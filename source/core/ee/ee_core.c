@@ -35,6 +35,7 @@
  */
 
 #include "core/ee/ee_core.h"
+#include "core/hw/dma.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -83,6 +84,15 @@ uint16_t ee_mem_read16(ee_state_t *st, uint32_t addr)
 
 uint32_t ee_mem_read32(ee_state_t *st, uint32_t addr)
 {
+    /* Hardware register window (0x10000000-0x1000FFFF): DMA controller
+     * and friends. Only the DMAC is actually modeled so far - other
+     * addresses in this window (timers, INTC, SIO, GIF/VIF/IPU control
+     * regs) still fall through to the silent-no-op RAM/BIOS path below,
+     * which returns 0. See docs/ROADMAP.md. */
+    uint32_t hw_val;
+    if (dma_mmio_read32(addr, &hw_val))
+        return hw_val;
+
     uint8_t *p = ee_mem_ptr(st, addr, 4);
     if (!p) return 0;
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
@@ -115,6 +125,9 @@ void ee_mem_write16(ee_state_t *st, uint32_t addr, uint16_t val)
 
 void ee_mem_write32(ee_state_t *st, uint32_t addr, uint32_t val)
 {
+    if (dma_mmio_write32(addr, val))
+        return;
+
     uint8_t *p = ee_mem_ptr(st, addr, 4);
     if (!p) return;
     p[0] = (uint8_t)(val & 0xFF);
@@ -134,6 +147,8 @@ void ee_mem_write64(ee_state_t *st, uint32_t addr, uint64_t val)
 int ee_core_init(const bios_image_t *bios)
 {
     memset(&g_state, 0, sizeof(g_state));
+
+    dma_init(); /* EE DMA controller register block - see core/hw/dma.h */
 
     g_state.ram = memalign(32, EE_RAM_SIZE);
     if (!g_state.ram) {

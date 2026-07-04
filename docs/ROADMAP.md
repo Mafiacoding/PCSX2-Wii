@@ -71,9 +71,12 @@ the SPU2. Reference: `Dmac.cpp` (583) + `Dmac.h` (570).
       are latched faithfully, addresses are decoded against the real
       PS2 memory map, but no channel is wired into `ee_core.c`'s
       memory bus yet and no transfer actually executes.
-- [ ] Wire dma_mmio_read32/write32 into ee_core.c's memory access path
-      (currently 0x10000000+ hardware register writes are silently
-      dropped by ee_mem_ptr)
+- [x] Wire dma_mmio_read32/write32 into ee_core.c's memory access
+      path (32-bit load/store only so far - matches how real code
+      actually accesses these registers). Verified end-to-end in
+      `tests/test_ee_dma_bus.c`: SW to a DMA register address now
+      correctly reaches `dma.c` instead of vanishing into RAM, and LW
+      reads it back with correct sign-extension.
 - [ ] Channel state machine (normal/chain/interleave transfer modes,
       actually moving bytes and walking chain tags)
 - [ ] At minimum: the channels needed for BIOS boot to push data to

@@ -49,3 +49,16 @@ instead of address masking. Run it the same way:
 gcc -I../include -I../source -o test_dma tests/test_dma_core.c
 ./test_dma
 ```
+
+
+`test_ee_dma_bus.c` verifies the wiring between `ee_core.c`'s memory
+bus and the DMA register skeleton: a `SW` to a DMA channel's register
+address is routed to `dma.c` instead of silently vanishing, and a
+subsequent `LW` reads back the same value (correctly sign-extended
+into the 64-bit register, matching real EE/PCSX2 LW semantics). Needs
+`dma.c` linked in as well as `ee_core.c`:
+
+```sh
+gcc -I../include -I../source -o test_ee_dma tests/test_ee_dma_bus.c ../source/hw/dma.c
+./test_ee_dma
+```

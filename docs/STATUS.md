@@ -48,12 +48,59 @@ in the homebrew scene has shipped this for exactly these reasons.
 | devkitPPC/libogc toolchain build | Working - compiles and links a `.dol` |
 | Wii video/console bring-up | Working (real libogc init code) |
 | SD/USB mount (libfat) | Working |
-| BIOS file loader + ROMDIR/ROMVER parse | Working, best-effort |
+| BIOS file loader + ROMDIR/ROMVER parse | Working - fixed a real bug (fixed 0x100 offset assumption was wrong; now scans for the RESET+ROMDIR signature) after testing against a real, legally-dumped BIOS - see "First real BIOS boot attempt" below |
 | EE interpreter | Full MIPS III integer core (ALU, shifts, MULT/DIV, HI/LO, branches, jumps, load/store) + basic COP0 (MFC0/MTC0) + CACHE/SYNC/PREF no-ops + ~35 of ~90 MMI (SIMD) opcodes: add/sub/logic/copy/extend/pack across byte/half/word lanes, plus MULT1/DIV1/MFHI1/MFLO1 pipe-1 variants. Semantics ported from PCSX2's `R5900OpcodeImpl.cpp`/`MMI.cpp`, unit-tested in `tests/test_ee_core.c`. Still halts on the other ~55 MMI opcodes (saturated arithmetic, compares, QFSRV, PMADD family), FPU, COP2/VU0, unaligned load/store, TLB/exceptions/syscalls |
 | IOP core | Not started |
 | VU0/VU1 | Not started |
 | Graphics Synthesizer | Not started |
 | PPC recompiler | Proof-of-concept only: 2 opcodes, no branches inside blocks, not wired into the boot path by default |
+
+## First real BIOS boot attempt
+
+This project's user provided a real, legally-dumped PS2 BIOS image
+(SCPH-10000, from their own console) for local testing only - it is
+NOT included in this repository (see `data/pcsx2/bios/README.txt`
+and `.gitignore`). This let us move from "does our interpreter run
+hand-written test programs correctly" to "what actually happens when
+it's given a real BIOS" for the first time.
+
+Two concrete, valuable results:
+
+1. **A real bug, found and fixed**: `bios_loader.c` assumed the
+   ROMDIR table always lives at file offset 0x100. Wrong - this real
+   dump has it at 0x2700. Fixed by scanning for the universal
+   RESET+ROMDIR name signature instead of trusting a fixed offset
+   (see `tests/test_bios_loader.c`, which reproduces the bug/fix with
+   a synthetic, non-copyrighted fixture). ROMVER now parses correctly
+   or this BIOS as `0100JC20000117`.
+
+2. **Running EE+IOP together against the real BIOS via
+   `system_run_interleaved()` reaches real, informative halt points**
+   (not committed as an automated test, since it needs the real BIOS
+   file - this was a one-off diagnostic run):
+   - The **EE** executes 99,158 real instructions from the actual
+     BIOS ROM before halting on an unimplemented COP0 sub-opcode
+     (BC0/TLB/ERET - MMU/exception-related instructions this
+     project's EE core doesn't implement yet). This means real BIOS
+     boot code gets meaningfully far into MMU/exception setup before
+     hitting a gap.
+   - The **IOP** executes over 3 million real instructions and, along
+     the way, makes **27 real calls through this project's A0/B0/C0
+     HLE trap** (`source/hw/iop_hle_bios.c`) - concrete proof that
+     mechanism is exercised by actual BIOS code, not just
+     hand-written test programs. It eventually halts on a raw
+     `SYSCALL` MIPS instruction (not the A0/B0/C0 jump convention -
+     a different, lower-level kernel-entry mechanism this project's
+     IOP core doesn't implement at all yet).
+
+**What this means for "next steps"**: these are now the two most
+concretely-justified next targets, since they're not speculative -
+they're the exact two places real BIOS execution actually stops.
+Implementing IOP SYSCALL handling (even a minimal version) and EE
+COP0's BC0/TLB-adjacent opcodes (at least enough to not halt - a full
+MMU is a much bigger undertaking, see docs/ROADMAP.md) would let a
+real boot attempt get further than any hand-written test program
+alone could ever prove.
 
 ## Endianness bug found and fixed
 

@@ -387,3 +387,30 @@ alongside the other IOP hardware models in iop_core_init(), though
 nothing in the executed instruction path calls into it yet - see its
 header comment) - test_iop_core.c and test_system_handshake.c both
 need it linked in too; the commands above are already updated.
+
+`test_bios_loader.c` covers `source/core/bios_loader.c`'s ROMDIR
+scanning/parsing logic, using an entirely SYNTHETIC, hand-built
+ROMDIR fixture - it does NOT embed or ship any real PS2 BIOS bytes
+(see the test file's own header comment, and
+`data/pcsx2/bios/README.txt`). This test exists because a real bug
+was found and fixed after the project's user provided a real,
+legally-dumped BIOS image (SCPH-10000, from their own PS2) for local
+testing: the loader used to assume the ROMDIR table always lives at
+a fixed file offset (0x100), which is simply wrong - the real
+SCPH-10000 dump has it at file offset 0x2700. Fixed by scanning for
+the well-known, universal RESET+ROMDIR name signature instead of
+trusting a fixed offset, and correcting the payload-offset math to
+start from file offset 0 (module data is packed sequentially from
+the start of the file; the ROMDIR table's own bytes serve as the
+payload for its own entry, which is why its file position always
+equals the preceding entry's aligned size - not a fixed constant).
+This test's synthetic fixture deliberately places its own ROMDIR
+table at yet another offset (48) to prove the fix is a genuine scan,
+not a second hardcoded offset that happens to match one known real
+dump. 5/5 checks pass. Self-contained (`#include`s `bios_loader.c`
+directly):
+
+```sh
+gcc -I../include -I../source -o test_bios_loader tests/test_bios_loader.c
+./test_bios_loader
+```

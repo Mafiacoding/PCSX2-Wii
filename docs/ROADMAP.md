@@ -352,6 +352,20 @@ programmable GPU nor any of those APIs).
 
 ## Suggested near-term order
 
+**Update: a real BIOS dump (SCPH-10000, legally owned by this
+project's user) was used for local testing** (never committed - see
+docs/STATUS.md's "First real BIOS boot attempt" section for full
+detail, and data/pcsx2/bios/README.txt). This surfaced a real
+ROMDIR-parsing bug (fixed) and, more importantly, gave two concrete,
+non-speculative next targets by actually running the real BIOS
+against this project's interpreters: the EE halts after 99,158 real
+instructions on an unimplemented COP0 sub-opcode (BC0/TLB/ERET), and
+the IOP halts after 3M+ instructions (having made 27 real calls
+through the A0/B0/C0 HLE trap along the way) on a raw `SYSCALL`
+instruction it doesn't implement. Both are now the most directly
+justified next steps - not guesses about what "might" matter, but the
+exact two places real BIOS boot code actually stops.
+
 1. IOP CPU core skeleton (this is "just" another MIPS interpreter,
    well-scoped, and unblocks everything downstream of SIF) - DONE
 2. Minimal SIF + DMA register stubs (enough for EE/IOP handshake, not

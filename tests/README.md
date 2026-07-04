@@ -33,3 +33,19 @@ LWL/LWR yet). Run it the same way:
 gcc -I../include -I../source -o test_iop tests/test_iop_core.c
 ./test_iop
 ```
+
+
+`test_dma_core.c` covers the DMA register skeleton
+(`source/hw/dma.c`) - channel address decoding and register roundtrip.
+This one caught a real bug during development: the initial channel
+decoder masked addresses to a fixed 0x1000-byte block to find the
+channel base, which incorrectly matched `fromSPR`/`toSPR` (and
+`fromIPU`/`toIPU`, `SIF0`/`SIF1`/`SIF2`) to the same base since those
+channels pack two channels into one 0x1000 region using 0x400-byte
+sub-blocks. Fixed with an explicit (base, size, channel) range table
+instead of address masking. Run it the same way:
+
+```sh
+gcc -I../include -I../source -o test_dma tests/test_dma_core.c
+./test_dma
+```

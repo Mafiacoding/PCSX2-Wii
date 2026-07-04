@@ -65,8 +65,17 @@ instead of fully emulating the real IOP BIOS ROM.
 10 DMA channels move data between EE RAM, the IOP, VIF0/VIF1, GIF, and
 the SPU2. Reference: `Dmac.cpp` (583) + `Dmac.h` (570).
 
-- [ ] DMA register block (D_CTRL, per-channel CHCR/MADR/QWC/TADR)
-- [ ] Channel state machine (normal/chain/interleave transfer modes)
+- [x] DMA register block (D_CTRL/D_STAT/D_PCR/etc, per-channel
+      CHCR/MADR/QWC/TADR/ASR0/ASR1/SADR) - `source/hw/dma.c`, unit
+      tested in `tests/test_dma_core.c`. Registers only: reads/writes
+      are latched faithfully, addresses are decoded against the real
+      PS2 memory map, but no channel is wired into `ee_core.c`'s
+      memory bus yet and no transfer actually executes.
+- [ ] Wire dma_mmio_read32/write32 into ee_core.c's memory access path
+      (currently 0x10000000+ hardware register writes are silently
+      dropped by ee_mem_ptr)
+- [ ] Channel state machine (normal/chain/interleave transfer modes,
+      actually moving bytes and walking chain tags)
 - [ ] At minimum: the channels needed for BIOS boot to push data to
       GIF (graphics) and to talk to the IOP over SIF
 

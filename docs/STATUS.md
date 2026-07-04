@@ -49,11 +49,22 @@ in the homebrew scene has shipped this for exactly these reasons.
 | Wii video/console bring-up | Working (real libogc init code) |
 | SD/USB mount (libfat) | Working |
 | BIOS file loader + ROMDIR/ROMVER parse | Working, best-effort |
-| EE interpreter | Covers most of the MIPS III integer core (~50 opcodes: ALU imm+reg, shifts incl. 64-bit, MULT/DIV, HI/LO, branches incl. REGIMM, J/JAL/JR/JALR, byte/half/word/double load+store), semantics ported from PCSX2's `R5900OpcodeImpl.cpp`. Still halts on MMI/FPU/COP2/LWL-SWR/LQ-SQ/syscalls/exceptions - real BIOS code uses these within the first few hundred to few thousand instructions, so still not a full boot |
+| EE interpreter | Full MIPS III integer core (ALU, shifts, MULT/DIV, HI/LO, branches, jumps, load/store) + basic COP0 (MFC0/MTC0) + CACHE/SYNC/PREF no-ops + ~35 of ~90 MMI (SIMD) opcodes: add/sub/logic/copy/extend/pack across byte/half/word lanes, plus MULT1/DIV1/MFHI1/MFLO1 pipe-1 variants. Semantics ported from PCSX2's `R5900OpcodeImpl.cpp`/`MMI.cpp`, unit-tested in `tests/test_ee_core.c`. Still halts on the other ~55 MMI opcodes (saturated arithmetic, compares, QFSRV, PMADD family), FPU, COP2/VU0, unaligned load/store, TLB/exceptions/syscalls |
 | IOP core | Not started |
 | VU0/VU1 | Not started |
 | Graphics Synthesizer | Not started |
 | PPC recompiler | Proof-of-concept only: 2 opcodes, no branches inside blocks, not wired into the boot path by default |
+
+## Endianness bug found and fixed
+
+Early memory-access code used `memcpy()` to read/write multi-byte
+values, which silently assumes host and guest share the same byte
+order. PS2 (EE/IOP) is little-endian; the Wii (PowerPC 750, our build
+target) is big-endian. Every load/store and the BIOS ROMDIR parser now
+compose/decompose bytes explicitly in little-endian order. This was
+caught by the unit test in `tests/test_ee_core.c`, not by code review -
+a good reminder that a native host-side test harness is worth having
+even for code that only "really" runs cross-compiled on target.
 
 ## What changed in this pass
 

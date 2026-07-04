@@ -22,11 +22,14 @@
 #define ROMDIR_OFFSET   0x100
 #define ROMDIR_ENTRY_SZ 16
 
-typedef struct __attribute__((packed)) {
-    char     name[10];
-    uint16_t extinfo_flag;
-    uint32_t size;
-} romdir_entry_t;
+/* PS2 BIOS dumps are little-endian; the Wii (our build target) is
+ * big-endian, so a raw memcpy into a packed struct here would
+ * misread the 16/32-bit fields. Decode them explicitly instead. */
+static uint32_t rd_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
 
 static void try_parse_romver(bios_image_t *bios)
 {
@@ -42,24 +45,25 @@ static void try_parse_romver(bios_image_t *bios)
 
     /* Walk entries until an empty name terminator or sane limit. */
     for (int i = 0; i < 512; i++) {
-        romdir_entry_t e;
-        memcpy(&e, base + i * ROMDIR_ENTRY_SZ, sizeof(e));
-
-        if (e.name[0] == '\0')
-            break;
+        const uint8_t *entry = base + i * ROMDIR_ENTRY_SZ;
 
         char name[11];
-        memcpy(name, e.name, 10);
+        memcpy(name, entry, 10); /* name is raw ASCII bytes, no endian issue */
         name[10] = '\0';
+
+        if (name[0] == '\0')
+            break;
+
+        uint32_t size = rd_le32(entry + 12);
 
         if (strncmp(name, "ROMVER", 6) == 0) {
             romver_off = ROMDIR_OFFSET + 512 * ROMDIR_ENTRY_SZ + data_offset;
-            romver_size = e.size;
+            romver_size = size;
             found_romver = 1;
         }
 
         /* file payloads are packed sequentially, 16-byte aligned */
-        data_offset += (e.size + 15) & ~15u;
+        data_offset += (size + 15) & ~15u;
     }
 
     if (found_romver && romver_size > 0 && romver_size < sizeof(bios->version_string)

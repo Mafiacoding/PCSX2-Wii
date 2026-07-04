@@ -16,16 +16,20 @@ that document for exactly what works, what doesn't, and why.
   SD/USB via libfat, loads a BIOS image, hands off to the EE core.
 - `source/core/bios_loader.c` - loads a raw 4MB PS2 BIOS dump, does a
   best-effort ROMDIR walk to read the ROMVER string.
-- `source/core/ee/ee_core.c` - an R5900 (Emotion Engine) interpreter
-  covering most of the MIPS III integer core (ALU imm + reg-reg,
-  shifts incl. 64-bit D-variants, MULT/DIV, HI/LO moves, branches incl.
-  REGIMM, jumps incl. link register, byte/half/word/double loads and
-  stores). Instruction semantics are ported from PCSX2's own
-  `pcsx2/R5900OpcodeImpl.cpp` interpreter reference (not reinvented),
-  so behavior matches real PCSX2 for the opcodes covered. No MMI, no
-  FPU, no VU0, no LWL/LWR/SWL/SWR, no LQ/SQ, no MMU/exceptions. It
-  halts cleanly on the first unimplemented opcode and prints where it
-  stopped - see `docs/STATUS.md` for the coverage table.
+- `source/core/ee/ee_core.c` - an R5900 (Emotion Engine) interpreter:
+  full MIPS III integer core (ALU imm + reg-reg, shifts incl. 64-bit
+  D-variants, MULT/DIV, HI/LO moves, branches incl. REGIMM, jumps incl.
+  link register, byte/half/word/double loads and stores), basic COP0
+  (MFC0/MTC0), CACHE/SYNC/PREF as no-ops, and ~35 of the ~90 MMI (SIMD)
+  opcodes (add/sub/logic/copy/extend/pack across byte/half/word lanes,
+  plus the MULT1/DIV1/MFHI1/MFLO1 "pipe 1" variants). Instruction
+  semantics are ported from PCSX2's own `R5900OpcodeImpl.cpp` and
+  `MMI.cpp` (not reinvented), so behavior matches real PCSX2 for the
+  opcodes covered - see `tests/test_ee_core.c` for a host-native unit
+  test. Still no FPU, no VU0/COP2, no LWL/LWR/SWL/SWR, no LQ/SQ, no
+  MMU/exceptions, and ~55 MMI opcodes remain unimplemented. Halts
+  cleanly on the first unimplemented opcode and prints where it
+  stopped - see `docs/STATUS.md` for the full coverage table.
 - `source/core/recompiler/ppc_dynarec.c` - an experimental proof of
   concept that translates straight-line ADDIU/OR sequences into native
   PPC machine code at runtime (with proper icache/dcache handling via

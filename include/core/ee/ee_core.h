@@ -7,24 +7,29 @@
 /*
  * Emotion Engine (R5900) CPU state.
  *
- * Real hardware note: the EE registers are 128-bit (64-bit GPRs with an
- * extra "upper" 64 bits used by MMI/multimedia instructions). This
- * skeleton only models the low 64 bits - the MMI instruction set
- * (parallel SIMD-ish ops PS2 games/BIOS routines rely on constantly)
- * is NOT implemented. This alone means real BIOS boot code will hit
- * unimplemented-opcode halts almost immediately. See docs/STATUS.md.
+ * GPRs and HI/LO are modeled as full 128 bits (two 64-bit halves,
+ * "ud0"/"ud1" matching PCSX2's own UD[0]/UD[1] naming) because the MMI
+ * (multimedia/SIMD) instruction set operates on all 128 bits as packed
+ * lanes, and PCSX2 itself models HI/LO as 128-bit registers too (used
+ * by the "pipeline 1" MMI multiply/divide variants: MULT1/DIV1/etc).
  *
- * Opcode semantics in ee_core.c (sign-extension rules, HI/LO handling,
- * etc.) are ported from PCSX2's own interpreter reference
- * (pcsx2/R5900OpcodeImpl.cpp, GPL-3.0) rather than reinvented, so this
- * project is GPL-3.0 licensed as a whole - see COPYING.GPLv3.
+ * Opcode semantics in ee_core.c (sign-extension rules, lane packing
+ * for MMI ops, HI/LO handling, etc.) are ported from PCSX2's own
+ * interpreter reference (pcsx2/R5900OpcodeImpl.cpp and pcsx2/MMI.cpp,
+ * GPL-3.0) rather than reinvented, so this project is GPL-3.0
+ * licensed as a whole - see /COPYING.GPLv3.
  */
 typedef struct {
-    uint64_t gpr[32];
+    uint64_t ud0; /* low 64 bits  (what plain 64-bit MIPS ops read/write) */
+    uint64_t ud1; /* high 64 bits (only touched by MMI ops) */
+} ee_reg128_t;
+
+typedef struct {
+    ee_reg128_t gpr[32];
     uint32_t pc;
     uint32_t next_pc;       /* branch delay slot handling */
-    uint64_t hi, lo;
-    uint32_t cop0[32];      /* status/cause/EPC subset only */
+    ee_reg128_t hi, lo;
+    uint32_t cop0[32];      /* status/cause/EPC/config subset only */
     uint8_t  branch_pending;
 
     uint8_t *ram;           /* 32MB emulated EE RAM */

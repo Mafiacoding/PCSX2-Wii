@@ -49,11 +49,24 @@ in the homebrew scene has shipped this for exactly these reasons.
 | Wii video/console bring-up | Working (real libogc init code) |
 | SD/USB mount (libfat) | Working |
 | BIOS file loader + ROMDIR/ROMVER parse | Working, best-effort |
-| EE interpreter | Covers ~12 MIPS III opcodes. Will halt on the first MMI/FPU/VU/branch-likely/syscall opcode a real BIOS uses - almost certainly within the first few hundred instructions |
+| EE interpreter | Covers most of the MIPS III integer core (~50 opcodes: ALU imm+reg, shifts incl. 64-bit, MULT/DIV, HI/LO, branches incl. REGIMM, J/JAL/JR/JALR, byte/half/word/double load+store), semantics ported from PCSX2's `R5900OpcodeImpl.cpp`. Still halts on MMI/FPU/COP2/LWL-SWR/LQ-SQ/syscalls/exceptions - real BIOS code uses these within the first few hundred to few thousand instructions, so still not a full boot |
 | IOP core | Not started |
 | VU0/VU1 | Not started |
 | Graphics Synthesizer | Not started |
 | PPC recompiler | Proof-of-concept only: 2 opcodes, no branches inside blocks, not wired into the boot path by default |
+
+## What changed in this pass
+
+- Replaced the placeholder `elf2dol.py` output path with the real
+  upstream devkitPro `elf2dol.c` (vendored from `devkitPro/gamecube-tools`),
+  compiled natively on demand.
+- Pulled in PCSX2's actual upstream source (github.com/PCSX2/pcsx2) as
+  a reference and ported real instruction semantics into
+  `ee_core.c`, replacing the earlier ad-hoc ~12-opcode toy interpreter
+  with a ~50-opcode one matching PCSX2's own interpreter behavior.
+  This makes the project GPL-3.0 (see LICENSE section in README).
+- This is still an interpreter, not a recompiler, and still does not
+  boot a real BIOS to completion - see the coverage table above.
 
 ## Realistic next steps, if you want to keep going
 

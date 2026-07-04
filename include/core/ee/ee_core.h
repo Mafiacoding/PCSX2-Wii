@@ -13,6 +13,11 @@
  * (parallel SIMD-ish ops PS2 games/BIOS routines rely on constantly)
  * is NOT implemented. This alone means real BIOS boot code will hit
  * unimplemented-opcode halts almost immediately. See docs/STATUS.md.
+ *
+ * Opcode semantics in ee_core.c (sign-extension rules, HI/LO handling,
+ * etc.) are ported from PCSX2's own interpreter reference
+ * (pcsx2/R5900OpcodeImpl.cpp, GPL-3.0) rather than reinvented, so this
+ * project is GPL-3.0 licensed as a whole - see COPYING.GPLv3.
  */
 typedef struct {
     uint64_t gpr[32];
@@ -40,7 +45,13 @@ void ee_core_shutdown(void);
  * register state layout / memory access helpers. */
 ee_state_t *ee_core_get_state(void);
 
+uint8_t  ee_mem_read8(ee_state_t *st, uint32_t addr);
+uint16_t ee_mem_read16(ee_state_t *st, uint32_t addr);
 uint32_t ee_mem_read32(ee_state_t *st, uint32_t addr);
+uint64_t ee_mem_read64(ee_state_t *st, uint32_t addr);
+void     ee_mem_write8(ee_state_t *st, uint32_t addr, uint8_t val);
+void     ee_mem_write16(ee_state_t *st, uint32_t addr, uint16_t val);
 void     ee_mem_write32(ee_state_t *st, uint32_t addr, uint32_t val);
+void     ee_mem_write64(ee_state_t *st, uint32_t addr, uint64_t val);
 
 #endif

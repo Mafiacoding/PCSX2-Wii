@@ -1,21 +1,29 @@
 /*
- * ee_core.c - minimal R5900 (Emotion Engine) interpreter
+ * ee_core.c - R5900 (Emotion Engine) interpreter
  *
- * Implements just enough of the MIPS III base ISA (a handful of ALU,
- * branch and load/store opcodes) to decode and step through the very
- * first instructions the PS2 BIOS reset vector executes. It does NOT
- * implement:
- *   - MMI (multimedia) instructions - used pervasively by real BIOS code
+ * Instruction semantics (sign-extension rules for 32-bit ops into the
+ * 64-bit register file, HI/LO handling for MULT/DIV, etc.) are ported
+ * from PCSX2's own interpreter, pcsx2/R5900OpcodeImpl.cpp - not
+ * reinvented from the MIPS manual, so behavior matches real PCSX2 for
+ * the opcodes covered here. That file is GPL-3.0 (PCSX2 project), so
+ * this file - and this project as a whole, once you link against
+ * derived logic like this - is also GPL-3.0. See /COPYING.GPLv3.
+ *
+ * Coverage: a meaningful subset of the MIPS III/EE integer core -
+ * ALU (imm + reg-reg), shifts (incl. 64-bit D-variants), MULT/DIV,
+ * HI/LO moves, branches (incl. REGIMM: BLTZ/BGEZ), jumps incl. link
+ * register, and byte/half/word/double loads and stores.
+ *
+ * Still NOT implemented (halts cleanly, does not crash):
+ *   - MMI (multimedia/SIMD) opcodes - see MMI.cpp upstream
  *   - COP1 (FPU), COP2 (VU0 macro mode)
- *   - TLB / MMU, exceptions, interrupts
- *   - The IOP (I/O Processor, separate MIPS core) or its BIOS side-channel
+ *   - LWL/LWR/SWL/SWR (unaligned load/store), LQ/SQ (128-bit)
+ *   - TLB / MMU, exceptions/interrupts, SYSCALL handler table
+ *   - The IOP (separate MIPS core) and its BIOS side-channel
  *   - The 128-bit register upper halves
  *
- * In practice this means the interpreter will decode a few dozen to a
- * few hundred instructions from a real BIOS image before hitting an
- * unimplemented opcode and halting cleanly (rather than crashing). That
- * halt is a diagnostic, not a bug - see docs/STATUS.md for what a real
- * implementation would require.
+ * A real BIOS will still halt here fairly quickly - see docs/STATUS.md
+ * for what's actually required to get further.
  */
 
 #include "core/ee/ee_core.h"
@@ -30,33 +38,74 @@ static ee_state_t g_state;
 
 ee_state_t *ee_core_get_state(void) { return &g_state; }
 
-uint32_t ee_mem_read32(ee_state_t *st, uint32_t addr)
+/* --- memory access --- */
+
+static inline uint8_t *ee_mem_ptr(ee_state_t *st, uint32_t addr, uint32_t size)
 {
-    /* KSEG1 (0xBFC00000+) maps directly to BIOS ROM, uncached */
     if (addr >= 0xBFC00000u) {
         uint32_t off = addr - 0xBFC00000u;
-        if (st->bios && off + 4 <= st->bios->size) {
-            uint32_t v;
-            memcpy(&v, st->bios->data + off, 4);
-            return v;
-        }
-        return 0;
+        if (st->bios && off + size <= st->bios->size)
+            return st->bios->data + off;
+        return NULL;
     }
-    uint32_t phys = addr & 0x1FFFFFFFu; /* strip KSEG mapping bits */
-    if (phys + 4 <= st->ram_size) {
-        uint32_t v;
-        memcpy(&v, st->ram + phys, 4);
-        return v;
-    }
-    return 0;
+    uint32_t phys = addr & 0x1FFFFFFFu;
+    if (phys + size <= st->ram_size)
+        return st->ram + phys;
+    return NULL;
+}
+
+uint8_t ee_mem_read8(ee_state_t *st, uint32_t addr)
+{
+    uint8_t *p = ee_mem_ptr(st, addr, 1);
+    return p ? *p : 0;
+}
+
+uint16_t ee_mem_read16(ee_state_t *st, uint32_t addr)
+{
+    uint8_t *p = ee_mem_ptr(st, addr, 2);
+    uint16_t v = 0;
+    if (p) memcpy(&v, p, 2);
+    return v;
+}
+
+uint32_t ee_mem_read32(ee_state_t *st, uint32_t addr)
+{
+    uint8_t *p = ee_mem_ptr(st, addr, 4);
+    uint32_t v = 0;
+    if (p) memcpy(&v, p, 4);
+    return v;
+}
+
+uint64_t ee_mem_read64(ee_state_t *st, uint32_t addr)
+{
+    uint8_t *p = ee_mem_ptr(st, addr, 8);
+    uint64_t v = 0;
+    if (p) memcpy(&v, p, 8);
+    return v;
+}
+
+void ee_mem_write8(ee_state_t *st, uint32_t addr, uint8_t val)
+{
+    uint8_t *p = ee_mem_ptr(st, addr, 1);
+    if (p) *p = val;
+}
+
+void ee_mem_write16(ee_state_t *st, uint32_t addr, uint16_t val)
+{
+    uint8_t *p = ee_mem_ptr(st, addr, 2);
+    if (p) memcpy(p, &val, 2);
 }
 
 void ee_mem_write32(ee_state_t *st, uint32_t addr, uint32_t val)
 {
-    uint32_t phys = addr & 0x1FFFFFFFu;
-    if (phys + 4 <= st->ram_size) {
-        memcpy(st->ram + phys, &val, 4);
-    }
+    uint8_t *p = ee_mem_ptr(st, addr, 4);
+    if (p) memcpy(p, &val, 4);
+}
+
+void ee_mem_write64(ee_state_t *st, uint32_t addr, uint64_t val)
+{
+    uint8_t *p = ee_mem_ptr(st, addr, 8);
+    if (p) memcpy(p, &val, 8);
 }
 
 int ee_core_init(const bios_image_t *bios)
@@ -75,7 +124,7 @@ int ee_core_init(const bios_image_t *bios)
     g_state.bios = bios;
     g_state.pc = BIOS_RESET_VECTOR;
     g_state.next_pc = BIOS_RESET_VECTOR + 4;
-    g_state.gpr[0] = 0; /* $zero is hardwired */
+    g_state.gpr[0] = 0;
 
     return 0;
 }
@@ -86,91 +135,158 @@ static void halt(const char *reason)
     strncpy(g_state.halt_reason, reason, sizeof(g_state.halt_reason) - 1);
 }
 
-/* Decodes and executes exactly one instruction. Returns 0 to continue,
- * non-zero if the core halted. */
+/* Sign/zero-extension helpers matching R5900OpcodeImpl.cpp's u64(s64(s32(...)))
+ * idiom: 32-bit ALU results are computed in 32 bits, then sign-extended
+ * to fill the (low) 64-bit register. */
+static inline uint64_t sext32(uint32_t v) { return (uint64_t)(int64_t)(int32_t)v; }
+
 static int ee_step(void)
 {
-    uint32_t pc = g_state.pc;
-    uint32_t instr = ee_mem_read32(&g_state, pc);
+    ee_state_t *st = &g_state;
+    uint32_t pc = st->pc;
+    uint32_t instr = ee_mem_read32(st, pc);
 
-    uint32_t op   = (instr >> 26) & 0x3F;
-    uint32_t rs   = (instr >> 21) & 0x1F;
-    uint32_t rt   = (instr >> 16) & 0x1F;
-    uint32_t rd   = (instr >> 11) & 0x1F;
-    int32_t  imm  = (int16_t)(instr & 0xFFFF);
-    uint32_t uimm = instr & 0xFFFF;
+    uint32_t op    = (instr >> 26) & 0x3F;
+    uint32_t rs    = (instr >> 21) & 0x1F;
+    uint32_t rt    = (instr >> 16) & 0x1F;
+    uint32_t rd    = (instr >> 11) & 0x1F;
+    uint32_t sa    = (instr >> 6)  & 0x1F;
+    int32_t  imm   = (int16_t)(instr & 0xFFFF);
+    uint32_t uimm  = instr & 0xFFFF;
     uint32_t funct = instr & 0x3F;
 
     uint32_t this_pc = pc;
-    uint32_t fallthrough_pc = g_state.next_pc;
-    g_state.pc = fallthrough_pc;
-    g_state.next_pc = fallthrough_pc + 4;
+    uint32_t fallthrough_pc = st->next_pc;
+    st->pc = fallthrough_pc;
+    st->next_pc = fallthrough_pc + 4;
+
+    uint32_t rs32 = (uint32_t)st->gpr[rs];
+    uint32_t rt32 = (uint32_t)st->gpr[rt];
+
+#define GPR(x) st->gpr[x]
+#define BRANCH_TO(target) do { st->next_pc = (target); } while (0)
+#define LINK(reg) do { GPR(reg) = this_pc + 8; } while (0)
 
     switch (op) {
     case 0x00: /* SPECIAL */
         switch (funct) {
-        case 0x00: /* SLL (incl. true NOP = SLL $0,$0,0) */
-            g_state.gpr[rd] = (uint32_t)((uint32_t)g_state.gpr[rt] << ((instr >> 6) & 0x1F));
+        case 0x00: /* SLL */    if (rd) GPR(rd) = sext32(rt32 << sa); break;
+        case 0x02: /* SRL */    if (rd) GPR(rd) = sext32(rt32 >> sa); break;
+        case 0x03: /* SRA */    if (rd) GPR(rd) = sext32((uint32_t)((int32_t)rt32 >> sa)); break;
+        case 0x04: /* SLLV */   if (rd) GPR(rd) = sext32(rt32 << (rs32 & 0x1F)); break;
+        case 0x06: /* SRLV */   if (rd) GPR(rd) = sext32(rt32 >> (rs32 & 0x1F)); break;
+        case 0x07: /* SRAV */   if (rd) GPR(rd) = sext32((uint32_t)((int32_t)rt32 >> (rs32 & 0x1F))); break;
+        case 0x08: /* JR */     BRANCH_TO((uint32_t)GPR(rs)); break;
+        case 0x09: /* JALR */   { uint32_t tgt = (uint32_t)GPR(rs); if (rd) LINK(rd); BRANCH_TO(tgt); } break;
+        case 0x0A: /* MOVZ */   if (rd && GPR(rt) == 0) GPR(rd) = GPR(rs); break;
+        case 0x0B: /* MOVN */   if (rd && GPR(rt) != 0) GPR(rd) = GPR(rs); break;
+        case 0x0C: /* SYSCALL */ halt("SYSCALL (no BIOS syscall table implemented)"); return 1;
+        case 0x0D: /* BREAK */  halt("BREAK"); return 1;
+        case 0x10: /* MFHI */   if (rd) GPR(rd) = st->hi; break;
+        case 0x11: /* MTHI */   st->hi = GPR(rs); break;
+        case 0x12: /* MFLO */   if (rd) GPR(rd) = st->lo; break;
+        case 0x13: /* MTLO */   st->lo = GPR(rs); break;
+        case 0x14: /* DSLLV */  if (rd) GPR(rd) = GPR(rt) << (rs32 & 0x3F); break;
+        case 0x16: /* DSRLV */  if (rd) GPR(rd) = GPR(rt) >> (rs32 & 0x3F); break;
+        case 0x17: /* DSRAV */  if (rd) GPR(rd) = (uint64_t)((int64_t)GPR(rt) >> (rs32 & 0x3F)); break;
+        case 0x18: /* MULT */ {
+            int64_t res = (int64_t)(int32_t)rs32 * (int64_t)(int32_t)rt32;
+            st->lo = sext32((uint32_t)(res & 0xFFFFFFFFu));
+            st->hi = sext32((uint32_t)(res >> 32));
+            if (rd) GPR(rd) = st->lo;
+        } break;
+        case 0x19: /* MULTU */ {
+            uint64_t res = (uint64_t)rs32 * (uint64_t)rt32;
+            st->lo = sext32((uint32_t)(res & 0xFFFFFFFFu));
+            st->hi = sext32((uint32_t)(res >> 32));
+            if (rd) GPR(rd) = st->lo;
+        } break;
+        case 0x1A: /* DIV */
+            if (rt32 != 0) {
+                st->lo = sext32((uint32_t)((int32_t)rs32 / (int32_t)rt32));
+                st->hi = sext32((uint32_t)((int32_t)rs32 % (int32_t)rt32));
+            }
             break;
-        case 0x25: /* OR */
-            g_state.gpr[rd] = g_state.gpr[rs] | g_state.gpr[rt];
+        case 0x1B: /* DIVU */
+            if (rt32 != 0) {
+                st->lo = sext32(rs32 / rt32);
+                st->hi = sext32(rs32 % rt32);
+            }
             break;
-        case 0x24: /* AND */
-            g_state.gpr[rd] = g_state.gpr[rs] & g_state.gpr[rt];
-            break;
-        case 0x21: /* ADDU */
-            g_state.gpr[rd] = (uint32_t)(g_state.gpr[rs] + g_state.gpr[rt]);
-            break;
-        case 0x08: /* JR */
-            g_state.next_pc = (uint32_t)g_state.gpr[rs];
-            break;
+        case 0x20: /* ADD */
+        case 0x21: /* ADDU */   if (rd) GPR(rd) = sext32(rs32 + rt32); break;
+        case 0x22: /* SUB */
+        case 0x23: /* SUBU */   if (rd) GPR(rd) = sext32(rs32 - rt32); break;
+        case 0x24: /* AND */    if (rd) GPR(rd) = GPR(rs) & GPR(rt); break;
+        case 0x25: /* OR */     if (rd) GPR(rd) = GPR(rs) | GPR(rt); break;
+        case 0x26: /* XOR */    if (rd) GPR(rd) = GPR(rs) ^ GPR(rt); break;
+        case 0x27: /* NOR */    if (rd) GPR(rd) = ~(GPR(rs) | GPR(rt)); break;
+        case 0x2A: /* SLT */    if (rd) GPR(rd) = ((int64_t)GPR(rs) < (int64_t)GPR(rt)) ? 1 : 0; break;
+        case 0x2B: /* SLTU */   if (rd) GPR(rd) = (GPR(rs) < GPR(rt)) ? 1 : 0; break;
+        case 0x2D: /* DADDU */  if (rd) GPR(rd) = GPR(rs) + GPR(rt); break;
+        case 0x2F: /* DSUBU */  if (rd) GPR(rd) = GPR(rs) - GPR(rt); break;
+        case 0x38: /* DSLL */   if (rd) GPR(rd) = GPR(rt) << sa; break;
+        case 0x3A: /* DSRL */   if (rd) GPR(rd) = GPR(rt) >> sa; break;
+        case 0x3B: /* DSRA */   if (rd) GPR(rd) = (uint64_t)((int64_t)GPR(rt) >> sa); break;
+        case 0x3C: /* DSLL32 */ if (rd) GPR(rd) = GPR(rt) << (sa + 32); break;
+        case 0x3E: /* DSRL32 */ if (rd) GPR(rd) = GPR(rt) >> (sa + 32); break;
+        case 0x3F: /* DSRA32 */ if (rd) GPR(rd) = (uint64_t)((int64_t)GPR(rt) >> (sa + 32)); break;
         default:
-            halt("unimplemented SPECIAL funct (likely MMI/COP2 territory)");
+            halt("unimplemented SPECIAL funct (likely MMI territory)");
             return 1;
         }
         break;
 
-    case 0x0F: /* LUI */
-        g_state.gpr[rt] = ((uint32_t)uimm) << 16;
+    case 0x01: /* REGIMM */
+        switch (rt) {
+        case 0x00: /* BLTZ */ if ((int64_t)GPR(rs) < 0)  BRANCH_TO(this_pc + 4 + (imm << 2)); break;
+        case 0x01: /* BGEZ */ if ((int64_t)GPR(rs) >= 0) BRANCH_TO(this_pc + 4 + (imm << 2)); break;
+        default:
+            halt("unimplemented REGIMM opcode");
+            return 1;
+        }
         break;
 
-    case 0x0D: /* ORI */
-        g_state.gpr[rt] = g_state.gpr[rs] | uimm;
-        break;
+    case 0x02: /* J */   BRANCH_TO((this_pc & 0xF0000000u) | ((instr & 0x03FFFFFFu) << 2)); break;
+    case 0x03: /* JAL */  LINK(31); BRANCH_TO((this_pc & 0xF0000000u) | ((instr & 0x03FFFFFFu) << 2)); break;
+    case 0x04: /* BEQ */  if (GPR(rs) == GPR(rt)) BRANCH_TO(this_pc + 4 + (imm << 2)); break;
+    case 0x05: /* BNE */  if (GPR(rs) != GPR(rt)) BRANCH_TO(this_pc + 4 + (imm << 2)); break;
+    case 0x06: /* BLEZ */ if ((int64_t)GPR(rs) <= 0) BRANCH_TO(this_pc + 4 + (imm << 2)); break;
+    case 0x07: /* BGTZ */ if ((int64_t)GPR(rs) > 0)  BRANCH_TO(this_pc + 4 + (imm << 2)); break;
 
-    case 0x09: /* ADDIU */
-        g_state.gpr[rt] = (uint32_t)((int32_t)g_state.gpr[rs] + imm);
-        break;
+    case 0x08: /* ADDI */
+    case 0x09: /* ADDIU */ if (rt) GPR(rt) = sext32((uint32_t)((int32_t)rs32 + imm)); break;
+    case 0x0A: /* SLTI */  if (rt) GPR(rt) = ((int64_t)GPR(rs) < (int64_t)imm) ? 1 : 0; break;
+    case 0x0B: /* SLTIU */ if (rt) GPR(rt) = (GPR(rs) < (uint64_t)(int64_t)imm) ? 1 : 0; break;
+    case 0x0C: /* ANDI */  if (rt) GPR(rt) = GPR(rs) & (uint64_t)uimm; break;
+    case 0x0D: /* ORI */   if (rt) GPR(rt) = GPR(rs) | (uint64_t)uimm; break;
+    case 0x0E: /* XORI */  if (rt) GPR(rt) = GPR(rs) ^ (uint64_t)uimm; break;
+    case 0x0F: /* LUI */   if (rt) GPR(rt) = sext32(uimm << 16); break;
 
-    case 0x23: /* LW */
-        g_state.gpr[rt] = (int32_t)ee_mem_read32(&g_state, (uint32_t)(g_state.gpr[rs] + imm));
-        break;
+    case 0x20: /* LB */  if (rt) GPR(rt) = (uint64_t)(int64_t)(int8_t)ee_mem_read8(st, rs32 + imm); else ee_mem_read8(st, rs32 + imm); break;
+    case 0x21: /* LH */  if (rt) GPR(rt) = (uint64_t)(int64_t)(int16_t)ee_mem_read16(st, rs32 + imm); else ee_mem_read16(st, rs32 + imm); break;
+    case 0x23: /* LW */  if (rt) GPR(rt) = sext32(ee_mem_read32(st, rs32 + imm)); else ee_mem_read32(st, rs32 + imm); break;
+    case 0x24: /* LBU */ if (rt) GPR(rt) = ee_mem_read8(st, rs32 + imm); else ee_mem_read8(st, rs32 + imm); break;
+    case 0x25: /* LHU */ if (rt) GPR(rt) = ee_mem_read16(st, rs32 + imm); else ee_mem_read16(st, rs32 + imm); break;
+    case 0x27: /* LWU */ if (rt) GPR(rt) = ee_mem_read32(st, rs32 + imm); else ee_mem_read32(st, rs32 + imm); break;
+    case 0x37: /* LD */  if (rt) GPR(rt) = ee_mem_read64(st, rs32 + imm); else ee_mem_read64(st, rs32 + imm); break;
 
-    case 0x2B: /* SW */
-        ee_mem_write32(&g_state, (uint32_t)(g_state.gpr[rs] + imm), (uint32_t)g_state.gpr[rt]);
-        break;
-
-    case 0x04: /* BEQ */
-        if (g_state.gpr[rs] == g_state.gpr[rt])
-            g_state.next_pc = this_pc + 4 + (imm << 2);
-        break;
-
-    case 0x05: /* BNE */
-        if (g_state.gpr[rs] != g_state.gpr[rt])
-            g_state.next_pc = this_pc + 4 + (imm << 2);
-        break;
-
-    case 0x02: /* J */
-        g_state.next_pc = (this_pc & 0xF0000000u) | ((instr & 0x03FFFFFFu) << 2);
-        break;
+    case 0x28: /* SB */ ee_mem_write8(st, rs32 + imm, (uint8_t)GPR(rt)); break;
+    case 0x29: /* SH */ ee_mem_write16(st, rs32 + imm, (uint16_t)GPR(rt)); break;
+    case 0x2B: /* SW */ ee_mem_write32(st, rs32 + imm, (uint32_t)GPR(rt)); break;
+    case 0x3F: /* SD */ ee_mem_write64(st, rs32 + imm, GPR(rt)); break;
 
     default:
-        halt("unimplemented primary opcode");
+        halt("unimplemented primary opcode (MMI/COP1/COP2/LWL-SWR/LQ-SQ territory)");
         return 1;
     }
 
-    g_state.gpr[0] = 0; /* $zero always reads as 0 */
-    g_state.instructions_executed++;
+#undef GPR
+#undef BRANCH_TO
+#undef LINK
+
+    st->gpr[0] = 0;
+    st->instructions_executed++;
     return 0;
 }
 

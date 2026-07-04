@@ -77,3 +77,23 @@ write-1-to-clear. Fixed before it was ever committed. Run it with:
 gcc -I../include -I../source -o test_gs tests/test_gs_registers.c
 ./test_gs
 ```
+
+
+`test_ee_unaligned.c` covers `ee_core.c`'s LWL/LWR/SWL/SWR (unaligned
+load/store). Needs `dma.c` and `gs.c` linked in too, since ee_core.c
+now depends on both:
+
+```sh
+gcc -I../include -I../source -o test_ee_unaligned tests/test_ee_unaligned.c ../source/hw/dma.c ../source/hw/gs.c
+./test_ee_unaligned
+```
+
+Writing this test surfaced a genuine subtlety worth documenting: the
+correct address pairing for these instructions is LWL/SWL at
+`start+3` and LWR/SWR at `start` (not the other way around) for this
+little-endian-target formula set - i.e. the "R" variant always uses
+the lower/start address, the "L" variant uses `start+3`. Get this
+backwards and the instructions individually "work" (no crash, no
+obviously wrong output) but silently reconstruct/store the wrong
+bytes. Confirmed by hand-tracing the mask/shift tables before locking
+in the test's expected values.

@@ -12,7 +12,8 @@
  * unblock:
  *   - Full MIPS III integer core: ALU imm+reg, all shift variants
  *     incl. 64-bit D-forms, MULT/DIV, HI/LO moves, REGIMM branches,
- *     J/JAL/JR/JALR, byte/half/word/double load+store.
+ *     J/JAL/JR/JALR, byte/half/word/double load+store, and unaligned
+ *     LWL/LWR/SWL/SWR.
  *   - COP0: MFC0/MTC0 (Status/Config/generic registers only - no TLB,
  *     no BC0 branches, no ERET/exceptions).
  *   - CACHE, SYNC, PREF: accepted as no-ops (real BIOS init code issues
@@ -25,7 +26,7 @@
  *   - The other ~55 MMI opcodes (saturated arithmetic, compares,
  *     QFSRV, PMADDW/H family, PINTH/PINTEH, PROT3W, etc.)
  *   - COP1 (FPU), COP2 (VU0 macro mode)
- *   - LWL/LWR/SWL/SWR (unaligned load/store), LQ/SQ (128-bit)
+ *   - LQ/SQ (128-bit load/store)
  *   - TLB/MMU, exceptions/interrupts, SYSCALL handler table
  *   - The IOP (separate MIPS core) and its BIOS side-channel
  *
@@ -585,6 +586,29 @@ static int ee_step(void)
         }
         break;
 
+    case 0x22: /* LWL */ {
+        static const uint32_t LWL_MASK[4]  = { 0xffffffu, 0x0000ffffu, 0x000000ffu, 0x00000000u };
+        static const uint8_t  LWL_SHIFT[4] = { 24, 16, 8, 0 };
+        uint32_t addr = rs32 + imm;
+        uint32_t shift = addr & 3;
+        uint32_t mem = ee_mem_read32(st, addr & ~3u);
+        if (rt) GPR(rt) = sext32((rt32 & LWL_MASK[shift]) | (mem << LWL_SHIFT[shift]));
+    } break;
+    case 0x26: /* LWR */ {
+        static const uint32_t LWR_MASK[4]  = { 0x00000000u, 0xff000000u, 0xffff0000u, 0xffffff00u };
+        static const uint8_t  LWR_SHIFT[4] = { 0, 8, 16, 24 };
+        uint32_t addr = rs32 + imm;
+        uint32_t shift = addr & 3;
+        uint32_t mem = ee_mem_read32(st, addr & ~3u);
+        uint32_t result = (rt32 & LWR_MASK[shift]) | (mem >> LWR_SHIFT[shift]);
+        if (rt) {
+            if (shift == 0)
+                GPR(rt) = sext32(result); /* full 64-bit sign extend, matches PCSX2 */
+            else
+                GPR(rt) = (GPR(rt) & 0xFFFFFFFF00000000ULL) | result; /* upper 32 bits preserved */
+        }
+    } break;
+
     case 0x20: /* LB */  if (rt) GPR(rt) = (uint64_t)(int64_t)(int8_t)ee_mem_read8(st, rs32 + imm); else ee_mem_read8(st, rs32 + imm); break;
     case 0x21: /* LH */  if (rt) GPR(rt) = (uint64_t)(int64_t)(int16_t)ee_mem_read16(st, rs32 + imm); else ee_mem_read16(st, rs32 + imm); break;
     case 0x23: /* LW */  if (rt) GPR(rt) = sext32(ee_mem_read32(st, rs32 + imm)); else ee_mem_read32(st, rs32 + imm); break;
@@ -592,6 +616,23 @@ static int ee_step(void)
     case 0x25: /* LHU */ if (rt) GPR(rt) = ee_mem_read16(st, rs32 + imm); else ee_mem_read16(st, rs32 + imm); break;
     case 0x27: /* LWU */ if (rt) GPR(rt) = ee_mem_read32(st, rs32 + imm); else ee_mem_read32(st, rs32 + imm); break;
     case 0x37: /* LD */  if (rt) GPR(rt) = ee_mem_read64(st, rs32 + imm); else ee_mem_read64(st, rs32 + imm); break;
+
+    case 0x2A: /* SWL */ {
+        static const uint32_t SWL_MASK[4]  = { 0xffffff00u, 0xffff0000u, 0xff000000u, 0x00000000u };
+        static const uint8_t  SWL_SHIFT[4] = { 24, 16, 8, 0 };
+        uint32_t addr = rs32 + imm;
+        uint32_t shift = addr & 3;
+        uint32_t mem = ee_mem_read32(st, addr & ~3u);
+        ee_mem_write32(st, addr & ~3u, (rt32 >> SWL_SHIFT[shift]) | (mem & SWL_MASK[shift]));
+    } break;
+    case 0x2E: /* SWR */ {
+        static const uint32_t SWR_MASK[4]  = { 0x00000000u, 0x000000ffu, 0x0000ffffu, 0x00ffffffu };
+        static const uint8_t  SWR_SHIFT[4] = { 0, 8, 16, 24 };
+        uint32_t addr = rs32 + imm;
+        uint32_t shift = addr & 3;
+        uint32_t mem = ee_mem_read32(st, addr & ~3u);
+        ee_mem_write32(st, addr & ~3u, (rt32 << SWR_SHIFT[shift]) | (mem & SWR_MASK[shift]));
+    } break;
 
     case 0x28: /* SB */ ee_mem_write8(st, rs32 + imm, (uint8_t)GPR(rt)); break;
     case 0x29: /* SH */ ee_mem_write16(st, rs32 + imm, (uint16_t)GPR(rt)); break;
@@ -601,7 +642,7 @@ static int ee_step(void)
     case 0x3F: /* SD */ ee_mem_write64(st, rs32 + imm, GPR(rt)); break;
 
     default:
-        halt("unimplemented primary opcode (COP1/COP2/LWL-SWR/LQ-SQ territory)");
+        halt("unimplemented primary opcode (COP1/COP2/LQ-SQ territory)");
         return 1;
     }
 

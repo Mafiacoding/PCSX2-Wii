@@ -20,7 +20,10 @@ splash screen, not just difficulty.
 - [ ] Remaining ~55 MMI opcodes (saturated arithmetic, PCGT*/PCEQ*/
       PMAX*/PMIN* compares, QFSRV, PMADDW/H family, PINTH/PINTEH,
       PROT3W, PEXEH/PEXEW/PEXCH/PEXCW, PMFHL/PMTHL clamping variants)
-- [ ] LWL/LWR/SWL/SWR (unaligned word load/store)
+- [x] LWL/LWR/SWL/SWR (unaligned word load/store) - ported from
+      R5900OpcodeImpl.cpp, unit tested in `tests/test_ee_unaligned.c`
+      (also gave the IOP core this ability first, then brought it to
+      the EE core for parity)
 - [ ] LQ/SQ (128-bit load/store - used constantly for VU/GS data)
 - [ ] COP1 (FPU) - single-precision float ops, used by a lot of BIOS
       and game code (reference: `pcsx2/FPU.cpp`)

@@ -5,7 +5,7 @@ boot a PS2 BIOS on a Nintendo Wii, built with devkitPPC + libogc.
 
 Upstream reference: [github.com/PCSX2/pcsx2](https://github.com/PCSX2/pcsx2) (master branch, fetched 2026-07-04) - used as the semantic reference for `ee_core.c`'s instruction implementations.
 
-**Read [docs/STATUS.md](docs/STATUS.md) before opening issues.** This is a
+**Read [docs/STATUS.md](docs/STATUS.md) before opening issues**, and see [docs/ROADMAP.md](docs/ROADMAP.md) for the full subsystem-by-subsystem task breakdown (EE, IOP, DMA, GIF/VIF, VU0/VU1, GS) with what's done vs. open. This is a
 fun/research project, not a usable PS2 emulator, and it will not become one
 without a lot more work than a solo project can realistically deliver. See
 that document for exactly what works, what doesn't, and why.

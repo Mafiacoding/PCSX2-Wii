@@ -32,6 +32,14 @@ typedef struct {
     uint32_t cop0[32];      /* status/cause/EPC/config subset only */
     uint8_t  branch_pending;
 
+    /* COP1 (FPU) - single-precision only. Raw IEEE-754 bit patterns,
+     * not C floats, so bit-level ops (ABS_S/MOV_S/NEG_S, and the
+     * denormal/infinity handling PS2's FPU does that plain IEEE float
+     * math doesn't) match real hardware exactly. Semantics ported
+     * from PCSX2's pcsx2/FPU.cpp. */
+    uint32_t fpr[32];
+    uint32_t fcr31;
+
     uint8_t *ram;           /* 32MB emulated EE RAM */
     uint32_t ram_size;
 

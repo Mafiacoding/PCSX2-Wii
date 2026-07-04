@@ -97,3 +97,13 @@ backwards and the instructions individually "work" (no crash, no
 obviously wrong output) but silently reconstruct/store the wrong
 bytes. Confirmed by hand-tracing the mask/shift tables before locking
 in the test's expected values.
+
+
+`test_ee_fpu.c` covers the new COP1/FPU opcodes (ADD.S/SUB.S/MUL.S/
+DIV.S/ABS.S/NEG.S, MTC1/MFC1, C.EQ.S) with real float arithmetic.
+Needs dma.c and gs.c linked too:
+
+```sh
+gcc -I../include -I../source -o test_ee_fpu tests/test_ee_fpu.c ../source/hw/dma.c ../source/hw/gs.c
+./test_ee_fpu
+```

@@ -25,7 +25,13 @@
  * Still NOT implemented (halts cleanly, does not crash):
  *   - The other ~55 MMI opcodes (saturated arithmetic, compares,
  *     QFSRV, PMADDW/H family, PINTH/PINTEH, PROT3W, etc.)
- *   - COP1 (FPU), COP2 (VU0 macro mode)
+ *   - COP2 (VU0 macro mode)
+ *   - COP1 (FPU): SQRT/RSQRT, MADD/MSUB family, MAX/MIN, BC1 branches
+ *     not implemented (halts). Core arithmetic (ADD/SUB/MUL/DIV/ABS/
+ *     MOV/NEG.S, CVT.W.S/CVT.S.W, C.EQ/LT/LE.S, MFC1/MTC1/CFC1/CTC1)
+ *     is implemented, ported from pcsx2/FPU.cpp including the PS2's
+ *     non-IEEE denormal/infinity handling (fpuDouble/checkOverflow/
+ *     checkUnderflow).
  *   - LQ/SQ (128-bit load/store)
  *   - TLB/MMU, exceptions/interrupts, SYSCALL handler table
  *   - The IOP (separate MIPS core) and its BIOS side-channel
@@ -188,6 +194,43 @@ static void halt(const char *reason)
  * untouched by ordinary (non-MMI) instructions - this matches real
  * EE/PCSX2 behavior. */
 static inline uint64_t sext32(uint32_t v) { return (uint64_t)(int64_t)(int32_t)v; }
+
+/* --- COP1 (FPU) helpers, ported from PCSX2's pcsx2/FPU.cpp ---
+ * PS2's FPU isn't strict IEEE-754: it treats denormal inputs as
+ * signed zero and clamps infinite inputs to +/-Fmax *before* doing
+ * arithmetic (fpuDouble), then separately clamps infinite/denormal
+ * *results* after the operation (checkOverflow/checkUnderflow). Both
+ * steps matter for matching real hardware/PCSX2 behavior. */
+#define FPU_POS_INFINITY 0x7f800000u
+#define FPU_POS_FMAX      0x7F7FFFFFu
+#define FPU_NEG_FMAX      0xFF7FFFFFu
+
+static inline float bits_to_float(uint32_t bits) { float f; memcpy(&f, &bits, 4); return f; }
+static inline uint32_t float_to_bits(float f) { uint32_t b; memcpy(&b, &f, 4); return b; }
+
+static float fpu_double(uint32_t f)
+{
+    uint32_t exp = f & 0x7f800000u;
+    if (exp == 0)               return bits_to_float(f & 0x80000000u);              /* denormal -> signed zero */
+    if (exp == 0x7f800000u)     return bits_to_float((f & 0x80000000u) | FPU_POS_FMAX); /* infinity -> +/-Fmax */
+    return bits_to_float(f);
+}
+
+static int fpu_check_overflow(uint32_t *reg)
+{
+    if ((*reg & ~0x80000000u) == FPU_POS_INFINITY) {
+        *reg = (*reg & 0x80000000u) | FPU_POS_FMAX;
+        return 1;
+    }
+    return 0;
+}
+
+static void fpu_check_underflow(uint32_t *reg)
+{
+    if ((*reg & 0x7F800000u) == 0 && (*reg & 0x007FFFFFu) != 0)
+        *reg &= 0x80000000u; /* denormal result -> signed zero */
+}
+
 
 /* --- 128-bit lane accessors for MMI opcodes (lane 0 = least significant) --- */
 
@@ -357,6 +400,91 @@ static int ee_step(void)
             break;
         default:
             halt("unimplemented COP0 sub-opcode (BC0/TLB/ERET not implemented)");
+            return 1;
+        }
+        break;
+
+    case 0x11: /* COP1 (FPU, single-precision only) */
+        switch (rs) {
+        case 0x00: /* MFC1 */ if (rt) GPR(rt) = sext32(st->fpr[rd]); break;
+        case 0x02: /* CFC1 */
+            if (rt) {
+                if (rd == 31) GPR(rt) = sext32(st->fcr31);
+                else if (rd == 0) GPR(rt) = sext32(0x2E00u);
+                else GPR(rt) = 0;
+            }
+            break;
+        case 0x04: /* MTC1 */ st->fpr[rd] = rt32; break;
+        case 0x06: /* CTC1 */ if (rd == 31) st->fcr31 = rt32; break;
+        case 0x10: { /* COP1.S - single-precision arithmetic, fd=sa fs=rd ft=rt */
+            uint32_t fd = sa, fs = rd, ft = rt;
+            switch (funct) {
+            case 0x00: /* ADD.S */ {
+                float r = fpu_double(st->fpr[fs]) + fpu_double(st->fpr[ft]);
+                st->fpr[fd] = float_to_bits(r);
+                if (!fpu_check_overflow(&st->fpr[fd])) fpu_check_underflow(&st->fpr[fd]);
+            } break;
+            case 0x01: /* SUB.S */ {
+                float r = fpu_double(st->fpr[fs]) - fpu_double(st->fpr[ft]);
+                st->fpr[fd] = float_to_bits(r);
+                if (!fpu_check_overflow(&st->fpr[fd])) fpu_check_underflow(&st->fpr[fd]);
+            } break;
+            case 0x02: /* MUL.S */ {
+                float r = fpu_double(st->fpr[fs]) * fpu_double(st->fpr[ft]);
+                st->fpr[fd] = float_to_bits(r);
+                if (!fpu_check_overflow(&st->fpr[fd])) fpu_check_underflow(&st->fpr[fd]);
+            } break;
+            case 0x03: /* DIV.S */ {
+                uint32_t divisor = st->fpr[ft], dividend = st->fpr[fs];
+                if ((divisor & 0x7F800000u) == 0) {
+                    /* divide-by-zero (denormal counts as zero too): result is
+                     * signed +/-Fmax, sign = XOR of operand signs. */
+                    st->fpr[fd] = ((divisor ^ dividend) & 0x80000000u) | FPU_POS_FMAX;
+                } else {
+                    float r = fpu_double(dividend) / fpu_double(divisor);
+                    st->fpr[fd] = float_to_bits(r);
+                    fpu_check_overflow(&st->fpr[fd]);
+                    fpu_check_underflow(&st->fpr[fd]);
+                }
+            } break;
+            case 0x05: /* ABS.S */ st->fpr[fd] = st->fpr[fs] & 0x7fffffffu; break;
+            case 0x06: /* MOV.S */ st->fpr[fd] = st->fpr[fs]; break;
+            case 0x07: /* NEG.S */ st->fpr[fd] = st->fpr[fs] ^ 0x80000000u; break;
+            case 0x24: /* CVT.W.S (float -> int32) */
+                if ((st->fpr[fs] & 0x7F800000u) <= 0x4E800000u) {
+                    st->fpr[fd] = (uint32_t)(int32_t)bits_to_float(st->fpr[fs]);
+                } else {
+                    st->fpr[fd] = (st->fpr[fs] & 0x80000000u) ? 0x80000000u : 0x7fffffffu;
+                }
+                break;
+            case 0x32: /* C.EQ.S */
+                if (fpu_double(st->fpr[fs]) == fpu_double(st->fpr[ft])) st->fcr31 |= 0x00800000u;
+                else st->fcr31 &= ~0x00800000u;
+                break;
+            case 0x34: /* C.LT.S */
+                if (fpu_double(st->fpr[fs]) < fpu_double(st->fpr[ft])) st->fcr31 |= 0x00800000u;
+                else st->fcr31 &= ~0x00800000u;
+                break;
+            case 0x36: /* C.LE.S */
+                if (fpu_double(st->fpr[fs]) <= fpu_double(st->fpr[ft])) st->fcr31 |= 0x00800000u;
+                else st->fcr31 &= ~0x00800000u;
+                break;
+            default:
+                halt("unimplemented COP1.S funct (SQRT/RSQRT/MADD/MAX/MIN family not implemented)");
+                return 1;
+            }
+        } break;
+        case 0x14: /* COP1.W - only CVT.S.W (int32 -> float) */
+            if (funct == 0x20) {
+                uint32_t fd = sa, fs = rd;
+                st->fpr[fd] = float_to_bits((float)(int32_t)st->fpr[fs]);
+            } else {
+                halt("unimplemented COP1.W funct");
+                return 1;
+            }
+            break;
+        default:
+            halt("unimplemented COP1 sub-opcode (BC1 branches not implemented)");
             return 1;
         }
         break;
@@ -642,7 +770,7 @@ static int ee_step(void)
     case 0x3F: /* SD */ ee_mem_write64(st, rs32 + imm, GPR(rt)); break;
 
     default:
-        halt("unimplemented primary opcode (COP1/COP2/LQ-SQ territory)");
+        halt("unimplemented primary opcode (COP2/LQ-SQ territory)");
         return 1;
     }
 

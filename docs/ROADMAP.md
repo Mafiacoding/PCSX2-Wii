@@ -25,8 +25,13 @@ splash screen, not just difficulty.
       (also gave the IOP core this ability first, then brought it to
       the EE core for parity)
 - [ ] LQ/SQ (128-bit load/store - used constantly for VU/GS data)
-- [ ] COP1 (FPU) - single-precision float ops, used by a lot of BIOS
-      and game code (reference: `pcsx2/FPU.cpp`)
+- [x] COP1 (FPU) - core single-precision ops: MFC1/CFC1/MTC1/CTC1,
+      ADD.S/SUB.S/MUL.S/DIV.S/ABS.S/MOV.S/NEG.S, CVT.W.S/CVT.S.W,
+      C.EQ.S/C.LT.S/C.LE.S. Ported from `pcsx2/FPU.cpp` including the
+      PS2 FPU's non-IEEE quirks (denormal inputs/outputs flushed to
+      signed zero, infinities clamped to +/-Fmax). Unit tested in
+      `tests/test_ee_fpu.c`. Still missing: SQRT.S/RSQRT.S, the
+      MADD/MSUB/MADDA/MSUBA family, MAX.S/MIN.S, and BC1 branches.
 - [ ] COP2 (VU0 macro mode) - VU0 running as a COP2 coprocessor
       attached to the EE pipeline (reference: `pcsx2/VU0.cpp`, `COP2.cpp`)
 - [ ] TLB / MMU (32-entry TLB, address translation)

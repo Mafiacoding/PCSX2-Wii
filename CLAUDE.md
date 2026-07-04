@@ -206,7 +206,13 @@ to the right module by address range.
   PS2 A0/B0/C0 BIOS syscall trap (`iop_hle_bios.c` - intercepts PC
   reaching one of three fixed addresses, logs the call, returns a generic
   default via `$v0`/`$ra` instead of decoding whatever bytes are actually
-  loaded there) and a standalone module registry scaffold
+  loaded there - with ONE specific, real exception: `C0h` function `0x07`
+  (`InstallExceptionHandlers`, per the public psx-spx community reference,
+  see "Real BIOS testing" below) actually locates the real 16-byte
+  exception-vector trampoline inside the loaded BIOS ROM itself (a
+  distinctive byte signature, not a hardcoded guess) and installs it for
+  real at RAM address 0x80 - every other function number still gets the
+  generic default) and a standalone module registry scaffold
   (`iop_hle_modules.c`, not yet wired to any specific trap function
   number). Both HLE pieces are explicitly, deliberately NOT ports of
   PCSX2's real `IopBios.cpp` (~1500 lines) - see that file's own header
@@ -267,7 +273,23 @@ actually found the biggest real bugs/gaps in this project so far -
 synthetic all-zero test buffers never meaningfully exercised
 `bios_loader.c`'s ROMDIR-walking code path at all, so its fixed-offset
 assumption (wrong - real dump has ROMDIR at file offset 0x2700, not 0x100)
-went uncaught until real data was used. The same real-BIOS diagnostic
+went uncaught until real data was used. This project's policy has always
+been "no fabricated hardware/BIOS-call semantics without a verified
+reference" - real-BIOS testing eventually made that concrete rather than
+just aspirational: `psx-spx` (https://psx-spx.consoledev.net/kernelbios/),
+a long-standing, publicly published PS1/PS2 community technical
+reference (distinct from disassembling this project's copyrighted BIOS
+binary), was adopted as exactly that citable reference once real testing
+showed precisely which BIOS call (`InstallExceptionHandlers`, `C0h`
+function `0x07`) needed real behavior to make further progress - see
+`docs/STATUS.md`'s "Resolved: InstallExceptionHandlers" section. When
+citing psx-spx (or similar public documentation) for a specific
+function's behavior, prefer confirming the exact bytes/values against
+this project's own loaded ROM where possible (as done there - the real
+jump-target immediate was located via a signature scan of the actual
+dump, not assumed from the docs' example values) rather than hardcoding
+documentation examples verbatim, since real values can vary by BIOS
+revision. The same real-BIOS diagnostic
 (`system_init()` + `system_run_interleaved()` run against the real image)
 subsequently identified the exact two opcodes each core was missing (EE:
 COP0 CO-format RFE/ERET/EI/DI; IOP: SYSCALL exception handling) by showing
@@ -327,6 +349,18 @@ if new code re-introduces the naive version:
   terminates via a halting instruction (BREAK, or an unimplemented-opcode
   halt) will report one fewer instruction executed than you might expect
   when writing test assertions. Not a bug; just a convention to know.
+- **Reserved low-memory addresses are no longer just "empty" for test
+  programs**: the IOP's real BIOS RAM map reserves several fixed, small
+  regions in the first 64KB (address 0 "Garbage Area", 0x80 exception
+  vector, 0xA0/0xB0/0xC0 function vectors, etc. - see psx-spx). As of
+  `InstallExceptionHandlers`, some of these now get REAL writes at
+  runtime (0x00 and 0x80, mirrored). A hand-written test program placed
+  at one of these addresses can have its own instructions silently
+  overwritten by such a feature before it ever executes (this bit
+  `tests/test_iop_hle_exception_install.c` once, the same way the
+  JAL-segment issue below bit an earlier test) - place new IOP test
+  programs at a safely-clear address like `0x1000` unless the test is
+  specifically about one of these reserved regions.
 
 ## Reference material
 

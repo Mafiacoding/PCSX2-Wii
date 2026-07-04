@@ -34,9 +34,31 @@ splash screen, not just difficulty.
       MADD/MSUB/MADDA/MSUBA family, MAX.S/MIN.S, and BC1 branches.
 - [ ] COP2 (VU0 macro mode) - VU0 running as a COP2 coprocessor
       attached to the EE pipeline (reference: `pcsx2/VU0.cpp`, `COP2.cpp`)
+- [x] COP0 "CO"-format instructions: RFE, ERET, EI, DI - dispatched
+      via a 6-bit `funct` field (not the `rs` field used by MFC0/MTC0)
+      once `rs`'s top bit is set (`rs & 0x10`), matching PCSX2's
+      `tbl_COP0_C0[64]` table. Added directly in response to real
+      BIOS testing (SCPH-10000 - see docs/STATUS.md): the EE
+      interpreter used to halt almost immediately on these. RFE
+      shifts Status's KU/IE bit-stack right by 2 (real note: RFE
+      isn't actually implemented on real EE hardware per PCSX2's own
+      table, but the SCPH-10000 BIOS's PS1-compat boot path executes
+      it anyway, so it's modeled to let that path progress). ERET
+      branches to ErrorEPC or EPC depending on Status.ERL and has NO
+      branch delay slot (unlike ordinary branches). EI/DI set/clear
+      Status.EIE, gated by `_EDI || EXL || ERL || KSU==0`. Semantics
+      ported from PCSX2's `COP0.cpp`. Unit tested in
+      `tests/test_ee_cop0_special.c` (9/9 checks). After this fix,
+      the real-BIOS diagnostic went from halting at ~99K instructions
+      to running past 5 million without hitting another unimplemented
+      opcode.
 - [ ] TLB / MMU (32-entry TLB, address translation)
 - [ ] Exception handling (BEV, EPC, Cause, actual exception vectors -
-      currently MFC0/MTC0 are read/write-only, no exceptions raised)
+      currently MFC0/MTC0 are read/write-only, and RFE/ERET/EI/DI
+      above manipulate Status/EPC directly without a real exception
+      ever being raised on the EE side - the IOP now raises a real
+      SYSCALL exception, see section 2, but the EE side of this is
+      still open)
 - [ ] Counters/Timers + INTC (interrupt controller) - needed for any
       timing-dependent BIOS code and for the IOP/EE to ever synchronize
 - [x] SIF mailbox/flag registers (MSCOM/SMCOM/MSFLAG/SMFLAG/CTRL,
@@ -216,6 +238,33 @@ instead of fully emulating the real IOP BIOS ROM.
       later be mistaken for real hardware behavior - wiring a real
       trigger is future work once/if a verified reference is found.
       Unit tested in `tests/test_iop_hle_modules.c`.
+- [x] SYSCALL exception handling (MIPS I, SPECIAL funct 0x0C) - added
+      directly in response to real BIOS testing (SCPH-10000 - see
+      docs/STATUS.md): the IOP interpreter used to halt
+      unconditionally on the first real SYSCALL instruction it hit.
+      Now sets Cause.ExcCode (pre-shifted value 0x20 = ExcCode 8/
+      "Syscall"), sets EPC to the SYSCALL instruction's own address
+      (branch-delay-slot BD-bit handling is explicitly NOT modeled -
+      documented simplification), vectors PC to the bootstrap handler
+      (0xBFC00180) if Status.BEV is set, or the normal handler
+      (0x80000080) otherwise, and shifts Status's KU/IE stack LEFT by
+      2 (opposite direction from the EE's RFE, section 1). Ported
+      from PCSX2's `psxException()` in `R3000A.cpp`. Also fixed
+      `iop_core_init()`, which incorrectly left Status.BEV at 0 on
+      reset via a plain `memset` - real hardware/PCSX2's `psxReset()`
+      sets it to 1, which matters directly here since it's what
+      selects which vector SYSCALL jumps to. Unit tested in
+      `tests/test_iop_syscall.c` (5/5 checks). After this fix, the
+      real-BIOS diagnostic progressed from halting at 3,054,721
+      instructions (raw SYSCALL) to 3,054,763 (42 more real
+      instructions executed inside the exception handler) before
+      hitting a NEW halt: an unimplemented SPECIAL `funct 0x3F` at
+      `pc=0x00000068` - a low RAM address, suggesting the bootstrap
+      handler dispatches down into a RAM-resident routine after the
+      exception. This is now the most concrete next IOP target (see
+      "Suggested near-term order" below); whether it's a genuine
+      missing opcode or a symptom of an earlier, different bug hasn't
+      been investigated yet.
 
 ## 3. DMA controller
 
@@ -356,15 +405,21 @@ programmable GPU nor any of those APIs).
 project's user) was used for local testing** (never committed - see
 docs/STATUS.md's "First real BIOS boot attempt" section for full
 detail, and data/pcsx2/bios/README.txt). This surfaced a real
-ROMDIR-parsing bug (fixed) and, more importantly, gave two concrete,
-non-speculative next targets by actually running the real BIOS
-against this project's interpreters: the EE halts after 99,158 real
-instructions on an unimplemented COP0 sub-opcode (BC0/TLB/ERET), and
-the IOP halts after 3M+ instructions (having made 27 real calls
-through the A0/B0/C0 HLE trap along the way) on a raw `SYSCALL`
-instruction it doesn't implement. Both are now the most directly
-justified next steps - not guesses about what "might" matter, but the
-exact two places real BIOS boot code actually stops.
+ROMDIR-parsing bug (fixed) and gave two concrete, non-speculative next
+targets by actually running the real BIOS against this project's
+interpreters. **Both of those original targets are now fixed** (EE
+COP0 CO-format instructions RFE/ERET/EI/DI, section 1; IOP SYSCALL
+exception handling + Status.BEV reset fix, section 2) - re-running the
+same diagnostic afterward: the EE now runs the full 5,000,000-
+instruction test slice without halting at all (up from 99,158), and
+the IOP progresses to 3,054,763 instructions (up from 3,054,721)
+before hitting a NEW halt point: an unimplemented SPECIAL `funct 0x3F`
+at `pc=0x00000068`. That new IOP halt is now the single most
+concretely-justified next target - not a guess about what "might"
+matter, but the exact place real BIOS boot code (after successfully
+taking the SYSCALL exception path) actually stops next. Whether it's
+a genuine missing opcode or a sign of drift from an earlier, unrelated
+bug hasn't been investigated yet.
 
 1. IOP CPU core skeleton (this is "just" another MIPS interpreter,
    well-scoped, and unblocks everything downstream of SIF) - DONE

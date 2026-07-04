@@ -414,3 +414,67 @@ directly):
 gcc -I../include -I../source -o test_bios_loader tests/test_bios_loader.c
 ./test_bios_loader
 ```
+
+`test_ee_cop0_special.c` covers `ee_core.c`'s COP0 "CO"-format
+instructions - RFE, ERET, EI, DI - added directly in response to real
+BIOS testing (SCPH-10000, see docs/STATUS.md): the EE interpreter used
+to halt on the very first of these it hit. Real MIPS COP0 encodes
+these not via the `rs` field (like MTC0/MFC0) but via a 6-bit `funct`
+field once `rs`'s top bit is set (`rs & 0x10`) - dispatch had to be
+restructured to check `instr & 0x3F` in that case, matching PCSX2's
+own `tbl_COP0_C0[64]` table (`R5900OpcodeTables.cpp`). Semantics
+ported directly from PCSX2's `COP0.cpp`:
+- RFE (`0x42000010`): shifts Status's 3-level KU/IE bit-stack (bits
+  0-5) RIGHT by 2. Real note: RFE is not actually implemented on real
+  EE hardware per PCSX2's own table (it maps to COP0_Unknown there),
+  but the SCPH-10000 BIOS's PS1-backward-compatibility boot path
+  executes it anyway, so it's modeled here to let that path progress.
+- ERET (`0x42000018`): branches to ErrorEPC (cop0[30]) and clears
+  Status.ERL if ERL was set, otherwise branches to EPC (cop0[14]) and
+  clears Status.EXL. Has NO branch delay slot, unlike ordinary
+  branches - the instruction right after it must never execute.
+- EI/DI (`0x42000038`/`0x42000039`): set/clear Status.EIE (bit 16),
+  gated by `_EDI || EXL || ERL || KSU==0` - when the gate condition
+  isn't satisfied, the write is silently ignored.
+
+9/9 checks pass, covering all three sub-cases plus ERET's no-delay-
+slot behavior and EI/DI's gating in both the allowed and blocked
+case. After this fix, the real-BIOS diagnostic went from halting at
+~99K instructions to running past 5 million without hitting another
+unimplemented opcode. Needs the same link set as the other ee_core.c
+tests:
+
+```sh
+gcc -I../include -I../source -o test_ee_cop0_special tests/test_ee_cop0_special.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+./test_ee_cop0_special
+```
+
+`test_iop_syscall.c` covers `iop_core.c`'s SYSCALL exception handling
+(MIPS I opcode, SPECIAL funct `0x0C`), ported from PCSX2's
+`psxException()` in `R3000A.cpp`. Also added directly in response to
+real BIOS testing: the IOP used to halt unconditionally the moment it
+hit a real SYSCALL instruction. Now it sets Cause.ExcCode (bits 2-6,
+pre-shifted value `0x20` = ExcCode 8/"Syscall"), sets EPC to the
+SYSCALL instruction's own address (branch-delay-slot BD-bit handling
+is explicitly NOT modeled - documented simplification), vectors PC to
+`0xBFC00180` if Status.BEV is set (or `0x80000080` otherwise), and
+shifts Status's KU/IE stack LEFT by 2 - the opposite direction from
+EE's RFE. Also fixed `iop_core_init()` to set Status.BEV=1 on reset
+(`0x00400000`), matching real hardware/PCSX2's `psxReset()` - it was
+previously left at 0 via `memset`, which is wrong.
+
+This test also confirmed something easy to get wrong when writing
+expectations for it: `iop_core_run()`'s halt path (used here by the
+BREAK instruction placed at the exception vector) returns before its
+own trailing `instructions_executed++`, same as every `halt()` call
+in this codebase - so a 2-instruction program (SYSCALL, then BREAK at
+the vector) reports `instructions_executed == 1`, not 2. Not a bug;
+just something to know before writing the assertion. 5/5 checks pass,
+including confirming SYSCALL has no delay slot (a NOP placed right
+after it never executes) and that BEV correctly selects the
+bootstrap vector. Needs the same link set as `test_iop_core.c`:
+
+```sh
+gcc -I../include -I../source -o test_iop_syscall tests/test_iop_syscall.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c
+./test_iop_syscall
+```

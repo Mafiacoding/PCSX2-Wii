@@ -102,6 +102,55 @@ MMU is a much bigger undertaking, see docs/ROADMAP.md) would let a
 real boot attempt get further than any hand-written test program
 alone could ever prove.
 
+### Update: both concrete blockers above addressed
+
+Both gaps identified above were real, and both are now fixed - ported
+directly from real PCSX2 source, not guessed:
+
+- **EE**: the halt wasn't actually "BC0/TLB unimplemented" in the way
+  it first looked - it was the COP0 "CO"-format instructions RFE,
+  ERET, EI, and DI, which are dispatched via a 6-bit `funct` field
+  (not the `rs` field) once `rs`'s top bit is set. Added, matching
+  PCSX2's `tbl_COP0_C0[64]` table and `COP0.cpp`'s ERET/EI/DI
+  semantics (see `tests/test_ee_cop0_special.c`, 9/9 checks, and the
+  COP0 case in `ee_core.c` for the full reference notes). Real TLB
+  instructions (TLBWI/TLBWR/TLBP/TLBR) and actual exception-vector
+  raising for the EE are still not implemented - the CO-format gap
+  was simply the first thing real BIOS code hit.
+- **IOP**: SYSCALL (SPECIAL funct 0x0C) now raises a real exception -
+  sets Cause.ExcCode, sets EPC, vectors to the bootstrap
+  (`0xBFC00180`) or normal (`0x80000080`) handler depending on
+  Status.BEV, and shifts the KU/IE stack - ported from PCSX2's
+  `psxException()` in `R3000A.cpp` (see `tests/test_iop_syscall.c`,
+  5/5 checks). Also fixed `iop_core_init()`, which incorrectly left
+  Status.BEV at 0 on reset via a plain `memset` - real hardware/PCSX2
+  set it to 1, which matters because it's what selects the bootstrap
+  vector SYSCALL just started actually using.
+
+Re-running the same real-BIOS diagnostic after these fixes:
+
+- The **EE** now runs the full 5,000,000-instruction test slice
+  without halting at all - up from 99,158. A 50x+ improvement, and no
+  new gap was hit within that slice; the real limit here is just how
+  long the diagnostic was allowed to run, not a code halt.
+- The **IOP** progressed from halting at 3,054,721 instructions
+  (raw SYSCALL) to 3,054,763 - 42 more real instructions executed
+  inside the exception handler this time - before hitting a new halt:
+  an unimplemented SPECIAL `funct 0x3F` at `pc=0x00000068`. Notably,
+  this new halt address is a low RAM address, not near either
+  exception vector - suggesting the bootstrap handler dispatches
+  execution down into a RAM-resident routine after the SYSCALL, which
+  is itself a small, useful data point about what the real IOP
+  kernel's exception path actually does. Whether `funct 0x3F` is a
+  genuine missing opcode or a symptom of drift from an earlier,
+  different bug hasn't been investigated yet - flagged as the next
+  concrete IOP target in `docs/ROADMAP.md`.
+
+Both fixes are committed with host-native regression tests
+(`tests/test_ee_cop0_special.c`, `tests/test_iop_syscall.c`) alongside
+the full existing test suite (21 test files total), all passing, and
+the Wii/devkitPPC target rebuilding clean with no warnings.
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

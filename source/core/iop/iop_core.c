@@ -1,22 +1,42 @@
 /*
  * iop_core.c - R3000A (IOP) interpreter
  *
- * Semantics ported from PCSX2's pcsx2/R3000AOpcodeTables.cpp
- * (GPL-3.0), same approach as ee_core.c: not reinvented from the
- * MIPS manual, so behavior matches real PCSX2 for opcodes covered.
+ * Semantics ported from PCSX2's pcsx2/R3000AOpcodeTables.cpp and
+ * R3000A.cpp (GPL-3.0), same approach as ee_core.c: not reinvented
+ * from the MIPS manual, so behavior matches real PCSX2 for opcodes
+ * covered.
  *
  * Coverage: the MIPS I integer core - ALU imm+reg, shifts, MULT/DIV,
  * HI/LO moves, branches (incl. REGIMM w/ link variants), jumps incl.
  * link register, byte/half/word load+store, and unaligned
- * LWL/LWR/SWL/SWR (which the EE core doesn't have yet - MIPS I and
- * MIPS III share this part of the ISA, so it was cheap to include
- * here first). Basic COP0 (MFC0/MTC0).
+ * LWL/LWR/SWL/SWR. Basic COP0 (MFC0/MTC0), plus a real SYSCALL
+ * exception (Cause/EPC/Status updated and PC vectored to
+ * 0xBFC00180/0x80000080 depending on Status.BEV, ported from PCSX2's
+ * psxException() in R3000A.cpp - see the SYSCALL case below for the
+ * one documented simplification: branch-delay-slot detection isn't
+ * modeled). BREAK is deliberately kept as this project's own
+ * clean-halt-for-testing convention rather than also raising a real
+ * exception, since every test in tests/ relies on it to signal clean
+ * completion.
  *
- * NOT implemented: no SIF, no IOP hardware registers (interrupt
- * controller, DMA, timers, controller/memcard modules), no BIOS
- * module loading. This core currently just executes whatever's at
- * the reset vector in isolation - it isn't wired into main.c and
- * doesn't talk to the EE core at all yet. See docs/ROADMAP.md.
+ * Wired into a shared address space with: the SIF mailbox mirror
+ * (core/hw/sif.h, 0x1D000000 window), the IOP's own interrupt
+ * controller (core/hw/iop_intc.h), its own DMA controller register
+ * stubs (core/hw/iop_dma.h), counter/timer register stubs
+ * (core/hw/iop_timers.h), a BIOS syscall trap for the classic
+ * A0/B0/C0 call convention (core/hw/iop_hle_bios.h), and a module
+ * registry scaffold (core/hw/iop_hle_modules.h) - see each header for
+ * exact scope/caveats. Runs interleaved with the EE core via
+ * source/core/system.c, wired into main.c's actual boot path.
+ *
+ * NOT implemented: IOP HLE module loading beyond the registry
+ * scaffold (no real IRX parsing, no real module ABI), no TLB (the
+ * IOP doesn't have one on real hardware either), no interrupt-driven
+ * exceptions (nothing but SYSCALL currently raises one), no timer
+ * ticking (iop_timers.c is a pure register stub). See docs/ROADMAP.md
+ * for the full picture and docs/STATUS.md's "First real BIOS boot
+ * attempt" section for what a real BIOS dump's execution against
+ * this core actually looks like today.
  */
 
 #include "core/iop/iop_core.h"
@@ -144,6 +164,15 @@ int iop_core_init(const bios_image_t *bios)
     g_iop.bios = bios;
     g_iop.pc = IOP_RESET_VECTOR;
     g_iop.next_pc = IOP_RESET_VECTOR + 4;
+
+    /* Real hardware/PCSX2 (R3000A.cpp's psxReset()) initializes
+     * Status.BEV (bit 22, "use bootstrap exception vectors") to 1 on
+     * reset - real BIOS boot code relies on this to route early
+     * exceptions to 0xBFC00180 before it has set up RAM-resident
+     * handlers and cleared this bit itself. Without this, our SYSCALL
+     * exception handling (above) would incorrectly default to the
+     * "normal" vector (0x80000080) from the very start. */
+    g_iop.cop0[12] = 0x00400000u;
     return 0;
 }
 
@@ -203,7 +232,35 @@ static int iop_step(void)
         case 0x07: /* SRAV */ if (rd) GPR(rd) = (uint32_t)((int32_t)rt32 >> (rs32 & 0x1F)); break;
         case 0x08: /* JR */   BRANCH_TO(GPR(rs)); break;
         case 0x09: /* JALR */ { uint32_t tgt = GPR(rs); if (rd) LINK(rd); BRANCH_TO(tgt); } break;
-        case 0x0C: /* SYSCALL */ halt("SYSCALL (no IOP BIOS syscall table implemented)"); return 1;
+        case 0x0C: /* SYSCALL - raises a real R3000A exception instead
+             * of halting, ported from PCSX2's psxException()
+             * (R3000A.cpp): Cause.ExcCode=8 (Syscall, pre-shifted
+             * into bits 2-6 as 0x20), EPC=the SYSCALL instruction's
+             * own address, PC vectors to 0xBFC00180 (bootstrap) or
+             * 0x80000080 (normal) depending on Status.BEV (bit 22),
+             * and the 3-level interrupt-enable/kernel-mode bit stack
+             * (Status bits 0-5) shifts left by 2 (current->previous,
+             * previous->old). NOTE: real hardware/PCSX2 also handles
+             * the case where SYSCALL itself executes in a branch
+             * delay slot (EPC=pc-4, Cause.BD=1 set) - not modeled
+             * here, since this interpreter doesn't track per-step
+             * delay-slot state; EPC is always set to the SYSCALL's
+             * own address. A real SYSCALL landing in a delay slot is
+             * rare in practice, but this is a known, documented
+             * simplification, not an oversight. Unlike BREAK (below),
+             * this does NOT halt the core - it's a real, successful
+             * step, matching real hardware's actual behavior for this
+             * instruction (BREAK is kept as this project's own
+             * clean-halt-for-testing convention, not changed here). */
+        {
+            st->cop0[13] = (st->cop0[13] & ~0x7Fu) | 0x20u; /* Cause.ExcCode = 8 (Syscall) */
+            st->cop0[14] = this_pc; /* EPC */
+            uint32_t vector = (st->cop0[12] & 0x400000u) ? 0xBFC00180u : 0x80000080u; /* Status.BEV */
+            st->pc = vector;
+            st->next_pc = vector + 4;
+            st->cop0[12] = (st->cop0[12] & ~0x3Fu) | ((st->cop0[12] & 0x0Fu) << 2); /* Status stack push */
+        }
+        break;
         case 0x0D: /* BREAK */ halt("BREAK"); return 1;
         case 0x10: /* MFHI */ if (rd) GPR(rd) = st->hi; break;
         case 0x11: /* MTHI */ st->hi = GPR(rs); break;
@@ -242,8 +299,13 @@ static int iop_step(void)
         case 0x2A: /* SLT */  if (rd) GPR(rd) = ((int32_t)rs32 < (int32_t)rt32) ? 1 : 0; break;
         case 0x2B: /* SLTU */ if (rd) GPR(rd) = (rs32 < rt32) ? 1 : 0; break;
         default:
-            halt("unimplemented SPECIAL funct");
+        {
+            char buf[96];
+            snprintf(buf, sizeof(buf), "unimplemented SPECIAL funct 0x%02X (pc=0x%08X)",
+                     (unsigned int)funct, (unsigned int)this_pc);
+            halt(buf);
             return 1;
+        }
         }
         break;
 
@@ -254,8 +316,13 @@ static int iop_step(void)
         case 0x10: /* BLTZAL */ LINK(31); if ((int32_t)GPR(rs) < 0)  BRANCH_TO(this_pc + 4 + (imm << 2)); break;
         case 0x11: /* BGEZAL */ LINK(31); if ((int32_t)GPR(rs) >= 0) BRANCH_TO(this_pc + 4 + (imm << 2)); break;
         default:
-            halt("unimplemented REGIMM opcode");
+        {
+            char buf[96];
+            snprintf(buf, sizeof(buf), "unimplemented REGIMM opcode 0x%02X (pc=0x%08X)",
+                     (unsigned int)rt, (unsigned int)this_pc);
+            halt(buf);
             return 1;
+        }
         }
         break;
 
@@ -280,8 +347,13 @@ static int iop_step(void)
         case 0x00: /* MFC0 */ if (rt) GPR(rt) = st->cop0[rd]; break;
         case 0x04: /* MTC0 */ st->cop0[rd] = rt32; break;
         default:
-            halt("unimplemented COP0 sub-opcode");
+        {
+            char buf[96];
+            snprintf(buf, sizeof(buf), "unimplemented COP0 sub-opcode (rs=0x%02X, pc=0x%08X)",
+                     (unsigned int)rs, (unsigned int)this_pc);
+            halt(buf);
             return 1;
+        }
         }
         break;
 
@@ -322,8 +394,13 @@ static int iop_step(void)
     } break;
 
     default:
-        halt("unimplemented primary opcode");
+    {
+        char buf[96];
+        snprintf(buf, sizeof(buf), "unimplemented primary opcode 0x%02X (pc=0x%08X)",
+                 (unsigned int)op, (unsigned int)this_pc);
+        halt(buf);
         return 1;
+    }
     }
 
 #undef GPR

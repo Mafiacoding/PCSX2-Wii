@@ -150,15 +150,27 @@ instead of fully emulating the real IOP BIOS ROM.
       tests/README.md). NOT modeled: any actual transfer execution
       for any channel, or the interrupt/exception side effects a real
       ICR write would trigger (no such wiring exists in iop_core.c).
-- [ ] IOP timers (T0-T5: COUNT/MODE/TARGET at 0x1F801100-0x1F8014A8) -
-      still open. Note when this is picked up: real timer behavior
-      (actual cycle counting, gate modes, clock source selection,
-      target-reached IRQs - PCSX2's `Counters.cpp`) is substantially
-      more involved than the register-stub pattern used for DMA/INTC
-      above, since it requires ticking state forward in sync with
-      instruction execution rather than just latching register
-      writes - budget for that as a bigger increment than the ones
-      before it.
+- [x] IOP timer register stub (T0-T5: COUNT/MODE/TARGET across the
+      two real hardware address windows 0x1F801100-0x1F80112B and
+      0x1F801480-0x1F8014AB) - `source/hw/iop_timers.c`, wired into
+      `iop_core.c`'s 32-bit MMIO dispatch. Deliberately a PLAIN
+      register stub, more limited than the DMA/INTC/SIF models above:
+      COUNT/MODE/TARGET are just latched storage with no special-case
+      write behavior. Real hardware/PCSX2 (`IopCounters.cpp`,
+      `psxRcntWmode16/32`) preserves certain status flag bits across
+      a MODE write, recomputes IRQ-mode state, and drives a live,
+      ticking counter service that advances COUNT based on elapsed
+      CPU cycles/gate mode/clock source and fires an interrupt at
+      TARGET/overflow - NONE of that is modeled here; these registers
+      do not advance on their own. Unit tested in
+      `tests/test_iop_timers.c` (10/10 checks - address decoding
+      across both hardware windows, cross-counter isolation, and
+      confirming addresses inside a counter's window that aren't one
+      of the 3 known register offsets are correctly unclaimed).
+      Modeling real counting/gating/target-IRQ behavior remains
+      future work and would be a meaningfully bigger effort than this
+      stub (needs to tick forward in sync with instruction execution,
+      not just latch writes) - not attempted here.
 - [ ] Either: emulate the real IOP BIOS ROM, or (like PCSX2 optionally
       does) HLE the common IOP modules (SIO2MAN, MCMAN, PADMAN, etc.)
       well enough that SIF handshakes succeed
@@ -311,12 +323,17 @@ programmable GPU nor any of those APIs).
    - it's proven with a hand-written toy handshake, not the actual
    BIOS/PCSX2 SIF DMA protocol (`Sif0.cpp`/`Sif1.cpp`).
 4. IOP HLE stubs for the specific modules the BIOS boot path calls -
-   PARTIAL: the IOP interrupt controller (I_STAT/I_MASK/I_CTRL) now
-   exists (section 2), but the IOP still has no DMA controller of its
-   own, no timers, and - the bigger gap - no actual module-loading
-   logic or HLE BIOS replacement (like PCSX2's `IopBios.cpp`). The
-   IOP core still just executes whatever raw BIOS ROM bytes are at
-   its reset vector with nothing resembling real boot behavior.
+   PARTIAL: the IOP now has register stubs for its interrupt
+   controller (I_STAT/I_MASK/I_CTRL), its own DMA controller (13
+   channels + ICR/ICR2), and its counter/timers (T0-T5) - all section
+   2 - but none of them DO anything beyond store whatever was last
+   written (no live transfers, no ticking counters, no raised
+   interrupts). The bigger remaining gap is unchanged: no actual
+   module-loading logic or HLE BIOS replacement (like PCSX2's
+   `IopBios.cpp`) exists, so the IOP core still just executes
+   whatever raw BIOS ROM bytes are at its reset vector with nothing
+   resembling real boot behavior - that's the next thing that would
+   actually move the needle, more so than further register plumbing.
 5. GIF/VIF passthrough - DONE for PACKED-mode GIF + SPRITE
    rasterization (see section 4 above); VIF0/VIF1 itself is still
    open

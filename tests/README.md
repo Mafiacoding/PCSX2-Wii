@@ -32,7 +32,7 @@ write32` route the IOP-side SIF mirror window (0x1D000000-0x1D0000FF)
 through it. Run it the same way:
 
 ```sh
-gcc -I../include -I../source -o test_iop tests/test_iop_core.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c
+gcc -I../include -I../source -o test_iop tests/test_iop_core.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c
 ./test_iop
 ```
 
@@ -231,7 +231,7 @@ simple). Needs the full EE+IOP+hardware-model dependency set linked
 in:
 
 ```sh
-gcc -I../include -I../source -o test_system_handshake tests/test_system_handshake.c ../source/core/ee/ee_core.c ../source/core/iop/iop_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c
+gcc -I../include -I../source -o test_system_handshake tests/test_system_handshake.c ../source/core/ee/ee_core.c ../source/core/iop/iop_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c
 ./test_system_handshake
 ```
 
@@ -295,3 +295,30 @@ Note: iop_core.c now depends on iop_dma.c too (wired into
 iop_mem_read32/write32 alongside SIF and INTC), so test_iop_core.c
 and test_system_handshake.c both need it linked in - see the updated
 commands above.
+
+
+`test_iop_timers.c` covers the IOP counter/timer register stub
+(`source/hw/iop_timers.c`, T0-T5 COUNT/MODE/TARGET registers across
+the two real hardware address windows 0x1F801100-0x1F80112B and
+0x1F801480-0x1F8014AB). This is deliberately a PLAIN register stub -
+no real counting/gating/target-IRQ behavior is modeled (see
+iop_timers.h for why: real counter behavior needs to tick forward in
+sync with instruction execution, a meaningfully bigger effort than a
+register latch) - so the test is correspondingly simple: per-counter
+roundtrip across both address windows, cross-counter isolation, and
+confirming that addresses inside a counter's 12-byte register window
+that AREN'T one of the 3 known offsets (e.g. base+2) are correctly
+unclaimed rather than silently aliased to the wrong register, plus
+the gap between the two hardware address windows also being
+unclaimed. 10/10 checks pass. Self-contained (`#include`s
+`iop_timers.c` directly):
+
+```sh
+gcc -I../include -I../source -o test_iop_timers tests/test_iop_timers.c
+./test_iop_timers
+```
+
+Note: iop_core.c now depends on iop_timers.c too (wired into
+iop_mem_read32/write32 alongside SIF, INTC, and DMA), so
+test_iop_core.c and test_system_handshake.c both need it linked in -
+see the updated commands above.

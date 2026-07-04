@@ -85,8 +85,18 @@ the SPU2. Reference: `Dmac.cpp` (583) + `Dmac.h` (570).
       `tests/test_ee_dma_bus.c`: SW to a DMA register address now
       correctly reaches `dma.c` instead of vanishing into RAM, and LW
       reads it back with correct sign-extension.
-- [ ] Channel state machine (normal/chain/interleave transfer modes,
-      actually moving bytes and walking chain tags)
+- [x] Channel state machine - NORMAL mode (one-shot MADR+QWC
+      transfer) and CHAIN mode walking DMA_TAG_REFE/CNT/NEXT/END tags
+      (the four most common), with correct inline-vs-out-of-line data
+      addressing. Writing CHCR with the STR bit set now actually
+      triggers a transfer (`dma_channel_kick`), which delivers data to
+      a per-channel sink callback (`dma_set_sink`) - the hook point
+      for a future GIF packet parser - and correctly auto-clears STR
+      on completion. Unsupported tag IDs (REF/REFS/CALL/RET - address
+      indirection and the ASR call/return stack) set an error flag
+      and stop cleanly rather than misbehaving. INTERLEAVE mode (SPR
+      only) is not implemented. Unit tested end-to-end in
+      `tests/test_dma_chain.c`.
 - [ ] At minimum: the channels needed for BIOS boot to push data to
       GIF (graphics) and to talk to the IOP over SIF
 
@@ -167,7 +177,10 @@ programmable GPU nor any of those APIs).
 2. Minimal SIF + DMA register stubs (enough for EE/IOP handshake, not
    full chain-mode DMA)
 3. IOP HLE stubs for the specific modules the BIOS boot path calls
-4. GIF/VIF passthrough (accept packets, don't yet rasterize)
+4. GIF/VIF passthrough (accept packets, don't yet rasterize) - the
+   DMA chain engine's sink callback (`dma_set_sink`) is now the ready
+   hook point for this: register a GIF-channel sink that parses GIF
+   tags/primitive data out of the delivered quadwords
 5. GS register block + local memory (still no rasterization output)
 6. Minimal rasterizer for whatever primitive types the splash actually
    uses, output to Wii GX framebuffer

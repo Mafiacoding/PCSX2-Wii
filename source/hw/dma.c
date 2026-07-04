@@ -11,13 +11,172 @@
 #include <string.h>
 
 static dma_state_t g_dma;
+static uint8_t *g_ee_ram = NULL;
+static uint32_t g_ee_ram_size = 0;
+static dma_sink_fn g_sinks[DMA_CHANNEL_COUNT];
 
 void dma_init(void)
 {
     memset(&g_dma, 0, sizeof(g_dma));
+    memset(g_sinks, 0, sizeof(g_sinks));
+    /* Deliberately not clearing g_ee_ram/g_ee_ram_size here - dma_init()
+     * resets register state on emulator (re)start, but the RAM binding
+     * is a one-time wiring done by ee_core_init() at a different point
+     * in the boot sequence. */
 }
 
 dma_state_t *dma_get_state(void) { return &g_dma; }
+
+void dma_bind_ee_ram(uint8_t *ram, uint32_t ram_size)
+{
+    g_ee_ram = ram;
+    g_ee_ram_size = ram_size;
+}
+
+void dma_set_sink(int channel, dma_sink_fn fn)
+{
+    if (channel >= 0 && channel < DMA_CHANNEL_COUNT)
+        g_sinks[channel] = fn;
+}
+
+/* Little-endian-explicit RAM access - same reasoning as ee_core.c and
+ * iop_core.c: PS2 memory is little-endian, our Wii/PowerPC build
+ * target is big-endian, so this can't be a raw memcpy. */
+static int ram_read32(uint32_t phys_addr, uint32_t *out)
+{
+    if (!g_ee_ram || phys_addr + 4 > g_ee_ram_size)
+        return 0;
+    const uint8_t *p = g_ee_ram + phys_addr;
+    *out = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    return 1;
+}
+
+static int ram_ptr(uint32_t phys_addr, uint32_t len, const uint8_t **out)
+{
+    if (!g_ee_ram || phys_addr + len > g_ee_ram_size)
+        return 0;
+    *out = g_ee_ram + phys_addr;
+    return 1;
+}
+
+/* Transfers 'qwc' quadwords (16 bytes each) starting at physical
+ * address 'addr' to the channel's registered sink (if any). Returns 1
+ * on success, 0 if the range falls outside bound RAM. */
+static int transfer_quadwords(int channel, uint32_t addr, uint32_t qwc)
+{
+    if (qwc == 0)
+        return 1;
+    const uint8_t *p;
+    if (!ram_ptr(addr, qwc * 16u, &p))
+        return 0;
+    if (g_sinks[channel])
+        g_sinks[channel](channel, p, qwc);
+    g_dma.chan[channel].quadwords_transferred += qwc;
+    return 1;
+}
+
+/* Reads one 64-bit DMA chain tag (2 words: control word with QWC/ID/
+ * IRQ, then the ADDR word) from physical address 'tag_addr'. Matches
+ * PCSX2's tDMA_TAG bitfield layout (Dmac.h): QWC in bits 0-15, PCE in
+ * 26-27, ID in 28-30, IRQ in bit 31 of the control word; ADDR in bits
+ * 0-30 of the address word. */
+static int read_chain_tag(uint32_t tag_addr, uint32_t *qwc, uint32_t *id,
+                           uint32_t *addr, uint32_t *irq)
+{
+    uint32_t ctrl, addr_word;
+    if (!ram_read32(tag_addr, &ctrl)) return 0;
+    if (!ram_read32(tag_addr + 4, &addr_word)) return 0;
+
+    *qwc  = ctrl & 0xFFFFu;
+    *id   = (ctrl >> 28) & 0x7u;
+    *irq  = (ctrl >> 31) & 0x1u;
+    *addr = addr_word & 0x7FFFFFFFu;
+    return 1;
+}
+
+void dma_channel_kick(int channel)
+{
+    if (channel < 0 || channel >= DMA_CHANNEL_COUNT)
+        return;
+
+    dma_channel_t *ch = &g_dma.chan[channel];
+    ch->last_error = DMA_ERR_NONE;
+
+    if (!g_ee_ram) {
+        ch->last_error = DMA_ERR_NO_RAM_BOUND;
+        ch->chcr &= ~0x100u; /* clear STR - can't run */
+        return;
+    }
+
+    uint32_t mod = (ch->chcr >> 2) & 0x3u;
+
+    if (mod == 0) {
+        /* NORMAL mode: one shot, QWC quadwords straight from MADR. */
+        if (!transfer_quadwords(channel, ch->madr, ch->qwc)) {
+            ch->last_error = DMA_ERR_OUT_OF_BOUNDS;
+        } else {
+            ch->madr += ch->qwc * 16u;
+            ch->qwc = 0;
+        }
+        ch->chcr &= ~0x100u; /* transfer complete - clear STR */
+        return;
+    }
+
+    if (mod == 1) {
+        /* CHAIN mode: walk tags starting at TADR. Implements the four
+         * most common tag IDs (REFE/CNT/NEXT/END); REF/REFS/CALL/RET
+         * are flagged as unsupported rather than silently mishandled -
+         * see docs/ROADMAP.md. */
+        const int MAX_TAGS_PER_KICK = 4096; /* guards against a corrupt/cyclic chain hanging us forever */
+        for (int guard = 0; guard < MAX_TAGS_PER_KICK; guard++) {
+            uint32_t qwc, id, addr, irq;
+            (void)irq;
+            if (!read_chain_tag(ch->tadr, &qwc, &id, &addr, &irq)) {
+                ch->last_error = DMA_ERR_OUT_OF_BOUNDS;
+                break;
+            }
+
+            switch (id) {
+            case DMA_TAG_REFE: /* 0: data at ADDR, then stop */
+                if (!transfer_quadwords(channel, addr, qwc)) { ch->last_error = DMA_ERR_OUT_OF_BOUNDS; }
+                ch->tadr += 16u;
+                ch->chcr &= ~0x100u;
+                return;
+
+            case DMA_TAG_CNT: /* 1: data follows the tag itself, keep going */
+                if (!transfer_quadwords(channel, ch->tadr + 16u, qwc)) { ch->last_error = DMA_ERR_OUT_OF_BOUNDS; return; }
+                ch->tadr = ch->tadr + 16u + qwc * 16u;
+                continue;
+
+            case DMA_TAG_NEXT: /* 2: data follows the tag, next tag is at ADDR */
+                if (!transfer_quadwords(channel, ch->tadr + 16u, qwc)) { ch->last_error = DMA_ERR_OUT_OF_BOUNDS; return; }
+                ch->tadr = addr;
+                continue;
+
+            case DMA_TAG_END: /* 7: data follows the tag, then stop */
+                if (!transfer_quadwords(channel, ch->tadr + 16u, qwc)) { ch->last_error = DMA_ERR_OUT_OF_BOUNDS; }
+                ch->tadr += 16u + qwc * 16u;
+                ch->chcr &= ~0x100u;
+                return;
+
+            default: /* REF/REFS/CALL/RET - not implemented */
+                ch->last_error = DMA_ERR_UNSUPPORTED_TAG;
+                ch->chcr &= ~0x100u;
+                return;
+            }
+        }
+        /* Fell out of the loop via the guard counter - treat as an error
+         * rather than leaving STR set forever. */
+        ch->last_error = DMA_ERR_UNSUPPORTED_TAG;
+        ch->chcr &= ~0x100u;
+        return;
+    }
+
+    /* INTERLEAVE mode (SPR only) - not implemented. */
+    ch->last_error = DMA_ERR_UNSUPPORTED_TAG;
+    ch->chcr &= ~0x100u;
+}
 
 #define DMAC_BASE       0x10008000u
 #define DMAC_CHAN_END   0x1000E000u
@@ -110,10 +269,11 @@ int dma_mmio_write32(uint32_t addr, uint32_t val)
         if (ch < 0) return 1; /* consumed, ignored - unknown sub-register */
         uint32_t *reg = channel_reg_ptr(&g_dma.chan[ch], off);
         if (reg) {
-            /* D_CHCR bit 8 (STR - start) being set would normally kick
-             * off a real transfer. We don't execute transfers yet, so
-             * we just latch the register value - see docs/ROADMAP.md. */
             *reg = val;
+            /* Writing CHCR (offset 0x00) with STR (bit 8) set kicks off
+             * a real transfer - see dma_channel_kick(). */
+            if (off == 0x00 && (val & 0x100u))
+                dma_channel_kick(ch);
         }
         return 1;
     }

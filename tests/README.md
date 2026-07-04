@@ -136,3 +136,24 @@ test pattern to the real Wii/Dolphin framebuffer on every boot (not
 yet driven by the BIOS/GIF/DMA pipeline - see docs/ROADMAP.md - but
 proof the underlying pixel path is real and working end-to-end, not
 just correct in isolated host tests).
+
+
+`test_dma_chain.c` covers the DMA chain-mode transfer engine
+(`dma_channel_kick` in `source/hw/dma.c`): NORMAL mode, CHAIN mode
+walking CNT->REFE tags with correct inline/out-of-line data addressing,
+STR bit auto-clear on completion, and that an unsupported tag ID
+(REF/REFS/CALL/RET) sets an error flag and stops cleanly instead of
+misbehaving silently. Doesn't need dma.c linked separately since it
+#includes it directly:
+
+```sh
+gcc -I../include -I../source -o test_dma_chain tests/test_dma_chain.c
+./test_dma_chain
+```
+
+Note: after adding chain-mode support, `tests/test_dma_core.c` needed
+a small update - it originally wrote CHCR with the STR bit (0x100)
+set as part of a plain register-roundtrip check, which now correctly
+triggers `dma_channel_kick()` and clears STR again (real hardware
+behavior). Updated that test to use a CHCR value without STR set,
+since chain/transfer *behavior* now has its own dedicated test file.

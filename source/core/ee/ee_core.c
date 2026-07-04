@@ -175,6 +175,8 @@ int ee_core_init(const bios_image_t *bios)
     memset(g_state.ram, 0, EE_RAM_SIZE);
     g_state.ram_size = EE_RAM_SIZE;
 
+    dma_bind_ee_ram(g_state.ram, g_state.ram_size); /* chain-mode DMA reads tags/data from here */
+
     g_state.bios = bios;
     g_state.pc = BIOS_RESET_VECTOR;
     g_state.next_pc = BIOS_RESET_VECTOR + 4;

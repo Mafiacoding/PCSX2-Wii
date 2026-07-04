@@ -16,9 +16,13 @@ int main(void) {
     CHECK(dma_mmio_write32(0x1000A010u, 0xDEADBEEF) == 1, "write to GIF MADR handled");
     CHECK(dma_mmio_read32(0x1000A010u, &v) == 1 && v == 0xDEADBEEF, "GIF MADR roundtrip");
 
-    /* SIF0 channel (0x1000C000, 0x400-byte block) CHCR roundtrip */
-    CHECK(dma_mmio_write32(0x1000C000u, 0x00000101) == 1, "write to SIF0 CHCR handled");
-    CHECK(dma_mmio_read32(0x1000C000u, &v) == 1 && v == 0x00000101, "SIF0 CHCR roundtrip");
+    /* SIF0 channel (0x1000C000, 0x400-byte block) CHCR roundtrip.
+     * Deliberately NOT setting the STR bit (0x100) here - that now
+     * triggers a real transfer via dma_channel_kick() (see
+     * tests/test_dma_chain.c for that behavior), which would clear
+     * STR again and break this simple register-latch check. */
+    CHECK(dma_mmio_write32(0x1000C000u, 0x00000001) == 1, "write to SIF0 CHCR handled");
+    CHECK(dma_mmio_read32(0x1000C000u, &v) == 1 && v == 0x00000001, "SIF0 CHCR roundtrip");
 
     /* toSPR channel (0x1000D400) QWC at +0x20 */
     CHECK(dma_mmio_write32(0x1000D420u, 42) == 1, "write to toSPR QWC handled");

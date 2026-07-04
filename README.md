@@ -26,6 +26,26 @@ that document for exactly what works, what doesn't, and why.
   covers two opcodes, as a demonstration that dynamic codegen works on
   Wii hardware - not as a real recompiler.
 
+## Getting the real devkitPro base_tools
+
+The devkitPPC tarball some of us started from had an empty `base_tools`
+directory (no `elf2dol`, `wiiload`, `gxtexconv`, ...). Two ways to get
+the genuine tools:
+
+1. **Recommended - devkitPro pacman** (gets everything, kept up to date):
+   install the devkitPro pacman package manager from
+   https://github.com/devkitPro/pacman/releases, then:
+   ```sh
+   sudo dkp-pacman -S wii-dev gamecube-tools general-tools
+   ```
+2. **Just elf2dol from source** (what this repo does automatically as
+   a fallback): the source lives upstream at
+   `devkitPro/gamecube-tools` (`elftool/elf2dol.c`), vendored here at
+   `tools/elf2dol.c` under its original license. The Makefile compiles
+   it natively (host gcc, not the PPC cross compiler) on demand if no
+   system-wide `elf2dol` is found on `PATH`. `tools/elf2dol.py` is a
+   last-resort pure-Python reimplementation if neither is available.
+
 ## Building
 
 Requires devkitPPC (r32 tested) and libogc 1.8.18 installed under a

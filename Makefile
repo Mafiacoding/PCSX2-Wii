@@ -73,7 +73,16 @@ DEPENDS	:=	$(OFILES:.o=.d)
 
 $(OUTPUT).dol: $(OUTPUT).elf
 	@echo output ... $(notdir $@)
-	@python3 $(TOPDIR)/tools/elf2dol.py $< $@
+	@if command -v elf2dol >/dev/null 2>&1; then \
+		elf2dol $< $@ ; \
+	else \
+		cc -O2 -o $(TOPDIR)/tools/elf2dol_native $(TOPDIR)/tools/elf2dol.c 2>/dev/null ; \
+		if [ -x $(TOPDIR)/tools/elf2dol_native ]; then \
+			$(TOPDIR)/tools/elf2dol_native $< $@ ; \
+		else \
+			python3 $(TOPDIR)/tools/elf2dol.py $< $@ ; \
+		fi ; \
+	fi
 $(OUTPUT).elf: $(OFILES)
 
 -include $(DEPENDS)

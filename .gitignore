@@ -3,3 +3,4 @@ build/
 *.elf
 *.map
 data/pcsx2/bios/*.bin
+tools/elf2dol_native

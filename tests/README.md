@@ -107,3 +107,32 @@ Needs dma.c and gs.c linked too:
 gcc -I../include -I../source -o test_ee_fpu tests/test_ee_fpu.c ../source/hw/dma.c ../source/hw/gs.c
 ./test_ee_fpu
 ```
+
+
+`test_gs_mem.c` covers the simplified linear GS local memory model
+(`source/hw/gs_mem.c`) - pixel roundtrip and scanline/adjacent-pixel
+isolation:
+
+```sh
+gcc -I../include -I../source -o test_gs_mem tests/test_gs_mem.c
+./test_gs_mem
+```
+
+`test_gs_output.c` covers the GS-memory-to-Wii-XFB output path
+(`source/hw/gs_wii_output.c`) - the RGB->YCbCr conversion (ported from
+libogc's console.c) against hand-verified black/white anchor points,
+and the rectangular blit against a mock framebuffer (checking both
+that the right pixels get written AND that pixels outside the blit
+region are left untouched):
+
+```sh
+gcc -I../include -I../source -o test_gs_output tests/test_gs_output.c
+./test_gs_output
+```
+
+Together these are the first "pixels actually reach a real display"
+milestone in the project - `source/main.c` now also draws a 4-color
+test pattern to the real Wii/Dolphin framebuffer on every boot (not
+yet driven by the BIOS/GIF/DMA pipeline - see docs/ROADMAP.md - but
+proof the underlying pixel path is real and working end-to-end, not
+just correct in isolated host tests).

@@ -127,13 +127,30 @@ programmable GPU nor any of those APIs).
       are genuinely 64-bit registers on real hardware), unit tested
       in `tests/test_gs_registers.c`. Registers only: nothing is
       rasterized, GS local memory (the 4MB eDRAM) doesn't exist yet.
-- [ ] GS local memory model (4MB eDRAM, PSMCT32/24/16/Z formats)
+- [x] GS local memory model - SIMPLIFIED: linear addressing instead
+      of real hardware's block-swizzled layout (see code comments in
+      `include/core/hw/gs_mem.h` for why), PSMCT32 only (no 24/16/Z/
+      paletted formats). `source/hw/gs_mem.c`, unit tested in
+      `tests/test_gs_mem.c`. Real swizzle addressing is still open -
+      needed before texture sampling or certain blit tricks would
+      work correctly.
 - [ ] Primitive rasterization (triangles/sprites/lines - at minimum
       whatever the BIOS splash actually draws with)
-- [ ] A translation layer from GS's output format to something the
-      Wii's GX (fixed-function, Flipper/Hollywood-derived) can
-      display - this is its own subproject, not a thin adapter,
-      because GS and GX have fairly different texture/blending models
+- [x] A first, minimal translation layer from GS memory to the Wii's
+      display: `source/hw/gs_wii_output.c` converts a rectangular
+      PSMCT32 region to the Wii's packed Y1CbY2Cr XFB format (RGB->YUV
+      conversion ported from libogc's console.c) and blits it
+      directly into the framebuffer - no GX 3D pipeline involved,
+      just a direct pixel blit. Unit tested in
+      `tests/test_gs_output.c` against hand-verified black/white
+      YCbCr anchor points, AND wired into `source/main.c` so a real
+      Wii/Dolphin boot now visibly draws a 4-color test pattern -
+      the first actual pixels-on-a-real-screen milestone in the
+      project. NOT yet driven by anything the BIOS does - no GIF
+      packet parsing, no primitive assembly/rasterization, no DMA
+      transfer execution feeds this path yet. A real splash screen
+      still needs all of that, plus eventually a proper GX-based
+      renderer once primitives beyond flat rectangles are needed.
 
 ## 7. Supporting pieces (lower priority for "just the splash screen")
 

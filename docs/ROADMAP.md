@@ -49,9 +49,12 @@ Reference sizes: `R3000A.cpp` (304 lines) + `R3000AInterpreter.cpp`
 `IopBios.cpp` (1502 lines) for the HLE BIOS module layer PCSX2 uses
 instead of fully emulating the real IOP BIOS ROM.
 
-- [ ] R3000A CPU state + memory model (2MB IOP RAM)
-- [ ] R3000A interpreter (simpler than EE - no MMI/128-bit registers,
-      but same MIPS I branch-delay-slot structure)
+- [x] R3000A CPU state + memory model (2MB IOP RAM)
+- [x] R3000A interpreter (simpler than EE - no MMI/128-bit registers,
+      but same MIPS I branch-delay-slot structure; includes LWL/LWR/
+      SWL/SWR unaligned load/store, which the EE core doesn't have
+      yet). Unit-tested in `tests/test_iop_core.c`. Standalone so far -
+      not yet wired into main.c, no SIF, no IOP hardware registers.
 - [ ] IOP hardware register stubs (interrupt controller, DMA, timers)
 - [ ] Either: emulate the real IOP BIOS ROM, or (like PCSX2 optionally
       does) HLE the common IOP modules (SIO2MAN, MCMAN, PADMAN, etc.)

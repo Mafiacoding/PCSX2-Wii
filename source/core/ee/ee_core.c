@@ -45,6 +45,7 @@
 #include "core/hw/dma.h"
 #include "core/hw/gs.h"
 #include "core/hw/gif.h"
+#include "core/hw/sif.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -93,13 +94,15 @@ uint16_t ee_mem_read16(ee_state_t *st, uint32_t addr)
 
 uint32_t ee_mem_read32(ee_state_t *st, uint32_t addr)
 {
-    /* Hardware register window (0x10000000-0x1000FFFF): DMA controller
-     * and friends. Only the DMAC is actually modeled so far - other
-     * addresses in this window (timers, INTC, SIO, GIF/VIF/IPU control
-     * regs) still fall through to the silent-no-op RAM/BIOS path below,
-     * which returns 0. See docs/ROADMAP.md. */
+    /* Hardware register window (0x10000000-0x1000FFFF): DMA controller,
+     * SIF mailbox registers, and friends. Other addresses in this
+     * window (timers, INTC, SIO, GIF/VIF/IPU control regs) still fall
+     * through to the silent-no-op RAM/BIOS path below, which returns
+     * 0. See docs/ROADMAP.md. */
     uint32_t hw_val;
     if (dma_mmio_read32(addr, &hw_val))
+        return hw_val;
+    if (sif_mmio_read32(addr, &hw_val))
         return hw_val;
 
     uint8_t *p = ee_mem_ptr(st, addr, 4);
@@ -140,6 +143,8 @@ void ee_mem_write32(ee_state_t *st, uint32_t addr, uint32_t val)
 {
     if (dma_mmio_write32(addr, val))
         return;
+    if (sif_mmio_write32(addr, val))
+        return;
 
     uint8_t *p = ee_mem_ptr(st, addr, 4);
     if (!p) return;
@@ -166,6 +171,7 @@ int ee_core_init(const bios_image_t *bios)
 
     dma_init(); /* EE DMA controller register block - see core/hw/dma.h */
     gs_init();  /* GS privileged register block - see core/hw/gs.h */
+    sif_init(); /* EE-side SIF/SBUS mailbox registers - see core/hw/sif.h */
 
     g_state.ram = memalign(32, EE_RAM_SIZE);
     if (!g_state.ram) {

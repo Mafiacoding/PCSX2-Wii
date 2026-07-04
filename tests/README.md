@@ -10,7 +10,7 @@ values (cross-checked against PCSX2's own semantics for the opcodes
 covered). Run it with:
 
 ```sh
-gcc -I../include -I../source -o test_ee tests/test_ee_core.c
+gcc -I../include -I../source -o test_ee tests/test_ee_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
 ./test_ee
 ```
 
@@ -59,7 +59,7 @@ into the 64-bit register, matching real EE/PCSX2 LW semantics). Needs
 `dma.c` linked in as well as `ee_core.c`:
 
 ```sh
-gcc -I../include -I../source -o test_ee_dma tests/test_ee_dma_bus.c ../source/hw/dma.c
+gcc -I../include -I../source -o test_ee_dma tests/test_ee_dma_bus.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
 ./test_ee_dma
 ```
 
@@ -84,7 +84,7 @@ load/store). Needs `dma.c` and `gs.c` linked in too, since ee_core.c
 now depends on both:
 
 ```sh
-gcc -I../include -I../source -o test_ee_unaligned tests/test_ee_unaligned.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c
+gcc -I../include -I../source -o test_ee_unaligned tests/test_ee_unaligned.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
 ./test_ee_unaligned
 ```
 
@@ -104,7 +104,7 @@ DIV.S/ABS.S/NEG.S, MTC1/MFC1, C.EQ.S) with real float arithmetic.
 Needs dma.c and gs.c linked too:
 
 ```sh
-gcc -I../include -I../source -o test_ee_fpu tests/test_ee_fpu.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c
+gcc -I../include -I../source -o test_ee_fpu tests/test_ee_fpu.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
 ./test_ee_fpu
 ```
 
@@ -175,7 +175,32 @@ gcc -I../include -I../source -o test_gif tests/test_gif.c ../source/hw/gs_mem.c
 ./test_gif
 ```
 
-Note: as ee_core.c has grown more hw/ dependencies (dma.c, gs.c, now
-also gif.c and gs_mem.c since dma_set_sink() wires GIF DMA transfers
-into the GIF parser), tests that link ee_core.c directly need all of
-these on the command line now - see the updated commands above.
+Note: as ee_core.c has grown more hw/ dependencies (dma.c, gs.c,
+gif.c, gs_mem.c, and now sif.c since sif_init()/sif_mmio_read32/
+write32 are wired into ee_core_init() and the memory bus), tests that
+link ee_core.c directly need all of these on the command line now -
+see the updated commands above.
+
+`test_sif.c` covers the EE-side SIF/SBUS mailbox registers
+(`source/hw/sif.c`, addresses 0x1000F200-0x1000F260): MSCOM plain
+read/write, MSFLAG OR-on-write, SMFLAG AND-NOT-on-write
+(write-1-to-clear, same idea as GS_CSR), and CTRL's read-side fixed
+0xF0000102 OR mask plus its internal bit-0x100 lock flag. Register
+semantics are ported directly from PCSX2's `HwWrite.cpp`/
+`HwRead.cpp`/`Hw.cpp` (SBUS_F2xx cases), not reinvented.
+
+This test caught a real subtlety while writing it: CTRL's read-side
+mask (0xF0000102) already has bit 0x100 set as part of the fixed
+mask, so every read of that register shows bit 0x100 set regardless
+of the register's actual internal state - an initial version of this
+test tried to observe the lock-flag clear via `sif_mmio_read32()` and
+failed, because the read path can never show that bit as clear. Real
+hardware/PCSX2 behavior; the fix was to check the internal state
+(`g_sif.ctrl`) directly in the test instead, which is what the test
+does now. Self-contained (`#include`s `sif.c` directly, no extra
+link deps):
+
+```sh
+gcc -I../include -I../source -o test_sif tests/test_sif.c
+./test_sif
+```

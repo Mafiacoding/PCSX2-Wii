@@ -39,9 +39,26 @@ splash screen, not just difficulty.
       currently MFC0/MTC0 are read/write-only, no exceptions raised)
 - [ ] Counters/Timers + INTC (interrupt controller) - needed for any
       timing-dependent BIOS code and for the IOP/EE to ever synchronize
-- [ ] SIF0/SIF1/SIF2 (EE<->IOP sub-CPU interface) - the channel the
-      BIOS uses to hand off to IOP modules; currently doesn't exist at
-      all (reference: `pcsx2/Sif0.cpp`, `Sif1.cpp`, `Sif.cpp`)
+- [x] SIF mailbox/flag registers (MSCOM/SMCOM/MSFLAG/SMFLAG/CTRL,
+      0x1000F200-0x1000F260), EE side only - `source/hw/sif.c`, wired
+      into `ee_core.c`'s 32-bit MMIO dispatch. Register-level
+      semantics ported directly from PCSX2's `HwWrite.cpp`/
+      `HwRead.cpp`/`Hw.cpp` (MSFLAG ORs on write, SMFLAG ANDs-off on
+      write, CTRL's fixed 0xF0000102 read-side OR mask and bit-0x100
+      lock flag). Unit tested in `tests/test_sif.c` (13/13 checks,
+      including a real subtlety this test caught: CTRL's read mask
+      always shows bit 0x100 set, so the lock flag's clear behavior
+      has to be checked against internal state, not through the read
+      path - matches real hardware). NOT modeled: the actual IOP-side
+      mirror registers, the IRQ-raise/IOP-reset side effects of CTRL
+      bits 18/19 (no-ops - no cross-CPU wiring to iop_core.c exists
+      yet), and SIF0/SIF1/SIF2 themselves are still just DMA channel
+      register slots in dma.c with no IOP on the other end consuming
+      them. This is the mailbox layer only - a working EE<->IOP
+      handshake still needs the IOP core interleaved with the EE and
+      reading/writing this same state (reference: `pcsx2/Sif0.cpp`,
+      `Sif1.cpp`, `Sif.cpp` for the full protocol this only partially
+      models).
 
 ## 2. IOP (I/O Processor) - separate MIPS core
 
@@ -206,9 +223,16 @@ programmable GPU nor any of those APIs).
 1. IOP CPU core skeleton (this is "just" another MIPS interpreter,
    well-scoped, and unblocks everything downstream of SIF) - DONE
 2. Minimal SIF + DMA register stubs (enough for EE/IOP handshake, not
-   full chain-mode DMA) - still open
+   full chain-mode DMA) - PARTIAL: EE-side SIF mailbox registers are
+   done (see section 1), but the IOP core still isn't wired to read/
+   write the same state, so there's no actual handshake happening yet
+   - just the register plumbing one side of it needs.
 3. IOP HLE stubs for the specific modules the BIOS boot path calls -
-   still open
+   still open, and now the most direct next unblock: wiring
+   iop_core.c into the same process loop as ee_core.c (even crudely -
+   e.g. run N EE instructions, then N IOP instructions, repeat) plus
+   giving the IOP side read/write access to sif_mmio_read32/write32
+   would make this project's first real cross-CPU handshake possible.
 4. GIF/VIF passthrough - DONE for PACKED-mode GIF + SPRITE
    rasterization (see section 4 above); VIF0/VIF1 itself is still
    open
@@ -220,8 +244,10 @@ programmable GPU nor any of those APIs).
    code since SIF/IOP HLE aren't wired up yet
 
 Remaining near-term candidates, roughly in order of how directly they
-unblock "the BIOS actually draws something": SIF + IOP HLE stubs (so
-the EE core can get past its boot handshake with the IOP), triangle
+unblock "the BIOS actually draws something": interleaving iop_core.c
+with ee_core.c and giving the IOP side access to the SIF mailbox
+registers (so a real handshake becomes possible for the first time),
+IOP HLE stubs for the specific BIOS-boot-path modules, triangle
 rasterization in the GIF parser, VIF0/VIF1 passthrough, and wiring a
 real GIF packet through `dma_channel_kick` at boot in `main.c` as a
 live demo (currently only the hardcoded 4-color pattern runs there).

@@ -113,7 +113,26 @@ instead of fully emulating the real IOP BIOS ROM.
       details) - no longer standalone. Has SIF mailbox register
       access (section 1). Still has NO other IOP hardware registers
       (interrupt controller, DMA, timers) - see next bullet.
-- [ ] IOP hardware register stubs (interrupt controller, DMA, timers)
+- [x] IOP interrupt controller (I_STAT/I_MASK/I_CTRL,
+      0x1F801070-0x1F801078) - `source/hw/iop_intc.c`, wired into
+      `iop_core.c`'s 32-bit MMIO dispatch. Semantics ported from
+      PCSX2's `ps2/Iop/IopHwWrite.cpp`/`IopHwRead.cpp`: I_STAT write
+      ANDs the value in (write-0-to-clear - opposite polarity from
+      GS_CSR/SIF SMFLAG's write-1-to-clear elsewhere in this
+      project), I_MASK is plain read/write, I_CTRL clears itself to 0
+      as a side effect of being READ (a one-shot latch - the first
+      register in this project where the interesting behavior is on
+      the read path). `iop_intc_raise(irq)` lets future peripheral
+      models set a pending bit. Unit tested in `tests/test_iop_intc.c`
+      (11/11 checks). NOT modeled: actually raising a CPU interrupt/
+      exception in iop_core.c when I_STAT & I_MASK becomes nonzero
+      (no interrupt/exception handling exists in the IOP interpreter
+      at all yet), and the ~20 individual real IRQ source assignments
+      (VBLANK, DMA completion, etc).
+- [ ] IOP DMA controller register stubs (separate from the EE's DMA
+      model in dma.c - the IOP has its own DMA controller with its
+      own channels, e.g. SIF0/SIF1 on the IOP side, SPU2, CDVD)
+- [ ] IOP timers
 - [ ] Either: emulate the real IOP BIOS ROM, or (like PCSX2 optionally
       does) HLE the common IOP modules (SIO2MAN, MCMAN, PADMAN, etc.)
       well enough that SIF handshakes succeed
@@ -266,13 +285,12 @@ programmable GPU nor any of those APIs).
    - it's proven with a hand-written toy handshake, not the actual
    BIOS/PCSX2 SIF DMA protocol (`Sif0.cpp`/`Sif1.cpp`).
 4. IOP HLE stubs for the specific modules the BIOS boot path calls -
-   still open, and now the most direct next unblock: with cores
-   actually running together and able to exchange mailbox messages,
-   the next gap is that the real IOP BIOS code (or an HLE
-   replacement for it, like PCSX2's own `IopBios.cpp`) doesn't exist
-   here at all - the IOP core currently just executes whatever raw
-   BIOS ROM bytes are at its reset vector with no module-loading
-   logic, interrupt controller, or DMA of its own.
+   PARTIAL: the IOP interrupt controller (I_STAT/I_MASK/I_CTRL) now
+   exists (section 2), but the IOP still has no DMA controller of its
+   own, no timers, and - the bigger gap - no actual module-loading
+   logic or HLE BIOS replacement (like PCSX2's `IopBios.cpp`). The
+   IOP core still just executes whatever raw BIOS ROM bytes are at
+   its reset vector with nothing resembling real boot behavior.
 5. GIF/VIF passthrough - DONE for PACKED-mode GIF + SPRITE
    rasterization (see section 4 above); VIF0/VIF1 itself is still
    open

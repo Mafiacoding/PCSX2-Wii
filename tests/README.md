@@ -32,7 +32,7 @@ write32` route the IOP-side SIF mirror window (0x1D000000-0x1D0000FF)
 through it. Run it the same way:
 
 ```sh
-gcc -I../include -I../source -o test_iop tests/test_iop_core.c ../source/hw/sif.c
+gcc -I../include -I../source -o test_iop tests/test_iop_core.c ../source/hw/sif.c ../source/hw/iop_intc.c
 ./test_iop
 ```
 
@@ -231,6 +231,31 @@ simple). Needs the full EE+IOP+hardware-model dependency set linked
 in:
 
 ```sh
-gcc -I../include -I../source -o test_system_handshake tests/test_system_handshake.c ../source/core/ee/ee_core.c ../source/core/iop/iop_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+gcc -I../include -I../source -o test_system_handshake tests/test_system_handshake.c ../source/core/ee/ee_core.c ../source/core/iop/iop_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/iop_intc.c
 ./test_system_handshake
 ```
+
+
+`test_iop_intc.c` covers the IOP interrupt controller register model
+(`source/hw/iop_intc.c`, I_STAT/I_MASK/I_CTRL at
+0x1F801070-0x1F801078). Semantics ported directly from PCSX2's
+`ps2/Iop/IopHwWrite.cpp`/`IopHwRead.cpp`: I_STAT write ANDs the
+written value in (write-0-to-clear, the OPPOSITE polarity from
+GS_CSR/SIF SMFLAG's write-1-to-clear elsewhere in this project),
+I_MASK is plain read/write, and I_CTRL has a read-side effect - the
+register is cleared to 0 as a side effect of being read (a one-shot
+latch, the first register in this project where the interesting
+behavior is on the read path rather than the write path). Also
+covers `iop_intc_raise()`, the hook future peripheral models will use
+to set a pending-interrupt bit. 11/11 checks passed on the first run.
+Self-contained (`#include`s `iop_intc.c` directly):
+
+```sh
+gcc -I../include -I../source -o test_iop_intc tests/test_iop_intc.c
+./test_iop_intc
+```
+
+Note: iop_core.c now depends on iop_intc.c too (wired into
+iop_mem_read32/write32 alongside the SIF mirror), so test_iop_core.c
+and test_system_handshake.c both need it linked in - see the updated
+commands above.

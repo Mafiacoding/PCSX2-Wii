@@ -30,6 +30,17 @@
  *   - A meaningful subset (~35 of ~90) of MMI (SIMD) opcodes: the
  *     add/sub/logic/copy/extend/pack family across byte/half/word
  *     lanes, plus the "pipeline 1" MULT1/DIV1/MFHI1/MFLO1 family.
+ *   - LQ/SQ (128-bit load/store, primary opcodes 0x1E/0x1F) - ported
+ *     from PCSX2's R5900OpcodeImpl.cpp. Address masked to 16-byte
+ *     alignment (real hardware silently ignores the low 4 bits rather
+ *     than faulting); LQ skips the read entirely when rt==$0 (matches
+ *     PCSX2's interpreter exactly - unlike LW/LH/etc elsewhere in
+ *     this file, which still perform a discarded read for its memory
+ *     side effects). Added after real-BIOS testing (see
+ *     docs/STATUS.md) showed the EE now running 53M+ real instructions
+ *     before halting on exactly this gap - the first real evidence
+ *     that boot code needs 128-bit memory access, presumably for
+ *     VU0 data staging.
  *
  * Still NOT implemented (halts cleanly, does not crash):
  *   - The other ~55 MMI opcodes (saturated arithmetic, compares,
@@ -41,7 +52,6 @@
  *     is implemented, ported from pcsx2/FPU.cpp including the PS2's
  *     non-IEEE denormal/infinity handling (fpuDouble/checkOverflow/
  *     checkUnderflow).
- *   - LQ/SQ (128-bit load/store)
  *   - TLB/MMU (no TLB entries modeled at all), interrupt/exception
  *     RAISING (nothing ever triggers an exception - only the
  *     exception-RETURN instructions ERET/RFE above are implemented),
@@ -881,9 +891,52 @@ static int ee_step(void)
     case 0x33: /* PREF */  break; /* no-op: prefetch hint */
     case 0x3F: /* SD */ ee_mem_write64(st, rs32 + imm, GPR(rt)); break;
 
+    case 0x1E: /* LQ - 128-bit load, ported from PCSX2's R5900OpcodeImpl.cpp.
+                * Address is masked to 16-byte alignment (real hardware
+                * ignores the low 4 bits rather than faulting on
+                * unaligned access, unlike LW/LD). Matches PCSX2's own
+                * interpreter exactly in skipping the read entirely
+                * when rt==$0 (unlike LW/LH/etc elsewhere in this
+                * file, which still perform the read for its memory
+                * side effects even when the destination is
+                * discarded) - LQ has no such side-effect-only path in
+                * real PCSX2, so neither does this. */
+        if (rt) {
+            uint32_t addr = (rs32 + imm) & ~0xFu;
+            GPR(rt)  = ee_mem_read64(st, addr);
+            GPR1(rt) = ee_mem_read64(st, addr + 8);
+        }
+        break;
+    case 0x1F: /* SQ - 128-bit store, ported from PCSX2's R5900OpcodeImpl.cpp.
+                * Same 16-byte alignment masking as LQ. Always writes
+                * both halves, including when rt==$0 (whose value is
+                * always zero) - matches real hardware/PCSX2, no
+                * special-case needed. */
+    {
+        uint32_t addr = (rs32 + imm) & ~0xFu;
+        ee_mem_write64(st, addr,     GPR(rt));
+        ee_mem_write64(st, addr + 8, GPR1(rt));
+    } break;
+
     default:
-        halt("unimplemented primary opcode (COP2/LQ-SQ territory)");
+    {
+        /* NOTE: this halt point can be reached in a way that has
+         * nothing to do with the actual opcode value - see the
+         * real-BIOS-testing note in docs/STATUS.md ("EE program
+         * counter escapes into the hardware register window" /
+         * out-of-range JALR target investigation). If `op` here is
+         * 0 (SPECIAL) with funct also reading as 0, that's the
+         * signature of this exact scenario: PC drifted through a
+         * long stretch of unpopulated ("reads as zero") memory,
+         * decoding every word as a harmless SLL/NOP, until it
+         * happened to reach a live hardware register address whose
+         * CURRENT value decoded as something genuinely invalid. */
+        char buf[96];
+        snprintf(buf, sizeof(buf), "unimplemented primary opcode 0x%02X (pc=0x%08X)",
+                 (unsigned int)op, (unsigned int)this_pc);
+        halt(buf);
         return 1;
+    }
     }
 
 #undef GPR

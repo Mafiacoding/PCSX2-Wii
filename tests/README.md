@@ -522,3 +522,27 @@ set as `test_iop_core.c`:
 gcc -I../include -I../source -o test_iop_hle_exception_install tests/test_iop_hle_exception_install.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c
 ./test_iop_hle_exception_install
 ```
+
+`test_ee_lqsq.c` covers `ee_core.c`'s LQ/SQ (128-bit load/store,
+primary opcodes 0x1E/0x1F), ported from PCSX2's `R5900OpcodeImpl.cpp`.
+Address is masked to 16-byte alignment (real hardware ignores the low
+4 bits rather than faulting); LQ skips the read entirely when rt==$0,
+matching PCSX2's own interpreter exactly (unlike other loads elsewhere
+in this file, which still perform a discarded read for its memory side
+effects even when the destination is `$0`). 8/8 checks: a full 128-bit
+roundtrip through a deliberately unaligned SQ offset (proving the
+16-byte mask), confirming bytes just past the aligned 16-byte target
+are left untouched (no overrun), and the rt==$0 no-read behavior.
+Needs the same link set as the other `ee_core.c` tests:
+
+```sh
+gcc -I../include -I../source -o test_ee_lqsq tests/test_ee_lqsq.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+./test_ee_lqsq
+```
+
+Added directly after real-BIOS testing showed the EE halting on
+exactly this gap - but implementing it revealed that halt point never
+actually moves (see `docs/STATUS.md`'s "LQ/SQ implemented" section for
+the bigger, more important finding this led to: the EE's real-BIOS
+progress was never legitimately 53 million instructions in the first
+place).

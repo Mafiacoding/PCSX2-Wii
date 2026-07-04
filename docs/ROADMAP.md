@@ -24,7 +24,19 @@ splash screen, not just difficulty.
       R5900OpcodeImpl.cpp, unit tested in `tests/test_ee_unaligned.c`
       (also gave the IOP core this ability first, then brought it to
       the EE core for parity)
-- [ ] LQ/SQ (128-bit load/store - used constantly for VU/GS data)
+- [x] LQ/SQ (128-bit load/store) - ported from PCSX2's
+      `R5900OpcodeImpl.cpp`: address masked to 16-byte alignment
+      (real hardware ignores the low 4 bits rather than faulting);
+      LQ skips the read entirely when rt==$0 (matches PCSX2's own
+      interpreter, unlike other loads in this file which still
+      perform a discarded read for its memory side effects). Unit
+      tested in `tests/test_ee_lqsq.c` (8/8 checks). Added after
+      real-BIOS testing showed the EE halting on exactly this opcode
+      - but re-testing after the fix revealed the halt point didn't
+      move at all, which led to a bigger, more important finding (see
+      docs/STATUS.md's "LQ/SQ implemented" section): the EE wasn't
+      actually doing 53M instructions of real boot work at all - see
+      "Suggested near-term order" below for the corrected picture.
 - [x] COP1 (FPU) - core single-precision ops: MFC1/CFC1/MTC1/CTC1,
       ADD.S/SUB.S/MUL.S/DIV.S/ABS.S/MOV.S/NEG.S, CVT.W.S/CVT.S.W,
       C.EQ.S/C.LT.S/C.LE.S. Ported from `pcsx2/FPU.cpp` including the
@@ -458,18 +470,30 @@ than hardcoded) and installs it for real; every other function number
 is unaffected. Unit tested (`tests/test_iop_hle_exception_install.c`,
 9/9 checks).
 
-**Result**: dramatic further progress. The IOP no longer halts at
-all - re-tested out to 100,000,000 instructions, still running, same
-27 real HLE calls as before. The EE, run against that larger cap,
-reaches 53,592,141 instructions before hitting an entirely expected,
-already-documented gap (COP2/LQ-SQ territory - see section 1) - the
-first time real BIOS boot code has run far enough to actually need the
-vector unit. Both cores are now making substantial real progress using
-only verified real-hardware behavior (real PCSX2 source, this dump's
-own real bytes, and public documentation) - no fabricated BIOS call
-semantics anywhere. LQ/SQ (128-bit load/store) and/or COP2/VU0 are now
-the most concretely-justified next EE targets; the IOP has no known
-halt point left to chase at all right now.
+**Result**: dramatic further progress on the IOP - it no longer halts
+at all, re-tested out to 100,000,000 instructions, still running, same
+27 real HLE calls as before. The EE's picture needed a correction,
+though: it was initially reported as reaching 53,592,141 instructions
+before an expected COP2/LQ-SQ-shaped halt - but implementing LQ/SQ
+(now done, see section 1) didn't move the halt point AT ALL, which
+led to properly investigating it (docs/STATUS.md's "LQ/SQ implemented"
+section has the full trace). The real finding: the EE only executes
+about 99,262 REAL instructions before a `JALR` sends it to an address
+beyond the emulated 32MB EE RAM; because unmapped memory safely reads
+as zero (a real NOP), the CPU doesn't crash or halt - it marches
+forward in a straight line for 53+ million steps until it happens to
+reach the hardware register window and finally decodes a live register
+value as an invalid opcode. So "53 million instructions" was never
+real boot progress; the actual, honest number is closer to 99,262.
+This is now the single most important EE investigation target - NOT
+yet solved, unlike the two IOP fixes above, since the root cause of
+why the JALR target lands outside RAM isn't confirmed (candidates:
+an unpopulated module/EXE descriptor, mirroring the IOP's earlier
+"expected data was never installed" bug category, or a genuine gap in
+this project's memory map/RAM-size assumptions). The IOP has no known
+halt point left to chase at all right now; COP2/VU0 remains unstarted
+and unproven against real BIOS code, since the EE hasn't legitimately
+run far enough to demonstrate needing it yet.
 
 1. IOP CPU core skeleton (this is "just" another MIPS interpreter,
    well-scoped, and unblocks everything downstream of SIF) - DONE

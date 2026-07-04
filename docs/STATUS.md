@@ -283,6 +283,56 @@ this dump's own actual bytes for the exception handler, and public
 community documentation for what those bytes mean) - no fabricated
 BIOS call semantics anywhere.
 
+### LQ/SQ implemented - and a correction to the "53M instructions" framing above
+
+Implemented `LQ`/`SQ` (128-bit load/store, primary opcodes 0x1E/0x1F),
+ported from PCSX2's `R5900OpcodeImpl.cpp` - see `docs/ROADMAP.md`
+section 1 for the exact semantics. Unit tested
+(`tests/test_ee_lqsq.c`, 8/8 checks).
+
+Re-running the real-BIOS diagnostic afterward: **the EE halts at the
+exact same instruction count and PC as before (53,592,141, same
+address)** - proving the earlier "COP2/LQ-SQ territory" halt label was
+a guess, and LQ/SQ was never actually the real blocker. Investigating
+properly (the same kind of trace-based diagnostic used for the IOP's
+funct-0x3F halt) turned up a more important correction: **the "53
+million instructions" figure was never 53 million instructions of real
+boot progress**. The EE actually executes only about 99,262 real
+instructions before a `JALR $ra, $s1` sends it to an address
+(`0x03400008`) that lies beyond this project's emulated 32MB EE RAM.
+This project's memory access correctly, safely returns 0 for anything
+outside the allocated RAM buffer (not a bounds-checking bug - verified
+in `ee_mem_read32`/`ee_mem_ptr`), and a MIPS word of `0x00000000`
+happens to decode as a harmless `SLL $0,$0,0` (a real NOP) - so instead
+of a clean crash or halt, the CPU just marches forward in a dead-straight
+line, instruction by instruction, "executing" 53+ million NOPs across
+the entire unmapped address space, until it eventually reaches the
+hardware register window at `0x10000000+` and reads a LIVE, non-zero
+SIF register value (`CTRL`, fixed real value `0xF0000102`) as if it
+were an instruction - which is what actually halts (decodes to a
+genuinely invalid opcode, `0x3C`). The halt message now reports the
+real opcode and address (`ee_core.c`'s default case is enriched the
+same way `iop_core.c`'s already was).
+
+Traced `$s1`'s origin: it's loaded via `LW $s1, 8($s6)` at instruction
+#99,257, where `$s6` was itself loaded two instructions earlier from
+`0($s3)` - a pointer-chasing pattern consistent with reading fields
+(possibly an entry-point-like field) out of some in-memory descriptor
+structure (an EXE/module header, or similar), following the classic
+"module/EXE loading" pattern also seen on the IOP side (`Exec()`/
+`LoadExec()` in the psx-spx documentation) - but NOT yet confirmed
+against any citable reference for the EE-side equivalent. Unlike the
+two IOP fixes above, this doesn't yet have a clean, verified root
+cause - it's flagged here as the next concrete EE investigation
+target, honestly reported as unsolved rather than guessed at. Two
+open, plausible directions: (a) the pointed-to descriptor was itself
+never correctly populated (echoing the IOP's earlier "expected
+resident data was never installed" category of bug), or (b) the
+address is legitimately what real BIOS code computes, and this
+project's 32MB EE RAM allocation and/or address-space layout needs
+re-checking against real PS2 physical memory maps. Neither is
+confirmed yet.
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

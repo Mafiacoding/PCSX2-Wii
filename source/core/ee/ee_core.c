@@ -14,8 +14,17 @@
  *     incl. 64-bit D-forms, MULT/DIV, HI/LO moves, REGIMM branches,
  *     J/JAL/JR/JALR, byte/half/word/double load+store, and unaligned
  *     LWL/LWR/SWL/SWR.
- *   - COP0: MFC0/MTC0 (Status/Config/generic registers only - no TLB,
- *     no BC0 branches, no ERET/exceptions).
+ *   - COP0: MFC0/MTC0 (Status/Config/generic registers only), plus
+ *     the "CO"-format instructions ERET, EI, DI (ported from PCSX2's
+ *     COP0.cpp), and RFE (the older MIPS I exception-return
+ *     instruction - not in PCSX2's own EE opcode table since real
+ *     EE/R5900 doesn't need it, but real BIOS PS1-backward-
+ *     compatibility-mode boot code does execute it, so it's
+ *     implemented here with RFE's standard MIPS I semantics). Still
+ *     no TLB (TLBR/TLBWI/TLBWR/TLBP), no BC0 branches, no actual
+ *     exception RAISING (ERET/RFE only handle the return side; there
+ *     is no MMU/interrupt logic that would ever trigger EPC/Cause to
+ *     be set other than explicit MTC0 writes).
  *   - CACHE, SYNC, PREF: accepted as no-ops (real BIOS init code issues
  *     these constantly for cache management we don't model).
  *   - A meaningful subset (~35 of ~90) of MMI (SIMD) opcodes: the
@@ -33,8 +42,12 @@
  *     non-IEEE denormal/infinity handling (fpuDouble/checkOverflow/
  *     checkUnderflow).
  *   - LQ/SQ (128-bit load/store)
- *   - TLB/MMU, exceptions/interrupts, SYSCALL handler table
- *   - The IOP (separate MIPS core) and its BIOS side-channel
+ *   - TLB/MMU (no TLB entries modeled at all), interrupt/exception
+ *     RAISING (nothing ever triggers an exception - only the
+ *     exception-RETURN instructions ERET/RFE above are implemented),
+ *     SYSCALL handler table
+ *   - The IOP has its own core (iop_core.c) and BIOS syscall trap
+ *     (core/hw/iop_hle_bios.c) now - see docs/ROADMAP.md for scope
  *
  * A real BIOS will still halt here - see docs/STATUS.md for what's
  * actually required to get to a rendered splash screen (short
@@ -410,8 +423,96 @@ static int ee_step(void)
                 st->cop0[rd] = rt32;
             break;
         default:
-            halt("unimplemented COP0 sub-opcode (BC0/TLB/ERET not implemented)");
-            return 1;
+            if (rs & 0x10) {
+                /* "CO" format: rs's top bit set means the real
+                 * operation is selected by the 6-bit funct field
+                 * (bits 0-5), not by rs itself - matches PCSX2's own
+                 * tbl_COP0_C0[64] dispatch table in
+                 * R5900OpcodeTables.cpp. */
+                uint32_t co_funct = instr & 0x3F;
+                switch (co_funct) {
+                case 0x10: /* RFE - "Return From Exception".
+                     * NOTE: real PCSX2's EE (R5900) opcode table does
+                     * NOT implement this (tbl_COP0_C0[0x10] is
+                     * COP0_Unknown there) - RFE is the ORIGINAL MIPS I
+                     * exception-return instruction, superseded by
+                     * ERET (funct 0x18, below) on MIPS III+. It shows
+                     * up here because this real BIOS dump's early
+                     * boot code includes PS1-backward-compatibility-
+                     * mode boot code (this file's own header bytes
+                     * contain the ASCII string "PS compatible mode"),
+                     * which runs in a MIPS-I-compatible execution
+                     * context where RFE is meaningful. Implemented
+                     * with RFE's standard, unambiguous MIPS I
+                     * semantics (restore the 3-level interrupt-
+                     * enable/kernel-mode bit stack by shifting it
+                     * right by 2) rather than skipped/faked, since
+                     * that's well-defined regardless of the exact
+                     * execution mode question above. RFE does NOT
+                     * itself change PC (unlike ERET) - the caller
+                     * separately jumps to EPC, typically via JR. */
+                    st->cop0[12] = (st->cop0[12] & ~0x0Fu) | ((st->cop0[12] >> 2) & 0x0Fu);
+                    break;
+                case 0x18: /* ERET - ported from PCSX2's COP0::ERET().
+                     * No branch delay slot (unlike ordinary jumps/
+                     * branches) - takes effect immediately, so this
+                     * sets st->pc/next_pc directly rather than going
+                     * through the BRANCH_TO() delay-slot convention. */
+                {
+                    uint32_t target;
+                    if (st->cop0[12] & 0x4u) { /* Status.ERL */
+                        target = st->cop0[30]; /* ErrorEPC */
+                        st->cop0[12] &= ~0x4u;
+                    } else {
+                        target = st->cop0[14]; /* EPC */
+                        st->cop0[12] &= ~0x2u; /* Status.EXL */
+                    }
+                    st->pc = target;
+                    st->next_pc = target + 4;
+                    break;
+                }
+                case 0x38: /* EI - ported from PCSX2's COP0::EI(). Gated
+                     * the same way real hardware/PCSX2 gates it:
+                     * only takes effect if _EDI, EXL, ERL are set, or
+                     * KSU==0 (kernel mode) - i.e. code running in
+                     * user mode without the right permission bit
+                     * can't enable interrupts via this instruction. */
+                    if ((st->cop0[12] & 0x20000u) ||      /* _EDI  (bit 17) */
+                        (st->cop0[12] & 0x2u) ||           /* EXL   (bit 1)  */
+                        (st->cop0[12] & 0x4u) ||           /* ERL   (bit 2)  */
+                        ((st->cop0[12] & 0x18u) == 0))      /* KSU==0 (bits 3-4) */
+                    {
+                        st->cop0[12] |= 0x10000u; /* Status.EIE = 1 (bit 16) */
+                    }
+                    break;
+                case 0x39: /* DI - ported from PCSX2's COP0::DI(), same gating as EI. */
+                    if ((st->cop0[12] & 0x20000u) ||
+                        (st->cop0[12] & 0x2u) ||
+                        (st->cop0[12] & 0x4u) ||
+                        ((st->cop0[12] & 0x18u) == 0))
+                    {
+                        st->cop0[12] &= ~0x10000u; /* Status.EIE = 0 */
+                    }
+                    break;
+                default:
+                {
+                    char buf[96];
+                    snprintf(buf, sizeof(buf),
+                             "unimplemented COP0 CO-format funct 0x%02X (TLBR/TLBWI/TLBWR/TLBP not implemented, pc=0x%08X)",
+                             (unsigned int)co_funct, (unsigned int)this_pc);
+                    halt(buf);
+                    return 1;
+                }
+                }
+            } else {
+                char buf[96];
+                snprintf(buf, sizeof(buf),
+                         "unimplemented COP0 sub-opcode (rs=0x%02X, pc=0x%08X, BC0 not implemented)",
+                         (unsigned int)rs, (unsigned int)this_pc);
+                halt(buf);
+                return 1;
+            }
+            break;
         }
         break;
 

@@ -151,6 +151,67 @@ Both fixes are committed with host-native regression tests
 the full existing test suite (21 test files total), all passing, and
 the Wii/devkitPPC target rebuilding clean with no warnings.
 
+### Investigating the new IOP halt: not a missing opcode
+
+Dug into the new "unimplemented SPECIAL funct 0x3F at pc=0x00000068"
+halt with targeted diagnostics (instruction-trace ring buffer, full
+low-memory store logging, and a log of every real A0/B0/C0 HLE BIOS
+call made). Conclusion: **this is not a missing MIPS instruction** -
+funct 0x3F isn't a real R3000A opcode at all, so "implementing" it
+would mean fabricating hardware behavior that doesn't exist. It's a
+downstream symptom of something else:
+
+- The real IOP kernel's general exception dispatcher is hardware-
+  mandated to live at RAM address 0x80000080 (physical 0x80) - any
+  exception (including our now-working SYSCALL) jumps straight there.
+  Tracing shows this address, and the ~36 bytes after it, are all
+  zero in our emulated RAM - no real dispatcher code ever landed
+  there. A short trampoline exists a bit further along at 0x800000A4
+  (loads an offset into `$t0` and `JR`s to it), which is itself real
+  code that DID get written correctly - so *something* installed
+  partway, but not the actual dispatcher stub at the hardware-fixed
+  entry point.
+- Following that trampoline's target lands in a region (address
+  ~0x5D1 and eventually 0x68) that's mostly zero except for a few
+  stray non-zero words. One of those, at address 0x000068, is the
+  exact byte pattern `0x000000FF` - traced back to a single, explicit
+  `SW` instruction executed from ROM (`pc=0xBFC4B860`) very early in
+  boot (instruction #20226, long before any HLE BIOS call happens).
+  This has the signature of a sentinel/placeholder value (an "empty
+  slot" marker in some table or control-block array) that real boot
+  code intends to overwrite with real content *later* - and that
+  later step evidently never happens in this project's emulation, so
+  execution eventually wanders onto the raw sentinel bytes and decodes
+  them as a (bogus) instruction.
+- Ruled out this project's IOP DMA register-stub limitation (no real
+  transfer execution) as the direct cause: no CHCR write with the
+  STR/kick bit targeting this address range was observed anywhere in
+  the run.
+- The chain of 27 real A0/B0/C0 HLE BIOS calls made during the run
+  (logged via `iop_hle_bios_get_state()`) was extracted in full; the
+  very last one, immediately before the SYSCALL that leads into this
+  broken vector, is an A0-table call to function `0x72`. This project
+  has no verified, citable reference for what real PS1/PS2 BIOS
+  function numbers actually do (see `source/hw/iop_hle_bios.c`'s
+  scope notes) - every call, including this one, gets a generic
+  default return value of 0 - and it's plausible (though not proven)
+  that the real function 0x72 returns something the surrounding code
+  branches on before deciding to install the real exception-dispatcher
+  code, which a wrong/default return value could cause to be skipped.
+
+**Bottom line**: further progress here needs either (a) a legitimate,
+citable reference for real PS1/PS2 BIOS syscall function numbers
+(e.g. publicly published community documentation, as opposed to
+disassembling the copyrighted BIOS binary itself) so specific A0/B0/C0
+functions can be implemented for real instead of generically stubbed,
+or (b) substantially deeper reverse-engineering of this specific
+dump's boot sequence to pin down exactly which step is supposed to
+install the exception dispatcher and why it isn't happening. Both are
+a meaningfully bigger undertaking than the RFE/ERET/SYSCALL fixes
+above, and represent a scope decision (this project has so far
+deliberately avoided implementing guessed BIOS call semantics at all)
+rather than a quick, obvious next fix.
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

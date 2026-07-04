@@ -414,12 +414,33 @@ same diagnostic afterward: the EE now runs the full 5,000,000-
 instruction test slice without halting at all (up from 99,158), and
 the IOP progresses to 3,054,763 instructions (up from 3,054,721)
 before hitting a NEW halt point: an unimplemented SPECIAL `funct 0x3F`
-at `pc=0x00000068`. That new IOP halt is now the single most
-concretely-justified next target - not a guess about what "might"
-matter, but the exact place real BIOS boot code (after successfully
-taking the SYSCALL exception path) actually stops next. Whether it's
-a genuine missing opcode or a sign of drift from an earlier, unrelated
-bug hasn't been investigated yet.
+at `pc=0x00000068`.
+
+**That new IOP halt has now been investigated** (see docs/STATUS.md's
+"Investigating the new IOP halt" section for the full diagnostic
+trail) - and it's NOT a missing-opcode gap (`funct 0x3F` isn't a real
+R3000A instruction; there's nothing to "implement"). It's a symptom:
+the hardware-mandated general exception dispatcher address
+(0x80000080) never receives real kernel code in this emulation run -
+tracing shows a short trampoline nearby DID get installed correctly,
+but following it leads to a region containing mostly zeros plus a
+lone sentinel-looking byte pattern (`0x000000FF` at address 0x68,
+written explicitly by ROM code very early in boot, long before any
+HLE BIOS call) that real code presumably intends to overwrite later
+and never does in this emulation. The last of 27 real A0/B0/C0 HLE
+BIOS calls made during the run - an A0-table call to function `0x72`,
+immediately before the SYSCALL that lands in this broken vector - is
+a plausible (not proven) point of divergence: this project's HLE trap
+gives every call a generic default return value (0), since it has no
+verified reference for real function semantics, and the real function
+may return something the surrounding code branches on. Unblocking
+this further needs either a legitimate, citable reference for real
+PS1/PS2 BIOS syscall function numbers (a scope decision - this project
+has so far deliberately avoided implementing guessed call semantics),
+or substantially deeper reverse-engineering of this specific dump's
+boot sequence. Both are bigger, more open-ended undertakings than the
+RFE/ERET/SYSCALL fixes were, and the next move here is a direction
+decision rather than an obvious quick fix.
 
 1. IOP CPU core skeleton (this is "just" another MIPS interpreter,
    well-scoped, and unblocks everything downstream of SIF) - DONE

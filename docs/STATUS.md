@@ -333,6 +333,39 @@ project's 32MB EE RAM allocation and/or address-space layout needs
 re-checking against real PS2 physical memory maps. Neither is
 confirmed yet.
 
+## Clock-rate-aware EE:IOP scheduling
+
+The single most important EE investigation target above (the JALR to
+unmapped memory) needs the real BIOS dump to make progress on, and
+that dump only ever exists on this project's user's own machine for
+local testing (see CLAUDE.md's "Real BIOS testing" section) - it's
+never present in a fresh clone or a remote session. With that
+particular thread blocked for this pass, picked the next concrete item
+already reasoned through in `docs/ROADMAP.md`'s "Suggested near-term
+order": the interleaved EE/IOP scheduler's known 1:1 instruction-count
+simplification (real hardware's EE/IOP clocks are an exact 8:1 ratio -
+294.912 MHz vs 36.864 MHz).
+
+`system_run_interleaved()` (`source/core/system.c`) now steps up to
+`EE_IOP_CLOCK_RATIO` (8) EE instructions per IOP instruction each
+slice, instead of one each. Still honestly not true cycle-accuracy -
+real MIPS instructions vary in cycle cost (loads, branches,
+multiply/divide) - so this is an instruction-count ratio approximating
+the real clock ratio, not a cycle-level model; `system.h`'s header
+comment spells this out. Unit tested in `tests/test_system_ratio.c`
+(9/9 checks): a partial run (5 slices, before either core halts) shows
+the exact 8:1 count (EE=40, IOP=5), and a full run to completion shows
+the IOP - given a much shorter absolute program but only 1
+instruction/slice - correctly ending up as the scheduling bottleneck,
+finishing after the EE despite starting from a "smaller" program. Also
+re-ran the existing `tests/test_system_handshake.c` under the new
+ratio - still 9/9, since its SIF poll-loop protocol doesn't depend on
+strict 1:1 stepping. One incidental thing this test run confirmed
+(not new, already documented in CLAUDE.md's "Known sharp edges"):
+`halt()`'s early return means a BREAK-terminated program's final
+`instructions_executed` count is the NOP count, not NOP count + 1 -
+the halting instruction executes but isn't counted.
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

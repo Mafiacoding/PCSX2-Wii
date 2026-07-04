@@ -101,27 +101,41 @@ splash screen, not just difficulty.
       underlying state.
 - [x] **A real, working EE<->IOP handshake** - `source/core/system.c`
       (`system_init`/`system_run_interleaved`) steps both cores
-      alternately (one instruction each per slice) instead of running
-      either to completion in isolation, which is what actually makes
-      a mailbox-register handshake possible for the first time in
-      this project. Proven end-to-end in
-      `tests/test_system_handshake.c`: a hand-encoded EE program
-      writes MSCOM and sets an MSFLAG bit, a hand-encoded IOP program
-      polls MSFLAG, reads MSCOM, echoes the value into SMCOM and sets
-      an SMFLAG bit, and the EE polls SMFLAG and reads back the exact
-      value the IOP echoed - a genuine round trip through shared
-      hardware state between two independently-interpreted CPU cores.
-      All 9 checks passed on the first run. `main.c` now calls
+      alternately instead of running either to completion in
+      isolation, which is what actually makes a mailbox-register
+      handshake possible for the first time in this project. Proven
+      end-to-end in `tests/test_system_handshake.c`: a hand-encoded EE
+      program writes MSCOM and sets an MSFLAG bit, a hand-encoded IOP
+      program polls MSFLAG, reads MSCOM, echoes the value into SMCOM
+      and sets an SMFLAG bit, and the EE polls SMFLAG and reads back
+      the exact value the IOP echoed - a genuine round trip through
+      shared hardware state between two independently-interpreted CPU
+      cores. All 9 checks passed on the first run. `main.c` now calls
       `system_init`/`system_run_interleaved` instead of driving the EE
       core alone - the IOP actually runs at boot for the first time.
-      Known simplification: 1:1 instruction-count stepping, not
-      clock-rate-accurate (real EE:IOP is roughly 8:1) - see
-      `system.h`'s header comment. This is the mailbox layer only - a
-      REAL BIOS boot still needs IOP HLE/BIOS module emulation on top
-      of this (see section 2) before any of this produces meaningful
-      behavior beyond the test's toy protocol (reference:
-      `pcsx2/Sif0.cpp`, `Sif1.cpp`, `Sif.cpp` for the full DMA-backed
-      protocol this only partially models at the register level).
+      This is the mailbox layer only - a REAL BIOS boot still needs IOP
+      HLE/BIOS module emulation on top of this (see section 2) before
+      any of this produces meaningful behavior beyond the test's toy
+      protocol (reference: `pcsx2/Sif0.cpp`, `Sif1.cpp`, `Sif.cpp` for
+      the full DMA-backed protocol this only partially models at the
+      register level).
+- [x] **Clock-rate-aware EE:IOP scheduling** - `system_run_interleaved`
+      used to step both cores strictly 1:1 (one EE instruction, one
+      IOP instruction, per slice); it now steps up to
+      `EE_IOP_CLOCK_RATIO` (8) EE instructions per IOP instruction each
+      slice, matching real hardware's exact 294.912 MHz : 36.864 MHz
+      clock ratio (see `system.h`'s header comment for the full
+      rationale, including the honest caveat that this is still an
+      instruction-count ratio, not true cycle-accuracy - real MIPS
+      instructions don't all cost one cycle). Unit tested in
+      `tests/test_system_ratio.c` (9/9 checks): confirms the exact 8:1
+      count at a partial slice cap, and that a full run correctly
+      leaves the IOP - not the EE - as the scheduling bottleneck when
+      given a proportionally longer program, mirroring what the real
+      clock difference would predict.
+      `tests/test_system_handshake.c` was re-run under the new ratio
+      and still passes unchanged (its poll-loop protocol doesn't
+      depend on strict 1:1 stepping).
 
 ## 2. IOP (I/O Processor) - separate MIPS core
 
@@ -541,11 +555,24 @@ unblock "the BIOS actually draws something": IOP hardware register
 stubs (INTC/DMA/timers) and/or IOP HLE stubs for the specific
 BIOS-boot-path modules (both are needed before real BIOS code - as
 opposed to hand-written test programs - can get through a real SIF
-handshake), a clock-rate-aware EE:IOP scheduler (currently 1:1
-instruction stepping, real hardware is roughly 8:1), triangle
-rasterization in the GIF parser, VIF0/VIF1 passthrough, and wiring a
-real GIF packet through `dma_channel_kick` at boot in `main.c` as a
-live demo (currently only the hardcoded 4-color pattern runs there).
+handshake), triangle rasterization in the GIF parser, VIF0/VIF1
+passthrough, and wiring a real GIF packet through `dma_channel_kick` at
+boot in `main.c` as a live demo (currently only the hardcoded 4-color
+pattern runs there). The clock-rate-aware EE:IOP scheduler (8:1
+instruction stepping, matching real hardware's clock ratio) is now
+DONE - see section 1.
+
+Also worth revisiting when a real BIOS is available again for testing
+(this project's user's own SCPH-10000 dump - see docs/STATUS.md and
+the "Real BIOS testing" section of CLAUDE.md): the EE's still-open
+"single most important EE investigation target" - a `JALR` sending
+execution to an address beyond the emulated 32MB EE RAM after only
+~99,262 real instructions, root cause not yet confirmed (candidates:
+an unpopulated module/EXE descriptor, or a genuine gap in this
+project's memory map/RAM-size assumptions). That investigation
+requires the real BIOS dump and can't be advanced from source-code
+reasoning alone - it's the reason this pass picked the scheduler
+instead.
 
 Step 7 (real GX-based rendering with textures) is where this stops
 being "a lot of careful work" and becomes genuinely research-scale for

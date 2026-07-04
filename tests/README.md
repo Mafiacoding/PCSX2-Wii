@@ -357,7 +357,7 @@ pass. Needs the full IOP hardware-model dependency set linked (same
 as `test_iop_core.c`):
 
 ```sh
-gcc -I../include -I../source -o test_iop_hle_bios tests/test_iop_hle_bios.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c
+gcc -I../include -I../source -o test_iop_hle_bios tests/test_iop_hle_bios.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c
 ./test_iop_hle_bios
 ```
 
@@ -546,3 +546,37 @@ actually moves (see `docs/STATUS.md`'s "LQ/SQ implemented" section for
 the bigger, more important finding this led to: the EE's real-BIOS
 progress was never legitimately 53 million instructions in the first
 place).
+
+
+`test_system_ratio.c` covers the EE:IOP clock-ratio scheduling change
+in `source/core/system.c` (`system_run_interleaved()`), which used to
+step the EE and IOP 1:1 (documented as a simplification in
+`system.h`'s header comment - real hardware's EE/IOP clocks are in an
+exact 8:1 ratio, 294.912 MHz vs 36.864 MHz) and now steps up to
+`EE_IOP_CLOCK_RATIO` (8) EE instructions per IOP instruction each
+slice. Gives each core a long, plain NOP-then-BREAK program (100 NOPs
+for the EE, 20 for the IOP) and checks real instruction counts twice:
+once at a partial slice cap (5 slices - before either core halts, so
+the 8:1 ratio must hold exactly: EE=40, IOP=5) and once after a full,
+uncapped run to completion, where the IOP - deliberately given the
+shorter absolute program but only 1 instruction/slice - ends up the
+scheduling bottleneck and finishes last, same as real hardware's clock
+difference would predict. Also confirms
+`test_system_handshake.c`'s existing SIF mailbox handshake still
+completes correctly under the new 8:1 stepping (that test was rerun,
+not just this new one - see its own entry above). 9/9 checks passed.
+One non-obvious result while writing this: final instruction counts
+equal the NOP count exactly, not NOP count + 1 - `halt()`'s early
+return in both `ee_core.c` and `iop_core.c` skips the shared epilogue's
+`instructions_executed++` (an existing, documented convention in
+CLAUDE.md's "Known sharp edges" - the BREAK that triggers the halt
+still executes, it just isn't counted), which this test's expected
+values had to account for rather than "fix" anything. Only needs
+`system.c` itself (which pulls in the full EE+IOP+hardware-model
+dependency set via `#include "core/system.c"`, same pattern as
+`test_system_handshake.c`):
+
+```sh
+gcc -I../include -I../source -o test_system_ratio tests/test_system_ratio.c ../source/core/ee/ee_core.c ../source/core/iop/iop_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c
+./test_system_ratio
+```

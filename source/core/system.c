@@ -1,7 +1,8 @@
 /*
  * system.c - interleaved EE/IOP scheduler. See system.h for the
- * rationale and current known simplifications (1:1 instruction
- * stepping, not clock-rate-accurate).
+ * rationale and current known simplifications (8:1 EE:IOP instruction
+ * stepping, matching the real clock ratio, but not truly
+ * cycle-accurate).
  */
 #include "core/system.h"
 #include "core/ee/ee_core.h"
@@ -28,7 +29,7 @@ int system_run_interleaved(uint64_t max_slices)
 
     uint64_t slice = 0;
     for (;;) {
-        if (!ee->halted)
+        for (int i = 0; i < EE_IOP_CLOCK_RATIO && !ee->halted; i++)
             ee_core_step();
         if (!iop->halted)
             iop_core_step();

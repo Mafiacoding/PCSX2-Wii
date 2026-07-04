@@ -13,17 +13,22 @@
  * vice versa), which can't happen if one core runs to completion
  * before the other starts at all.
  *
- * This is a deliberately simple round-robin scheduler: one EE
- * instruction, then one IOP instruction, repeat. Real hardware
- * doesn't schedule this way (both cores just run continuously at
- * their own clock rates), and a cycle-accurate scheduler would need
- * to account for the EE's ~294MHz vs the IOP's ~33MHz clock (roughly
- * 8:1) rather than 1:1 stepping - that refinement is left for later
- * (see docs/ROADMAP.md). What this does provide, for the first time
- * in this project, is genuine cross-CPU visibility: a write the EE
- * makes to a SIF register is visible to the IOP on its very next
- * step, and vice versa, which is enough to prove out a real
- * handshake protocol (see tests/test_system_handshake.c).
+ * This is a round-robin scheduler: per slice, up to EE_IOP_CLOCK_RATIO
+ * (8) EE instructions, then one IOP instruction, repeat. The 8:1 ratio
+ * matches real hardware's EE (294.912 MHz) vs IOP (36.864 MHz) clock
+ * rates (294.912 / 36.864 == 8 exactly). This used to be strict 1:1
+ * instruction stepping - a documented simplification (see
+ * docs/ROADMAP.md's "clock-rate-aware EE:IOP scheduler" entry). Note
+ * this is still an INSTRUCTION-count ratio, not a real cycle-accurate
+ * model: real MIPS instructions don't all take one cycle each (loads,
+ * branches, multiply/divide differ), so 8 EE instructions per IOP
+ * instruction approximates the clock ratio without being truly
+ * cycle-accurate - a genuine cycle-cost model is a further-out
+ * refinement, not attempted here. What this provides, for the first
+ * time in this project, is genuine cross-CPU visibility: a write the
+ * EE makes to a SIF register is visible to the IOP within the same
+ * slice or the next, and vice versa, which is enough to prove out a
+ * real handshake protocol (see tests/test_system_handshake.c).
  */
 #ifndef PCSX2_WII_SYSTEM_H
 #define PCSX2_WII_SYSTEM_H
@@ -37,15 +42,22 @@
  * CPUs - or different ones. Returns 0 on success. */
 int system_init(const bios_image_t *ee_bios, const bios_image_t *iop_bios);
 
-/* Steps the EE and IOP alternately (one instruction each per slice)
- * until both cores have halted, or until max_slices slices have run -
- * whichever comes first. Pass max_slices == 0 for no limit (real
- * hardware has none; used by main.c). Host-native tests should pass a
- * finite cap so a scheduling/protocol bug produces a clean test
- * failure instead of a hang.
+/* Steps the EE and IOP alternately - up to EE_IOP_CLOCK_RATIO EE
+ * instructions, then one IOP instruction, per slice (see system.h's
+ * header comment for why 8:1) - until both cores have halted, or
+ * until max_slices slices have run, whichever comes first. Pass
+ * max_slices == 0 for no limit (real hardware has none; used by
+ * main.c). Host-native tests should pass a finite cap so a
+ * scheduling/protocol bug produces a clean test failure instead of a
+ * hang.
  *
  * Returns 1 if both cores halted on their own, 0 if the slice limit
  * was hit first (only possible when max_slices != 0). */
 int system_run_interleaved(uint64_t max_slices);
+
+/* Real hardware's EE (294.912 MHz) : IOP (36.864 MHz) clock ratio -
+ * exactly 8. Exposed so tests can assert on it instead of hardcoding
+ * the number a second time. */
+#define EE_IOP_CLOCK_RATIO 8
 
 #endif

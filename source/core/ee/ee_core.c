@@ -796,6 +796,20 @@ static int ee_step(void)
     return 0;
 }
 
+/* Public single-instruction step, for callers (currently
+ * source/core/system.c's interleaved EE/IOP scheduler) that need to
+ * interleave execution with another core rather than run this core
+ * to completion in isolation. Returns the same value as the internal
+ * ee_step(): 0 to keep going, 1 if this step halted the core. Safe to
+ * keep calling after a halt (ee_step() re-checks st->halted itself
+ * via the same path ee_core_run()'s loop uses). */
+int ee_core_step(void)
+{
+    if (g_state.halted)
+        return 1;
+    return ee_step();
+}
+
 void ee_core_run(const bios_image_t *bios)
 {
     (void)bios;

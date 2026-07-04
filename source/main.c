@@ -15,6 +15,7 @@
 #include <ogc/lwp_watchdog.h>
 
 #include "core/ee/ee_core.h"
+#include "core/system.h"
 #include "core/bios_loader.h"
 #include "core/hw/gs_mem.h"
 #include "core/hw/gs_wii_output.h"
@@ -69,15 +70,27 @@ int main(int argc, char **argv)
     printf("[+] BIOS loaded: %s\n", bios.name);
     printf("    size=%u bytes  rom_ver=%s\n", (unsigned)bios.size, bios.version_string);
 
-    ee_core_init(&bios);
+    /* Both the EE and IOP boot from the same physical BIOS ROM on
+     * real hardware, and are wired together here via system_init()
+     * so they can actually run alongside each other - see
+     * core/system.h. Before this, the IOP core existed but never
+     * ran at all from main.c; now both cores step interleaved, which
+     * is what a real SIF handshake needs (one side polling a flag
+     * the other side sets can't work if the cores run one after the
+     * other instead of together). */
+    system_init(&bios, &bios);
 
-    printf("\n[+] EE interpreter core initialized.\n");
-    printf("[+] Entering fetch/decode/execute loop (interpreter only)...\n\n");
+    printf("\n[+] EE + IOP cores initialized (interleaved scheduler).\n");
+    printf("[+] Entering interleaved fetch/decode/execute loop (interpreters only)...\n\n");
 
-    /* Runs the R5900 interpreter starting at the BIOS reset vector.
-     * No recompiler is engaged by default - see core/recompiler for the
-     * experimental PPC dynarec proof-of-concept and its limitations. */
-    ee_core_run(&bios);
+    /* Runs both interpreters starting at their respective BIOS reset
+     * vectors, alternating one instruction at a time (see
+     * core/system.h for why, and its current known limitations - not
+     * clock-rate accurate). No recompiler is engaged by default - see
+     * core/recompiler for the experimental PPC dynarec proof-of-concept
+     * and its limitations. max_slices=0: no cap, run until both halt
+     * (real hardware has no such cap either). */
+    system_run_interleaved(0);
 
     /* First real "pixels reach the actual screen" milestone: this is
      * NOT the BIOS splash screen (nothing in the GIF/DMA pipeline

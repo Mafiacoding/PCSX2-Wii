@@ -52,6 +52,10 @@ typedef struct {
 
 int  ee_core_init(const bios_image_t *bios);
 void ee_core_run(const bios_image_t *bios);
+
+/* Single-step entry point, for the interleaved EE/IOP scheduler
+ * in core/system.h. See its definition in ee_core.c for details. */
+int ee_core_step(void);
 void ee_core_shutdown(void);
 
 /* Exposed for the recompiler PoC (source/core/recompiler) to share

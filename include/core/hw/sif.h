@@ -78,6 +78,27 @@ void sif_init(void);
 int sif_mmio_read32(uint32_t addr, uint32_t *out);
 int sif_mmio_write32(uint32_t addr, uint32_t value);
 
+/*
+ * IOP-side mirror, addresses 0x1D000000-0x1D0000FF. Real PCSX2 models
+ * this IOP-side window as a flat, un-special-cased 0x100-byte array
+ * (see MemoryTypes.h: "u8 Sif[0x100]; // a few special SIF/SBUS
+ * registers (likely not needed)" and IopMem.h's psxSu32(mem) macro,
+ * which indexes that array with `mem & 0xff` and does a plain typed
+ * read/write - no OR/AND-on-write special casing at all on this
+ * side). This project follows PCSX2's own lead here rather than
+ * inventing stronger semantics than the reference implementation
+ * actually has: IOP-side reads/writes are plain, unlike the EE-side
+ * MSFLAG/SMFLAG/CTRL special cases above.
+ *
+ * The low byte of the IOP-side address lines up with the low byte of
+ * the corresponding EE-side address (0x1D0000XX <-> 0x1000F2XX), so
+ * the same underlying sif_state_t fields back both sides - this is a
+ * deliberate, documented convenience of this implementation, not a
+ * claim about real internal wiring.
+ */
+int sif_iop_mmio_read32(uint32_t addr, uint32_t *out);
+int sif_iop_mmio_write32(uint32_t addr, uint32_t value);
+
 sif_state_t *sif_get_state(void);
 
 #endif

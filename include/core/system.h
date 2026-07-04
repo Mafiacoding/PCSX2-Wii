@@ -1,0 +1,51 @@
+/*
+ * system.h - interleaved EE/IOP scheduler
+ *
+ * Real PS2 hardware runs the EE and IOP as two genuinely independent
+ * CPUs executing in parallel. ee_core.c and iop_core.c model each CPU
+ * in isolation and, until now, neither ever actually ran alongside
+ * the other - iop_core_run() and ee_core_run() each loop internally
+ * until their own core halts, with no interleaving at all. That was
+ * fine for testing each core standalone, but a real EE<->IOP
+ * handshake over the SIF mailbox registers (core/hw/sif.h) requires
+ * both sides to make progress in the same wall-clock timeframe - the
+ * EE typically has to poll a flag and wait for the IOP to set it (or
+ * vice versa), which can't happen if one core runs to completion
+ * before the other starts at all.
+ *
+ * This is a deliberately simple round-robin scheduler: one EE
+ * instruction, then one IOP instruction, repeat. Real hardware
+ * doesn't schedule this way (both cores just run continuously at
+ * their own clock rates), and a cycle-accurate scheduler would need
+ * to account for the EE's ~294MHz vs the IOP's ~33MHz clock (roughly
+ * 8:1) rather than 1:1 stepping - that refinement is left for later
+ * (see docs/ROADMAP.md). What this does provide, for the first time
+ * in this project, is genuine cross-CPU visibility: a write the EE
+ * makes to a SIF register is visible to the IOP on its very next
+ * step, and vice versa, which is enough to prove out a real
+ * handshake protocol (see tests/test_system_handshake.c).
+ */
+#ifndef PCSX2_WII_SYSTEM_H
+#define PCSX2_WII_SYSTEM_H
+
+#include <stdint.h>
+#include "core/bios_loader.h"
+
+/* Initializes both cores (which transitively initializes DMA/GS/GIF/
+ * SIF via ee_core_init()). ee_bios and iop_bios may point to the same
+ * bios_image_t - real hardware shares one physical ROM between both
+ * CPUs - or different ones. Returns 0 on success. */
+int system_init(const bios_image_t *ee_bios, const bios_image_t *iop_bios);
+
+/* Steps the EE and IOP alternately (one instruction each per slice)
+ * until both cores have halted, or until max_slices slices have run -
+ * whichever comes first. Pass max_slices == 0 for no limit (real
+ * hardware has none; used by main.c). Host-native tests should pass a
+ * finite cap so a scheduling/protocol bug produces a clean test
+ * failure instead of a hang.
+ *
+ * Returns 1 if both cores halted on their own, 0 if the slice limit
+ * was hit first (only possible when max_slices != 0). */
+int system_run_interleaved(uint64_t max_slices);
+
+#endif

@@ -20,6 +20,7 @@
  */
 
 #include "core/iop/iop_core.h"
+#include "core/hw/sif.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -63,6 +64,14 @@ uint16_t iop_mem_read16(iop_state_t *st, uint32_t addr)
 
 uint32_t iop_mem_read32(iop_state_t *st, uint32_t addr)
 {
+    /* IOP-side SIF mailbox mirror (0x1D000000-0x1D0000FF) - see
+     * core/hw/sif.h. Checked before the RAM/BIOS path since it's
+     * outside IOP RAM's range anyway, but explicit is better than
+     * relying on that fact silently. */
+    uint32_t sif_val;
+    if (sif_iop_mmio_read32(addr, &sif_val))
+        return sif_val;
+
     uint8_t *p = iop_mem_ptr(st, addr, 4);
     if (!p) return 0;
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
@@ -85,6 +94,9 @@ void iop_mem_write16(iop_state_t *st, uint32_t addr, uint16_t val)
 
 void iop_mem_write32(iop_state_t *st, uint32_t addr, uint32_t val)
 {
+    if (sif_iop_mmio_write32(addr, val))
+        return;
+
     uint8_t *p = iop_mem_ptr(st, addr, 4);
     if (!p) return;
     p[0] = (uint8_t)(val & 0xFF);
@@ -283,6 +295,16 @@ static int iop_step(void)
     st->gpr[0] = 0;
     st->instructions_executed++;
     return 0;
+}
+
+/* Public single-instruction step - see ee_core_step()'s comment in
+ * ee_core.c for why this exists (source/core/system.c's interleaved
+ * scheduler). */
+int iop_core_step(void)
+{
+    if (g_iop.halted)
+        return 1;
+    return iop_step();
 }
 
 void iop_core_run(void)

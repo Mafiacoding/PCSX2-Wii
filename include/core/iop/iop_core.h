@@ -38,6 +38,10 @@ typedef struct {
 
 int  iop_core_init(const bios_image_t *bios);
 void iop_core_run(void);
+
+/* Single-step entry point, for the interleaved EE/IOP scheduler
+ * in core/system.h. See its definition in iop_core.c for details. */
+int iop_core_step(void);
 void iop_core_shutdown(void);
 iop_state_t *iop_core_get_state(void);
 

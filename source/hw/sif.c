@@ -90,3 +90,62 @@ int sif_mmio_write32(uint32_t addr, uint32_t value)
             return 0;
     }
 }
+
+/* --- IOP-side mirror (0x1D000000-0x1D0000FF), plain/flat semantics -
+ * see the header comment above sif_iop_mmio_read32/write32 for why
+ * this deliberately does NOT replicate the EE side's OR/AND-on-write
+ * special cases. */
+
+int sif_iop_mmio_read32(uint32_t addr, uint32_t *out)
+{
+    if (addr < 0x1D000000u || addr > 0x1D0000FFu)
+        return 0;
+
+    switch (addr & 0xFFu) {
+        case 0x00: *out = g_sif.mscom;  return 1;
+        case 0x10: *out = g_sif.smcom;  return 1;
+        case 0x20: *out = g_sif.msflag; return 1;
+        case 0x30: *out = g_sif.smflag; return 1;
+        case 0x40: *out = g_sif.ctrl;   return 1; /* plain - the EE-side
+                                                     * 0xF0000102 read
+                                                     * mask is specific
+                                                     * to HwRead.cpp's
+                                                     * EE-side handler,
+                                                     * not modeled for
+                                                     * the IOP's flat
+                                                     * array view. */
+        case 0x50: *out = g_sif.f250;   return 1;
+        case 0x60: *out = g_sif.f260;   return 1;
+        default:   *out = 0;            return 1; /* rest of the
+                                                     * 0x100-byte
+                                                     * window: reads
+                                                     * as 0, matching
+                                                     * an all-zero
+                                                     * backing array
+                                                     * for the parts
+                                                     * we don't model
+                                                     * individually. */
+    }
+}
+
+int sif_iop_mmio_write32(uint32_t addr, uint32_t value)
+{
+    if (addr < 0x1D000000u || addr > 0x1D0000FFu)
+        return 0;
+
+    switch (addr & 0xFFu) {
+        case 0x00: g_sif.mscom  = value; return 1;
+        case 0x10: g_sif.smcom  = value; return 1;
+        case 0x20: g_sif.msflag = value; return 1; /* plain overwrite,
+                                                      * NOT an OR - see
+                                                      * header comment */
+        case 0x30: g_sif.smflag = value; return 1; /* plain overwrite,
+                                                      * NOT an AND-clear */
+        case 0x40: g_sif.ctrl   = value; return 1;
+        case 0x50: g_sif.f250   = value; return 1;
+        case 0x60: g_sif.f260   = value; return 1;
+        default:   return 1; /* rest of the window: accepted, discarded -
+                               * matches an unmodeled part of a flat
+                               * backing array. */
+    }
+}

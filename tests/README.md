@@ -27,10 +27,12 @@ version-string parse.
 `iop_core.c` - verifies basic ALU/load-store behavior and the
 LWL/LWR unaligned-load reconstruction logic specifically (new code,
 not yet covered by the EE test since ee_core.c doesn't implement
-LWL/LWR yet). Run it the same way:
+LWL/LWR yet). Needs `sif.c` linked too now that `iop_mem_read32/
+write32` route the IOP-side SIF mirror window (0x1D000000-0x1D0000FF)
+through it. Run it the same way:
 
 ```sh
-gcc -I../include -I../source -o test_iop tests/test_iop_core.c
+gcc -I../include -I../source -o test_iop tests/test_iop_core.c ../source/hw/sif.c
 ./test_iop
 ```
 
@@ -168,10 +170,14 @@ actually lands in GS memory - with explicit checks that pixels just
 outside the rectangle's bounds are untouched. This is the first test
 in the project that exercises the full intended pipeline in miniature:
 GIF packet -> register state -> primitive rasterization -> GS memory.
-Needs gs_mem.c linked too:
+Self-contained (`#include`s both `gs_mem.c` and `gif.c` directly, no
+extra link deps - a stale earlier version of this doc incorrectly
+listed `../source/hw/gs_mem.c` as an extra link argument, which
+actually fails with duplicate-symbol linker errors since it's already
+pulled in via #include; fixed here):
 
 ```sh
-gcc -I../include -I../source -o test_gif tests/test_gif.c ../source/hw/gs_mem.c
+gcc -I../include -I../source -o test_gif tests/test_gif.c
 ./test_gif
 ```
 
@@ -203,4 +209,28 @@ link deps):
 ```sh
 gcc -I../include -I../source -o test_sif tests/test_sif.c
 ./test_sif
+```
+
+`test_system_handshake.c` is the first test that exercises TWO cores
+at once - it hand-encodes a small MIPS program for each of the EE and
+the IOP that perform a real SIF mailbox handshake (EE writes MSCOM +
+sets MSFLAG bit 0; IOP polls MSFLAG, reads MSCOM, echoes it into
+SMCOM, sets SMFLAG bit 0; EE polls SMFLAG, then reads SMCOM back) and
+runs them through `system_init()`/`system_run_interleaved()`
+(`source/core/system.c`) exactly as `main.c` now does at boot.
+Neither side's poll loop can complete without the other side actually
+having run in between - if the interleaved scheduler didn't really
+alternate between cores, this test would hit its slice cap and fail
+cleanly (`system_run_interleaved()` returns 0) instead of hanging.
+All 9 checks passed on the first run. Uses two independent fake BIOS
+images, one per core, purely for test convenience (real hardware
+shares one physical ROM - `main.c` does share one real image between
+both `system_init()` arguments for the actual boot path; giving each
+core its own independent instruction stream here just keeps the test
+simple). Needs the full EE+IOP+hardware-model dependency set linked
+in:
+
+```sh
+gcc -I../include -I../source -o test_system_handshake tests/test_system_handshake.c ../source/core/ee/ee_core.c ../source/core/iop/iop_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+./test_system_handshake
 ```

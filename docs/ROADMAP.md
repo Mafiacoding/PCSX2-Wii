@@ -54,11 +54,40 @@ splash screen, not just difficulty.
       bits 18/19 (no-ops - no cross-CPU wiring to iop_core.c exists
       yet), and SIF0/SIF1/SIF2 themselves are still just DMA channel
       register slots in dma.c with no IOP on the other end consuming
-      them. This is the mailbox layer only - a working EE<->IOP
-      handshake still needs the IOP core interleaved with the EE and
-      reading/writing this same state (reference: `pcsx2/Sif0.cpp`,
-      `Sif1.cpp`, `Sif.cpp` for the full protocol this only partially
-      models).
+      them.
+- [x] IOP-side SIF mirror (0x1D000000-0x1D0000FF) - `sif_iop_mmio_read32/
+      write32` in `source/hw/sif.c`, wired into `iop_core.c`'s 32-bit
+      MMIO dispatch. Modeled as a flat, plain read/write window (no
+      OR/AND special casing), matching PCSX2's OWN IOP-side treatment
+      (`MemoryTypes.h`'s `u8 Sif[0x100]` flat array + `IopMem.h`'s
+      `psxSu32` macro - PCSX2 itself doesn't special-case this side
+      either, per its own "likely not needed" comment). The IOP-side
+      window's low byte lines up with the EE-side register's low byte
+      (0x1D0000XX <-> 0x1000F2XX) so both sides read/write the same
+      underlying state.
+- [x] **A real, working EE<->IOP handshake** - `source/core/system.c`
+      (`system_init`/`system_run_interleaved`) steps both cores
+      alternately (one instruction each per slice) instead of running
+      either to completion in isolation, which is what actually makes
+      a mailbox-register handshake possible for the first time in
+      this project. Proven end-to-end in
+      `tests/test_system_handshake.c`: a hand-encoded EE program
+      writes MSCOM and sets an MSFLAG bit, a hand-encoded IOP program
+      polls MSFLAG, reads MSCOM, echoes the value into SMCOM and sets
+      an SMFLAG bit, and the EE polls SMFLAG and reads back the exact
+      value the IOP echoed - a genuine round trip through shared
+      hardware state between two independently-interpreted CPU cores.
+      All 9 checks passed on the first run. `main.c` now calls
+      `system_init`/`system_run_interleaved` instead of driving the EE
+      core alone - the IOP actually runs at boot for the first time.
+      Known simplification: 1:1 instruction-count stepping, not
+      clock-rate-accurate (real EE:IOP is roughly 8:1) - see
+      `system.h`'s header comment. This is the mailbox layer only - a
+      REAL BIOS boot still needs IOP HLE/BIOS module emulation on top
+      of this (see section 2) before any of this produces meaningful
+      behavior beyond the test's toy protocol (reference:
+      `pcsx2/Sif0.cpp`, `Sif1.cpp`, `Sif.cpp` for the full DMA-backed
+      protocol this only partially models at the register level).
 
 ## 2. IOP (I/O Processor) - separate MIPS core
 
@@ -78,8 +107,12 @@ instead of fully emulating the real IOP BIOS ROM.
 - [x] R3000A interpreter (simpler than EE - no MMI/128-bit registers,
       but same MIPS I branch-delay-slot structure; includes LWL/LWR/
       SWL/SWR unaligned load/store, which the EE core doesn't have
-      yet). Unit-tested in `tests/test_iop_core.c`. Standalone so far -
-      not yet wired into main.c, no SIF, no IOP hardware registers.
+      yet). Unit-tested in `tests/test_iop_core.c`.
+- [x] Wired into `main.c` and running interleaved with the EE core via
+      `source/core/system.c` (see section 1's SIF handshake entry for
+      details) - no longer standalone. Has SIF mailbox register
+      access (section 1). Still has NO other IOP hardware registers
+      (interrupt controller, DMA, timers) - see next bullet.
 - [ ] IOP hardware register stubs (interrupt controller, DMA, timers)
 - [ ] Either: emulate the real IOP BIOS ROM, or (like PCSX2 optionally
       does) HLE the common IOP modules (SIO2MAN, MCMAN, PADMAN, etc.)
@@ -223,35 +256,44 @@ programmable GPU nor any of those APIs).
 1. IOP CPU core skeleton (this is "just" another MIPS interpreter,
    well-scoped, and unblocks everything downstream of SIF) - DONE
 2. Minimal SIF + DMA register stubs (enough for EE/IOP handshake, not
-   full chain-mode DMA) - PARTIAL: EE-side SIF mailbox registers are
-   done (see section 1), but the IOP core still isn't wired to read/
-   write the same state, so there's no actual handshake happening yet
-   - just the register plumbing one side of it needs.
-3. IOP HLE stubs for the specific modules the BIOS boot path calls -
-   still open, and now the most direct next unblock: wiring
-   iop_core.c into the same process loop as ee_core.c (even crudely -
-   e.g. run N EE instructions, then N IOP instructions, repeat) plus
-   giving the IOP side read/write access to sif_mmio_read32/write32
-   would make this project's first real cross-CPU handshake possible.
-4. GIF/VIF passthrough - DONE for PACKED-mode GIF + SPRITE
+   full chain-mode DMA) - DONE: both the EE-side special-cased
+   registers and the IOP-side flat mirror exist and are wired into
+   their respective cores.
+3. Interleaved EE/IOP execution + a real, working mailbox handshake -
+   DONE (`source/core/system.c`, `tests/test_system_handshake.c`) -
+   this was the actual missing piece that made SIF register stubs
+   meaningful; see section 1 for full detail. NOT yet a real protocol
+   - it's proven with a hand-written toy handshake, not the actual
+   BIOS/PCSX2 SIF DMA protocol (`Sif0.cpp`/`Sif1.cpp`).
+4. IOP HLE stubs for the specific modules the BIOS boot path calls -
+   still open, and now the most direct next unblock: with cores
+   actually running together and able to exchange mailbox messages,
+   the next gap is that the real IOP BIOS code (or an HLE
+   replacement for it, like PCSX2's own `IopBios.cpp`) doesn't exist
+   here at all - the IOP core currently just executes whatever raw
+   BIOS ROM bytes are at its reset vector with no module-loading
+   logic, interrupt controller, or DMA of its own.
+5. GIF/VIF passthrough - DONE for PACKED-mode GIF + SPRITE
    rasterization (see section 4 above); VIF0/VIF1 itself is still
    open
-5. GS register block + local memory - DONE (section 6)
-6. Minimal rasterizer for whatever primitive types the splash actually
+6. GS register block + local memory - DONE (section 6)
+7. Minimal rasterizer for whatever primitive types the splash actually
    uses, output to Wii GX framebuffer - PARTIAL: SPRITE works via a
    direct-to-XFB pixel blit (not real GX), triangles/textures still
    open, and this whole path is still not driven by real BIOS/EE
-   code since SIF/IOP HLE aren't wired up yet
+   code since IOP HLE isn't wired up yet
 
 Remaining near-term candidates, roughly in order of how directly they
-unblock "the BIOS actually draws something": interleaving iop_core.c
-with ee_core.c and giving the IOP side access to the SIF mailbox
-registers (so a real handshake becomes possible for the first time),
-IOP HLE stubs for the specific BIOS-boot-path modules, triangle
+unblock "the BIOS actually draws something": IOP hardware register
+stubs (INTC/DMA/timers) and/or IOP HLE stubs for the specific
+BIOS-boot-path modules (both are needed before real BIOS code - as
+opposed to hand-written test programs - can get through a real SIF
+handshake), a clock-rate-aware EE:IOP scheduler (currently 1:1
+instruction stepping, real hardware is roughly 8:1), triangle
 rasterization in the GIF parser, VIF0/VIF1 passthrough, and wiring a
 real GIF packet through `dma_channel_kick` at boot in `main.c` as a
 live demo (currently only the hardcoded 4-color pattern runs there).
 
-Step 6 (real GX-based rendering with textures) is where this stops
+Step 7 (real GX-based rendering with textures) is where this stops
 being "a lot of careful work" and becomes genuinely research-scale for
 a solo project - see the GS line count above.

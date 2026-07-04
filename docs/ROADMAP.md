@@ -171,9 +171,51 @@ instead of fully emulating the real IOP BIOS ROM.
       future work and would be a meaningfully bigger effort than this
       stub (needs to tick forward in sync with instruction execution,
       not just latch writes) - not attempted here.
-- [ ] Either: emulate the real IOP BIOS ROM, or (like PCSX2 optionally
-      does) HLE the common IOP modules (SIO2MAN, MCMAN, PADMAN, etc.)
-      well enough that SIF handshakes succeed
+- [x] IOP BIOS syscall trap (the "HLE BIOS replacement" mechanism) -
+      `source/hw/iop_hle_bios.c`, wired into `iop_core.c`'s
+      `iop_step()`. Implements the classic, well-established PS1/PS2
+      A0/B0/C0 BIOS call convention (function number in $t1, `JAL`
+      to one of the three fixed trap addresses, real BIOS ROM code
+      there dispatches and returns via `JR $ra`) - intercepting PC
+      reaching 0xA0/0xB0/0xC0 and handling the call natively instead
+      of decoding whatever bytes are actually loaded there. IMPORTANT:
+      this is explicitly NOT a port of PCSX2's actual IOP HLE
+      (`IopBios.cpp`, ~1500 lines), which takes a fundamentally
+      different and far more involved approach - it lets a REAL,
+      working IOP BIOS ROM boot far enough to build its own internal
+      data structures (loadcore's module list, thread manager state)
+      and only intercepts specific IRX library import calls once
+      those exist, which requires a real BIOS ROM this project
+      doesn't ship and can't verify version-specific internal
+      structure layouts for. What's implemented instead is honest and
+      bounded: every trapped call is logged (table + function number)
+      and given a generic default return value (0) - NO specific
+      function-number-to-behavior mapping is implemented or guessed
+      at, since this project doesn't have a verified, citable
+      reference for real PS1/PS2 BIOS syscall semantics. Still a real
+      improvement over the prior behavior (an incomplete/fake BIOS
+      image reading as zero bytes at these addresses would decode as
+      valid NOP instructions and loop forever, going nowhere - the
+      trap now returns control to the caller immediately, letting
+      whatever boot code issued the call keep making progress).
+      Unit tested in `tests/test_iop_hle_bios.c` (9/9 checks; caught a
+      real MIPS J-type addressing subtlety in the test's own setup -
+      see tests/README.md).
+- [x] IOP module registry (a "module loading logic" scaffold) -
+      `source/hw/iop_hle_modules.c`. Records module name/version pairs
+      via a project-owned API (`iop_hle_module_register`/
+      `iop_hle_module_is_registered`) - explicitly NOT a port of real
+      IRX module parsing or PCSX2's `sceSifLoadModule`-style SIF RPC
+      protocol (Sifcmd.h), both of which are substantially bigger
+      undertakings requiring real module binary formats and BIOS
+      structures this project doesn't have verified references for.
+      Standalone so far: NOT yet wired to the BIOS syscall trap above
+      with a specific "this function number means load-module" rule,
+      because this project doesn't have a verified real function
+      number for that and didn't want to fabricate one that could
+      later be mistaken for real hardware behavior - wiring a real
+      trigger is future work once/if a verified reference is found.
+      Unit tested in `tests/test_iop_hle_modules.c`.
 
 ## 3. DMA controller
 
@@ -323,17 +365,24 @@ programmable GPU nor any of those APIs).
    - it's proven with a hand-written toy handshake, not the actual
    BIOS/PCSX2 SIF DMA protocol (`Sif0.cpp`/`Sif1.cpp`).
 4. IOP HLE stubs for the specific modules the BIOS boot path calls -
-   PARTIAL: the IOP now has register stubs for its interrupt
-   controller (I_STAT/I_MASK/I_CTRL), its own DMA controller (13
-   channels + ICR/ICR2), and its counter/timers (T0-T5) - all section
-   2 - but none of them DO anything beyond store whatever was last
-   written (no live transfers, no ticking counters, no raised
-   interrupts). The bigger remaining gap is unchanged: no actual
-   module-loading logic or HLE BIOS replacement (like PCSX2's
-   `IopBios.cpp`) exists, so the IOP core still just executes
-   whatever raw BIOS ROM bytes are at its reset vector with nothing
-   resembling real boot behavior - that's the next thing that would
-   actually move the needle, more so than further register plumbing.
+   PARTIAL, and meaningfully further along now: the IOP has register
+   stubs for its interrupt controller, DMA controller, and timers
+   (section 2), a BIOS syscall trap for the classic A0/B0/C0 call
+   convention (`source/hw/iop_hle_bios.c`), and a module registry
+   scaffold (`source/hw/iop_hle_modules.c`) - see section 2 for exact
+   scope and the important caveat that neither of the last two is a
+   port of PCSX2's actual, much more involved `IopBios.cpp` (which
+   depends on a real, working BIOS ROM this project doesn't have and
+   can't fake convincingly). What real BIOS/game code would still need
+   before any of this does something meaningful: a verified reference
+   for actual PS1/PS2 BIOS syscall function numbers (this project
+   doesn't have one and deliberately hasn't guessed), and/or a decision
+   to go the PCSX2 route (parse real BIOS structures - needs a real
+   BIOS ROM) vs. inventing this project's own from-scratch IOP "OS"
+   that real game IRX modules could never actually run against anyway
+   (game code is compiled against the real IOP kernel's ABI). This is
+   the crux of why "just get the BIOS splash to render" remains hard
+   even with all the hardware register plumbing in place.
 5. GIF/VIF passthrough - DONE for PACKED-mode GIF + SPRITE
    rasterization (see section 4 above); VIF0/VIF1 itself is still
    open

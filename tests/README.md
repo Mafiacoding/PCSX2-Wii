@@ -32,7 +32,7 @@ write32` route the IOP-side SIF mirror window (0x1D000000-0x1D0000FF)
 through it. Run it the same way:
 
 ```sh
-gcc -I../include -I../source -o test_iop tests/test_iop_core.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c
+gcc -I../include -I../source -o test_iop tests/test_iop_core.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c
 ./test_iop
 ```
 
@@ -231,7 +231,7 @@ simple). Needs the full EE+IOP+hardware-model dependency set linked
 in:
 
 ```sh
-gcc -I../include -I../source -o test_system_handshake tests/test_system_handshake.c ../source/core/ee/ee_core.c ../source/core/iop/iop_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c
+gcc -I../include -I../source -o test_system_handshake tests/test_system_handshake.c ../source/core/ee/ee_core.c ../source/core/iop/iop_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c
 ./test_system_handshake
 ```
 
@@ -322,3 +322,68 @@ Note: iop_core.c now depends on iop_timers.c too (wired into
 iop_mem_read32/write32 alongside SIF, INTC, and DMA), so
 test_iop_core.c and test_system_handshake.c both need it linked in -
 see the updated commands above.
+
+
+`test_iop_hle_bios.c` covers the IOP BIOS syscall trap
+(`source/hw/iop_hle_bios.c`, wired into `iop_core.c`'s `iop_step()`).
+This is the classic PS1/PS2 A0/B0/C0 BIOS call convention - real code
+puts a function number in $t1 and does `JAL 0xA0` (or 0xB0/0xC0);
+this project's trap intercepts execution reaching one of those three
+addresses instead of decoding whatever bytes happen to be there,
+logs the call, sets $v0 to a generic default (0), and redirects
+straight to $ra as if a real `JR $ra` had executed. See
+`include/core/hw/iop_hle_bios.h` for why specific per-function-number
+behavior is deliberately NOT implemented (this project doesn't have a
+verified reference for real PS1/PS2 BIOS function semantics, and
+PCSX2's own actual HLE - `IopBios.cpp` - takes a completely different,
+much more involved approach that depends on parsing a REAL running
+BIOS's internal structures).
+
+This test hand-encodes a small IOP program (ADDIU to set $t1, JAL
+0xA0, a delay-slot NOP, then code that copies $v0 and BREAKs) and
+caught a genuine subtlety while being written: JAL is a MIPS J-type
+(pseudo-direct) jump whose target address is built from the CURRENT
+pc's upper 4 bits plus a 26-bit immediate field - it can only reach
+addresses within the same 256MB segment as the JAL instruction
+itself. An early version of this test placed its program at the IOP's
+BIOS reset vector (0xBFC00000, segment 0xB) the same way
+`test_iop_core.c` does, which made the JAL's computed target become
+0xB00000A0 instead of the intended 0xA0 - not a bug in the trap
+handler, just a test-setup mismatch with how real IOP code actually
+calls these traps (from RAM, segment 0, which shares its segment with
+the near-zero trap addresses). Fixed by writing the test program into
+IOP RAM and starting execution at address 0 instead. All 9 checks
+pass. Needs the full IOP hardware-model dependency set linked (same
+as `test_iop_core.c`):
+
+```sh
+gcc -I../include -I../source -o test_iop_hle_bios tests/test_iop_hle_bios.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c
+./test_iop_hle_bios
+```
+
+Note: iop_core.c now depends on iop_hle_bios.c too (iop_step() calls
+it before fetching/decoding any real instruction), so
+test_iop_core.c and test_system_handshake.c both need it linked in -
+see the updated commands above.
+
+`test_iop_hle_modules.c` covers the IOP module registry
+(`source/hw/iop_hle_modules.c`) - a plain, project-owned bookkeeping
+scaffold, NOT a port of real IRX module parsing (see
+`include/core/hw/iop_hle_modules.h` for the full scope explanation).
+Register/query roundtrip, re-registering an existing name updates its
+version in place rather than duplicating the entry, unknown names
+correctly report as not registered, and basic input validation (NULL/
+empty names rejected, over-long names truncated rather than
+overflowing). 14/14 checks pass. Self-contained (`#include`s
+`iop_hle_modules.c` directly):
+
+```sh
+gcc -I../include -I../source -o test_iop_hle_modules tests/test_iop_hle_modules.c
+./test_iop_hle_modules
+```
+
+Note: iop_core.c now also depends on iop_hle_modules.c (initialized
+alongside the other IOP hardware models in iop_core_init(), though
+nothing in the executed instruction path calls into it yet - see its
+header comment) - test_iop_core.c and test_system_handshake.c both
+need it linked in too; the commands above are already updated.

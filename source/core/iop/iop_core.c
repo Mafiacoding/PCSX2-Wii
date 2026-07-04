@@ -24,6 +24,8 @@
 #include "core/hw/iop_intc.h"
 #include "core/hw/iop_dma.h"
 #include "core/hw/iop_timers.h"
+#include "core/hw/iop_hle_bios.h"
+#include "core/hw/iop_hle_modules.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -130,6 +132,8 @@ int iop_core_init(const bios_image_t *bios)
     iop_intc_init(); /* IOP interrupt controller register block - see core/hw/iop_intc.h */
     iop_dma_init();  /* IOP DMA controller register block - see core/hw/iop_dma.h */
     iop_timers_init(); /* IOP counter/timer register stub - see core/hw/iop_timers.h */
+    iop_hle_bios_init(); /* IOP BIOS syscall trap (A0/B0/C0) - see core/hw/iop_hle_bios.h */
+    iop_hle_modules_init(); /* IOP module registry scaffold - see core/hw/iop_hle_modules.h */
 
     g_iop.ram = memalign(32, IOP_RAM_SIZE);
     if (!g_iop.ram)
@@ -153,6 +157,18 @@ static int iop_step(void)
 {
     iop_state_t *st = &g_iop;
     uint32_t pc = st->pc;
+
+    /* IOP BIOS syscall trap (0xA0/0xB0/0xC0) - see core/hw/iop_hle_bios.h.
+     * If this is one of the three trap addresses, the "instruction"
+     * there is not really interpreted at all - the call is handled
+     * natively and control is redirected straight to the return
+     * address, so this step is complete without any real MIPS
+     * instruction being fetched/decoded. */
+    if (iop_hle_bios_try_handle(st, pc)) {
+        st->instructions_executed++;
+        return 0;
+    }
+
     uint32_t instr = iop_mem_read32(st, pc);
 
     uint32_t op    = (instr >> 26) & 0x3F;

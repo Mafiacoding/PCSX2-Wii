@@ -44,6 +44,7 @@
 #include "core/ee/ee_core.h"
 #include "core/hw/dma.h"
 #include "core/hw/gs.h"
+#include "core/hw/gif.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -176,6 +177,8 @@ int ee_core_init(const bios_image_t *bios)
     g_state.ram_size = EE_RAM_SIZE;
 
     dma_bind_ee_ram(g_state.ram, g_state.ram_size); /* chain-mode DMA reads tags/data from here */
+    gif_init();
+    dma_set_sink(DMA_CHANNEL_GIF, gif_process_quadwords); /* GIF DMA transfers now actually get parsed and drawn */
 
     g_state.bios = bios;
     g_state.pc = BIOS_RESET_VECTOR;

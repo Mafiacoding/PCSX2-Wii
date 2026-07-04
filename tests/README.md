@@ -84,7 +84,7 @@ load/store). Needs `dma.c` and `gs.c` linked in too, since ee_core.c
 now depends on both:
 
 ```sh
-gcc -I../include -I../source -o test_ee_unaligned tests/test_ee_unaligned.c ../source/hw/dma.c ../source/hw/gs.c
+gcc -I../include -I../source -o test_ee_unaligned tests/test_ee_unaligned.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c
 ./test_ee_unaligned
 ```
 
@@ -104,7 +104,7 @@ DIV.S/ABS.S/NEG.S, MTC1/MFC1, C.EQ.S) with real float arithmetic.
 Needs dma.c and gs.c linked too:
 
 ```sh
-gcc -I../include -I../source -o test_ee_fpu tests/test_ee_fpu.c ../source/hw/dma.c ../source/hw/gs.c
+gcc -I../include -I../source -o test_ee_fpu tests/test_ee_fpu.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c
 ./test_ee_fpu
 ```
 
@@ -157,3 +157,25 @@ set as part of a plain register-roundtrip check, which now correctly
 triggers `dma_channel_kick()` and clears STR again (real hardware
 behavior). Updated that test to use a CHCR value without STR set,
 since chain/transfer *behavior* now has its own dedicated test file.
+
+
+`test_gif.c` is the big one: it builds a real PACKED-mode GIF packet
+by hand (GIFtag + 6 A+D register writes: FRAME_1, XYOFFSET_1, PRIM,
+RGBAQ, and two XYZ2 vertices), feeds it through
+`gif_process_quadwords` exactly as the DMA chain engine would, and
+checks that a correctly-colored, correctly-positioned filled rectangle
+actually lands in GS memory - with explicit checks that pixels just
+outside the rectangle's bounds are untouched. This is the first test
+in the project that exercises the full intended pipeline in miniature:
+GIF packet -> register state -> primitive rasterization -> GS memory.
+Needs gs_mem.c linked too:
+
+```sh
+gcc -I../include -I../source -o test_gif tests/test_gif.c ../source/hw/gs_mem.c
+./test_gif
+```
+
+Note: as ee_core.c has grown more hw/ dependencies (dma.c, gs.c, now
+also gif.c and gs_mem.c since dma_set_sink() wires GIF DMA transfers
+into the GIF parser), tests that link ee_core.c directly need all of
+these on the command line now - see the updated commands above.

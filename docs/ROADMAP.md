@@ -102,8 +102,30 @@ the SPU2. Reference: `Dmac.cpp` (583) + `Dmac.h` (570).
 
 ## 4. GIF / VIF (packet interfaces)
 
-- [ ] GIF (Graphics Interface) - packages EE/VU1 output into GS
-      primitives (reference: `Gif.cpp` 799 lines, `Gif_Unit.cpp` 244)
+- [x] GIF (Graphics Interface), PACKED mode only - `source/hw/gif.c`,
+      registered as the sink for `DMA_CHANNEL_GIF` via
+      `dma_set_sink()` inside `ee_core_init()`, so it now receives
+      real quadwords whenever the DMA chain engine kicks the GIF
+      channel. Parses GIFtag (NLOOP/EOP/PRE/PRIM/FLG/NREG) and, for
+      PACKED-mode data, the four register formats currently handled:
+      PRIM, RGBAQ, XYZ2, and A+D (address+data - used to write PRIM/
+      RGBAQ/XYZ2/FRAME_1/XYOFFSET_1 by address rather than by fixed
+      per-loop register list, which is how real BIOS/game code
+      typically drives the GIF). XYZ2 does real 12.4 fixed-point ->
+      pixel conversion against XYOFFSET_1, and on the second vertex
+      of a SPRITE primitive (PRIM type 6) it rasterizes a filled
+      axis-aligned rectangle directly into GS memory via
+      `gs_mem_write_psmct32`. This is the first genuine "GIF packet
+      in -> pixels in GS memory" path in the project, exercised
+      end-to-end in `tests/test_gif.c` (13/13 checks, including
+      pixel-level bounds checks that the rectangle is exactly the
+      right size and position and touches nothing outside it).
+      Reference: `Gif.cpp` 799 lines, `Gif_Unit.cpp` 244 - only a
+      sliver of that is covered. NOT yet covered: REGLIST/IMAGE
+      transfer modes, any primitive besides SPRITE (no lines,
+      triangles, or triangle strips/fans/textures), GS context 2
+      (FRAME_2/XYOFFSET_2), and VU1-sourced GIF traffic (path 1) -
+      only the direct EE->GIF path (path 3) is modeled.
 - [ ] VIF0/VIF1 (Vector Interface) - feeds VU0/VU1 with microcode data
       and unpacks data formats (reference: `Vif.cpp` 418, plus
       `Vif_Unpack.cpp`, `Vif_Codes.cpp`, `Vif1_Dma.cpp`, `Vif0_Dma.cpp`)
@@ -144,8 +166,11 @@ programmable GPU nor any of those APIs).
       `tests/test_gs_mem.c`. Real swizzle addressing is still open -
       needed before texture sampling or certain blit tricks would
       work correctly.
-- [ ] Primitive rasterization (triangles/sprites/lines - at minimum
-      whatever the BIOS splash actually draws with)
+- [x] Primitive rasterization - SPRITE (filled axis-aligned
+      rectangles) only, via the GIF parser above (`source/hw/gif.c`
+      calling `gs_mem_write_psmct32`). Triangles/lines/strips/fans
+      and textured primitives are still open - a real BIOS splash
+      likely needs at least triangles and textures too.
 - [x] A first, minimal translation layer from GS memory to the Wii's
       display: `source/hw/gs_wii_output.c` converts a rectangular
       PSMCT32 region to the Wii's packed Y1CbY2Cr XFB format (RGB->YUV
@@ -156,11 +181,17 @@ programmable GPU nor any of those APIs).
       YCbCr anchor points, AND wired into `source/main.c` so a real
       Wii/Dolphin boot now visibly draws a 4-color test pattern -
       the first actual pixels-on-a-real-screen milestone in the
-      project. NOT yet driven by anything the BIOS does - no GIF
-      packet parsing, no primitive assembly/rasterization, no DMA
-      transfer execution feeds this path yet. A real splash screen
-      still needs all of that, plus eventually a proper GX-based
-      renderer once primitives beyond flat rectangles are needed.
+      project. As of the GIF parser above, GS memory CAN now be
+      populated by a real DMA-chain-delivered GIF packet rather than
+      only by `main.c`'s hardcoded demo pattern - but `main.c` itself
+      still only demonstrates the fixed 4-color test pattern; it has
+      not yet been updated to drive a GIF packet through
+      `dma_channel_kick` at boot as a live end-to-end demo. Still not
+      driven by anything the actual BIOS does - no EE code is
+      executing real GS-driving instructions yet. A real splash
+      screen still needs triangle rasterization and textures, plus
+      eventually a proper GX-based renderer once primitives beyond
+      flat rectangles are needed.
 
 ## 7. Supporting pieces (lower priority for "just the splash screen")
 
@@ -173,19 +204,28 @@ programmable GPU nor any of those APIs).
 ## Suggested near-term order
 
 1. IOP CPU core skeleton (this is "just" another MIPS interpreter,
-   well-scoped, and unblocks everything downstream of SIF)
+   well-scoped, and unblocks everything downstream of SIF) - DONE
 2. Minimal SIF + DMA register stubs (enough for EE/IOP handshake, not
-   full chain-mode DMA)
-3. IOP HLE stubs for the specific modules the BIOS boot path calls
-4. GIF/VIF passthrough (accept packets, don't yet rasterize) - the
-   DMA chain engine's sink callback (`dma_set_sink`) is now the ready
-   hook point for this: register a GIF-channel sink that parses GIF
-   tags/primitive data out of the delivered quadwords
-5. GS register block + local memory (still no rasterization output)
+   full chain-mode DMA) - still open
+3. IOP HLE stubs for the specific modules the BIOS boot path calls -
+   still open
+4. GIF/VIF passthrough - DONE for PACKED-mode GIF + SPRITE
+   rasterization (see section 4 above); VIF0/VIF1 itself is still
+   open
+5. GS register block + local memory - DONE (section 6)
 6. Minimal rasterizer for whatever primitive types the splash actually
-   uses, output to Wii GX framebuffer
+   uses, output to Wii GX framebuffer - PARTIAL: SPRITE works via a
+   direct-to-XFB pixel blit (not real GX), triangles/textures still
+   open, and this whole path is still not driven by real BIOS/EE
+   code since SIF/IOP HLE aren't wired up yet
 
-Steps 1-4 are substantial but tractable in the way the EE interpreter
-was. Step 6 is where this stops being "a lot of careful work" and
-becomes genuinely research-scale for a solo project - see the GS line
-count above.
+Remaining near-term candidates, roughly in order of how directly they
+unblock "the BIOS actually draws something": SIF + IOP HLE stubs (so
+the EE core can get past its boot handshake with the IOP), triangle
+rasterization in the GIF parser, VIF0/VIF1 passthrough, and wiring a
+real GIF packet through `dma_channel_kick` at boot in `main.c` as a
+live demo (currently only the hardcoded 4-color pattern runs there).
+
+Step 6 (real GX-based rendering with textures) is where this stops
+being "a lot of careful work" and becomes genuinely research-scale for
+a solo project - see the GS line count above.

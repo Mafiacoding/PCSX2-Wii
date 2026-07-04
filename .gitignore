@@ -1,0 +1,5 @@
+build/
+*.dol
+*.elf
+*.map
+data/pcsx2/bios/*.bin

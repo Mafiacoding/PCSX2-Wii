@@ -49,13 +49,26 @@ the genuine tools:
    ```sh
    sudo dkp-pacman -S wii-dev gamecube-tools general-tools
    ```
-2. **Just elf2dol from source** (what this repo does automatically as
-   a fallback): the source lives upstream at
-   `devkitPro/gamecube-tools` (`elftool/elf2dol.c`), vendored here at
-   `tools/elf2dol.c` under its original license. The Makefile compiles
-   it natively (host gcc, not the PPC cross compiler) on demand if no
-   system-wide `elf2dol` is found on `PATH`. `tools/elf2dol.py` is a
-   last-resort pure-Python reimplementation if neither is available.
+2. **Vendored sources** (what this repo does automatically, or you
+   can build yourself): the sources for the specific tools this
+   project actually uses are vendored here under their original
+   licenses, and built natively (host gcc, not the PPC cross
+   compiler):
+   - `tools/elf2dol.c` (from `devkitPro/gamecube-tools`) - compiled
+     on demand by the Makefile if no system-wide `elf2dol` is on
+     `PATH`. `tools/elf2dol.py` is a last-resort pure-Python
+     reimplementation if neither is available.
+   - `tools/wiiload/` (from `devkitPro/wiiload`) - pushes a `.dol` to
+     a running Homebrew Channel over network. Not wired into the
+     Makefile automatically (needs `zlib`), build it yourself:
+     `gcc -o wiiload tools/wiiload/wiiload.c tools/wiiload/gecko.c -lz`,
+     then `WIILOAD=tcp:<your wii's IP>` + running `wiiload pcsx2-wii.dol`
+     (or `make run`, which already assumes `wiiload` is on `PATH`).
+   - `gxtexconv` (TPL texture conversion) isn't vendored - it doesn't
+     appear to have its own public repo under `devkitPro/`, and this
+     project doesn't produce any `.tpl` texture assets, so it isn't
+     actually needed here. Get it via `dkp-pacman` if some other
+     project needs it.
 
 ## Building
 

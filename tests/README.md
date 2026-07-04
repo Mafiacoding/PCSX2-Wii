@@ -32,7 +32,7 @@ write32` route the IOP-side SIF mirror window (0x1D000000-0x1D0000FF)
 through it. Run it the same way:
 
 ```sh
-gcc -I../include -I../source -o test_iop tests/test_iop_core.c ../source/hw/sif.c ../source/hw/iop_intc.c
+gcc -I../include -I../source -o test_iop tests/test_iop_core.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c
 ./test_iop
 ```
 
@@ -231,7 +231,7 @@ simple). Needs the full EE+IOP+hardware-model dependency set linked
 in:
 
 ```sh
-gcc -I../include -I../source -o test_system_handshake tests/test_system_handshake.c ../source/core/ee/ee_core.c ../source/core/iop/iop_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/iop_intc.c
+gcc -I../include -I../source -o test_system_handshake tests/test_system_handshake.c ../source/core/ee/ee_core.c ../source/core/iop/iop_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c
 ./test_system_handshake
 ```
 
@@ -257,5 +257,41 @@ gcc -I../include -I../source -o test_iop_intc tests/test_iop_intc.c
 
 Note: iop_core.c now depends on iop_intc.c too (wired into
 iop_mem_read32/write32 alongside the SIF mirror), so test_iop_core.c
+and test_system_handshake.c both need it linked in - see the updated
+commands above.
+
+
+`test_iop_dma.c` covers the IOP DMA controller register block
+(`source/hw/iop_dma.c`): per-channel MADR/BCR/CHCR/TADR roundtrip and
+address-decoding isolation (including confirming the channel-5 gap -
+there is no such channel on real hardware - correctly claims nothing),
+and the DMA_ICR/DMA_ICR2 bit-level write logic ported from PCSX2's
+`ps2/Iop/IopHwWrite.cpp`: bits 0-23 (force-IRQ bit 15, per-channel
+enable bits 16-22, master-enable bit 23) are plainly overwritten by
+each write, bits 24-30 (per-channel pending flags) are write-1-to-clear
+(and can only ever be CLEARED by software, never SET - only real DMA
+completion events set them, which this register-stub doesn't
+simulate), and bit 31 (master IRQ flag) is recomputed on every write
+from the force bit and the enable/flag overlap.
+
+This test caught a real subtlety in itself while being written: an
+early version tried to "set" a flag bit (24-30) by writing a 1 to it,
+expecting that to both set AND immediately test the master-bit logic
+in one write - that doesn't match real hardware, since flag bits are
+write-1-to-CLEAR only and can never be set via a register write at
+all (only an actual DMA completion event sets them, which isn't
+modeled here). Fixed by directly poking the underlying state
+(`g_dma.icr`) to simulate a hardware-originated flag, the same
+approach `tests/test_sif.c` uses for SIF's SMFLAG, then performing a
+separate write that doesn't target that bit to trigger the master-bit
+recompute against the pre-set flag. 20/20 checks pass. Self-contained (`#include`s `iop_dma.c` directly):
+
+```sh
+gcc -I../include -I../source -o test_iop_dma tests/test_iop_dma.c
+./test_iop_dma
+```
+
+Note: iop_core.c now depends on iop_dma.c too (wired into
+iop_mem_read32/write32 alongside SIF and INTC), so test_iop_core.c
 and test_system_handshake.c both need it linked in - see the updated
 commands above.

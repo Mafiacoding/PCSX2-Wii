@@ -129,10 +129,36 @@ instead of fully emulating the real IOP BIOS ROM.
       (no interrupt/exception handling exists in the IOP interpreter
       at all yet), and the ~20 individual real IRQ source assignments
       (VBLANK, DMA completion, etc).
-- [ ] IOP DMA controller register stubs (separate from the EE's DMA
-      model in dma.c - the IOP has its own DMA controller with its
-      own channels, e.g. SIF0/SIF1 on the IOP side, SPU2, CDVD)
-- [ ] IOP timers
+- [x] IOP DMA controller register stubs - `source/hw/iop_dma.c`,
+      wired into `iop_core.c`'s 32-bit MMIO dispatch. Separate from
+      the EE's DMA model in `dma.c` - the IOP has its own controller
+      with its own 13-channel layout (MDEC in/out, GPU, CDROM, SPU,
+      OTC, SPU2, DEV9, SIF0, SIF1, SIO2 in/out - channel 5 doesn't
+      exist on real hardware, modeled as a genuine gap). Per-channel
+      MADR/BCR/CHCR/TADR are plain latched storage (writing CHCR does
+      NOT trigger a transfer - real PCSX2 calls a per-channel,
+      device-specific transfer function here that isn't modeled).
+      DMA_ICR/DMA_ICR2 have real, non-trivial write semantics ported
+      from `ps2/Iop/IopHwWrite.cpp`: bits 0-23 (force-IRQ, per-channel
+      enable, master-enable) are plainly overwritten, bits 24-30
+      (per-channel pending flags) are write-1-to-clear and can only
+      ever be cleared by software (never set - only a real DMA
+      completion event sets them, not modeled), and bit 31 (master
+      IRQ flag) is recomputed on every write. Unit tested in
+      `tests/test_iop_dma.c` (20/20 checks; caught a real test-design
+      subtlety, not an implementation bug, while being written - see
+      tests/README.md). NOT modeled: any actual transfer execution
+      for any channel, or the interrupt/exception side effects a real
+      ICR write would trigger (no such wiring exists in iop_core.c).
+- [ ] IOP timers (T0-T5: COUNT/MODE/TARGET at 0x1F801100-0x1F8014A8) -
+      still open. Note when this is picked up: real timer behavior
+      (actual cycle counting, gate modes, clock source selection,
+      target-reached IRQs - PCSX2's `Counters.cpp`) is substantially
+      more involved than the register-stub pattern used for DMA/INTC
+      above, since it requires ticking state forward in sync with
+      instruction execution rather than just latching register
+      writes - budget for that as a bigger increment than the ones
+      before it.
 - [ ] Either: emulate the real IOP BIOS ROM, or (like PCSX2 optionally
       does) HLE the common IOP modules (SIO2MAN, MCMAN, PADMAN, etc.)
       well enough that SIF handshakes succeed

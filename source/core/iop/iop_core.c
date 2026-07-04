@@ -22,6 +22,7 @@
 #include "core/iop/iop_core.h"
 #include "core/hw/sif.h"
 #include "core/hw/iop_intc.h"
+#include "core/hw/iop_dma.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -75,6 +76,9 @@ uint32_t iop_mem_read32(iop_state_t *st, uint32_t addr)
     uint32_t intc_val;
     if (iop_intc_mmio_read32(addr, &intc_val))
         return intc_val;
+    uint32_t dma_val;
+    if (iop_dma_mmio_read32(addr, &dma_val))
+        return dma_val;
 
     uint8_t *p = iop_mem_ptr(st, addr, 4);
     if (!p) return 0;
@@ -102,6 +106,8 @@ void iop_mem_write32(iop_state_t *st, uint32_t addr, uint32_t val)
         return;
     if (iop_intc_mmio_write32(addr, val))
         return;
+    if (iop_dma_mmio_write32(addr, val))
+        return;
 
     uint8_t *p = iop_mem_ptr(st, addr, 4);
     if (!p) return;
@@ -116,6 +122,7 @@ int iop_core_init(const bios_image_t *bios)
     memset(&g_iop, 0, sizeof(g_iop));
 
     iop_intc_init(); /* IOP interrupt controller register block - see core/hw/iop_intc.h */
+    iop_dma_init();  /* IOP DMA controller register block - see core/hw/iop_dma.h */
 
     g_iop.ram = memalign(32, IOP_RAM_SIZE);
     if (!g_iop.ram)

@@ -478,3 +478,47 @@ bootstrap vector. Needs the same link set as `test_iop_core.c`:
 gcc -I../include -I../source -o test_iop_syscall tests/test_iop_syscall.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c
 ./test_iop_syscall
 ```
+
+`test_iop_hle_exception_install.c` covers the one narrow, documented
+exception to `iop_hle_bios.c`'s "every A0/B0/C0 call gets a generic
+default" rule: InstallExceptionHandlers (C0h/0x07). Added after real
+BIOS testing (SCPH-10000, see docs/STATUS.md's "Investigating the new
+IOP halt" section) traced a new IOP halt back to this exact gap - the
+generic default-return stub was leaving the IOP's hardware-mandated
+general exception vector (RAM address 0x80) empty, so a later real
+SYSCALL exception jumped into unpopulated memory and eventually
+executed garbage. Fixed by having the C0h/0x07 call locate the real,
+well-known 16-byte exception-handler trampoline (`LUI $k0,0 / ADDIU
+$k0,$k0,<addr> / JR $k0 / NOP` - documented at
+https://psx-spx.consoledev.net/kernelbios/) inside the loaded BIOS ROM
+itself (a distinctive, unambiguous 3-of-4-words byte signature - only
+the ADDIU immediate varies by BIOS revision) and copying those exact,
+version-correct bytes to address 0x80 (mirrored to address 0, per
+that same document's "Garbage Area" note) - rather than hardcoding an
+assumed immediate from the public documentation's example values.
+
+This test builds a synthetic BIOS image (no real BIOS bytes) with the
+signature planted at an arbitrary offset with a deliberately
+distinctive jump-target immediate (0x0ABC), and confirms: the
+signature is found, the exact bytes (including the distinctive
+immediate) land at both address 0x80 and address 0, and - importantly
+- that a DIFFERENT C0-table function number does NOT trigger the
+install (this is a narrow, specific exception, not a blanket behavior
+change). 9/9 checks pass.
+
+This test also caught a real test-design mistake while being written
+(the same category of mistake as `test_iop_hle_bios.c`'s JAL-segment
+issue, but new: an address collision this time, not addressing
+range): an early version placed its test program at IOP RAM address
+0, which directly overlaps the "Garbage Area" mirror (0x00-0x0F) that
+this very feature writes to - the install was overwriting the test's
+own BREAK instruction before it ever executed, hanging the test
+(`iop_core_run()` has no slice cap and loops until halted). Fixed by
+moving the test program to address 0x1000, comfortably clear of every
+reserved region in the documented BIOS RAM map. Needs the same link
+set as `test_iop_core.c`:
+
+```sh
+gcc -I../include -I../source -o test_iop_hle_exception_install tests/test_iop_hle_exception_install.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c
+./test_iop_hle_exception_install
+```

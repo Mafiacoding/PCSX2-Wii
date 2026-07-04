@@ -212,6 +212,77 @@ above, and represent a scope decision (this project has so far
 deliberately avoided implementing guessed BIOS call semantics at all)
 rather than a quick, obvious next fix.
 
+### Resolved: InstallExceptionHandlers (C0h/0x07), using psx-spx as a citable reference
+
+Chose option (a) above. **psx-spx**
+(https://psx-spx.consoledev.net/kernelbios/) is a long-standing,
+publicly published PS1/PS2 community technical reference, distinct
+from disassembling this project's copyrighted BIOS binary - using it
+as a citable source (rather than guessing) is consistent with this
+project's standing policy of not fabricating hardware semantics.
+
+Its documented "BIOS RAM Map" independently confirmed several things
+found during the investigation above, word for word: address
+`0x00000068` is documented as `"Unknown (set to 000000FFh)"` - i.e.
+the `0x000000FF` byte pattern found there is genuinely correct,
+expected, real-hardware content, not a bug or a leftover sentinel as
+first suspected. Address `0x00000080` is documented as the
+`"Exception vector (actually in KSEG0, ie. at 80000080h)"`, and the
+BIOS function table documents `C(07h)` as `InstallExceptionHandlers()`
+- exactly the real function this project's generic HLE stub was
+trapping and silently no-op'ing.
+
+The documentation also gives the *exact* real bytes real BIOS ROMs
+write there: a fixed 4-instruction trampoline (`LUI $k0,0` / `ADDIU
+$k0,$k0,<addr>` / `JR $k0` / `NOP`), noting the jump-target immediate
+varies by BIOS revision. Rather than hardcoding one of the
+documentation's example immediates (which could easily be wrong for
+this exact SCPH-10000 dump), a Python scan of the actual loaded ROM
+for this distinctive, unambiguous 3-of-4-words signature (word0 and
+word2/word3 are fixed; only word1's low 16 bits vary) found **exactly
+one match**, at ROM offset `0x003C5C`:
+`3C1A0000 275A0C80 03400008 00000000` - confirming the `0x0C80`
+variant, and, crucially, that this dump really does contain the
+documented pattern verbatim.
+
+Implemented in `source/hw/iop_hle_bios.c`: when the trapped call is
+specifically `C0h` function `0x07`, the real 16-byte template is
+located in the loaded ROM (via the same kind of signature scan used
+to confirm it above, done once and cached) and copied verbatim to RAM
+address `0x80` (the real exception vector) and mirrored to address
+`0` (the documented "Garbage Area" echo) - using the dump's own real,
+version-correct bytes, never a hardcoded guess. Every other A0/B0/C0
+function number is completely unaffected and still gets the generic
+default. Unit tested in `tests/test_iop_hle_exception_install.c`
+(9/9 checks, using a synthetic BIOS image with a deliberately
+distinctive planted immediate to prove the actual found bytes are
+used, not an assumed value).
+
+**Result, re-running the real-BIOS diagnostic**: dramatic further
+progress on both cores.
+- The **IOP** no longer halts at all - it was re-tested out to
+  100,000,000 instructions (20x the previous diagnostic's cap) and is
+  still running at the end of that slice, having made the exact same
+  27 real HLE calls as before (confirming this fix didn't change *what*
+  boot code does, only unblocked forward progress past the point that
+  used to halt).
+- The **EE**, run against that same larger cap, now gets to
+  **53,592,141 instructions** (up from running out the previous
+  5,000,000-instruction cap without incident - this is the first time
+  the EE has actually been run far enough to hit a NEW wall) before
+  halting on an unimplemented primary opcode in COP2/LQ-SQ territory -
+  which is an entirely expected, already-documented gap (VU0/COP2 and
+  128-bit LQ/SQ are both explicitly listed as not-yet-implemented in
+  docs/ROADMAP.md section 1), not a surprise. Real BIOS boot code is
+  now demonstrably running deep enough to need the vector unit.
+
+This is the strongest real-BIOS result so far: both cores now make
+substantial, real forward progress using nothing but genuinely
+verified real-hardware behavior (real PCSX2 source for CPU semantics,
+this dump's own actual bytes for the exception handler, and public
+community documentation for what those bytes mean) - no fabricated
+BIOS call semantics anywhere.
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

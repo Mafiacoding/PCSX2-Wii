@@ -58,6 +58,30 @@
  * back to "log it, return a default" for any IRX import it doesn't
  * have a specific C++ implementation for (see `irxImportExec`'s
  * fallback path).
+ *
+ * ONE EXCEPTION to "every call gets a generic default": C(07h),
+ * InstallExceptionHandlers - see the real-BIOS-testing investigation
+ * in docs/STATUS.md. Real PS1/PS2 hardware/BIOS documents this
+ * function's job precisely (community reference: psx-spx,
+ * https://psx-spx.consoledev.net/kernelbios/, "BIOS Function
+ * Summary" and "BIOS RAM Map" sections): it writes a small, fixed,
+ * 4-instruction trampoline (LUI $k0,0 / ADDIU $k0,$k0,<addr> /
+ * JR $k0 / NOP) to the CPU's hardware-mandated general exception
+ * vector at RAM address 0x80 (mirrored to address 0, per that same
+ * document's "Garbage Area" note). Confirmed via real-BIOS testing
+ * that this project's generic default-return stub was exactly what
+ * was leaving that vector empty, causing execution to eventually
+ * wander into unrelated reserved memory and halt. Rather than
+ * hardcoding the well-known template bytes from the public
+ * documentation (which vary slightly by BIOS revision - the jump
+ * target immediate differs), `iop_hle_bios_try_handle()` locates the
+ * REAL 16-byte template already present in the loaded BIOS ROM image
+ * itself (a distinctive, unambiguous byte signature - see
+ * `find_exception_handler_template()`) and copies those exact,
+ * version-correct bytes verbatim. If no such signature is found (a
+ * different BIOS revision structures this differently, or no BIOS
+ * ROM is loaded), this falls back to the same generic default as
+ * every other function - no fabricated bytes are ever written.
  */
 #ifndef PCSX2_WII_IOP_HLE_BIOS_H
 #define PCSX2_WII_IOP_HLE_BIOS_H
@@ -74,6 +98,16 @@ typedef struct {
     uint32_t last_table;     /* one of the IOP_HLE_TABLE_* constants */
     uint32_t last_function;  /* value of $t1 at the time of the last call */
     char     last_call_desc[64];
+
+    /* InstallExceptionHandlers (C0h/0x07) real-behavior tracking -
+     * see the header comment above. */
+    uint8_t  exception_handler_template_found; /* 1 if the 16-byte
+                                                 * signature was
+                                                 * located in the
+                                                 * loaded BIOS ROM */
+    uint8_t  exception_handler_installed;      /* 1 once the template
+                                                 * has actually been
+                                                 * written to RAM */
 } iop_hle_bios_state_t;
 
 void iop_hle_bios_init(void);

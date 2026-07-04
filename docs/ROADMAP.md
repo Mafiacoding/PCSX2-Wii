@@ -259,12 +259,36 @@ instead of fully emulating the real IOP BIOS ROM.
       instructions (raw SYSCALL) to 3,054,763 (42 more real
       instructions executed inside the exception handler) before
       hitting a NEW halt: an unimplemented SPECIAL `funct 0x3F` at
-      `pc=0x00000068` - a low RAM address, suggesting the bootstrap
-      handler dispatches down into a RAM-resident routine after the
-      exception. This is now the most concrete next IOP target (see
-      "Suggested near-term order" below); whether it's a genuine
-      missing opcode or a symptom of an earlier, different bug hasn't
-      been investigated yet.
+      `pc=0x00000068` - a low RAM address. Investigated (see
+      docs/STATUS.md) and traced to a real, now-fixed gap: see the
+      InstallExceptionHandlers bullet below.
+- [x] InstallExceptionHandlers (`C0h` function `0x07`) - real behavior
+      instead of the generic HLE default, added directly in response
+      to the SYSCALL halt above. Using the public psx-spx community
+      reference (https://psx-spx.consoledev.net/kernelbios/) as a
+      citable source: this real BIOS function's job is to write a
+      well-known 16-byte trampoline (`LUI $k0,0` / `ADDIU $k0,$k0,
+      <addr>` / `JR $k0` / `NOP`) into RAM at the hardware exception
+      vector (address 0x80, mirrored to address 0) - which this
+      project's generic "every call returns 0" HLE stub was silently
+      skipping, leaving the exception vector empty and causing
+      execution to eventually wander into unrelated reserved memory
+      after the SYSCALL fix above started actually using it.
+      `source/hw/iop_hle_bios.c` now locates the real 16-byte template
+      inside the actual loaded BIOS ROM itself (a distinctive
+      3-of-4-words byte signature; only the jump-target immediate
+      varies by BIOS revision) rather than hardcoding an assumed
+      immediate from the documentation's example values, and installs
+      those exact, version-correct bytes - confirmed to appear exactly
+      once in the SCPH-10000 dump used for testing. Every other A0/B0/
+      C0 function number is completely unaffected. Unit tested in
+      `tests/test_iop_hle_exception_install.c` (9/9 checks). Result:
+      the IOP no longer halts at all - re-tested out to 100,000,000
+      instructions, still running, making the same 27 real HLE calls
+      as before. The EE, run against that larger cap, now reaches
+      53,592,141 instructions before hitting an expected, already-
+      documented gap (COP2/LQ-SQ, section 1) - see docs/STATUS.md's
+      "Resolved: InstallExceptionHandlers" section for full detail.
 
 ## 3. DMA controller
 
@@ -416,31 +440,36 @@ the IOP progresses to 3,054,763 instructions (up from 3,054,721)
 before hitting a NEW halt point: an unimplemented SPECIAL `funct 0x3F`
 at `pc=0x00000068`.
 
-**That new IOP halt has now been investigated** (see docs/STATUS.md's
-"Investigating the new IOP halt" section for the full diagnostic
-trail) - and it's NOT a missing-opcode gap (`funct 0x3F` isn't a real
-R3000A instruction; there's nothing to "implement"). It's a symptom:
-the hardware-mandated general exception dispatcher address
-(0x80000080) never receives real kernel code in this emulation run -
-tracing shows a short trampoline nearby DID get installed correctly,
-but following it leads to a region containing mostly zeros plus a
-lone sentinel-looking byte pattern (`0x000000FF` at address 0x68,
-written explicitly by ROM code very early in boot, long before any
-HLE BIOS call) that real code presumably intends to overwrite later
-and never does in this emulation. The last of 27 real A0/B0/C0 HLE
-BIOS calls made during the run - an A0-table call to function `0x72`,
-immediately before the SYSCALL that lands in this broken vector - is
-a plausible (not proven) point of divergence: this project's HLE trap
-gives every call a generic default return value (0), since it has no
-verified reference for real function semantics, and the real function
-may return something the surrounding code branches on. Unblocking
-this further needs either a legitimate, citable reference for real
-PS1/PS2 BIOS syscall function numbers (a scope decision - this project
-has so far deliberately avoided implementing guessed call semantics),
-or substantially deeper reverse-engineering of this specific dump's
-boot sequence. Both are bigger, more open-ended undertakings than the
-RFE/ERET/SYSCALL fixes were, and the next move here is a direction
-decision rather than an obvious quick fix.
+**That new IOP halt has now been investigated AND fixed** (see
+docs/STATUS.md's "Investigating the new IOP halt" and "Resolved:
+InstallExceptionHandlers" sections for the full trail). It was never
+a missing-opcode gap (`funct 0x3F` isn't a real R3000A instruction).
+The real cause: `C(07h)` (`InstallExceptionHandlers`, per the public
+psx-spx community reference, https://psx-spx.consoledev.net/kernelbios/
+- now used as a citable source, distinct from disassembling the
+copyrighted BIOS binary) is a real BIOS function whose job is to write
+a well-known 16-byte trampoline into RAM at the hardware exception
+vector (address 0x80) - this project's generic HLE stub was silently
+no-op'ing that call instead. Fixed in `source/hw/iop_hle_bios.c`: this
+one specific function number now locates the real 16-byte template
+inside the actual loaded BIOS ROM (a distinctive byte signature - only
+the jump-target immediate varies by revision, found via scan rather
+than hardcoded) and installs it for real; every other function number
+is unaffected. Unit tested (`tests/test_iop_hle_exception_install.c`,
+9/9 checks).
+
+**Result**: dramatic further progress. The IOP no longer halts at
+all - re-tested out to 100,000,000 instructions, still running, same
+27 real HLE calls as before. The EE, run against that larger cap,
+reaches 53,592,141 instructions before hitting an entirely expected,
+already-documented gap (COP2/LQ-SQ territory - see section 1) - the
+first time real BIOS boot code has run far enough to actually need the
+vector unit. Both cores are now making substantial real progress using
+only verified real-hardware behavior (real PCSX2 source, this dump's
+own real bytes, and public documentation) - no fabricated BIOS call
+semantics anywhere. LQ/SQ (128-bit load/store) and/or COP2/VU0 are now
+the most concretely-justified next EE targets; the IOP has no known
+halt point left to chase at all right now.
 
 1. IOP CPU core skeleton (this is "just" another MIPS interpreter,
    well-scoped, and unblocks everything downstream of SIF) - DONE

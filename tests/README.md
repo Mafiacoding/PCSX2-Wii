@@ -62,3 +62,18 @@ into the 64-bit register, matching real EE/PCSX2 LW semantics). Needs
 gcc -I../include -I../source -o test_ee_dma tests/test_ee_dma_bus.c ../source/hw/dma.c
 ./test_ee_dma
 ```
+
+
+`test_gs_registers.c` covers the GS privileged register skeleton
+(`source/hw/gs.c`) - register roundtrip and specifically the GS_CSR
+write-1-to-clear semantics vs. GS_IMR's plain read/write behavior.
+This test caught a real bug while writing it: the CSR special-case in
+`gs_mmio_write64` was originally keyed to GS_IMR's address (0x12001010)
+instead of GS_CSR's (0x12001000), which would have made the actual
+CSR register behave like a plain store and made IMR wrongly
+write-1-to-clear. Fixed before it was ever committed. Run it with:
+
+```sh
+gcc -I../include -I../source -o test_gs tests/test_gs_registers.c
+./test_gs
+```

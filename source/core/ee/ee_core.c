@@ -36,6 +36,7 @@
 
 #include "core/ee/ee_core.h"
 #include "core/hw/dma.h"
+#include "core/hw/gs.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -101,6 +102,10 @@ uint32_t ee_mem_read32(ee_state_t *st, uint32_t addr)
 
 uint64_t ee_mem_read64(ee_state_t *st, uint32_t addr)
 {
+    uint64_t gs_val;
+    if (gs_mmio_read64(addr, &gs_val))
+        return gs_val;
+
     uint8_t *p = ee_mem_ptr(st, addr, 8);
     if (!p) return 0;
     uint64_t v = 0;
@@ -138,6 +143,9 @@ void ee_mem_write32(ee_state_t *st, uint32_t addr, uint32_t val)
 
 void ee_mem_write64(ee_state_t *st, uint32_t addr, uint64_t val)
 {
+    if (gs_mmio_write64(addr, val))
+        return;
+
     uint8_t *p = ee_mem_ptr(st, addr, 8);
     if (!p) return;
     for (int i = 0; i < 8; i++)
@@ -149,6 +157,7 @@ int ee_core_init(const bios_image_t *bios)
     memset(&g_state, 0, sizeof(g_state));
 
     dma_init(); /* EE DMA controller register block - see core/hw/dma.h */
+    gs_init();  /* GS privileged register block - see core/hw/gs.h */
 
     g_state.ram = memalign(32, EE_RAM_SIZE);
     if (!g_state.ram) {

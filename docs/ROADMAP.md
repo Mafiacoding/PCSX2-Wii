@@ -112,9 +112,13 @@ renderers (it ships DX11/DX12/Vulkan/Metal/OpenGL/software renderers -
 none of which are relevant to Wii, which has neither a modern
 programmable GPU nor any of those APIs).
 
-- [ ] GS privileged register block (PMODE, DISPFB, DISPLAY, BGCOLOR,
-      CSR, IMR, etc.) - currently these memory-mapped addresses are
-      silent no-ops in `ee_core.c`
+- [x] GS privileged register block (PMODE, SMODE1/2, SRFSH, SYNCH1/2,
+      SYNCV, DISPFB1/2, DISPLAY1/2, EXTBUF/DATA/WRITE, BGCOLOR, CSR
+      w/ write-1-to-clear, IMR, BUSDIR, SIGLBLID) - `source/hw/gs.c`,
+      wired into `ee_core.c`'s 64-bit load/store path (LD/SD - these
+      are genuinely 64-bit registers on real hardware), unit tested
+      in `tests/test_gs_registers.c`. Registers only: nothing is
+      rasterized, GS local memory (the 4MB eDRAM) doesn't exist yet.
 - [ ] GS local memory model (4MB eDRAM, PSMCT32/24/16/Z formats)
 - [ ] Primitive rasterization (triangles/sprites/lines - at minimum
       whatever the BIOS splash actually draws with)

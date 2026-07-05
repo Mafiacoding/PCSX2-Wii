@@ -1298,6 +1298,54 @@ round-trips, plus an SDL/SDR round-trip). Full regression (all 40
 host-native test files) passes with 0 failures, and the Wii/devkitPPC
 target rebuilds clean with 0 warnings/0 errors.
 
+### GS: first flat-shaded triangle primitive
+
+Starting to expand GS coverage in parallel with the EE JALR
+investigation, alongside round 13. `source/hw/gif.c` previously only
+rasterized SPRITE (PRIM type 6, a filled axis-aligned rectangle from 2
+vertices) - everything else, including TRIANGLE/TRIANGLE_STRIP/
+TRIANGLE_FAN (types 3/4/5), only updated vertex/PRIM state without
+drawing anything.
+
+Added a flat-shaded triangle rasterizer (`rasterize_triangle()` in
+`gif.c`) using a standard edge-function scanline fill - plain 2D
+geometry, not real-hardware-specific behavior, so it doesn't need the
+same "verify against PCSX2 source" treatment the register layouts do.
+Single color per triangle (whichever RGBAQ was active when the
+triangle's last vertex arrived) - real per-vertex Gouraud shading,
+textures, and Z-testing are NOT modeled, an honest simplification
+matching this project's existing SPRITE-rasterizer scope notes.
+
+Vertex accumulation (`gif_state_t.tri_vseq`/`tri_x`/`tri_y`) now
+handles all 3 triangle primitive types:
+- `TRIANGLE` (type 3): every group of 3 vertices is independent (no
+  reuse between triangles).
+- `TRIANGLE_STRIP` (type 4): each new vertex from the 3rd onward forms
+  a triangle with the previous 2 (a rolling 3-vertex window).
+- `TRIANGLE_FAN` (type 5): the first vertex becomes a fixed anchor;
+  each subsequent vertex forms a triangle with the anchor and the
+  previous vertex.
+
+Any PRIM write (A+D, PACKED-mode PRIM register write, or the GIFtag's
+PRE bit) now resets the vertex-accumulation sequence - matching real
+hardware starting a fresh vertex queue on a new PRIM - so a primitive-
+type change mid-stream can't leak stale vertices from a previous
+primitive into a new triangle. This was actually tested (not just
+assumed): a dedicated check builds a partial TRIANGLE_STRIP, switches
+PRIM to TRIANGLE_FAN, and confirms only 2 vertices there draws
+nothing yet.
+
+Tests: `tests/test_gif_triangle.c`, 13 checks - a plain TRIANGLE fills
+exactly its interior (checked against a point just past the hypotenuse
+and a point outside the triangle entirely) and draws exactly once; a
+4-vertex TRIANGLE_STRIP and a 4-vertex TRIANGLE_FAN each draw exactly 2
+triangles that together fill the whole intended square; and the
+PRIM-write vertex-reset behavior above. Full regression (41
+host-native test files) passes with 0 failures, and the Wii/devkitPPC
+target rebuilds clean with 0 warnings/0 errors (fixed 4 new
+`-Wmisleading-indentation` warnings from a compact bounding-box
+one-liner along the way).
+
 ### EE JALR investigation, round 10: idle loop confirmed dead code on real hardware; root cause fully traced to a BIOS clock-calibration loop whose retry budget this project's timing model exhausts too early
 
 Direct continuation of round 9's wall (EI never executes before

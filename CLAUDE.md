@@ -422,10 +422,12 @@ to the right module by address range.
 - **`source/hw/gif.c`** - parses PACKED-mode GIF packets (GIFtag + PRIM/
   RGBAQ/XYZ2/A+D register writes) delivered via `dma_set_sink
   (DMA_CHANNEL_GIF, gif_process_quadwords)`, and rasterizes SPRITE
-  primitives (filled axis-aligned rectangles only, for now) directly into
-  GS memory. This is the current "how does data actually turn into
-  pixels" path - see `docs/ROADMAP.md` section 4 for exactly which
-  register/primitive/mode combinations are and are not handled.
+  (filled axis-aligned rectangles) plus, as of the first GS round,
+  flat-shaded `TRIANGLE`/`TRIANGLE_STRIP`/`TRIANGLE_FAN` (edge-function
+  scanline fill, single color per triangle - no Gouraud/textures/Z-test)
+  directly into GS memory. This is the current "how does data actually
+  turn into pixels" path - see `docs/ROADMAP.md` section 4 for exactly
+  which register/primitive/mode combinations are and are not handled.
 - **`source/hw/gs.c` / `gs_mem.c` / `gs_wii_output.c`** - three separate
   concerns that together stand in for the real GS: `gs.c` is just the
   privileged register block (PMODE/DISPFB/CSR/IMR/etc, with GS_CSR's

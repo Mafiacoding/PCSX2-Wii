@@ -267,6 +267,18 @@ splash screen, not just difficulty.
       this project's minimal IOP/SIF HLE model on a disc-less boot, not
       a bug. 16 new checks across two test files, 40-file/0-failure
       full regression, clean Wii rebuild.
+- [x] GS: first flat-shaded triangle primitive - `source/hw/gif.c` now
+      rasterizes `TRIANGLE`/`TRIANGLE_STRIP`/`TRIANGLE_FAN` (PRIM types
+      3/4/5) via an edge-function scanline fill, alongside the
+      existing SPRITE support. Single color per triangle (no per-
+      vertex Gouraud shading/texturing/Z-test - honest simplification,
+      see `include/core/hw/gif.h`). Vertex accumulation now supports
+      STRIP continuation (rolling 3-vertex window) and FAN continuation
+      (fixed anchor + rolling previous vertex), and correctly resets on
+      any PRIM write so a primitive-type change mid-stream can't leak
+      stale vertices into a new triangle. 13 new checks in
+      `tests/test_gif_triangle.c`, 41-file/0-failure full regression,
+      clean Wii rebuild.
 - [x] SIF mailbox/flag registers (MSCOM/SMCOM/MSFLAG/SMFLAG/CTRL,
       0x1000F200-0x1000F260), EE side only - `source/hw/sif.c`, wired
       into `ee_core.c`'s 32-bit MMIO dispatch. Register-level
@@ -898,10 +910,13 @@ enough to demonstrate needing it yet.
    open
 6. GS register block + local memory - DONE (section 6)
 7. Minimal rasterizer for whatever primitive types the splash actually
-   uses, output to Wii GX framebuffer - PARTIAL: SPRITE works via a
-   direct-to-XFB pixel blit (not real GX), triangles/textures still
-   open, and this whole path is still not driven by real BIOS/EE
-   code since IOP HLE isn't wired up yet
+   uses, output to Wii GX framebuffer - PARTIAL: SPRITE and now
+   flat-shaded TRIANGLE/TRIANGLE_STRIP/TRIANGLE_FAN work via a
+   direct-to-XFB pixel blit (not real GX; edge-function scanline fill,
+   single color per triangle, no Gouraud/texturing/Z-test - see
+   `include/core/hw/gif.h`'s scope comment), textures still open, and
+   this whole path is still not driven by real BIOS/EE code since IOP
+   HLE isn't wired up yet
 
 Remaining near-term candidates, roughly in order of how directly they
 unblock "the BIOS actually draws something": IOP hardware register
@@ -909,10 +924,11 @@ stubs (INTC/DMA/timers) and/or IOP HLE stubs for the specific
 BIOS-boot-path modules (both are needed before real BIOS code - as
 opposed to hand-written test programs - can get through a real SIF
 handshake), a clock-rate-aware EE:IOP scheduler (currently 1:1
-instruction stepping, real hardware is roughly 8:1), triangle
-rasterization in the GIF parser, VIF0/VIF1 passthrough, and wiring a
-real GIF packet through `dma_channel_kick` at boot in `main.c` as a
-live demo (currently only the hardcoded 4-color pattern runs there).
+instruction stepping, real hardware is roughly 8:1), per-vertex
+Gouraud shading and texturing for the new triangle rasterizer,
+VIF0/VIF1 passthrough, and wiring a real GIF packet through
+`dma_channel_kick` at boot in `main.c` as a live demo (currently only
+the hardcoded 4-color pattern runs there).
 
 Step 7 (real GX-based rendering with textures) is where this stops
 being "a lot of careful work" and becomes genuinely research-scale for

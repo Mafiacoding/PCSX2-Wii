@@ -181,6 +181,24 @@ gcc -I../include -I../source -o test_gif tests/test_gif.c
 ./test_gif
 ```
 
+`test_gif_triangle.c` covers the first GS round: flat-shaded
+`TRIANGLE`/`TRIANGLE_STRIP`/`TRIANGLE_FAN` (PRIM types 3/4/5), added
+alongside the existing SPRITE rasterizer. Same self-contained style as
+`test_gif.c` (`#include`s `gs_mem.c`/`gif.c` directly). 13 checks: a
+plain TRIANGLE fills exactly its interior (checked against a point just
+outside the hypotenuse and a point outside the triangle entirely) and
+draws exactly once; a 4-vertex TRIANGLE_STRIP and a 4-vertex
+TRIANGLE_FAN each draw exactly 2 triangles that together fill the
+whole intended square (checked one sample point per triangle); and a
+PRIM change mid-stream correctly resets the vertex-accumulation
+sequence so stale vertices from a previous primitive type can't leak
+into a new one.
+
+```sh
+gcc -I../include -I../source -o test_gif_triangle tests/test_gif_triangle.c
+./test_gif_triangle
+```
+
 Note: as ee_core.c has grown more hw/ dependencies (dma.c, gs.c,
 gif.c, gs_mem.c, and now sif.c since sif_init()/sif_mmio_read32/
 write32 are wired into ee_core_init() and the memory bus), tests that

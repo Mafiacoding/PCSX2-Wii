@@ -30,11 +30,68 @@ gif_state_t *gif_get_state(void) { return &g_gif; }
 #define GS_REG_FRAME_1    0x4C
 #define GS_REG_XYOFFSET_1 0x18
 
+#define PRIM_TYPE_TRIANGLE       3
+#define PRIM_TYPE_TRIANGLE_STRIP 4
+#define PRIM_TYPE_TRIANGLE_FAN   5
 #define PRIM_TYPE_SPRITE  6
 
 static inline uint32_t rd_le32(const uint8_t *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* Resets the triangle vertex-accumulation sequence - called whenever
+ * PRIM is written (real hardware starts a fresh vertex queue on a new
+ * PRIM, so a mid-strip primitive-type change can't accidentally draw
+ * a triangle from mismatched vertices). */
+static void reset_tri_vseq(void) { g_gif.tri_vseq = 0; }
+
+/* Flat-shaded triangle fill via edge functions (standard scanline
+ * rasterization - plain 2D geometry, not real-hardware-specific, so
+ * it doesn't need external verification the way register layouts do).
+ * Single color for the whole triangle (g_gif.rgba at the time the
+ * triangle completes) - no per-vertex Gouraud shading, no Z test, no
+ * texturing; see gif.h's scope comment. */
+static int32_t edge(int32_t ax, int32_t ay, int32_t bx, int32_t by, int32_t px, int32_t py)
+{
+    return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+}
+
+static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t x2, int32_t y2)
+{
+    int32_t minx = x0, maxx = x0, miny = y0, maxy = y0;
+    if (x1 < minx) minx = x1;
+    if (x1 > maxx) maxx = x1;
+    if (x2 < minx) minx = x2;
+    if (x2 > maxx) maxx = x2;
+    if (y1 < miny) miny = y1;
+    if (y1 > maxy) maxy = y1;
+    if (y2 < miny) miny = y2;
+    if (y2 > maxy) maxy = y2;
+    if (minx < 0) minx = 0;
+    if (miny < 0) miny = 0;
+
+    /* Degenerate (zero-area) triangle - nothing to draw. Also guards
+     * against divide-by-zero-shaped edge cases below. */
+    int32_t area = edge(x0, y0, x1, y1, x2, y2);
+    if (area == 0) return;
+
+    for (int32_t yy = miny; yy <= maxy; yy++) {
+        for (int32_t xx = minx; xx <= maxx; xx++) {
+            int32_t w0 = edge(x1, y1, x2, y2, xx, yy);
+            int32_t w1 = edge(x2, y2, x0, y0, xx, yy);
+            int32_t w2 = edge(x0, y0, x1, y1, xx, yy);
+            /* Inside the triangle if all 3 edge signs match the
+             * overall winding (area's sign) - works for either
+             * winding direction, since GIF vertex order isn't
+             * guaranteed consistent. */
+            if ((area > 0 && w0 >= 0 && w1 >= 0 && w2 >= 0) ||
+                (area < 0 && w0 <= 0 && w1 <= 0 && w2 <= 0)) {
+                gs_mem_write_psmct32(g_gif.fbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy, g_gif.rgba);
+            }
+        }
+    }
+    g_gif.triangles_drawn++;
 }
 
 static void apply_xyz2(uint32_t word0, uint32_t word1)
@@ -49,6 +106,45 @@ static void apply_xyz2(uint32_t word0, uint32_t word1)
     int32_t x = (raw_x - (int32_t)g_gif.xyoffset_x) >> 4;
     int32_t y = (raw_y - (int32_t)g_gif.xyoffset_y) >> 4;
 
+    uint32_t ptype = g_gif.prim & 0x7u;
+
+    if (ptype == PRIM_TYPE_TRIANGLE || ptype == PRIM_TYPE_TRIANGLE_STRIP || ptype == PRIM_TYPE_TRIANGLE_FAN) {
+        g_gif.tri_vseq++;
+
+        if (ptype == PRIM_TYPE_TRIANGLE) {
+            /* Plain TRIANGLE: every group of 3 vertices is
+             * independent - no reuse across triangles. */
+            int slot = (g_gif.tri_vseq - 1) % 3;
+            g_gif.tri_x[slot] = x;
+            g_gif.tri_y[slot] = y;
+            if (g_gif.tri_vseq % 3 == 0)
+                rasterize_triangle(g_gif.tri_x[0], g_gif.tri_y[0], g_gif.tri_x[1], g_gif.tri_y[1], g_gif.tri_x[2], g_gif.tri_y[2]);
+        } else if (ptype == PRIM_TYPE_TRIANGLE_STRIP) {
+            /* TRIANGLE_STRIP: each new vertex (from the 3rd onward)
+             * forms a triangle with the previous 2 - a rolling
+             * 3-slot window. */
+            g_gif.tri_x[0] = g_gif.tri_x[1]; g_gif.tri_y[0] = g_gif.tri_y[1];
+            g_gif.tri_x[1] = g_gif.tri_x[2]; g_gif.tri_y[1] = g_gif.tri_y[2];
+            g_gif.tri_x[2] = x; g_gif.tri_y[2] = y;
+            if (g_gif.tri_vseq >= 3)
+                rasterize_triangle(g_gif.tri_x[0], g_gif.tri_y[0], g_gif.tri_x[1], g_gif.tri_y[1], g_gif.tri_x[2], g_gif.tri_y[2]);
+        } else { /* PRIM_TYPE_TRIANGLE_FAN */
+            /* TRIANGLE_FAN: the first vertex is a fixed anchor
+             * (slot 0, never overwritten); each new vertex forms a
+             * triangle with the anchor and the previous vertex. */
+            if (g_gif.tri_vseq == 1) {
+                g_gif.tri_x[0] = x; g_gif.tri_y[0] = y;
+                g_gif.tri_x[1] = x; g_gif.tri_y[1] = y; /* also seed "previous" so vseq==2 has something to pair with */
+            } else {
+                g_gif.tri_x[2] = x; g_gif.tri_y[2] = y;
+                if (g_gif.tri_vseq >= 3)
+                    rasterize_triangle(g_gif.tri_x[0], g_gif.tri_y[0], g_gif.tri_x[1], g_gif.tri_y[1], g_gif.tri_x[2], g_gif.tri_y[2]);
+                g_gif.tri_x[1] = g_gif.tri_x[2]; g_gif.tri_y[1] = g_gif.tri_y[2];
+            }
+        }
+        return;
+    }
+
     if (!g_gif.has_vertex0) {
         g_gif.v0x = x;
         g_gif.v0y = y;
@@ -58,7 +154,7 @@ static void apply_xyz2(uint32_t word0, uint32_t word1)
 
     /* Second vertex: if we're drawing a SPRITE, fill the rectangle
      * between v0 and this vertex now. */
-    if ((g_gif.prim & 0x7u) == PRIM_TYPE_SPRITE) {
+    if (ptype == PRIM_TYPE_SPRITE) {
         int32_t x0 = g_gif.v0x, y0 = g_gif.v0y;
         int32_t x1 = x, y1 = y;
         if (x1 < x0) { int32_t t = x0; x0 = x1; x1 = t; }
@@ -76,9 +172,10 @@ static void apply_xyz2(uint32_t word0, uint32_t word1)
         g_gif.unsupported_prims_seen++;
     }
 
-    /* SPRITE (and most other GS primitives in this simplified model)
-     * only ever accumulate 2 vertices at a time before restarting -
-     * real triangle-strip/fan continuation isn't modeled. */
+    /* SPRITE only ever accumulates 2 vertices at a time before
+     * restarting - it has no strip/fan continuation on real hardware
+     * either (POINT/LINE, still unimplemented here, follow the same
+     * restart-every-N pattern as SPRITE, just with N=1/2). */
     g_gif.has_vertex0 = 0;
 }
 
@@ -102,6 +199,7 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
     switch (addr) {
     case GS_REG_PRIM:
         g_gif.prim = data_lo;
+        reset_tri_vseq();
         break;
     case GS_REG_RGBAQ: {
         /* A+D packs RGBAQ's R/G/B/A/Q into one 64-bit data value
@@ -167,8 +265,10 @@ static uint32_t process_one_packet(const uint8_t *p, uint32_t len)
     uint32_t pre   = (tag_w1 >> 14) & 0x1u;
     uint32_t prim  = (tag_w1 >> 15) & 0x7FFu;
 
-    if (pre)
+    if (pre) {
         g_gif.prim = prim;
+        reset_tri_vseq();
+    }
 
     uint32_t consumed = 16;
 
@@ -200,7 +300,7 @@ static uint32_t process_one_packet(const uint8_t *p, uint32_t len)
             uint32_t reg_code = regs_nibble(tag_w2, tag_w3, reg);
 
             switch (reg_code) {
-            case GIF_REG_PRIM:  g_gif.prim = w0; break;
+            case GIF_REG_PRIM:  g_gif.prim = w0; reset_tri_vseq(); break;
             case GIF_REG_RGBAQ: apply_rgbaq(w0, w1, w2); break;
             case GIF_REG_XYZ2:  apply_xyz2(w0, w1); break;
             case GIF_REG_AD:    apply_ad_write(w2 & 0xFFu, w0, w1); break; /* A+D: DATA in words 0-1, ADDR in word2's low byte */

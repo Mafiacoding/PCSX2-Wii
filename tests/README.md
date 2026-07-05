@@ -777,3 +777,27 @@ conflicting exceptions for a single guest instruction.
 gcc -I../include -I../source -o test_ee_exceptions tests/test_ee_exceptions.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
 ./test_ee_exceptions
 ```
+
+`test_ee_scratchpad_count.c` covers two fixes from "EE JALR
+investigation, round 8" (see docs/STATUS.md), both found via a second
+live PCSX2 trace: the R5900 Scratchpad RAM (SPR) hardware bypass and
+the COP0 Count free-running counter. 12 checks: a SW/LW round-trip
+through the *upper* half of the fixed `0x70000000-0x70003FFF` window
+(exactly where the real BIOS's kernel stack pointer lands) works with
+**no TLB entry installed at all**, proving the dedicated hardware-
+bypass path in `ee_mem_ptr()` is what resolves it, not TLB translation;
+exact boundary checks (`0x70000000`/`0x70003FFC` map into the new
+`scratch[]` buffer, `0x6FFFFFFC`/`0x70004000` do not and correctly fall
+through to the normal KUSEG TLB-miss path instead); and COP0 Count
+advancing by exactly 1 between two consecutive `MFC0` reads (previously
+static forever, hanging a real BIOS delay loop at `pc=0x9FC42500`).
+Note: this scratchpad fix also required updating
+`tests/test_ee_cop0_tlb.c`'s own KUSEG-translation test case, which had
+picked `0x70000000` as its "generic KUSEG address" example before the
+scratchpad's special, TLB-bypassing nature was known - moved to
+`0x71000000` to keep testing genuine TLB translation.
+
+```sh
+gcc -I../include -I../source -o test_ee_scratchpad_count tests/test_ee_scratchpad_count.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+./test_ee_scratchpad_count
+```

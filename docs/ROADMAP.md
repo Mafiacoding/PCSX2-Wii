@@ -154,8 +154,17 @@ splash screen, not just difficulty.
       InstallExceptionHandlers trap rather than real vectoring. The IOP
       raises a real SYSCALL exception on its own side, see section 2,
       independent of this EE work.)
-- [ ] Counters/Timers + INTC (interrupt controller) - needed for any
-      timing-dependent BIOS code and for the IOP/EE to ever synchronize
+- [x] EE COP0 Count register (round 8): a real, free-running counter,
+      advanced by 1 per instruction (a documented simplification - no
+      cycle-accurate timing model exists to derive a precise bus-clock
+      rate from - see docs/STATUS.md). Unblocked a real BIOS delay loop
+      at `pc=0x9FC42500`. Still NOT done: the Compare-match TIMER
+      INTERRUPT itself (ExcCode 0/Int delivery when Count==Compare) -
+      see the round 8 write-up below, this is the next concrete EE
+      blocker. IOP-side counters/timers remain register-stubs-only
+      (`iop_timers.c`, no ticking/gating/target-IRQ behavior) and INTC
+      (interrupt controller) more broadly is still needed for any other
+      timing-dependent BIOS code.
 - [x] SIF mailbox/flag registers (MSCOM/SMCOM/MSFLAG/SMFLAG/CTRL,
       0x1000F200-0x1000F260), EE side only - `source/hw/sif.c`, wired
       into `ee_core.c`'s 32-bit MMIO dispatch. Register-level
@@ -697,10 +706,35 @@ kernels reserve a few TLB entries, via `COP0.Wired`, specifically so
 kernel/handler code and its own scratch memory can never TLB-miss while
 already servicing a miss) - this project doesn't implement `Wired` at
 all, and/or the real boot path may install more `TLBWI` entries by this
-point than this project's trace has executed so far. Not root-caused
-further this session - it's the next investigation thread, same
-category of work as rounds 5/6/7 each were: a precisely identified,
-honestly-reached wall, not a guess.
+point than this project's trace has executed so far.
+
+**Update (round 8): both root causes found and fixed via a second live
+PCSX2 trace** (same PCSX2-MCP bridge as round 5). The "wired TLB entry"
+guess above was superseded by a more precise finding: the faulting
+address (`$sp=0x70003FC0`) falls inside the R5900's real Scratchpad RAM
+(SPR) - a fixed 16KB window (`0x70000000-0x70003FFF`) that hardware
+bypasses the TLB for *entirely*, confirmed both by the live trace and
+PCSX2's own source (`pcsx2/Memory.cpp`'s "scratch pad" comment,
+`pcsx2/MemoryTypes.h`'s 16KB `Ps2MemSize::Scratch`, `pcsx2/COP0.cpp`'s
+`isSPR()`-gated direct-buffer mapping). Fixed by intercepting this fixed
+range in `ee_mem_ptr()` before any TLB lookup, routing to a dedicated
+`scratch[]` buffer. A second wall immediately followed once that loop
+resolved: COP0 Count never advanced (see the checkbox above) - fixed by
+incrementing it once per instruction.
+
+With both fixes, an 800-million-instruction run against the real
+SCPH-10000 BIOS raises zero exceptions (down from 2-then-stuck-forever)
+and reaches a genuinely new region: `pc=0xBFC0092C`, a real `j $`
+(`J 0xBFC00928`) self-loop, immediately preceded by a `Compare=1` timer
+setup a few instructions earlier. This is a real, intentional
+"wait for interrupt" idle pattern - real hardware escapes it via an
+actual interrupt (very plausibly the Timer/Compare-match interrupt this
+setup is meant to trigger), which this project's EE core has never
+raised at all. **This is the next concrete, non-speculative EE
+blocker**: implement real EE interrupt delivery (ExcCode 0/Int),
+starting with the Count==Compare timer case, through the same
+`ee_raise_exception()` path round 7 built. See docs/STATUS.md's
+"round 8" section for the full trace and evidence.
 
 The
 IOP has no known halt point left

@@ -97,6 +97,26 @@ typedef struct {
     uint8_t *ram;           /* 32MB emulated EE RAM */
     uint32_t ram_size;
 
+    /* R5900 Scratchpad RAM (SPR): a real, dedicated 16KB on-chip
+     * memory hardwired to the fixed virtual range 0x70000000-
+     * 0x70003FFF (KUSEG). This is NOT ordinary TLB-mapped memory -
+     * real hardware bypasses the TLB entirely for this fixed address
+     * window (confirmed both by a live PCSX2 trace and PCSX2's own
+     * source: pcsx2/Memory.cpp literally comments "0x70000000-
+     * 0x70003fff scratch pad", pcsx2/MemoryTypes.h's
+     * Ps2MemSize::Scratch = 16KB, and pcsx2/COP0.cpp's MapTLB()
+     * special-cases isSPR() entries to route straight to a dedicated
+     * Scratch buffer instead of normal PFN-based physical translation).
+     * Round 7's real TLB implementation initially tried to translate
+     * this range through the normal KUSEG TLB path like any other
+     * address, which - since the BIOS's stack pointer lands in the
+     * upper 8KB half of this window, past the one narrow TLB entry
+     * that happened to be installed - produced a genuine, unresolvable
+     * TLB Refill exception loop (see docs/STATUS.md's "round 8").
+     * ee_mem_ptr() now intercepts this fixed range unconditionally,
+     * before any TLB lookup, exactly matching real hardware. */
+    uint8_t scratch[16 * 1024];
+
     const bios_image_t *bios;
 
     uint64_t instructions_executed;

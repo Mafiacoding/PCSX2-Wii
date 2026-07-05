@@ -125,17 +125,26 @@ int main(void) {
     CHECK(st->gpr[9].ud0 == 0xFFFFFFFF80000000ULL, "TLBP: no match sets Index to 0x80000000 (read back sign-extended via MFC0)");
 
     /* --- KUSEG address translation via ee_mem_ptr(): install a 4KB
-     * entry covering 0x70000000-0x70002000 (VPN2 for 0x70000000, one
+     * entry covering 0x71000000-0x71002000 (VPN2 for 0x71000000, one
      * pair of 4KB pages), then SW/LW through a KUSEG address in that
      * range and confirm it lands in the SAME physical RAM cell as the
      * kseg0-mapped equivalent (0x80000000 | phys). EntryLo0.PFN is set
-     * so the even page (0x70000000-0x70000FFF) maps to physical RAM
-     * offset 0x2000000-ish (near a small, in-bounds test area). */
+     * so the even page (0x71000000-0x71000FFF) maps to physical RAM
+     * offset 0x2000000-ish (near a small, in-bounds test area).
+     * Deliberately NOT 0x70000000 here (round 8's own earlier choice,
+     * before round 8's later scratchpad fix): that specific 16KB
+     * window (0x70000000-0x70003FFF) is real, dedicated Scratchpad RAM
+     * that ee_mem_ptr() now intercepts BEFORE any TLB lookup at all
+     * (see ee_core.h's "scratch" field and docs/STATUS.md's "round 8"),
+     * so it can no longer be used as a stand-in for "some generic
+     * TLB-translated KUSEG address" - using it here would silently
+     * test the scratchpad path instead of the TLB path this test is
+     * actually about. */
     memset(bios.data, 0, BIOS_MAX_SIZE);
     pc = 0;
-    wle32(prog+pc, enc_lui(4, 0x7000));    pc+=4; /* $a0 = 0x70000000 (KUSEG addr, even page) */
+    wle32(prog+pc, enc_lui(4, 0x7100));    pc+=4; /* $a0 = 0x71000000 (KUSEG addr, even page) */
     wle32(prog+pc, enc_lui(5, 0x1234));    pc+=4; /* $a1 = 0x12340000 (value to store) */
-    wle32(prog+pc, enc_sw(5, 4, 0x100));   pc+=4; /* SW $a1, 0x100($a0) -> KUSEG 0x70000100 */
+    wle32(prog+pc, enc_sw(5, 4, 0x100));   pc+=4; /* SW $a1, 0x100($a0) -> KUSEG 0x71000100 */
     wle32(prog+pc, enc_lw(6, 4, 0x100));   pc+=4; /* LW $a2, 0x100($a0) -> read it back via the SAME KUSEG path */
     wle32(prog+pc, enc_break());           pc+=4;
     ee_core_init(&bios);
@@ -144,14 +153,14 @@ int main(void) {
      * physical address 0x1000 << 12 = 0x01000000) for the even page;
      * V(bit1)=1 required to be considered valid-ish by our simplified
      * model (we don't check V, but set it anyway to be realistic). */
-    st->tlb[0].entry_hi  = 0x70000000u;
+    st->tlb[0].entry_hi  = 0x71000000u;
     st->tlb[0].entry_lo0 = (0x1000u << 6) | 0x2u; /* PFN=0x1000 -> phys 0x01000000, V=1 */
     st->tlb[0].entry_lo1 = 0x2u;
     st->tlb[0].page_mask = 0;
     ee_core_run(&bios);
     CHECK(st->halted == 1, "KUSEG translation test: core halted on BREAK");
     CHECK(st->gpr[6].ud0 == 0x0000000012340000ULL,
-          "KUSEG SW/LW round-trip through a TLB-mapped 0x70000100 address works (value survives, sign-extended)");
+          "KUSEG SW/LW round-trip through a TLB-mapped 0x71000100 address works (value survives, sign-extended)");
     CHECK(*(uint32_t*)(st->ram + 0x01000100) == 0x12340000u,
           "KUSEG write actually landed at the translated physical address (0x01000000 + 0x100 offset)");
 

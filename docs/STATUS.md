@@ -910,6 +910,98 @@ to how round 5/6 each started from "here's the next wall, honestly
 reached."
 
 
+### EE JALR investigation, round 8: real Scratchpad RAM + COP0 Count fixed via a live PCSX2 trace - two more walls cleared, boot now reaches a real "wait for interrupt" idle loop
+
+Direct continuation of round 7's precisely identified wall: two real
+exceptions fired, then Status.EXL never cleared again and the EE just
+kept running real code in the exception-handler prologue region
+indefinitely. The user connected a real, working PCSX2 (via the same
+PCSX2-MCP bridge as round 5) and captured exactly the live evidence
+needed to resolve it - see `report.md` (user-provided).
+
+**Root cause #1 - the R5900 Scratchpad RAM (SPR) is not ordinary TLB
+memory.** The live trace found the faulting instruction is `sd ra,
+0x20(sp)` at `pc=0x9FC41008`, with `$sp=0x70003FC0` - inside the
+virtual range `0x70000000`-`0x70003FFF`. Per the report's own MMU
+analysis (independently confirmed against real PCSX2 source):
+this fixed 16KB window is real, dedicated on-chip Scratchpad RAM that
+hardware bypasses the TLB for *entirely* - not a normal mapped KUSEG
+region needing a TLB entry at all. Confirmed directly in PCSX2's own
+source: `pcsx2/Memory.cpp` literally comments "`0x70000000-0x70003fff
+scratch pad`"; `pcsx2/MemoryTypes.h` defines a dedicated 16KB
+`Ps2MemSize::Scratch` buffer; `pcsx2/COP0.cpp`'s `MapTLB()`
+special-cases `isSPR()`-flagged entries to route straight to that
+buffer instead of normal PFN-based physical translation. Round 7's TLB
+implementation had routed this entire range through ordinary KUSEG TLB
+translation like any other address - since the real BIOS's kernel
+stack pointer lands in the *upper* half of this window
+(`0x70002000-0x70003FFF`), past the one narrow TLB entry the boot path
+happened to install, this produced a genuinely unresolvable TLB Refill
+exception loop (the "new wall" from round 7's writeup).
+
+**Fix**: `ee_mem_ptr()` now intercepts the fixed range
+`0x70000000-0x70003FFF` unconditionally, *before* any TLB lookup,
+routing straight to a new dedicated `scratch[16*1024]` buffer in
+`ee_state_t` - matching real hardware exactly, independent of whatever
+(if anything) a software TLB entry says about that range. Verified:
+an 800-million-instruction run against the real SCPH-10000 BIOS no
+longer raises a single exception (previously: 2, then stuck forever).
+
+**Root cause #2 - COP0 Count never advanced.** Past the scratchpad fix,
+tracing hit a second wall: a classic MIPS delay loop (`MFC0 $v0,$9`
+(Count); `SUBU`; `SLTU`; `BNE`) at `pc=0x9FC42500` in the real BIOS,
+looping forever because this project's COP0 Count register (`cop0[9]`)
+was only ever set via explicit `MTC0` - never a real, free-running
+counter. Real PCSX2 advances Count lazily based on elapsed bus cycles
+(`COP0.cpp`'s `MFC0` case 9: `Count += cpuRegs.cycle -
+cpuRegs.lastCOP0Cycle`); this project has no cycle-accurate timing
+model to draw an equally precise increment from, so `ee_step()` now
+increments `cop0[9]` by a fixed 1 every executed instruction instead -
+a real, working free-running counter (monotonic, comparable against
+Compare, exactly the documented COP0 Count/Compare mechanism), just
+without precise bus-clock-rate fidelity, which isn't verifiable without
+a real timing model and isn't needed just to let a delay loop
+terminate. Documented as a known simplification, not fabricated
+semantics.
+
+**Tested**: a new `tests/test_ee_scratchpad_count.c` (12 checks) covers
+a SW/LW round-trip through the scratchpad's upper half with *no* TLB
+entry installed at all (proving the hardware-bypass path, not TLB
+translation, is what resolves it), exact boundary checks (0x70000000
+and 0x70003FFC map into `scratch[]`; 0x6FFFFFFC and 0x70004000 do not,
+correctly falling through to the normal KUSEG TLB-miss path), and Count
+advancing by exactly 1 between two consecutive `MFC0` reads. One
+pre-existing test, `tests/test_ee_cop0_tlb.c`'s KUSEG-translation case,
+had unknowingly picked `0x70000000` as its "generic KUSEG address"
+example before the scratchpad's special nature was known - now
+collides with the new hardware-bypass path and was fixed by moving it
+to `0x71000000` (same kind of test-premise fix as `test_ee_unaligned.c`
+and the KUSEG-miss case needed in earlier rounds).
+
+**Verified as real, dramatic progress, not another false-progress
+trap**: with both fixes, an 800-million-instruction run against the
+real SCPH-10000 BIOS raises zero exceptions and reaches a genuinely new
+code region (`pc=0xBFC0092C`) - two full walls past round 7's stopping
+point. Disassembly confirms `0xBFC00928` is `J 0xBFC00928` - a literal,
+deliberate `j $` self-jump, immediately preceded by a `Compare=1` COP0
+timer setup a few instructions earlier (`pc=0xBFC00824`). This is a
+real, intentional "wait for interrupt" idle pattern, not a bug: real
+hardware escapes it via a genuine interrupt (very plausibly the timer
+interrupt this exact Count/Compare setup is meant to trigger) which
+this project's EE core has never raised at all (Status.IM/IE are
+tracked but nothing on the EE side ever asserts an Interrupt-class
+exception, ExcCode 0). This is the next concrete, non-speculative EE
+blocker - implementing real EE interrupt delivery, starting with the
+Timer (Count==Compare) case - already flagged generically in
+`docs/ROADMAP.md`'s "Counters/Timers + INTC" item, now confirmed by
+live evidence to be exactly what's needed next rather than one of
+several equally-plausible guesses.
+
+Regression: full suite (33 test files, including the two new ones)
+passes 0 failures. Wii/devkitPPC target rebuilds clean with no
+warnings.
+
+
 ### FPU accumulator (ACC) family implemented
 
 Added the last 7 COP1.S opcodes needed for the FPU's ACC register:

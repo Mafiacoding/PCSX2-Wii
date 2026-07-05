@@ -265,6 +265,28 @@ static void ee_raise_tlb_exception(ee_state_t *st, int is_store, uint32_t vaddr,
 
 static inline uint8_t *ee_mem_ptr(ee_state_t *st, uint32_t addr, uint32_t size)
 {
+    /* R5900 Scratchpad RAM (SPR): a real, dedicated 16KB on-chip buffer
+     * hardwired to the fixed KUSEG range 0x70000000-0x70003FFF. Real
+     * hardware bypasses the TLB *entirely* for this fixed window - it
+     * is not ordinary mapped memory, regardless of what (if anything)
+     * a software TLB entry says about it. Found via a live PCSX2 trace
+     * plus confirmation in PCSX2's own source (pcsx2/Memory.cpp's
+     * "0x70000000-0x70003fff scratch pad" comment, pcsx2/MemoryTypes.h's
+     * 16KB Ps2MemSize::Scratch, pcsx2/COP0.cpp's isSPR()-gated direct-
+     * buffer mapping in MapTLB()) - see docs/STATUS.md's "round 8".
+     * Must be checked BEFORE the KUSEG TLB path below: the real BIOS's
+     * kernel stack pointer lands in the upper half of this window
+     * (0x70002000-0x70003FFF), which round 7's TLB implementation had
+     * no way to resolve (no TLB entry covers it, and none should ever
+     * be needed here), producing an unresolvable TLB Refill exception
+     * loop. */
+    if (addr >= 0x70000000u && addr < 0x70004000u) {
+        uint32_t off = addr - 0x70000000u;
+        if (off + size <= sizeof(st->scratch))
+            return st->scratch + off;
+        return NULL; /* out-of-bounds within the 16KB window - not a TLB matter */
+    }
+
     uint32_t phys;
     if (addr < 0x80000000u) {
         /* KUSEG - needs real TLB translation, see ee_tlb_translate(). */
@@ -1866,6 +1888,25 @@ static int ee_step(void)
     st->gpr[0].ud0 = 0;
     st->gpr[0].ud1 = 0;
     st->instructions_executed++;
+
+    /* COP0 Count (register 9): a real, free-running counter compared
+     * against Compare (register 11) by real hardware/BIOS delay loops
+     * (a classic "MFC0 Count; SUBU; SLTU; BNE" busy-wait, e.g. the one
+     * found at pc=0x9FC42500 in the real SCPH-10000 BIOS - see
+     * docs/STATUS.md's "round 8"). Before this, Count never advanced
+     * at all (only ever written via explicit MTC0), so any such delay
+     * loop ran forever - not a translation/exception bug, just a
+     * missing free-running counter. Real PCSX2 advances Count lazily
+     * by however many bus cycles (cpuRegs.cycle) elapsed since the
+     * last read (COP0.cpp's MFC0 case 9); this project has no cycle-
+     * accurate timing model at all, so it advances Count by a fixed 1
+     * per instruction instead - a real, working free-running counter
+     * (monotonic, comparable against Compare, exactly the documented
+     * COP0 Count/Compare mechanism), just without precise bus-clock-
+     * rate fidelity, which isn't verifiable without a real timing
+     * model and isn't needed just to let a delay loop terminate. */
+    st->cop0[9]++;
+
     return 0;
 }
 

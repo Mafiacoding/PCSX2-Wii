@@ -155,20 +155,33 @@ int main(void) {
     CHECK(*(uint32_t*)(st->ram + 0x01000100) == 0x12340000u,
           "KUSEG write actually landed at the translated physical address (0x01000000 + 0x100 offset)");
 
-    /* --- KUSEG address with NO matching TLB entry: must fail cleanly
-     * (read-as-zero / write-is-no-op), not crash or fabricate a
-     * mapping - this is the real, currently-unresolved case found in
-     * real BIOS boot (see docs/STATUS.md's "round 5"): a genuine TLB
-     * miss with no exception-raising path yet. */
+    /* --- KUSEG address with NO matching TLB entry: real hardware
+     * raises a TLB Refill exception (this project didn't model
+     * exception delivery at all when this test was first written -
+     * see docs/STATUS.md's "round 5" - it just read as 0; the
+     * "round 6 continued" exception-delivery work replaced that
+     * placeholder with the real thing, see ee_raise_exception()/
+     * ee_raise_tlb_exception()). Single-step (not ee_core_run()) since
+     * this synthetic program has no real exception handler installed
+     * at the vector address - running to a BREAK that will never come
+     * would hang forever. */
     memset(bios.data, 0, BIOS_MAX_SIZE);
     pc = 0;
     wle32(prog+pc, enc_lui(4, 0x7FFF));    pc+=4; /* $a0 = 0x7FFF0000 (no TLB entry covers this) */
-    wle32(prog+pc, enc_lw(6, 4, 0x0));     pc+=4; /* LW from unmapped KUSEG -> should read 0 */
+    wle32(prog+pc, enc_lw(6, 4, 0x0));     pc+=4; /* LW from unmapped KUSEG -> should raise TLBL */
     wle32(prog+pc, enc_break());           pc+=4;
     ee_core_init(&bios);
     st = ee_core_get_state();
-    ee_core_run(&bios);
-    CHECK(st->gpr[6].ud0 == 0, "KUSEG TLB miss (no matching entry) reads as 0 rather than crashing or fabricating a mapping");
+    uint32_t lw_pc = st->pc; /* BIOS_RESET_VECTOR - the LW is the very first instruction */
+    ee_core_step(); /* LUI */
+    ee_core_step(); /* LW - faults */
+    CHECK(st->gpr[6].ud0 == 0, "KUSEG TLB miss: faulting LW did not fabricate a value (register left untouched)");
+    CHECK((st->cop0[13] & 0x7Cu) == (2u << 2), "KUSEG TLB miss: Cause.ExcCode == TLBL (2)");
+    CHECK((st->cop0[13] & 0x80000000u) == 0, "KUSEG TLB miss: Cause.BD == 0 (LW was not in a branch delay slot)");
+    CHECK(st->cop0[14] == lw_pc + 4, "KUSEG TLB miss: EPC points at the faulting LW instruction");
+    CHECK(st->cop0[8] == 0x7FFF0000u, "KUSEG TLB miss: BadVAddr == the faulting virtual address");
+    CHECK((st->cop0[12] & 0x2u) != 0, "KUSEG TLB miss: Status.EXL got set");
+    CHECK(st->pc == 0xBFC00200u, "KUSEG TLB miss: pc vectored to the TLB Refill handler (BEV=1 at reset, so the uncached ROM vector, offset 0)");
 
     printf("\n%d check(s) failed\n", failures);
     return failures != 0;

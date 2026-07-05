@@ -730,7 +730,7 @@ address below `0x80000000` (KUSEG), where real hardware requires a
 TLB entry rather than a fixed physical mask. This test was written as
 part of "EE JALR investigation, round 5" continuation, once the COP0
 PRId fix (see `test_ee_cop0_prid.c`) let boot progress far enough to
-reach real TLBWI calls. 9 checks: TLBWI writes the current
+reach real TLBWI calls. 15 checks: TLBWI writes the current
 PageMask/EntryHi/EntryLo0/EntryLo1 into the indexed `tlb[]` entry;
 TLBR reads a `tlb[]` entry back into those same COP0 registers (with
 the exact masking real hardware applies); TLBP finds a matching entry
@@ -738,11 +738,42 @@ by VPN2 (+ASID/Global) and sets Index accordingly, or sets Index's
 sign bit when no entry matches; a full KUSEG SW/LW round-trip through
 a manually-installed TLB entry proves address translation actually
 lands on the correct physical RAM offset; and a KUSEG TLB-miss case
-confirms an unmapped address reads as 0 rather than crashing or
-fabricating a mapping (no TLB Refill exception path exists yet - see
-docs/STATUS.md for the follow-on blocker this uncovered).
+confirms a real TLB Refill exception fires with the correct Cause/EPC/
+BadVAddr/Status.EXL/pc-vector bookkeeping (this last case was rewritten
+in "round 7" once real exception delivery existed to test against -
+it originally asserted the miss just reads as 0, which was the honest
+placeholder behavior before that work; single-stepped rather than run
+to completion since this synthetic program has no real exception
+handler installed, so running to a BREAK that will never come would
+hang forever).
 
 ```sh
 gcc -I../include -I../source -o test_ee_cop0_tlb tests/test_ee_cop0_tlb.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
 ./test_ee_cop0_tlb
+```
+
+`test_ee_exceptions.c` covers `ee_core.c`'s real MIPS exception
+delivery - `ee_raise_exception()`/`ee_raise_tlb_exception()`, ported
+from PCSX2's `cpuException()`/`cpuTlbMiss()` in `R5900.cpp` - added in
+"EE JALR investigation, round 7" once real-BIOS boot needed it to get
+past the `$sp=0x70003eb0` TLB miss wall round 6 left off at (see
+docs/STATUS.md). 16 checks across 6 scenarios: a faulting store gets
+Cause.ExcCode=TLBS (distinct from a faulting load's TLBL); a fault
+inside a branch-delay slot gets Cause.BD set and EPC pointing at the
+branch itself, not the delay-slot instruction (this needed real
+delay-slot tracking added to `branch_pending`, previously an unused
+field - see the file's own top comment); an instruction-fetch fault
+happens before the bogus fetched word is even decoded; Status.BEV
+correctly selects the RAM vs. ROM vector base; a nested exception
+(Status.EXL already 1) freezes EPC and forces the general vector
+regardless of the new fault's own ExcCode; and the `exc_raised_this_step`
+per-instruction guard (white-box test, calling the raise function
+directly twice within one simulated "instruction") correctly ignores
+the second call - this guard exists because SWL/SWR's internal
+read-then-write of the same address would otherwise raise two
+conflicting exceptions for a single guest instruction.
+
+```sh
+gcc -I../include -I../source -o test_ee_exceptions tests/test_ee_exceptions.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+./test_ee_exceptions
 ```

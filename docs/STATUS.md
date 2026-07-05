@@ -792,6 +792,124 @@ TLB itself, i.e. citable against PCSX2's own `Exceptions.cpp`/
 `COP0.cpp` rather than guessed.
 
 
+### EE JALR investigation, round 7: real MIPS exception delivery implemented - boot now runs 97%+ real instructions (was ~0.0008%), a new, different wall found
+
+Direct continuation of round 6's precisely identified blocker: real-BIOS
+boot diverged at instruction #158-159 on a genuine TLB miss
+($sp=0x70003eb0, no installed TLB entry covers it), which - since this
+project had no exception-raising path at all yet - just silently read
+as 0 and wandered into "zero-land" (151 real instructions out of 20
+million). Real hardware would service this via a TLB Refill exception,
+so that's what got implemented.
+
+**What was added**: `ee_raise_exception()` and `ee_raise_tlb_exception()`
+in `ee_core.c`, ported directly from PCSX2's own `cpuException()`/
+`cpuTlbMiss()`/`cpuTlbMissR()`/`cpuTlbMissW()` in `R5900.cpp` - not
+fabricated. On a KUSEG TLB miss (instruction fetch, load, or store),
+this now: records BadVAddr/Context/EntryHi (so a real TLB-refill
+handler could look up or install the right entry), sets Cause.ExcCode
+(TLBL for fetch/load, TLBS for store) and Cause.BD (whether the fault
+landed in a branch-delay slot), sets EPC (the faulting instruction, or
+the branch before it if BD), sets Status.EXL, and vectors pc/next_pc to
+the correct handler address - either the TLB Refill vector (offset
+0x0) or general-exception vector (offset 0x180) for a nested fault (one
+that happens while Status.EXL is already 1, i.e. still inside an
+unresolved handler) - based on Status.BEV (uncached ROM, 0xBFC00200+,
+vs. cached RAM, 0x80000000+, matching what the BIOS's own
+InstallExceptionHandlers work is for).
+
+Getting the BD/EPC bookkeeping right required real branch-delay-slot
+tracking, which this project didn't have either: `branch_pending`
+(previously an unused, vestigial field) now genuinely tracks whether
+the instruction about to execute is itself a delay-slot instruction -
+set unconditionally by the 8 "regular" conditional branches (BEQ/BNE/
+BLEZ/BGTZ/BLTZ/BGEZ/BC1F/BC1T - their delay slot always executes,
+taken or not) and by the `BRANCH_TO()` macro (covers J/JAL/JR/JALR
+unconditionally, and taken Branch Likely branches; not taken Branch
+Likely correctly leaves it unset, since that delay slot is annulled).
+
+Also required a `mem_tlb_miss` flag (set by `ee_mem_ptr()` itself) to
+distinguish "this NULL was a real KUSEG TLB miss" from "this NULL was
+just a kseg0/kseg1 address with no backing ROM/RAM" (architecturally
+NOT a TLB fault on real MIPS - kseg0/kseg1 are unmapped, direct
+segments - and still just reads-as-zero/no-ops exactly as before, so
+none of the many existing "unmapped hardware register reads as 0"
+assumptions elsewhere in this project broke), plus a per-instruction
+`exc_raised_this_step` guard so a single instruction that touches the
+same missing page twice (SWL/SWR's internal read-then-write of the
+same address, done purely to merge partial bytes) only actually raises
+one exception instead of two conflicting ones.
+
+**Known, honest limitation**: SWL/SWR's internal read-then-write
+implementation means a TLB miss during either of them is always
+reported as TLBL (load), never TLBS (store), even though architecturally
+a partial *store* instruction faulting should raise TLBS. This is a
+pre-existing implementation-detail quirk (the read is just this
+project's way of fetching the bytes to merge, not a real hardware
+transaction) now newly visible because misses are no longer silent -
+not fixed in this pass, flagged here for whenever it matters.
+
+**COP0 Status reset value** also corrected to the real one PCSX2 uses
+(`cpuRegs.CP0.n.Status.val = 0x70400004`) - previously left at 0 by
+`ee_core_init()`'s `memset()`. This matters specifically for exception
+vectoring: real hardware resets with Status.BEV set (bit 22), meaning
+early-boot exceptions vector into the BIOS ROM directly
+(`0xBFC00200+`) until the BIOS clears BEV after installing its own
+RAM-resident handlers; leaving BEV at 0 would have vectored boot-time
+exceptions into RAM instead, which is wrong for this phase of boot.
+
+**Tested**: a new `tests/test_ee_exceptions.c` (16 checks) covers a
+faulting store (Cause.ExcCode == TLBS, distinct from load), a fault
+inside a branch-delay slot (Cause.BD set, EPC points at the branch, not
+the delay slot), an instruction-fetch fault (faults before the bogus
+fetched word is even decoded), Status.BEV-dependent vectoring (RAM vs.
+ROM base), a nested exception (EPC frozen, forced to the general
+vector), and the `exc_raised_this_step` guard (a white-box test calling
+the raise function twice within one "instruction" and confirming the
+second call is a no-op). `tests/test_ee_cop0_tlb.c`'s own KUSEG-miss
+case (previously asserting "reads as 0 rather than crashing") was
+rewritten to single-step (not run to a BREAK that will never come now)
+and assert the real exception fired correctly instead - the old
+assertion was itself invalidated by this improvement, the same kind of
+test-premise fix as `test_ee_unaligned.c` needed in round 6.
+
+**Verified as real progress, not another false-progress trap**: running
+the actual SCPH-10000 BIOS for 20 million instructions now executes
+19,523,806 real (non-zero-decoded) instructions - a 97.62% meaningful-
+instruction ratio, compared to 151-out-of-20-million (0.0008%) before
+this fix. Disassembling the code range the trace spends most of its
+time in (`0xBFC00680`-`0xBFC0071C`) confirms it is genuine, recognizable
+MIPS exception-handler prologue: a full general-purpose register
+context save (`SD zero..ra` to a fixed scratch area) followed by
+reading and saving COP0 EPC and Cause - not zero-decoded NOP filler.
+
+**New, honest wall**: exactly two real exceptions fire during a 50
+million instruction run - the first (step 46, BadVAddr=0x70003FE0,
+essentially the same page as round 6's `$sp=0x70003eb0` wall) vectors
+to the TLB Refill vector; a second, nested one (step 88,
+BadVAddr=0x0BC1F000, the handler's own register-save scratch address)
+immediately follows, forced to the general vector per the nested-
+exception rule. After that second fault, Status.EXL never clears again
+(no ERET) and no further exceptions occur for tens of millions of
+subsequent instructions - the EE just keeps executing real code in
+that same handler-prologue region without completing or returning.
+This is architecturally consistent with a real MIPS kernel convention
+this project doesn't implement: reserving a few "wired" TLB entries
+(`COP0.Wired`, `cop0[6]`) so kernel/exception-handling code and its own
+scratch memory are always resident and can never themselves cause a
+TLB miss while already servicing one - if the real boot path expects
+such an entry to already be installed (or expects to install more than
+the single `TLBWI` this project's trace has executed by this point) and
+this project hasn't gotten there yet, the exception handler can end up
+doing real, legitimate work indefinitely without ever reaching the
+point that would resolve the original fault. This has NOT been root-
+caused further this session (deliberately - it's a distinct, deep
+question from "does exception delivery work correctly", which is now
+verified yes) - it's the next investigation thread, analogous in kind
+to how round 5/6 each started from "here's the next wall, honestly
+reached."
+
+
 ### FPU accumulator (ACC) family implemented
 
 Added the last 7 COP1.S opcodes needed for the FPU's ACC register:

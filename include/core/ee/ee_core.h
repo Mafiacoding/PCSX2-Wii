@@ -30,25 +30,58 @@ typedef struct {
     uint32_t next_pc;       /* branch delay slot handling */
     ee_reg128_t hi, lo;
     uint32_t cop0[32];      /* status/cause/EPC/config subset only */
+
+    /* Set to 1 by whichever instruction executes right before a
+     * branch-delay-slot instruction (any taken-or-not regular branch/
+     * jump, or a taken Branch Likely - see the BRANCH_TO() macro and
+     * the manual sets on BEQ/BNE/BLEZ/BGTZ/BLTZ/BGEZ/BLTZAL/BGEZAL/
+     * BC1F/BC1T in ee_core.c), consumed and cleared at the top of the
+     * NEXT ee_step() call. That next instruction's "am I in a delay
+     * slot" status is what determines the Cause.BD bit and EPC value
+     * (EPC = branch pc, not delay-slot pc) if IT raises an exception -
+     * see ee_raise_exception() in ee_core.c, ported from PCSX2's own
+     * cpuException() in R5900.cpp. */
     uint8_t  branch_pending;
 
     /* Real R5900 TLB (48 entries), ported from PCSX2's COP0.cpp
      * "tlbs" struct. Written/read by TLBWI/TLBWR/TLBR/TLBP (see
-     * ee_core.c). NOTE: this is storage + lookup logic only - address
-     * translation itself is NOT wired into ee_mem_ptr() yet, so this
-     * project still treats kuseg/kseg0/kseg1 as flat, TLB-free
-     * mappings for actual memory accesses (see ee_mem_ptr()'s
-     * "phys = addr & 0x1FFFFFFF" comment). Real boot-time TLBWI calls
-     * now execute correctly (matching real hardware's register
-     * semantics) instead of halting; whether this project ever needs
-     * real translation depends on what further real-BIOS boot
-     * progress reveals. */
+     * ee_core.c). Address translation IS wired into ee_mem_ptr() (via
+     * ee_tlb_translate()) for any KUSEG address (<0x80000000) - see
+     * docs/STATUS.md's "round 6". A KUSEG TLB miss now raises a real
+     * TLB Refill exception (see ee_raise_exception()/
+     * ee_raise_tlb_exception()) instead of silently reading as zero,
+     * ported from PCSX2's cpuException()/cpuTlbMiss() in R5900.cpp -
+     * see docs/STATUS.md's exception-delivery section for the full
+     * story. */
     struct {
         uint32_t page_mask;
         uint32_t entry_hi;
         uint32_t entry_lo0;
         uint32_t entry_lo1;
     } tlb[48];
+
+    /* Transient, per-instruction scratch state used only by the
+     * exception-raising path (ee_raise_exception() and callers in
+     * ee_core.c). Set once at the top of each ee_step() call (before
+     * the instruction fetch, which can itself fault) so that any
+     * memory-access helper deep in that instruction's execution
+     * (ee_mem_read32(), ee_mem_write8(), etc.) can raise a correctly
+     * addressed exception (right EPC / Cause.BD) without every one of
+     * those functions needing extra parameters threaded through. Not
+     * meaningful outside of an in-progress ee_step() call. */
+    uint32_t exc_this_pc;         /* address of the instruction currently executing */
+    uint8_t  exc_in_delay_slot;   /* was exc_this_pc itself a branch-delay-slot instruction? */
+    uint8_t  exc_raised_this_step;/* guards against double-faulting once per instruction -
+                                    * e.g. SWL/SWR do a read then a write of the SAME address,
+                                    * both of which would otherwise independently detect the
+                                    * same TLB miss and each try to vector away, corrupting the
+                                    * second call's Cause/EPC bookkeeping (see ee_raise_tlb_exception()) */
+    uint8_t  mem_tlb_miss;        /* set by ee_mem_ptr() itself: 1 if its most recent NULL
+                                    * return was specifically a KUSEG TLB miss (exception-
+                                    * worthy), 0 for every other outcome (success, or a
+                                    * kseg0/kseg1 address with no backing ROM/RAM, which is
+                                    * architecturally NOT a TLB fault and still just reads-as-
+                                    * zero/no-ops as before - see ee_mem_ptr()'s own comments) */
 
     /* COP1 (FPU) - single-precision only. Raw IEEE-754 bit patterns,
      * not C floats, so bit-level ops (ABS_S/MOV_S/NEG_S, and the

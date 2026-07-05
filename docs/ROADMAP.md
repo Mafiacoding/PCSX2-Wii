@@ -144,13 +144,16 @@ splash screen, not just difficulty.
       the real-BIOS diagnostic went from halting at ~99K instructions
       to running past 5 million without hitting another unimplemented
       opcode.
-- [x] TLB / MMU (48-entry TLB, TLBR/TLBWI/TLBWR/TLBP + KUSEG address translation - DONE, round 6; real MIPS exception delivery to service TLB Refill misses is still NOT done, see round 6 section in docs/STATUS.md)
-- [ ] Exception handling (BEV, EPC, Cause, actual exception vectors -
-      currently MFC0/MTC0 are read/write-only, and RFE/ERET/EI/DI
-      above manipulate Status/EPC directly without a real exception
-      ever being raised on the EE side - the IOP now raises a real
-      SYSCALL exception, see section 2, but the EE side of this is
-      still open)
+- [x] TLB / MMU (48-entry TLB, TLBR/TLBWI/TLBWR/TLBP + KUSEG address translation - DONE, round 6)
+- [x] Exception handling, KUSEG TLB misses only (BEV-dependent
+      vectoring, EPC/Cause/Status.EXL, Cause.BD for delay-slot faults -
+      DONE, round 7, see docs/STATUS.md. Still NOT done: general/
+      interrupt/SYSCALL exception delivery through this same real path
+      - RFE/ERET/EI/DI still only handle the return side for those,
+      and SYSCALL still uses its own separate hand-written
+      InstallExceptionHandlers trap rather than real vectoring. The IOP
+      raises a real SYSCALL exception on its own side, see section 2,
+      independent of this EE work.)
 - [ ] Counters/Timers + INTC (interrupt controller) - needed for any
       timing-dependent BIOS code and for the IOP/EE to ever synchronize
 - [x] SIF mailbox/flag registers (MSCOM/SMCOM/MSFLAG/SMFLAG/CTRL,
@@ -661,10 +664,43 @@ honestly-reached wall pointing at the next real blocker: this project
 has no MIPS exception delivery at all (no Cause/EPC/Status handling,
 no vectoring to the BIOS's own exception vectors), which is
 presumably what real hardware relies on here to install the missing
-TLB entry on demand (a TLB Refill exception). Implementing real
-exception delivery (citable against PCSX2's `Exceptions.cpp`/
-`COP0.cpp`) is therefore the next concrete, non-speculative EE
-blocker.
+TLB entry on demand (a TLB Refill exception).
+
+**Update (round 7): real exception delivery is now implemented** -
+`ee_raise_exception()`/`ee_raise_tlb_exception()`, ported from PCSX2's
+`cpuException()`/`cpuTlbMiss()` in `R5900.cpp`: Cause/EPC/Status.EXL
+updates, Status.BEV-dependent vectoring (ROM vs. RAM base), correct
+Cause.BD/EPC bookkeeping for faults inside a branch-delay slot (which
+needed real delay-slot tracking added too - see docs/STATUS.md's
+"round 7"), and a nested-exception path matching real hardware's rule
+of freezing EPC and forcing the general vector. Tested in
+`tests/test_ee_exceptions.c` (16 checks) plus an updated
+`tests/test_ee_cop0_tlb.c` KUSEG-miss case (rewritten to check the real
+exception fires correctly, replacing its old "reads as 0" assumption).
+
+Verified as real, dramatic progress against the actual SCPH-10000
+BIOS: a 20-million-instruction run now executes 97.62% real
+(non-zero-decoded) instructions, compared to 0.0008% (151 out of 20
+million) before this fix - and the code being executed in the range
+the trace spends most of its time in was confirmed by disassembly to
+be genuine MIPS exception-handler prologue (a full GPR context save
+followed by saving EPC/Cause), not zero-decoded filler.
+
+**New wall**: exactly two exceptions fire in a 50-million-instruction
+run (the original TLB miss, then an immediate nested fault when the
+handler's own register-save routine touches a different unmapped
+KUSEG page) - after that, Status.EXL never clears (no ERET) and the EE
+just keeps running real code in that same handler-prologue region
+without resolving, for tens of millions of instructions. This looks
+architecturally like a missing "wired" TLB entry situation (real MIPS
+kernels reserve a few TLB entries, via `COP0.Wired`, specifically so
+kernel/handler code and its own scratch memory can never TLB-miss while
+already servicing a miss) - this project doesn't implement `Wired` at
+all, and/or the real boot path may install more `TLBWI` entries by this
+point than this project's trace has executed so far. Not root-caused
+further this session - it's the next investigation thread, same
+category of work as rounds 5/6/7 each were: a precisely identified,
+honestly-reached wall, not a guess.
 
 The
 IOP has no known halt point left

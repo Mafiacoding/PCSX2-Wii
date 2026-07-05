@@ -14,17 +14,27 @@
  *     incl. 64-bit D-forms, MULT/DIV, HI/LO moves, REGIMM branches,
  *     J/JAL/JR/JALR, byte/half/word/double load+store, and unaligned
  *     LWL/LWR/SWL/SWR.
- *   - COP0: MFC0/MTC0 (Status/Config/generic registers only), plus
- *     the "CO"-format instructions ERET, EI, DI (ported from PCSX2's
- *     COP0.cpp), and RFE (the older MIPS I exception-return
- *     instruction - not in PCSX2's own EE opcode table since real
- *     EE/R5900 doesn't need it, but real BIOS PS1-backward-
- *     compatibility-mode boot code does execute it, so it's
- *     implemented here with RFE's standard MIPS I semantics). Still
- *     no TLB (TLBR/TLBWI/TLBWR/TLBP), no BC0 branches, no actual
- *     exception RAISING (ERET/RFE only handle the return side; there
- *     is no MMU/interrupt logic that would ever trigger EPC/Cause to
- *     be set other than explicit MTC0 writes).
+ *   - COP0: MFC0/MTC0 (Status/Config/generic registers only), the
+ *     "CO"-format instructions ERET, EI, DI (ported from PCSX2's
+ *     COP0.cpp), RFE (the older MIPS I exception-return instruction -
+ *     not in PCSX2's own EE opcode table since real EE/R5900 doesn't
+ *     need it, but real BIOS PS1-backward-compatibility-mode boot code
+ *     does execute it, so it's implemented here with RFE's standard
+ *     MIPS I semantics), a real 48-entry TLB (TLBR/TLBWI/TLBWR/TLBP,
+ *     ported from PCSX2's COP0.cpp, plus real KUSEG address
+ *     translation wired into ee_mem_ptr() - see docs/STATUS.md's
+ *     "round 6"), and real exception RAISING/delivery
+ *     (ee_raise_exception()/ee_raise_tlb_exception(), ported from
+ *     PCSX2's cpuException()/cpuTlbMiss() in R5900.cpp): Cause/EPC/
+ *     Status.EXL are updated and pc/next_pc vectored to the correct
+ *     BEV-dependent handler address on a KUSEG TLB miss, for both
+ *     instruction fetch and load/store, with correct Cause.BD/EPC
+ *     bookkeeping when the fault lands in a branch-delay slot. Still
+ *     no BC0 branches, and the only ExcCodes actually raised anywhere
+ *     are the two TLB-miss ones (TLBL/TLBS) - no general/interrupt/
+ *     SYSCALL exception delivery through this same path yet (SYSCALL
+ *     has its own hand-written trap elsewhere, see
+ *     InstallExceptionHandlers).
  *   - CACHE, SYNC, PREF: accepted as no-ops (real BIOS init code issues
  *     these constantly for cache management we don't model).
  *   - A meaningful subset (~67 of ~90) of MMI (SIMD) opcodes: the
@@ -80,10 +90,13 @@
  *     needed for BC1) is modeled; nothing in this project raises FPU
  *     exceptions from the others yet, a documented, consistent
  *     simplification across every FPU op in this file.
- *   - TLB/MMU (no TLB entries modeled at all), interrupt/exception
- *     RAISING (nothing ever triggers an exception - only the
- *     exception-RETURN instructions ERET/RFE above are implemented),
- *     SYSCALL handler table
+ *   - General/interrupt/SYSCALL exception delivery through the real
+ *     ee_raise_exception() path (only KUSEG TLB misses use it so far -
+ *     see the COP0 bullet above); a real SYSCALL handler table (the
+ *     existing InstallExceptionHandlers trap is a separate, hand-
+ *     written mechanism, not real exception vectoring); interrupts
+ *     (nothing ever raises Cause's Interrupt Pending bits or services
+ *     Status.IM)
  *   - The IOP has its own core (iop_core.c) and BIOS syscall trap
  *     (core/hw/iop_hle_bios.c) now - see docs/ROADMAP.md for scope
  *
@@ -125,11 +138,11 @@ ee_state_t *ee_core_get_state(void) { return &g_state; }
  * "boot wanders through silently-dead memory" failure mode already
  * documented for the JALR investigation. Ported from PCSX2's own
  * VPN2()/PFN0()/PFN1()/Mask() logic in R5900.h's tlbs struct. Returns
- * 1 and fills *out_phys on a hit; returns 0 (TLB miss) otherwise - a
- * real miss should raise a TLB Refill exception on real hardware, but
- * this project has no EE exception-raising path yet (see ee_core.c's
- * top-of-file coverage notes), so a miss here just means the access
- * fails cleanly (NULL / reads-as-zero) rather than being fabricated. */
+ * 1 and fills *out_phys on a hit; returns 0 (TLB miss) otherwise - the
+ * caller (ee_mem_ptr()) turns a miss into a real TLB Refill exception
+ * (see ee_raise_exception()/ee_raise_tlb_exception() and their call
+ * sites in the ee_mem_read* / ee_mem_write* functions below), matching
+ * real hardware instead of the old "just read as zero" placeholder. */
 static inline int ee_tlb_translate(ee_state_t *st, uint32_t vaddr, uint32_t *out_phys)
 {
     uint32_t want_vpn2 = (vaddr >> 13) & 0x7FFFFu;
@@ -170,13 +183,95 @@ static inline int ee_tlb_translate(ee_state_t *st, uint32_t vaddr, uint32_t *out
     return 0;
 }
 
+/* MIPS/R5900 exception codes (Cause register ExcCode field, bits
+ * 2-6) - only the ones this project actually raises so far. Ported
+ * from PCSX2's R5900.h EXC_CODE_* table (EXC_CODE(n) = n << 2). */
+#define EE_EXC_CODE_INT   (0u << 2) /* Interrupt - defined for completeness, not raised by this project yet */
+#define EE_EXC_CODE_TLBL  (2u << 2) /* TLB miss, load or instruction fetch */
+#define EE_EXC_CODE_TLBS  (3u << 2) /* TLB miss, store */
+
+/* Raises a real R5900 exception: updates Cause/EPC/Status and vectors
+ * pc/next_pc to the correct handler address. Ported from PCSX2's own
+ * cpuException() in R5900.cpp - not fabricated. Only the two TLB-miss
+ * ExcCodes above are actually triggered anywhere in this project right
+ * now (see ee_raise_tlb_exception() below and its call sites in the
+ * ee_mem_read* / ee_mem_write* functions), but this function itself
+ * handles the general case correctly (vector offsets, BEV, nested-
+ * exception override) for whenever a future change raises a different
+ * ExcCode (COP unusable, overflow, address error, etc. are all still
+ * unraised - see the coverage notes at the top of this file). */
+static void ee_raise_exception(ee_state_t *st, uint32_t exc_code, uint32_t this_pc, int in_delay_slot)
+{
+    uint32_t offset;
+    if (exc_code == EE_EXC_CODE_TLBL || exc_code == EE_EXC_CODE_TLBS)
+        offset = 0x000u; /* TLB Refill vector */
+    else if (exc_code == EE_EXC_CODE_INT)
+        offset = 0x200u; /* Interrupt vector */
+    else
+        offset = 0x180u; /* General exception vector */
+
+    /* Cause: clear ExcCode (bits 2-6) and BD (bit 31), then set both -
+     * other bits (e.g. the CE coprocessor-number field) are left
+     * alone, matching real hardware/PCSX2. */
+    st->cop0[13] = (st->cop0[13] & ~(0x7Cu | 0x80000000u)) | (exc_code & 0x7Cu);
+
+    if (!(st->cop0[12] & 0x2u)) { /* Status.EXL == 0: not already inside a handler */
+        st->cop0[12] |= 0x2u; /* Status.EXL = 1 */
+        if (in_delay_slot) {
+            st->cop0[14] = this_pc - 4u; /* EPC = the branch itself, not the delay slot */
+            st->cop0[13] |= 0x80000000u; /* Cause.BD = 1 */
+        } else {
+            st->cop0[14] = this_pc;
+        }
+    } else {
+        /* Nested exception (already mid-handler): real hardware forces
+         * the general-exception vector regardless of this ExcCode, and
+         * does NOT touch EPC again (the original handler's return
+         * address must survive). Ported from PCSX2's cpuException(). */
+        offset = 0x180u;
+    }
+
+    /* Status.BEV (bit 22): boot-time / pre-vector-install exceptions
+     * vector into the BIOS ROM directly (uncached, 0xBFC00200+); once
+     * the BIOS clears BEV (after installing its own RAM-resident
+     * handlers - see the InstallExceptionHandlers work elsewhere in
+     * this file), exceptions vector into RAM (cached, 0x80000000+)
+     * instead. */
+    uint32_t base = (st->cop0[12] & 0x00400000u) ? 0xBFC00200u : 0x80000000u;
+    st->pc = base + offset;
+    st->next_pc = st->pc + 4u;
+}
+
+/* TLB-miss-specific wrapper: also records BadVAddr/Context/EntryHi the
+ * way real hardware does, so a BIOS TLB-refill handler could look up
+ * (or install) the right entry - ported from PCSX2's cpuTlbMiss()/
+ * cpuTlbMissR()/cpuTlbMissW() in R5900.cpp. Guarded by
+ * exc_raised_this_step so a single instruction that touches the same
+ * missing TLB entry twice (e.g. SWL/SWR's read-then-write of the same
+ * address) only actually raises one exception - see the field's
+ * comment in ee_core.h. */
+static void ee_raise_tlb_exception(ee_state_t *st, int is_store, uint32_t vaddr, uint32_t this_pc, int in_delay_slot)
+{
+    if (st->exc_raised_this_step)
+        return;
+    st->exc_raised_this_step = 1;
+
+    st->cop0[8]  = vaddr; /* BadVAddr */
+    st->cop0[4]  = (st->cop0[4] & 0xFF80000Fu) | ((vaddr >> 9) & 0x007FFFF0u); /* Context */
+    st->cop0[10] = (vaddr & 0xFFFFE000u) | (st->cop0[10] & 0x1FFFu); /* EntryHi */
+
+    ee_raise_exception(st, is_store ? EE_EXC_CODE_TLBS : EE_EXC_CODE_TLBL, this_pc, in_delay_slot);
+}
+
 static inline uint8_t *ee_mem_ptr(ee_state_t *st, uint32_t addr, uint32_t size)
 {
     uint32_t phys;
     if (addr < 0x80000000u) {
         /* KUSEG - needs real TLB translation, see ee_tlb_translate(). */
-        if (!ee_tlb_translate(st, addr, &phys))
-            return NULL; /* TLB miss - no exception path yet, fails cleanly */
+        if (!ee_tlb_translate(st, addr, &phys)) {
+            st->mem_tlb_miss = 1; /* real TLB Refill exception territory - see callers below */
+            return NULL;
+        }
     } else {
         /* Mask to the physical address FIRST, then decide ROM-vs-RAM.
          * Real MIPS kseg0/kseg1 both decode to the same physical
@@ -196,6 +291,9 @@ static inline uint8_t *ee_mem_ptr(ee_state_t *st, uint32_t addr, uint32_t size)
          * immediately. */
         phys = addr & 0x1FFFFFFFu;
     }
+    st->mem_tlb_miss = 0; /* reached past the TLB-miss check above (translated OK, or kseg0/1) -
+                            * any NULL returned below is a bounds/backing-store miss, not a TLB
+                            * fault, and should keep failing silently (reads-as-zero/no-op) as before */
     if (phys >= 0x1FC00000u) {
         uint32_t off = phys - 0x1FC00000u;
         if (st->bios && off + size <= st->bios->size)
@@ -213,16 +311,34 @@ static inline uint8_t *ee_mem_ptr(ee_state_t *st, uint32_t addr, uint32_t size)
  * composed/decomposed byte-by-byte in explicit little-endian order,
  * independent of host/target endianness. */
 
+/* Shared by every ee_mem_read* / ee_mem_write* below: if the just-failed
+ * ee_mem_ptr() call was specifically a KUSEG TLB miss (not a harmless
+ * kseg0/1 backing-store gap), raise the real exception instead of
+ * silently reading-as-zero/no-oping. Uses the transient exc_this_pc/
+ * exc_in_delay_slot context ee_step() sets once per instruction (see
+ * ee_core.h) - so calling these functions OUTSIDE of an in-progress
+ * ee_step() (e.g. test setup code poking memory directly) never raises
+ * a spurious exception, since mem_tlb_miss will simply be 0 for any
+ * kseg0/1 address, which is all such direct calls use in this project
+ * (see tests/README.md's note on test_ee_unaligned.c). */
+static inline void ee_mem_check_tlb_fault(ee_state_t *st, uint32_t addr, int is_store)
+{
+    if (st->mem_tlb_miss)
+        ee_raise_tlb_exception(st, is_store, addr, st->exc_this_pc, st->exc_in_delay_slot);
+}
+
 uint8_t ee_mem_read8(ee_state_t *st, uint32_t addr)
 {
     uint8_t *p = ee_mem_ptr(st, addr, 1);
-    return p ? *p : 0;
+    if (p) return *p;
+    ee_mem_check_tlb_fault(st, addr, 0);
+    return 0;
 }
 
 uint16_t ee_mem_read16(ee_state_t *st, uint32_t addr)
 {
     uint8_t *p = ee_mem_ptr(st, addr, 2);
-    if (!p) return 0;
+    if (!p) { ee_mem_check_tlb_fault(st, addr, 0); return 0; }
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
 
@@ -240,7 +356,7 @@ uint32_t ee_mem_read32(ee_state_t *st, uint32_t addr)
         return hw_val;
 
     uint8_t *p = ee_mem_ptr(st, addr, 4);
-    if (!p) return 0;
+    if (!p) { ee_mem_check_tlb_fault(st, addr, 0); return 0; }
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
@@ -252,7 +368,7 @@ uint64_t ee_mem_read64(ee_state_t *st, uint32_t addr)
         return gs_val;
 
     uint8_t *p = ee_mem_ptr(st, addr, 8);
-    if (!p) return 0;
+    if (!p) { ee_mem_check_tlb_fault(st, addr, 0); return 0; }
     uint64_t v = 0;
     for (int i = 7; i >= 0; i--)
         v = (v << 8) | p[i];
@@ -262,13 +378,14 @@ uint64_t ee_mem_read64(ee_state_t *st, uint32_t addr)
 void ee_mem_write8(ee_state_t *st, uint32_t addr, uint8_t val)
 {
     uint8_t *p = ee_mem_ptr(st, addr, 1);
-    if (p) *p = val;
+    if (p) { *p = val; return; }
+    ee_mem_check_tlb_fault(st, addr, 1);
 }
 
 void ee_mem_write16(ee_state_t *st, uint32_t addr, uint16_t val)
 {
     uint8_t *p = ee_mem_ptr(st, addr, 2);
-    if (!p) return;
+    if (!p) { ee_mem_check_tlb_fault(st, addr, 1); return; }
     p[0] = (uint8_t)(val & 0xFF);
     p[1] = (uint8_t)((val >> 8) & 0xFF);
 }
@@ -281,7 +398,7 @@ void ee_mem_write32(ee_state_t *st, uint32_t addr, uint32_t val)
         return;
 
     uint8_t *p = ee_mem_ptr(st, addr, 4);
-    if (!p) return;
+    if (!p) { ee_mem_check_tlb_fault(st, addr, 1); return; }
     p[0] = (uint8_t)(val & 0xFF);
     p[1] = (uint8_t)((val >> 8) & 0xFF);
     p[2] = (uint8_t)((val >> 16) & 0xFF);
@@ -294,7 +411,7 @@ void ee_mem_write64(ee_state_t *st, uint32_t addr, uint64_t val)
         return;
 
     uint8_t *p = ee_mem_ptr(st, addr, 8);
-    if (!p) return;
+    if (!p) { ee_mem_check_tlb_fault(st, addr, 1); return; }
     for (int i = 0; i < 8; i++)
         p[i] = (uint8_t)((val >> (8 * i)) & 0xFF);
 }
@@ -343,6 +460,21 @@ int ee_core_init(const bios_image_t *bios)
      * root cause of the EE JALR-to-out-of-range halt investigated
      * across rounds 1-4. */
     g_state.cop0[15] = 0x00002e20u;
+
+    /* COP0 Status (register 12) reset value - ported directly from
+     * PCSX2's own R5900.cpp ("cpuRegs.CP0.n.Status.val = 0x70400004").
+     * Before this fix, cop0[12] was left at 0 by the memset() above,
+     * which is wrong in one specific, exception-relevant way: real
+     * hardware resets with Status.BEV (bit 22) SET, meaning exceptions
+     * vector into the BIOS ROM directly (0xBFC00200+) until the BIOS
+     * itself clears BEV after installing its own RAM-resident handlers
+     * (see the InstallExceptionHandlers work elsewhere in this file).
+     * With BEV left at 0, this project's new exception-delivery path
+     * (see ee_raise_exception()) would incorrectly vector early boot-
+     * time exceptions into RAM instead of ROM. The other bits in this
+     * reset value (ERL=1, KSU=0, IE=0, EXL=0) are also real, not
+     * fabricated - decoded straight from the same constant PCSX2 uses. */
+    g_state.cop0[12] = 0x70400004u;
 
     return 0;
 }
@@ -453,7 +585,31 @@ static int ee_step(void)
 {
     ee_state_t *st = &g_state;
     uint32_t pc = st->pc;
+
+    /* Capture + clear the delay-slot flag the PREVIOUS instruction may
+     * have left for us (see branch_pending's comment in ee_core.h),
+     * and publish this instruction'''s own transient exception context
+     * BEFORE the fetch below - which can itself fault (a real TLB
+     * Refill exception on a KUSEG instruction fetch) - so
+     * ee_raise_tlb_exception() always has the right EPC/BD to use, no
+     * matter how deep in this instruction'''s execution the fault
+     * actually happens. */
+    int in_delay_slot = st->branch_pending;
+    st->branch_pending = 0;
+    st->exc_this_pc = pc;
+    st->exc_in_delay_slot = (uint8_t)in_delay_slot;
+    st->exc_raised_this_step = 0;
+
     uint32_t instr = ee_mem_read32(st, pc);
+    if (st->mem_tlb_miss) {
+        /* Instruction-fetch TLB Refill: ee_mem_read32() -> ee_mem_ptr()
+         * already raised the exception and pointed st->pc/next_pc at
+         * the vector. Bail out now, before the unconditional
+         * st->pc = fallthrough_pc below would clobber that vector with
+         * this (never-fetched) instruction's own stale fallthrough
+         * address. */
+        return 0;
+    }
 
     uint32_t op    = (instr >> 26) & 0x3F;
     uint32_t rs    = (instr >> 21) & 0x1F;
@@ -474,7 +630,18 @@ static int ee_step(void)
 
 #define GPR(x)  st->gpr[x].ud0
 #define GPR1(x) st->gpr[x].ud1
-#define BRANCH_TO(target) do { st->next_pc = (target); } while (0)
+/* Marks that the instruction right after this one (this_pc + 4, i.e.
+ * whatever st->pc already got set to just above) is a branch-delay
+ * slot - see branch_pending'''s comment in ee_core.h. Every BRANCH_TO()
+ * call means a branch/jump is actually being taken (regular branch
+ * taken, unconditional J/JAL/JR/JALR, or a taken Branch Likely) and
+ * its delay slot WILL execute next, so this is set unconditionally
+ * here. The regular (non-Likely) conditional branches additionally set
+ * it manually even when NOT taken, since their delay slot executes
+ * either way - see e.g. BEQ/BNE/BLTZ/BC1F below - whereas Branch
+ * Likely'''s not-taken path deliberately skips both BRANCH_TO() and the
+ * delay slot entirely (annulled), so it correctly leaves this unset. */
+#define BRANCH_TO(target) do { st->next_pc = (target); st->branch_pending = 1; } while (0)
 #define LINK(reg) do { GPR(reg) = this_pc + 8; } while (0)
 
     switch (op) {
@@ -550,8 +717,8 @@ static int ee_step(void)
 
     case 0x01: /* REGIMM */
         switch (rt) {
-        case 0x00: /* BLTZ */ if ((int64_t)GPR(rs) < 0)  BRANCH_TO(this_pc + 4 + (imm << 2)); break;
-        case 0x01: /* BGEZ */ if ((int64_t)GPR(rs) >= 0) BRANCH_TO(this_pc + 4 + (imm << 2)); break;
+        case 0x00: /* BLTZ */ st->branch_pending = 1; /* delay slot always executes for regular branches, taken or not */ if ((int64_t)GPR(rs) < 0)  BRANCH_TO(this_pc + 4 + (imm << 2)); break;
+        case 0x01: /* BGEZ */ st->branch_pending = 1; if ((int64_t)GPR(rs) >= 0) BRANCH_TO(this_pc + 4 + (imm << 2)); break;
         /* "Likely" branches (MIPS II+, ported from PCSX2's
          * Interpreter.cpp): if the condition is FALSE, the delay slot
          * is NOT executed at all (nullified) - unlike ordinary
@@ -579,10 +746,10 @@ static int ee_step(void)
 
     case 0x02: /* J */   BRANCH_TO((this_pc & 0xF0000000u) | ((instr & 0x03FFFFFFu) << 2)); break;
     case 0x03: /* JAL */  LINK(31); BRANCH_TO((this_pc & 0xF0000000u) | ((instr & 0x03FFFFFFu) << 2)); break;
-    case 0x04: /* BEQ */  if (GPR(rs) == GPR(rt)) BRANCH_TO(this_pc + 4 + (imm << 2)); break;
-    case 0x05: /* BNE */  if (GPR(rs) != GPR(rt)) BRANCH_TO(this_pc + 4 + (imm << 2)); break;
-    case 0x06: /* BLEZ */ if ((int64_t)GPR(rs) <= 0) BRANCH_TO(this_pc + 4 + (imm << 2)); break;
-    case 0x07: /* BGTZ */ if ((int64_t)GPR(rs) > 0)  BRANCH_TO(this_pc + 4 + (imm << 2)); break;
+    case 0x04: /* BEQ */  st->branch_pending = 1; if (GPR(rs) == GPR(rt)) BRANCH_TO(this_pc + 4 + (imm << 2)); break;
+    case 0x05: /* BNE */  st->branch_pending = 1; if (GPR(rs) != GPR(rt)) BRANCH_TO(this_pc + 4 + (imm << 2)); break;
+    case 0x06: /* BLEZ */ st->branch_pending = 1; if ((int64_t)GPR(rs) <= 0) BRANCH_TO(this_pc + 4 + (imm << 2)); break;
+    case 0x07: /* BGTZ */ st->branch_pending = 1; if ((int64_t)GPR(rs) > 0)  BRANCH_TO(this_pc + 4 + (imm << 2)); break;
 
     /* "Likely" branches (MIPS II+, primary opcodes 0x14-0x17), ported
      * from PCSX2's Interpreter.cpp. Same delay-slot-nullification
@@ -1001,9 +1168,11 @@ static int ee_step(void)
             case 0x00: /* BC1F - branch if the FP condition flag (fcr31
                         * bit 0x00800000, set by C.EQ/LT/LE.S) is
                         * CLEAR. Ported from PCSX2's BC1()/BC1F(). */
+                st->branch_pending = 1; /* regular branch: delay slot always executes */
                 if (!(st->fcr31 & 0x00800000u)) BRANCH_TO(this_pc + 4 + (imm << 2));
                 break;
             case 0x01: /* BC1T - branch if the flag is SET. */
+                st->branch_pending = 1;
                 if ((st->fcr31 & 0x00800000u)) BRANCH_TO(this_pc + 4 + (imm << 2));
                 break;
             default:

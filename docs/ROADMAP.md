@@ -38,12 +38,26 @@ splash screen, not just difficulty.
       actually doing 53M instructions of real boot work at all - see
       "Suggested near-term order" below for the corrected picture.
 - [x] COP1 (FPU) - core single-precision ops: MFC1/CFC1/MTC1/CTC1,
-      ADD.S/SUB.S/MUL.S/DIV.S/ABS.S/MOV.S/NEG.S, CVT.W.S/CVT.S.W,
-      C.EQ.S/C.LT.S/C.LE.S. Ported from `pcsx2/FPU.cpp` including the
-      PS2 FPU's non-IEEE quirks (denormal inputs/outputs flushed to
-      signed zero, infinities clamped to +/-Fmax). Unit tested in
-      `tests/test_ee_fpu.c`. Still missing: SQRT.S/RSQRT.S, the
-      MADD/MSUB/MADDA/MSUBA family, MAX.S/MIN.S, and BC1 branches.
+      ADD.S/SUB.S/MUL.S/DIV.S/ABS.S/MOV.S/NEG.S, SQRT.S/RSQRT.S,
+      MAX.S/MIN.S, CVT.W.S/CVT.S.W, C.EQ.S/C.LT.S/C.LE.S, and
+      BC1F/BC1T (branch on FP condition flag). Ported from
+      `pcsx2/FPU.cpp` including the PS2 FPU's non-IEEE quirks
+      (denormal inputs/outputs flushed to signed zero, infinities
+      clamped to +/-Fmax), SQRT.S/RSQRT.S's special cases (negative
+      input takes sqrt(fabs()) instead of NaN; RSQRT.S with a
+      zero/denormal divisor returns +Fmax instead of infinity - and
+      the real-hardware quirk that SQRT.S's source operand is Ft, not
+      Fs), and MAX.S/MIN.S's bit-level signed-int comparison trick
+      (`fp_max`/`fp_min` - only differs from a naive float compare
+      when both operands are negative). Unit tested in
+      `tests/test_ee_fpu.c` and `tests/test_ee_fpu2.c` (13/13 checks,
+      including both branch directions for BC1F/BC1T to prove they're
+      not accidentally unconditional). Still missing: the
+      MADD/MSUB/MADDA/MSUBA accumulator family, BC1FL/BC1TL ("likely"
+      branches - this project has no likely-branch infrastructure yet
+      for ANY branch, integer or FP), and the FPU exception-cause
+      control-register flags (only the condition flag needed for BC1
+      is modeled).
 - [ ] COP2 (VU0 macro mode) - VU0 running as a COP2 coprocessor
       attached to the EE pipeline (reference: `pcsx2/VU0.cpp`, `COP2.cpp`)
 - [x] COP0 "CO"-format instructions: RFE, ERET, EI, DI - dispatched

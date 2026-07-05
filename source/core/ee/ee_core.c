@@ -46,12 +46,21 @@
  *   - The other ~55 MMI opcodes (saturated arithmetic, compares,
  *     QFSRV, PMADDW/H family, PINTH/PINTEH, PROT3W, etc.)
  *   - COP2 (VU0 macro mode)
- *   - COP1 (FPU): SQRT/RSQRT, MADD/MSUB family, MAX/MIN, BC1 branches
- *     not implemented (halts). Core arithmetic (ADD/SUB/MUL/DIV/ABS/
- *     MOV/NEG.S, CVT.W.S/CVT.S.W, C.EQ/LT/LE.S, MFC1/MTC1/CFC1/CTC1)
- *     is implemented, ported from pcsx2/FPU.cpp including the PS2's
- *     non-IEEE denormal/infinity handling (fpuDouble/checkOverflow/
- *     checkUnderflow).
+ *   - COP1 (FPU): core arithmetic (ADD/SUB/MUL/DIV/ABS/MOV/NEG.S,
+ *     SQRT.S/RSQRT.S, MAX.S/MIN.S, CVT.W.S/CVT.S.W, C.EQ/LT/LE.S,
+ *     MFC1/MTC1/CFC1/CTC1) plus BC1F/BC1T (branch on FP condition
+ *     flag) are implemented, ported from pcsx2/FPU.cpp including the
+ *     PS2's non-IEEE denormal/infinity handling (fpuDouble/
+ *     checkOverflow/checkUnderflow) and the MAX.S/MIN.S bit-level
+ *     signed-int comparison quirk (fp_max/fp_min). Still NOT
+ *     implemented: the MADD/MSUB accumulator family, BC1FL/BC1TL
+ *     ("likely" branches - this project has no likely-branch
+ *     infrastructure for ANY branch yet, integer or FP), and the
+ *     FPU exception-cause control-register flags (O/U/I/D/SO/SU/SI/
+ *     SD) - only the condition flag (C, needed for BC1) is modeled;
+ *     nothing in this project raises FPU exceptions from the others
+ *     yet, a documented, consistent simplification across every FPU
+ *     op in this file.
  *   - TLB/MMU (no TLB entries modeled at all), interrupt/exception
  *     RAISING (nothing ever triggers an exception - only the
  *     exception-RETURN instructions ERET/RFE above are implemented),
@@ -73,6 +82,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <malloc.h>
+#include <math.h>
 
 #define EE_RAM_SIZE (32 * 1024 * 1024)
 
@@ -263,6 +273,28 @@ static void fpu_check_underflow(uint32_t *reg)
 {
     if ((*reg & 0x7F800000u) == 0 && (*reg & 0x007FFFFFu) != 0)
         *reg &= 0x80000000u; /* denormal result -> signed zero */
+}
+
+/* fp_max/fp_min - ported from PCSX2's FPU.cpp exactly (bit-level
+ * comparison, not a float compare): when both operands are negative,
+ * a plain signed-32-bit min/max on the raw bit patterns gives the
+ * IEEE-754 max/min respectively (negative floats sort in REVERSED
+ * order as signed integers), otherwise a plain signed-32-bit max/min
+ * on the bit patterns already agrees with the float comparison. This
+ * is why PCSX2 implements it this way rather than a naive
+ * bits_to_float() compare - it's not a shortcut, it's the actual
+ * hardware-matching algorithm. */
+static uint32_t fp_max(uint32_t a, uint32_t b)
+{
+    int32_t sa = (int32_t)a, sb = (int32_t)b;
+    if (sa < 0 && sb < 0) return (uint32_t)((sa < sb) ? sa : sb);
+    return (uint32_t)((sa > sb) ? sa : sb);
+}
+static uint32_t fp_min(uint32_t a, uint32_t b)
+{
+    int32_t sa = (int32_t)a, sb = (int32_t)b;
+    if (sa < 0 && sb < 0) return (uint32_t)((sa > sb) ? sa : sb);
+    return (uint32_t)((sa < sb) ? sa : sb);
 }
 
 
@@ -579,6 +611,58 @@ static int ee_step(void)
                     st->fpr[fd] = (st->fpr[fs] & 0x80000000u) ? 0x80000000u : 0x7fffffffu;
                 }
                 break;
+            case 0x04: /* SQRT.S - real hardware/PCSX2 quirk: the source
+                        * operand is Ft (rt field), NOT Fs, and Fs
+                        * (rd field) is unused - ported exactly from
+                        * PCSX2's SQRT_S(), not a typo. Documented
+                        * simplification, matching this file's
+                        * existing FPU scope: the D/I exception-cause
+                        * control-register flags PCSX2 also sets here
+                        * are NOT modeled (nothing in this project
+                        * raises FPU exceptions from them yet - same
+                        * simplification already in place for every
+                        * other FPU op above, which also skip the
+                        * O/U/SO/SU flags). */
+                if ((st->fpr[ft] & 0x7F800000u) == 0) {
+                    st->fpr[fd] = st->fpr[ft] & 0x80000000u; /* +/-0 */
+                } else if (st->fpr[ft] & 0x80000000u) {
+                    float r = sqrtf(fabsf(fpu_double(st->fpr[ft])));
+                    st->fpr[fd] = float_to_bits(r);
+                } else {
+                    float r = sqrtf(fpu_double(st->fpr[ft]));
+                    st->fpr[fd] = float_to_bits(r);
+                }
+                break;
+            case 0x16: /* RSQRT.S: fd = fs / sqrt(ft) - ported from
+                        * PCSX2's RSQRT_S(). Same documented flag
+                        * simplification as SQRT.S above. */
+                if ((st->fpr[ft] & 0x7F800000u) == 0) {
+                    /* ft is +/-0 (denormals-are-zero): result is
+                     * +/-Fmax, sign taken from ft. */
+                    st->fpr[fd] = (st->fpr[ft] & 0x80000000u) | FPU_POS_FMAX;
+                } else if (st->fpr[ft] & 0x80000000u) {
+                    float denom = sqrtf(fabsf(fpu_double(st->fpr[ft])));
+                    float r = fpu_double(st->fpr[fs]) / denom;
+                    st->fpr[fd] = float_to_bits(r);
+                    fpu_check_overflow(&st->fpr[fd]);
+                    fpu_check_underflow(&st->fpr[fd]);
+                } else {
+                    float r = fpu_double(st->fpr[fs]) / sqrtf(fpu_double(st->fpr[ft]));
+                    st->fpr[fd] = float_to_bits(r);
+                    fpu_check_overflow(&st->fpr[fd]);
+                    fpu_check_underflow(&st->fpr[fd]);
+                }
+                break;
+            case 0x28: /* MAX.S - ported from PCSX2's MAX_S()/fp_max():
+                        * a bit-level signed-int max/min, not a float
+                        * compare - see fp_max()'s comment. No
+                        * overflow/underflow clamping needed (result
+                        * is always one of the two original values). */
+                st->fpr[fd] = fp_max(st->fpr[fs], st->fpr[ft]);
+                break;
+            case 0x29: /* MIN.S - ported from PCSX2's MIN_S()/fp_min(). */
+                st->fpr[fd] = fp_min(st->fpr[fs], st->fpr[ft]);
+                break;
             case 0x32: /* C.EQ.S */
                 if (fpu_double(st->fpr[fs]) == fpu_double(st->fpr[ft])) st->fcr31 |= 0x00800000u;
                 else st->fcr31 &= ~0x00800000u;
@@ -605,8 +689,36 @@ static int ee_step(void)
                 return 1;
             }
             break;
+        case 0x08: /* COP1 BC (branch on FP condition flag) - sub-selected
+                    * by the rt field (matches PCSX2's tbl_COP1_BC1[32],
+                    * indexed 0=BC1F, 1=BC1T, 2=BC1FL, 3=BC1TL). Only
+                    * the two non-"likely" variants are implemented -
+                    * see the case default below for why BC1FL/BC1TL
+                    * are still open. */
+            switch (rt) {
+            case 0x00: /* BC1F - branch if the FP condition flag (fcr31
+                        * bit 0x00800000, set by C.EQ/LT/LE.S) is
+                        * CLEAR. Ported from PCSX2's BC1()/BC1F(). */
+                if (!(st->fcr31 & 0x00800000u)) BRANCH_TO(this_pc + 4 + (imm << 2));
+                break;
+            case 0x01: /* BC1T - branch if the flag is SET. */
+                if ((st->fcr31 & 0x00800000u)) BRANCH_TO(this_pc + 4 + (imm << 2));
+                break;
+            default:
+                /* BC1FL/BC1TL ("branch likely" variants): still not
+                 * implemented. Real semantics additionally nullify
+                 * (skip) the branch delay-slot instruction when the
+                 * branch is NOT taken - this project has no "likely
+                 * branch" infrastructure yet for ANY branch (integer
+                 * BEQL/BNEL/etc. aren't implemented either), so adding
+                 * just the FP half would be inconsistent. Left as a
+                 * clearly scoped follow-up rather than a half-fix. */
+                halt("unimplemented BC1 variant (BC1FL/BC1TL - likely branches not implemented)");
+                return 1;
+            }
+            break;
         default:
-            halt("unimplemented COP1 sub-opcode (BC1 branches not implemented)");
+            halt("unimplemented COP1 sub-opcode");
             return 1;
         }
         break;

@@ -546,3 +546,29 @@ actually moves (see `docs/STATUS.md`'s "LQ/SQ implemented" section for
 the bigger, more important finding this led to: the EE's real-BIOS
 progress was never legitimately 53 million instructions in the first
 place).
+
+`test_ee_fpu2.c` covers `ee_core.c`'s newer COP1/FPU additions: SQRT.S,
+RSQRT.S, MAX.S, MIN.S, and BC1F/BC1T (branch on FP condition flag),
+all ported from PCSX2's `FPU.cpp`. 13/13 checks, covering a real
+hardware quirk worth remembering: SQRT.S's source operand is **Ft**
+(the `rt` field), not Fs - `Fs` is unused for this instruction, unlike
+the usual convention. Also covers SQRT.S/RSQRT.S's documented special
+cases (negative input takes `sqrt(fabs())` instead of producing NaN;
+RSQRT.S with a zero/denormal divisor returns `+Fmax` instead of
+infinity), MAX.S/MIN.S's bit-level signed-int comparison trick (which
+only differs from a naive float compare when BOTH operands are
+negative - both a both-negative and a mixed-sign case are tested), and
+BC1F/BC1T actually gating on the condition flag in both directions
+(confirms `BC1T` does NOT branch when the flag is clear, not just that
+`BC1F`/`BC1T` branch when expected - proving these aren't accidentally
+unconditional jumps). Needs the same link set as the other `ee_core.c`
+tests:
+
+```sh
+gcc -I../include -I../source -o test_ee_fpu2 tests/test_ee_fpu2.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+./test_ee_fpu2
+```
+
+Still not implemented on the COP1 side: the MADD/MSUB accumulator
+family, and BC1FL/BC1TL ("likely" branches - this project has no
+likely-branch infrastructure yet for ANY branch, integer or FP).

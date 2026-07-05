@@ -28,9 +28,22 @@ splash screen, not just difficulty.
       halfword lanes compute PSUBH (rs-rt) while its high 4 lanes
       compute PADDH (rs+rt), not a uniform 8-lane op. Unit tested in
       `tests/test_ee_mmi_compare.c` (32/32 checks).
-- [ ] Remaining ~42 MMI opcodes (saturated arithmetic, QFSRV,
-      PMADDW/H family, PINTH/PINTEH, PROT3W, PEXEH/PEXEW/PEXCH/PEXCW,
-      PMFHL/PMTHL clamping variants)
+- [x] MMI0's remaining saturated add/sub family - PADDSW/PSUBSW
+      (32-bit), PADDSH/PSUBSH (16-bit), PADDSB/PSUBSB (8-bit) - and
+      PEXT5/PPAC5 (GS 5551-pixel-format unpack/pack, rt-only). Ported
+      from PCSX2's `MMI.cpp`. The saturated ops compute the sum/
+      difference in a wider intermediate type and clamp to the lane
+      width's signed min/max instead of wrapping on overflow/
+      underflow. PEXT5 unpacks a 16-bit 5551 pixel (5/5/5/1 bits of
+      R/G/B/A) into a 32-bit lane with each channel left-aligned in
+      its own byte; PPAC5 is the exact inverse. This completes all
+      defined MMI0 sub-opcodes. Unit tested in
+      `tests/test_ee_mmi_sat.c` (21/21 checks, including a PEXT5/
+      PPAC5 round-trip). Brings EE MMI coverage from ~48 to ~56 of
+      the roughly 90 real opcodes.
+- [ ] Remaining ~34 MMI opcodes (QFSRV, PMADDW/H family, PINTH/PINTEH,
+      PROT3W, PEXEH/PEXEW/PEXCH/PEXCW, PMFHL/PMTHL clamping variants,
+      PMULTUW/PDIVUW/PMADDUW and other MMI2/MMI3 arithmetic)
 - [x] LWL/LWR/SWL/SWR (unaligned word load/store) - ported from
       R5900OpcodeImpl.cpp, unit tested in `tests/test_ee_unaligned.c`
       (also gave the IOP core this ability first, then brought it to

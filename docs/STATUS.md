@@ -439,6 +439,46 @@ Regression: full test suite (25 test files total, including this new
 one) all pass 0 failures. Wii/devkitPPC target rebuilds clean with no
 warnings.
 
+### MMI0 completed: saturated arithmetic + PEXT5/PPAC5
+
+Added the last 8 MMI0 sub-opcodes, ported from PCSX2's `MMI.cpp`:
+`PADDSW`/`PSUBSW` (32-bit), `PADDSH`/`PSUBSH` (16-bit), `PADDSB`/
+`PSUBSB` (8-bit) - all saturated signed add/sub, computing the result
+in a wider intermediate type (e.g. 64-bit for the 32-bit lanes) and
+clamping to that lane width's signed min/max instead of wrapping on
+overflow/underflow - and `PEXT5`/`PPAC5`, which unpack/pack a GS
+16-bit 5551 pixel format (5 bits R, 5 bits G, 5 bits B, 1 bit A) to/
+from 32-bit lanes with each channel left-aligned in its own byte.
+Both `PEXT5` and `PPAC5` use only the `rt` operand - `rs` is unused,
+matching real hardware/PCSX2 (these are unary unpack/pack ops, not
+binary ones like the rest of MMI0). Funct/`sa` values confirmed
+against the real `tbl_MMI0[32]` table in `R5900OpcodeTables.cpp`, not
+assumed. This completes every defined MMI0 sub-opcode (the four
+remaining table slots are genuinely `MMI_Unknown` in real hardware,
+not gaps in this port) and brings EE MMI coverage from ~48 to ~56 of
+the roughly 90 real opcodes.
+
+Unit tested in `tests/test_ee_mmi_sat.c`, 21/21 checks - same LQ-based
+RAM-planting approach as `tests/test_ee_mmi_compare.c`. Each saturated
+op is checked in a normal (non-saturating) case plus both an overflow
+and an underflow case, to confirm the clamp lands on the correct
+signed min/max for that width rather than merely not-crashing.
+`PEXT5`/`PPAC5` are checked with a specific 5551 pixel
+(R=0x1F, G=0x03, B=0x00, A=1), verified channel-by-channel after
+`PEXT5`, then round-tripped back through `PPAC5` to confirm the
+original 16-bit value comes back exactly - this caught an arithmetic
+mistake in the test itself (not the implementation) during
+development: an initial hand-computed expected pixel value
+(`0x801F`) turned out to be wrong once checked bit-by-bit against the
+5/5/5/1 layout (the correct value for that R/G/B/A combination is
+`0x807F`) - a good reminder to verify test *expectations*
+programmatically/by hand-derivation, not just trust a first guess at
+the encoding.
+
+Regression: full test suite (27 test files total, including this new
+one) all pass 0 failures. Wii/devkitPPC target rebuilds clean with no
+warnings.
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

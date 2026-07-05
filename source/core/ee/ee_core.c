@@ -27,11 +27,14 @@
  *     be set other than explicit MTC0 writes).
  *   - CACHE, SYNC, PREF: accepted as no-ops (real BIOS init code issues
  *     these constantly for cache management we don't model).
- *   - A meaningful subset (~48 of ~90) of MMI (SIMD) opcodes: the
+ *   - A meaningful subset (~56 of ~90) of MMI (SIMD) opcodes: the
  *     add/sub/logic/copy/extend/pack family across byte/half/word
- *     lanes, the "pipeline 1" MULT1/DIV1/MFHI1/MFLO1 family, and the
+ *     lanes, the "pipeline 1" MULT1/DIV1/MFHI1/MFLO1 family, the
  *     compare/max/min/abs family (PCGTW/H/B, PMAXW/H, PCEQW/H/B,
- *     PMINW/H, PABSW/H, PADSBH).
+ *     PMINW/H, PABSW/H, PADSBH), the saturated add/sub family
+ *     (PADDSW/H/B, PSUBSW/H/B - clamp to the lane width's min/max
+ *     instead of wrapping), and PEXT5/PPAC5 (GS 5551-pixel-format
+ *     unpack/pack). This completes MMI0's sub-table entirely.
  *   - LQ/SQ (128-bit load/store, primary opcodes 0x1E/0x1F) - ported
  *     from PCSX2's R5900OpcodeImpl.cpp. Address masked to 16-byte
  *     alignment (real hardware silently ignores the low 4 bits rather
@@ -45,8 +48,9 @@
  *     VU0 data staging.
  *
  * Still NOT implemented (halts cleanly, does not crash):
- *   - The other ~42 MMI opcodes (saturated arithmetic, QFSRV, PMADDW/H
- *     family, PINTH/PINTEH, PROT3W, PMFHL/PMTHL clamping variants, etc.)
+ *   - The other ~34 MMI opcodes (QFSRV, PMADDW/H family, PINTH/PINTEH,
+ *     PROT3W, PEXEH/PEXEW/PEXCH/PEXCW, PMFHL/PMTHL clamping variants,
+ *     PMULTUW/PDIVUW/PMADDUW and other MMI2/MMI3 arithmetic, etc.)
  *   - COP2 (VU0 macro mode)
  *   - COP1 (FPU): core arithmetic (ADD/SUB/MUL/DIV/ABS/MOV/NEG.S,
  *     SQRT.S/RSQRT.S, MAX.S/MIN.S, CVT.W.S/CVT.S.W, C.EQ/LT/LE.S,
@@ -948,6 +952,109 @@ static int ee_step(void)
                         set_lane_b(&out, n + 8, lane_b(Rs, n * 2));
                     }
                     st->gpr[rd] = out;
+                }
+                break;
+            case 0x10: /* PADDSW - saturated per-lane signed 32-bit
+                        * add, ported from PCSX2's _PADDSW(): computes
+                        * the sum in 64-bit to detect over/underflow,
+                        * then clamps to INT32_MAX/INT32_MIN instead
+                        * of wrapping - the "S" in the name is for
+                        * "saturated", not "signed" (all PMMI arithmetic
+                        * here is signed either way). */
+                if (rd) for (int n = 0; n < 4; n++) {
+                    int64_t sum = (int64_t)(int32_t)lane_w(st->gpr[rs], n) + (int64_t)(int32_t)lane_w(st->gpr[rt], n);
+                    uint32_t r;
+                    if (sum > 0x7FFFFFFFLL) r = 0x7FFFFFFFu;
+                    else if (sum < -0x80000000LL) r = 0x80000000u;
+                    else r = (uint32_t)(int32_t)sum;
+                    set_lane_w(&st->gpr[rd], n, r);
+                }
+                break;
+            case 0x11: /* PSUBSW - saturated per-lane signed 32-bit
+                        * subtract, ported from _PSUBSW(). */
+                if (rd) for (int n = 0; n < 4; n++) {
+                    int64_t diff = (int64_t)(int32_t)lane_w(st->gpr[rs], n) - (int64_t)(int32_t)lane_w(st->gpr[rt], n);
+                    uint32_t r;
+                    if (diff >= 0x7FFFFFFFLL) r = 0x7FFFFFFFu;
+                    else if (diff < -0x80000000LL) r = 0x80000000u;
+                    else r = (uint32_t)(int32_t)diff;
+                    set_lane_w(&st->gpr[rd], n, r);
+                }
+                break;
+            case 0x14: /* PADDSH - saturated per-lane signed 16-bit
+                        * add, ported from _PADDSH(). */
+                if (rd) for (int n = 0; n < 8; n++) {
+                    int32_t sum = (int32_t)(int16_t)lane_h(st->gpr[rs], n) + (int32_t)(int16_t)lane_h(st->gpr[rt], n);
+                    uint16_t r;
+                    if (sum > 0x7FFF) r = 0x7FFFu;
+                    else if (sum < -0x8000) r = 0x8000u;
+                    else r = (uint16_t)(int16_t)sum;
+                    set_lane_h(&st->gpr[rd], n, r);
+                }
+                break;
+            case 0x15: /* PSUBSH - saturated per-lane signed 16-bit
+                        * subtract, ported from _PSUBSH(). */
+                if (rd) for (int n = 0; n < 8; n++) {
+                    int32_t diff = (int32_t)(int16_t)lane_h(st->gpr[rs], n) - (int32_t)(int16_t)lane_h(st->gpr[rt], n);
+                    uint16_t r;
+                    if (diff >= 0x7FFF) r = 0x7FFFu;
+                    else if (diff < -0x8000) r = 0x8000u;
+                    else r = (uint16_t)(int16_t)diff;
+                    set_lane_h(&st->gpr[rd], n, r);
+                }
+                break;
+            case 0x18: /* PADDSB - saturated per-lane signed 8-bit
+                        * add, ported from _PADDSB(). */
+                if (rd) for (int n = 0; n < 16; n++) {
+                    int16_t sum = (int16_t)(int8_t)lane_b(st->gpr[rs], n) + (int16_t)(int8_t)lane_b(st->gpr[rt], n);
+                    uint8_t r;
+                    if (sum > 0x7F) r = 0x7Fu;
+                    else if (sum < -128) r = 0x80u;
+                    else r = (uint8_t)(int8_t)sum;
+                    set_lane_b(&st->gpr[rd], n, r);
+                }
+                break;
+            case 0x19: /* PSUBSB - saturated per-lane signed 8-bit
+                        * subtract, ported from _PSUBSB(). */
+                if (rd) for (int n = 0; n < 16; n++) {
+                    int16_t diff = (int16_t)(int8_t)lane_b(st->gpr[rs], n) - (int16_t)(int8_t)lane_b(st->gpr[rt], n);
+                    uint8_t r;
+                    if (diff >= 0x7F) r = 0x7Fu;
+                    else if (diff < -128) r = 0x80u;
+                    else r = (uint8_t)(int8_t)diff;
+                    set_lane_b(&st->gpr[rd], n, r);
+                }
+                break;
+            case 0x1E: /* PEXT5 - unpacks a GS 16-bit 5551 pixel format
+                        * (5 bits R, 5 bits G, 5 bits B, 1 bit A, packed
+                        * in the low 16 bits of each 32-bit lane) up
+                        * into a 32-bit lane with each channel
+                        * left-aligned in its own byte (R in bits 3-7,
+                        * G in bits 11-15, B in bits 19-23, A in bit
+                        * 31) - ported exactly from PCSX2's _PEXT5().
+                        * Uses only Rt; Rs is unused (matches real
+                        * hardware/PCSX2 - this is a unary unpack, not
+                        * a binary op). */
+                if (rd) for (int n = 0; n < 4; n++) {
+                    uint32_t v = lane_w(st->gpr[rt], n);
+                    uint32_t r = ((v & 0x0000001Fu) << 3)  |
+                                 ((v & 0x000003E0u) << 6)  |
+                                 ((v & 0x00007C00u) << 9)  |
+                                 ((v & 0x00008000u) << 16);
+                    set_lane_w(&st->gpr[rd], n, r);
+                }
+                break;
+            case 0x1F: /* PPAC5 - inverse of PEXT5: packs a 32-bit lane
+                        * (as produced by PEXT5's layout) back down to
+                        * a 16-bit 5551 pixel. Ported from _PPAC5().
+                        * Also Rt-only, Rs unused. */
+                if (rd) for (int n = 0; n < 4; n++) {
+                    uint32_t v = lane_w(st->gpr[rt], n);
+                    uint32_t r = ((v >> 3)  & 0x0000001Fu) |
+                                 ((v >> 6)  & 0x000003E0u) |
+                                 ((v >> 9)  & 0x00007C00u) |
+                                 ((v >> 16) & 0x00008000u);
+                    set_lane_w(&st->gpr[rd], n, r);
                 }
                 break;
             default:

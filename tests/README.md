@@ -628,3 +628,26 @@ gcc -I../include -I../source -o test_ee_mmi_compare tests/test_ee_mmi_compare.c 
 Still not implemented on the MMI side: the other ~42 opcodes
 (saturated arithmetic, QFSRV, PMADDW/H family, PINTH/PINTEH, PROT3W,
 PEXEH/PEXEW/PEXCH/PEXCW, PMFHL/PMTHL clamping variants).
+
+`test_ee_mmi_sat.c` covers `ee_core.c`'s MMI0 saturated arithmetic
+(PADDSW/PSUBSW/PADDSH/PSUBSH/PADDSB/PSUBSB) and PEXT5/PPAC5 (GS
+5551-pixel-format unpack/pack), all ported from PCSX2's `MMI.cpp`.
+21/21 checks. Same LQ-based RAM-planting approach as
+`test_ee_mmi_compare.c`. Each saturated op is checked in both a
+normal (non-saturating) case and both overflow and underflow cases,
+confirming the clamp targets the correct signed min/max for that lane
+width rather than wrapping. PEXT5/PPAC5 are checked with a specific
+5551 pixel (R=0x1F, G=0x03, B=0x00, A=1) verified channel-by-channel
+after PEXT5, then round-tripped back through PPAC5 to confirm the
+original 16-bit pixel value is recovered exactly. Needs the same link
+set as the other `ee_core.c` tests:
+
+```sh
+gcc -I../include -I../source -o test_ee_mmi_sat tests/test_ee_mmi_sat.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+./test_ee_mmi_sat
+```
+
+This completes all defined MMI0 sub-opcodes. Still not implemented on
+the MMI side: the other ~34 opcodes (QFSRV, PMADDW/H family,
+PINTH/PINTEH, PROT3W, PEXEH/PEXEW/PEXCH/PEXCW, PMFHL/PMTHL clamping
+variants, PMULTUW/PDIVUW/PMADDUW and other MMI2/MMI3 arithmetic).

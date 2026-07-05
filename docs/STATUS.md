@@ -685,6 +685,113 @@ already on the table as one of two honest paths forward after round 3,
 except it is now confirmed, not speculative, to be the actual next
 thing blocking real boot progress.
 
+### EE JALR investigation, round 6: real COP0 TLB implemented; boot now diverges at a genuine TLB miss (not a bug)
+
+Continuing directly from round 5's confirmed next blocker (`TLBWI` at
+`pc=0xBFC0086C`), four more real, previously-hidden gaps were found
+and fixed by re-tracing the same real-BIOS boot path one honest wall
+at a time - each fix uncovering the next wall, rather than papering
+over the previous one.
+
+**1. kseg0 ROM mirror not recognized.** `ee_mem_ptr()` only treated
+`0xBFC00000+` (kseg1, uncached) as mapping to the BIOS ROM; a jump to
+`0x9FC41000` (kseg0, cached, same physical ROM) was being flagged as
+"out of range" by this project's own out-of-range diagnostic heuristic
+- which turned out to be a real, valid target the interpreter simply
+didn't recognize. Fixed by masking to the physical address
+(`addr & 0x1FFFFFFF`) before deciding ROM vs. RAM, so kseg0 and kseg1
+now correctly alias the same physical memory, matching real hardware.
+
+**2. Real COP0 TLB implemented: `TLBR`/`TLBWI`/`TLBWR`/`TLBP`.** Ported
+directly from PCSX2's own `COP0.cpp` and the bitfield layouts in
+`R5900.h`: a real 48-entry `tlb[]` array (PageMask/EntryHi/EntryLo0/
+EntryLo1 per entry) was added to `ee_state_t`. `TLBWI`/`TLBWR` copy the
+current COP0 PageMask/EntryHi/EntryLo0/EntryLo1 registers into the
+entry indexed by Index or Random (`& 0x3F`); `TLBR` does the reverse
+with the exact masking real hardware applies (re-deriving the Global
+bit only when *both* EntryLo0 and EntryLo1 have it set); `TLBP`
+searches all 48 entries for a VPN2 (+ASID or Global) match and sets
+Index to the match, or to `0x80000000` (sign bit = not found) if none
+matches. A new `ee_tlb_translate()` helper gives `ee_mem_ptr()` real
+address translation for any address below `0x80000000` (KUSEG), where
+real hardware genuinely requires a TLB entry rather than a fixed
+physical mask - previously, KUSEG addresses were (incorrectly) treated
+identically to kseg0/kseg1's direct physical mapping, which happened
+to work only because no earlier test or boot trace ever depended on
+real KUSEG/TLB semantics. Unit tested in `tests/test_ee_cop0_tlb.c`,
+9/9 checks (TLBWI/TLBR round-trip, TLBP match and no-match, a full
+KUSEG SW/LW round-trip through a manually-installed TLB entry, and a
+KUSEG TLB-miss case confirming an unmapped address reads as 0 rather
+than crashing or fabricating a mapping).
+
+**3. MIPS "Branch Likely" family was entirely missing.** `BEQL`/`BNEL`/
+`BLEZL`/`BGTZL` (primary opcodes `0x14`-`0x17`) and `BLTZL`/`BGEZL`/
+`BLTZALL`/`BGEZALL` (REGIMM `rt=0x02/0x03/0x12/0x13`) - a MIPS II+
+family the real BIOS boot path uses that this project had never
+implemented at all. Ported the key semantic that distinguishes these
+from ordinary branches: when the branch condition is *false*, the
+delay-slot instruction is not executed at all (the real hardware
+nullifies it), implemented by advancing `pc`/`next_pc` past the delay
+slot entirely instead of executing it, matching real PCSX2's
+`Interpreter.cpp`.
+
+**4. `LWC1`/`SWC1` were entirely missing.** Direct FPR<->memory word
+transfer (opcodes `0x31`/`0x39`, distinct from the already-implemented
+`MFC1`/`MTC1` GPR<->FPR moves) - straightforward one-line ports once
+noticed.
+
+**Regression discipline note**: fixing #2 above (real KUSEG TLB
+requirement) broke an *existing* test, `tests/test_ee_unaligned.c`,
+which used a raw KUSEG address (`0x00300000`) as its scratch RAM base
+without installing any TLB entry - this "worked" before only because
+of the old, incorrect naive-mask KUSEG handling. This was a bug in the
+test's own premise, not a regression in the implementation: real PS2
+game code doesn't access plain RAM through unmapped KUSEG either, it
+uses kseg0/kseg1 (direct-mapped, no TLB needed) for exactly this kind
+of ordinary access. Fixed by changing the test's base address to
+`0x80300000` (kseg0) - same underlying physical RAM, no TLB entry
+required, matching how real code actually behaves. Confirmed 0
+failures after the change.
+
+**New, honest halt point after all four fixes**: boot now runs
+meaningfully further, but still eventually diverges into
+"zero-land" - out of 20 million executed instructions, only 151 are
+non-NOP/non-zero-decoded before the trace settles into a sustained run
+of zero-filled-memory decode (`SLL $0,$0,0`, a real NOP encoding this
+project's memory model produces for any address that reads as 0). The
+exact divergence point (instruction #158-159) is a genuine **TLB
+miss**: real BIOS code has set up `$sp = 0x70003eb0` (a KUSEG stack
+pointer), but the only TLB entry installed so far by the boot path
+(`tlb[0]`, covering VPN2 `0x38000`, an 8KB range `0x70000000-
+0x70002000`) doesn't cover it - `$sp` is roughly `0x1eb0` bytes beyond
+that entry's range.
+
+This is architecturally a case where real hardware would raise a TLB
+Refill exception (which this project's EE core does not implement at
+all yet - a limitation already flagged elsewhere in this document), or
+possibly indicates a second `TLBWI` call the real boot path executes
+that this project's interpreter doesn't yet reach for some other,
+not-yet-investigated reason. Either way, this is now a precisely
+identified, honestly-reached wall - not a guess, and not another
+instruction-count false-progress trap (checked explicitly: 151/20,000,000
+meaningful instructions is a real, verified ratio, not a stall
+disguised as progress).
+
+**Where this leaves the project**: the TLB implementation itself is
+real, tested, working infrastructure - it just isn't sufficient on its
+own to get past this boot path, because the boot path also needs
+either (a) a TLB Refill exception handler (so the BIOS's own exception
+vector can install the missing entry, which is presumably what real
+hardware does here), or (b) further tracing to find why this
+project's interpreter doesn't execute whatever install this specific
+entry before reaching `$sp`'s first use. Implementing real MIPS
+exception delivery (Cause/EPC/Status updates + vectoring to
+`0x80000180`/`0xBFC00200` etc.) is therefore the next concrete,
+non-speculative candidate blocker - the same category of work as the
+TLB itself, i.e. citable against PCSX2's own `Exceptions.cpp`/
+`COP0.cpp` rather than guessed.
+
+
 ### FPU accumulator (ACC) family implemented
 
 Added the last 7 COP1.S opcodes needed for the FPU's ACC register:

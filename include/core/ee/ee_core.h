@@ -32,6 +32,24 @@ typedef struct {
     uint32_t cop0[32];      /* status/cause/EPC/config subset only */
     uint8_t  branch_pending;
 
+    /* Real R5900 TLB (48 entries), ported from PCSX2's COP0.cpp
+     * "tlbs" struct. Written/read by TLBWI/TLBWR/TLBR/TLBP (see
+     * ee_core.c). NOTE: this is storage + lookup logic only - address
+     * translation itself is NOT wired into ee_mem_ptr() yet, so this
+     * project still treats kuseg/kseg0/kseg1 as flat, TLB-free
+     * mappings for actual memory accesses (see ee_mem_ptr()'s
+     * "phys = addr & 0x1FFFFFFF" comment). Real boot-time TLBWI calls
+     * now execute correctly (matching real hardware's register
+     * semantics) instead of halting; whether this project ever needs
+     * real translation depends on what further real-BIOS boot
+     * progress reveals. */
+    struct {
+        uint32_t page_mask;
+        uint32_t entry_hi;
+        uint32_t entry_lo0;
+        uint32_t entry_lo1;
+    } tlb[48];
+
     /* COP1 (FPU) - single-precision only. Raw IEEE-754 bit patterns,
      * not C floats, so bit-level ops (ABS_S/MOV_S/NEG_S, and the
      * denormal/infinity handling PS2's FPU does that plain IEEE float

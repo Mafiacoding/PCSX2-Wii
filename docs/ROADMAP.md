@@ -144,7 +144,7 @@ splash screen, not just difficulty.
       the real-BIOS diagnostic went from halting at ~99K instructions
       to running past 5 million without hitting another unimplemented
       opcode.
-- [ ] TLB / MMU (32-entry TLB, address translation)
+- [x] TLB / MMU (48-entry TLB, TLBR/TLBWI/TLBWR/TLBP + KUSEG address translation - DONE, round 6; real MIPS exception delivery to service TLB Refill misses is still NOT done, see round 6 section in docs/STATUS.md)
 - [ ] Exception handling (BEV, EPC, Cause, actual exception vectors -
       currently MFC0/MTC0 are read/write-only, and RFE/ERET/EI/DI
       above manipulate Status/EPC directly without a real exception
@@ -639,12 +639,34 @@ longer occurs at all with this fix in place. See docs/STATUS.md's
 "round 5" section for the full trace, including the live PCSX2 data
 that made finding this possible.
 
-This means the next real EE blocker is now a genuine COP0 TLB
-implementation (`TLBWI` at minimum, ideally all four real TLB ops plus
-address translation) - exactly the feature that was already flagged as
-one of the two honest paths forward after round 3, now confirmed (not
-speculative) to be what's actually needed for further real-BIOS boot
-progress. The
+**Update (round 6): the COP0 TLB is now implemented** -
+`TLBR`/`TLBWI`/`TLBWR`/`TLBP` plus real KUSEG address translation via
+a 48-entry `tlb[]`, ported from PCSX2's own `COP0.cpp`/`R5900.h`
+(`tests/test_ee_cop0_tlb.c`, 9/9 checks). Continuing the same trace
+past this fix also turned up and fixed three more real gaps: the
+kseg0 ROM mirror (`0x9FC00000+`) wasn't recognized as ROM; the MIPS
+"Branch Likely" family (`BEQL`/`BNEL`/`BLEZL`/`BGTZL`/`BLTZL`/`BGEZL`/
+`BLTZALL`/`BGEZALL`) was entirely missing; and `LWC1`/`SWC1` were
+entirely missing. See docs/STATUS.md's "round 6" section for the full
+trace and a note on a pre-existing test (`test_ee_unaligned.c`) whose
+own premise (an unmapped raw KUSEG address) had to be corrected once
+KUSEG started requiring a real TLB entry, same as real hardware.
+
+With all four fixes in place, real-BIOS boot progresses further but
+still diverges - at instruction #158-159, into a genuine **TLB miss**:
+the BIOS sets up `$sp = 0x70003eb0`, which falls just outside the one
+TLB entry (`tlb[0]`) the boot path installs before that point. This is
+not a translation bug (confirmed via the passing test suite) - it's an
+honestly-reached wall pointing at the next real blocker: this project
+has no MIPS exception delivery at all (no Cause/EPC/Status handling,
+no vectoring to the BIOS's own exception vectors), which is
+presumably what real hardware relies on here to install the missing
+TLB entry on demand (a TLB Refill exception). Implementing real
+exception delivery (citable against PCSX2's `Exceptions.cpp`/
+`COP0.cpp`) is therefore the next concrete, non-speculative EE
+blocker.
+
+The
 IOP has no known halt point left
 to chase at all right now; COP2/VU0 remains unstarted and unproven
 against real BIOS code, since the EE hasn't legitimately run far

@@ -33,9 +33,16 @@ int main(void) {
     uint8_t *p = bios.data;
     int pc = 0;
 
-    /* r10 = 0x00300000 (base for our scratch RAM area, well within the
-     * 32MB EE RAM window so LWL/LWR/SWL/SWR touch real RAM). */
-    wle32(p+pc, enc_lui(10, 0x0030)); pc += 4;
+    /* r10 = 0x80300000 (kseg0, base for our scratch RAM area, well
+     * within the 32MB EE RAM window so LWL/LWR/SWL/SWR touch real
+     * RAM). Deliberately kseg0 rather than raw KUSEG (0x00300000):
+     * since this project's TLB work (ee_tlb_translate()), plain KUSEG
+     * addresses require an installed TLB entry to resolve at all,
+     * exactly like real hardware - this test isn't exercising TLB
+     * translation, so it uses the same kind of direct-mapped,
+     * no-TLB-needed address real PS2 game code actually uses for
+     * ordinary RAM access. */
+    wle32(p+pc, enc_lui(10, 0x8030)); pc += 4;
 
     /* Seed RAM at r10+0x00 with word 0x03020100 and r10+0x04 with
      * 0x07060504 (so the byte at RAM+N literally equals N, for an
@@ -70,8 +77,8 @@ int main(void) {
     CHECK(st->gpr[3].ud0 == (uint64_t)(int64_t)(int32_t)0x04030201u,
           "LWL(base+4)+LWR(base+1) reconstructs the unaligned word 0x04030201");
 
-    uint32_t low_word  = ee_mem_read32(st, 0x00300008u);
-    uint32_t high_word = ee_mem_read32(st, 0x0030000Cu);
+    uint32_t low_word  = ee_mem_read32(st, 0x80300008u);
+    uint32_t high_word = ee_mem_read32(st, 0x8030000Cu);
     /* r1 = 0x03020100 written starting at byte offset 9 (i.e. offset
      * 1 into the word at +0x08): byte 0x08 untouched (still 0 from
      * memset), bytes 0x09-0x0B = the low 3 bytes of r1 (00,01,02),

@@ -111,15 +111,97 @@ ee_state_t *ee_core_get_state(void) { return &g_state; }
 
 /* --- memory access --- */
 
+/* KUSEG (0x00000000-0x7FFFFFFF) is a MAPPED segment on real MIPS/R5900
+ * hardware - unlike kseg0/kseg1, a KUSEG address is NOT simply
+ * "physical = virtual & 0x1FFFFFFF"; it requires a real TLB entry
+ * (written by TLBWI/TLBWR, see the COP0 CO-format dispatch above) to
+ * translate. Found empirically: once TLBWI actually stored real
+ * entries (see docs/STATUS.md's "round 5" COP0-TLB work) and boot
+ * progressed further, real BIOS code set up a kernel stack pointer in
+ * KUSEG (observed: $sp=0x70003eb0) that this project's old flat
+ * "phys = addr & 0x1FFFFFFF" shortcut mismapped to a physical address
+ * far past the end of RAM (silently doing nothing on every access
+ * through it) - explaining a further, more subtle case of the same
+ * "boot wanders through silently-dead memory" failure mode already
+ * documented for the JALR investigation. Ported from PCSX2's own
+ * VPN2()/PFN0()/PFN1()/Mask() logic in R5900.h's tlbs struct. Returns
+ * 1 and fills *out_phys on a hit; returns 0 (TLB miss) otherwise - a
+ * real miss should raise a TLB Refill exception on real hardware, but
+ * this project has no EE exception-raising path yet (see ee_core.c's
+ * top-of-file coverage notes), so a miss here just means the access
+ * fails cleanly (NULL / reads-as-zero) rather than being fabricated. */
+static inline int ee_tlb_translate(ee_state_t *st, uint32_t vaddr, uint32_t *out_phys)
+{
+    uint32_t want_vpn2 = (vaddr >> 13) & 0x7FFFFu;
+    uint32_t want_asid = st->cop0[10] & 0xFFu; /* current ASID = current EntryHi's ASID field */
+    for (uint32_t i = 0; i < 48; i++) {
+        uint32_t mask = (st->tlb[i].page_mask >> 13) & 0xFFFu;
+        uint32_t entry_vpn2 = (st->tlb[i].entry_hi >> 13) & 0x7FFFFu;
+        if ((entry_vpn2 & ~mask) != (want_vpn2 & ~mask))
+            continue;
+        int is_global = (st->tlb[i].entry_lo0 & 1u) && (st->tlb[i].entry_lo1 & 1u);
+        uint32_t entry_asid = st->tlb[i].entry_hi & 0xFFu;
+        if (!is_global && entry_asid != want_asid)
+            continue;
+        /* Even/odd page select: the bit just below the masked-off
+         * range picks EntryLo0 (even, bit clear) or EntryLo1 (odd,
+         * bit set). Page size in bytes is (mask+1) << 13 (PageMask's
+         * "Mask" field is in units of the VPN2 field's own bit
+         * position, i.e. bit 13 upward). */
+        /* Even/odd select bit position: bit 13 for the common 4KB-page
+         * case (mask=0), moving one bit higher each time the page size
+         * doubles. mask is always a run of low 1-bits (0, 1, 3, 7...)
+         * per the MIPS PageMask spec, so (mask+1) is a power of two -
+         * this matches PCSX2's own VPN2()/PFN0()/PFN1() shift-by-Mask()
+         * logic in R5900.h, just computed as a bit position instead of
+         * a bitmask. */
+        uint32_t page_select_bit = 13u;
+        {
+            uint32_t doubling = mask + 1u; /* 1,2,4,8,... for 4KB,16KB,64KB,... pages */
+            while (doubling > 1u) { page_select_bit++; doubling >>= 1; }
+        }
+        uint32_t lo = (vaddr & (1u << page_select_bit)) ? st->tlb[i].entry_lo1 : st->tlb[i].entry_lo0;
+        uint32_t pfn = (lo >> 6) & 0xFFFFFu;
+        uint32_t phys_page = (pfn & ~mask) << 12;
+        uint32_t offset_mask = (1u << page_select_bit) - 1u;
+        *out_phys = phys_page | (vaddr & offset_mask);
+        return 1;
+    }
+    return 0;
+}
+
 static inline uint8_t *ee_mem_ptr(ee_state_t *st, uint32_t addr, uint32_t size)
 {
-    if (addr >= 0xBFC00000u) {
-        uint32_t off = addr - 0xBFC00000u;
+    uint32_t phys;
+    if (addr < 0x80000000u) {
+        /* KUSEG - needs real TLB translation, see ee_tlb_translate(). */
+        if (!ee_tlb_translate(st, addr, &phys))
+            return NULL; /* TLB miss - no exception path yet, fails cleanly */
+    } else {
+        /* Mask to the physical address FIRST, then decide ROM-vs-RAM.
+         * Real MIPS kseg0/kseg1 both decode to the same physical
+         * address space directly (segment bits only affect caching,
+         * not the physical target) - so the BIOS ROM (physical base
+         * 0x1FC00000) is reachable via its kseg1 uncached mirror
+         * (0xBFC00000-0xC0000000, the reset vector's own segment) AND
+         * its kseg0 cached mirror (0x9FC00000-0xA0000000). This
+         * project originally only special-cased the kseg1 form
+         * (checking the raw virtual address >= 0xBFC00000 before
+         * masking), which silently treated any kseg0 ROM-mirror access
+         * as a RAM access with a physical offset far past the end of
+         * RAM (returning NULL / a decoded-as-NOP 0) instead of the
+         * real ROM byte. Found via the COP0 PRId fix (see
+         * docs/STATUS.md's "round 5"): once boot took the correct
+         * path, it jumped through pc=0x9FC4xxxx (kseg0 ROM) almost
+         * immediately. */
+        phys = addr & 0x1FFFFFFFu;
+    }
+    if (phys >= 0x1FC00000u) {
+        uint32_t off = phys - 0x1FC00000u;
         if (st->bios && off + size <= st->bios->size)
             return st->bios->data + off;
         return NULL;
     }
-    uint32_t phys = addr & 0x1FFFFFFFu;
     if (phys + size <= st->ram_size)
         return st->ram + phys;
     return NULL;
@@ -470,6 +552,25 @@ static int ee_step(void)
         switch (rt) {
         case 0x00: /* BLTZ */ if ((int64_t)GPR(rs) < 0)  BRANCH_TO(this_pc + 4 + (imm << 2)); break;
         case 0x01: /* BGEZ */ if ((int64_t)GPR(rs) >= 0) BRANCH_TO(this_pc + 4 + (imm << 2)); break;
+        /* "Likely" branches (MIPS II+, ported from PCSX2's
+         * Interpreter.cpp): if the condition is FALSE, the delay slot
+         * is NOT executed at all (nullified) - unlike ordinary
+         * branches, which always execute their delay slot regardless
+         * of whether the branch is taken. Modeled by skipping straight
+         * to fallthrough_pc+4 (past the delay slot) instead of letting
+         * the normal fallthrough_pc execute next. */
+        case 0x02: /* BLTZL */  if ((int64_t)GPR(rs) < 0)  BRANCH_TO(this_pc + 4 + (imm << 2)); else { st->pc = fallthrough_pc + 4; st->next_pc = fallthrough_pc + 8; } break;
+        case 0x03: /* BGEZL */  if ((int64_t)GPR(rs) >= 0) BRANCH_TO(this_pc + 4 + (imm << 2)); else { st->pc = fallthrough_pc + 4; st->next_pc = fallthrough_pc + 8; } break;
+        case 0x12: /* BLTZALL - links unconditionally (matches PCSX2's
+             * _SetLink(31) running before the branch-taken check),
+             * even when the branch itself is not taken. */
+            LINK(31);
+            if ((int64_t)GPR(rs) < 0) BRANCH_TO(this_pc + 4 + (imm << 2)); else { st->pc = fallthrough_pc + 4; st->next_pc = fallthrough_pc + 8; }
+            break;
+        case 0x13: /* BGEZALL - same unconditional-link caveat as BLTZALL. */
+            LINK(31);
+            if ((int64_t)GPR(rs) >= 0) BRANCH_TO(this_pc + 4 + (imm << 2)); else { st->pc = fallthrough_pc + 4; st->next_pc = fallthrough_pc + 8; }
+            break;
         default:
             halt("unimplemented REGIMM opcode");
             return 1;
@@ -482,6 +583,21 @@ static int ee_step(void)
     case 0x05: /* BNE */  if (GPR(rs) != GPR(rt)) BRANCH_TO(this_pc + 4 + (imm << 2)); break;
     case 0x06: /* BLEZ */ if ((int64_t)GPR(rs) <= 0) BRANCH_TO(this_pc + 4 + (imm << 2)); break;
     case 0x07: /* BGTZ */ if ((int64_t)GPR(rs) > 0)  BRANCH_TO(this_pc + 4 + (imm << 2)); break;
+
+    /* "Likely" branches (MIPS II+, primary opcodes 0x14-0x17), ported
+     * from PCSX2's Interpreter.cpp. Same delay-slot-nullification
+     * semantics as the REGIMM likely variants above: if not taken,
+     * skip straight past the delay slot instead of executing it. This
+     * family was found missing (halting cleanly on "unimplemented
+     * primary opcode 0x14") once the COP0 PRId fix (see docs/STATUS.md
+     * round 5) got real BIOS boot far enough to actually need it -
+     * real BIOS code uses BEQL/BNEL/etc. constantly for tight
+     * loops/polling, unlike the ordinary branches this project already
+     * had full coverage of. */
+    case 0x14: /* BEQL */  if (GPR(rs) == GPR(rt)) BRANCH_TO(this_pc + 4 + (imm << 2)); else { st->pc = fallthrough_pc + 4; st->next_pc = fallthrough_pc + 8; } break;
+    case 0x15: /* BNEL */  if (GPR(rs) != GPR(rt)) BRANCH_TO(this_pc + 4 + (imm << 2)); else { st->pc = fallthrough_pc + 4; st->next_pc = fallthrough_pc + 8; } break;
+    case 0x16: /* BLEZL */ if ((int64_t)GPR(rs) <= 0) BRANCH_TO(this_pc + 4 + (imm << 2)); else { st->pc = fallthrough_pc + 4; st->next_pc = fallthrough_pc + 8; } break;
+    case 0x17: /* BGTZL */ if ((int64_t)GPR(rs) > 0)  BRANCH_TO(this_pc + 4 + (imm << 2)); else { st->pc = fallthrough_pc + 4; st->next_pc = fallthrough_pc + 8; } break;
 
     case 0x08: /* ADDI */
     case 0x09: /* ADDIU */ if (rt) GPR(rt) = sext32((uint32_t)((int32_t)rs32 + imm)); break;
@@ -575,11 +691,96 @@ static int ee_step(void)
                         st->cop0[12] &= ~0x10000u; /* Status.EIE = 0 */
                     }
                     break;
+                case 0x01: /* TLBR - Read Indexed TLB Entry. Ported from
+                     * PCSX2's COP0::TLBR(). Loads the TLB entry at
+                     * Index (cop0[0], masked to 6 bits/48 entries)
+                     * back into PageMask/EntryHi/EntryLo0/EntryLo1
+                     * (cop0[5]/[10]/[2]/[3]), applying the same
+                     * read-back masking real hardware does (G is only
+                     * set in the read-back copies if BOTH EntryLo0 and
+                     * EntryLo1 have G set in the stored entry - see
+                     * PCSX2's comment on this exact quirk). */
+                {
+                    uint32_t i = st->cop0[0] & 0x3Fu;
+                    if (i > 47) break; /* real hardware/PCSX2 both just warn and no-op past entry 47 */
+                    uint32_t lo0 = st->tlb[i].entry_lo0, lo1 = st->tlb[i].entry_lo1;
+                    uint32_t g = (lo0 & 1u) & (lo1 & 1u);
+                    st->cop0[5]  = st->tlb[i].page_mask;
+                    st->cop0[10] = st->tlb[i].entry_hi & ~((st->tlb[i].page_mask) | 0x1F00u);
+                    st->cop0[2]  = (lo0 & ~0xFC000000u & ~1u) | g;
+                    st->cop0[3]  = (lo1 & ~0x7C000000u & ~1u) | g;
+                    break;
+                }
+                case 0x02: /* TLBWI - Write Indexed TLB Entry. Ported
+                     * from PCSX2's COP0::TLBWI()/WriteTLB(). Stores
+                     * the current PageMask/EntryHi/EntryLo0/EntryLo1
+                     * into the TLB at Index. NOTE: this project does
+                     * not wire TLB lookups into actual address
+                     * translation (ee_mem_ptr() still treats kuseg/
+                     * kseg0/kseg1 as flat physical-masked mappings) -
+                     * this stores the entry faithfully so MFC0/TLBR/
+                     * TLBP round-trip correctly, matching real
+                     * hardware's register-level behavior, without
+                     * claiming to model the MMU's actual page-walk. */
+                {
+                    uint32_t j = st->cop0[0] & 0x3Fu;
+                    if (j > 47) break;
+                    st->tlb[j].page_mask = st->cop0[5];
+                    st->tlb[j].entry_hi  = st->cop0[10];
+                    st->tlb[j].entry_lo0 = st->cop0[2];
+                    st->tlb[j].entry_lo1 = st->cop0[3];
+                    break;
+                }
+                case 0x06: /* TLBWR - Write Random TLB Entry. Same as
+                     * TLBWI but indexed by Random (cop0[1]) instead of
+                     * Index. Real hardware/PCSX2 decrement Random
+                     * every cycle between Wired and 47; this project
+                     * does not model that decay (Random is just
+                     * whatever value software last wrote via MTC0, or
+                     * 0) - a documented simplification, not a
+                     * fabricated behavior, since we don't claim
+                     * cycle-accurate Random decay. */
+                {
+                    uint32_t j = st->cop0[1] & 0x3Fu;
+                    if (j > 47) break;
+                    st->tlb[j].page_mask = st->cop0[5];
+                    st->tlb[j].entry_hi  = st->cop0[10];
+                    st->tlb[j].entry_lo0 = st->cop0[2];
+                    st->tlb[j].entry_lo1 = st->cop0[3];
+                    break;
+                }
+                case 0x08: /* TLBP - Probe TLB for Matching Entry.
+                     * Ported from PCSX2's COP0::TLBP(). Searches all
+                     * 48 entries for one whose (masked) VPN2 and
+                     * ASID/Global match the current EntryHi, sets
+                     * Index to the match (or 0x80000000, i.e. sign bit
+                     * set, if none found - the real "not found"
+                     * convention, checked via MFC0 $rt,$0 returning a
+                     * negative value). */
+                {
+                    uint32_t eh = st->cop0[10];
+                    uint32_t want_vpn2 = (eh >> 13) & 0x7FFFFu;
+                    uint32_t want_asid = eh & 0xFFu;
+                    uint32_t found = 0xFFFFFFFFu;
+                    for (uint32_t i = 0; i < 48; i++) {
+                        uint32_t mask = (st->tlb[i].page_mask >> 13) & 0xFFFu;
+                        uint32_t entry_vpn2 = (st->tlb[i].entry_hi >> 13) & 0x7FFFFu;
+                        int is_global = (st->tlb[i].entry_lo0 & 1u) && (st->tlb[i].entry_lo1 & 1u);
+                        uint32_t entry_asid = st->tlb[i].entry_hi & 0xFFu;
+                        if ((entry_vpn2 & ~mask) == (want_vpn2 & ~mask) &&
+                            (is_global || entry_asid == want_asid)) {
+                            found = i;
+                            break;
+                        }
+                    }
+                    st->cop0[0] = (found == 0xFFFFFFFFu) ? 0x80000000u : found;
+                    break;
+                }
                 default:
                 {
                     char buf[96];
                     snprintf(buf, sizeof(buf),
-                             "unimplemented COP0 CO-format funct 0x%02X (TLBR/TLBWI/TLBWR/TLBP not implemented, pc=0x%08X)",
+                             "unimplemented COP0 CO-format funct 0x%02X (pc=0x%08X)",
                              (unsigned int)co_funct, (unsigned int)this_pc);
                     halt(buf);
                     return 1;
@@ -1430,6 +1631,15 @@ static int ee_step(void)
     case 0x2F: /* CACHE */ break; /* no-op: no cache model */
     case 0x33: /* PREF */  break; /* no-op: prefetch hint */
     case 0x3F: /* SD */ ee_mem_write64(st, rs32 + imm, GPR(rt)); break;
+
+    /* LWC1/SWC1 - direct FPR<->memory word transfer (as opposed to
+     * MFC1/MTC1, which move a raw 32-bit value between an FPR and a
+     * GPR). Found missing once real BIOS boot got far enough to need
+     * it (see docs/STATUS.md's "round 5"/COP0 PRId fix) - halted
+     * cleanly on "unimplemented primary opcode 0x39" (SWC1). Standard
+     * MIPS I FPU load/store, `rt` selects the FPR (not a GPR) here. */
+    case 0x31: /* LWC1 */ st->fpr[rt] = ee_mem_read32(st, rs32 + imm); break;
+    case 0x39: /* SWC1 */ ee_mem_write32(st, rs32 + imm, st->fpr[rt]); break;
 
     case 0x1E: /* LQ - 128-bit load, ported from PCSX2's R5900OpcodeImpl.cpp.
                 * Address is masked to 16-byte alignment (real hardware

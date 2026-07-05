@@ -722,3 +722,27 @@ this fixes.
 gcc -I../include -I../source -o test_ee_cop0_prid tests/test_ee_cop0_prid.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
 ./test_ee_cop0_prid
 ```
+
+`test_ee_cop0_tlb.c` covers `ee_core.c`'s real R5900 TLB support -
+TLBR/TLBWI/TLBWR/TLBP (ported from PCSX2's `COP0.cpp`) plus the new
+`ee_tlb_translate()` helper that `ee_mem_ptr()` now uses for any
+address below `0x80000000` (KUSEG), where real hardware requires a
+TLB entry rather than a fixed physical mask. This test was written as
+part of "EE JALR investigation, round 5" continuation, once the COP0
+PRId fix (see `test_ee_cop0_prid.c`) let boot progress far enough to
+reach real TLBWI calls. 9 checks: TLBWI writes the current
+PageMask/EntryHi/EntryLo0/EntryLo1 into the indexed `tlb[]` entry;
+TLBR reads a `tlb[]` entry back into those same COP0 registers (with
+the exact masking real hardware applies); TLBP finds a matching entry
+by VPN2 (+ASID/Global) and sets Index accordingly, or sets Index's
+sign bit when no entry matches; a full KUSEG SW/LW round-trip through
+a manually-installed TLB entry proves address translation actually
+lands on the correct physical RAM offset; and a KUSEG TLB-miss case
+confirms an unmapped address reads as 0 rather than crashing or
+fabricating a mapping (no TLB Refill exception path exists yet - see
+docs/STATUS.md for the follow-on blocker this uncovered).
+
+```sh
+gcc -I../include -I../source -o test_ee_cop0_tlb tests/test_ee_cop0_tlb.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+./test_ee_cop0_tlb
+```

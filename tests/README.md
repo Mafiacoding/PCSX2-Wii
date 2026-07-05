@@ -10,7 +10,7 @@ values (cross-checked against PCSX2's own semantics for the opcodes
 covered). Run it with:
 
 ```sh
-gcc -I../include -I../source -o test_ee tests/test_ee_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+gcc -I../include -I../source -o test_ee tests/test_ee_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee
 ```
 
@@ -61,7 +61,7 @@ into the 64-bit register, matching real EE/PCSX2 LW semantics). Needs
 `dma.c` linked in as well as `ee_core.c`:
 
 ```sh
-gcc -I../include -I../source -o test_ee_dma tests/test_ee_dma_bus.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+gcc -I../include -I../source -o test_ee_dma tests/test_ee_dma_bus.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_dma
 ```
 
@@ -86,7 +86,7 @@ load/store). Needs `dma.c` and `gs.c` linked in too, since ee_core.c
 now depends on both:
 
 ```sh
-gcc -I../include -I../source -o test_ee_unaligned tests/test_ee_unaligned.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+gcc -I../include -I../source -o test_ee_unaligned tests/test_ee_unaligned.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_unaligned
 ```
 
@@ -106,7 +106,7 @@ DIV.S/ABS.S/NEG.S, MTC1/MFC1, C.EQ.S) with real float arithmetic.
 Needs dma.c and gs.c linked too:
 
 ```sh
-gcc -I../include -I../source -o test_ee_fpu tests/test_ee_fpu.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+gcc -I../include -I../source -o test_ee_fpu tests/test_ee_fpu.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_fpu
 ```
 
@@ -231,7 +231,7 @@ simple). Needs the full EE+IOP+hardware-model dependency set linked
 in:
 
 ```sh
-gcc -I../include -I../source -o test_system_handshake tests/test_system_handshake.c ../source/core/ee/ee_core.c ../source/core/iop/iop_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c
+gcc -I../include -I../source -o test_system_handshake tests/test_system_handshake.c ../source/core/ee/ee_core.c ../source/core/iop/iop_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c
 ./test_system_handshake
 ```
 
@@ -445,7 +445,7 @@ unimplemented opcode. Needs the same link set as the other ee_core.c
 tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop0_special tests/test_ee_cop0_special.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+gcc -I../include -I../source -o test_ee_cop0_special tests/test_ee_cop0_special.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_cop0_special
 ```
 
@@ -536,7 +536,7 @@ are left untouched (no overrun), and the rt==$0 no-read behavior.
 Needs the same link set as the other `ee_core.c` tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_lqsq tests/test_ee_lqsq.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+gcc -I../include -I../source -o test_ee_lqsq tests/test_ee_lqsq.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_lqsq
 ```
 
@@ -565,7 +565,7 @@ unconditional jumps). Needs the same link set as the other `ee_core.c`
 tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_fpu2 tests/test_ee_fpu2.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+gcc -I../include -I../source -o test_ee_fpu2 tests/test_ee_fpu2.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_fpu2
 ```
 
@@ -591,7 +591,7 @@ difference, not just a documentation footnote. Needs the same link
 set as the other `ee_core.c` tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_fpu3 tests/test_ee_fpu3.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+gcc -I../include -I../source -o test_ee_fpu3 tests/test_ee_fpu3.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_fpu3
 ```
 
@@ -621,7 +621,7 @@ PADDH (rs+rt), not a uniform 8-lane op. Needs the same link set as the
 other `ee_core.c` tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_mmi_compare tests/test_ee_mmi_compare.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+gcc -I../include -I../source -o test_ee_mmi_compare tests/test_ee_mmi_compare.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_mmi_compare
 ```
 
@@ -643,7 +643,7 @@ original 16-bit pixel value is recovered exactly. Needs the same link
 set as the other `ee_core.c` tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_mmi_sat tests/test_ee_mmi_sat.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+gcc -I../include -I../source -o test_ee_mmi_sat tests/test_ee_mmi_sat.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_mmi_sat
 ```
 
@@ -668,7 +668,7 @@ silently pass the other's test). Needs the same link set as the
 other `ee_core.c` tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_mmi_permute tests/test_ee_mmi_permute.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+gcc -I../include -I../source -o test_ee_mmi_permute tests/test_ee_mmi_permute.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_mmi_permute
 ```
 
@@ -693,7 +693,7 @@ value stored into a GPR). Needs the same link set as the other
 `ee_core.c` tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_mmi_pvshift tests/test_ee_mmi_pvshift.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+gcc -I../include -I../source -o test_ee_mmi_pvshift tests/test_ee_mmi_pvshift.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_mmi_pvshift
 ```
 
@@ -719,7 +719,7 @@ spelling out the exact real-BIOS branch condition (`SLTI $at,$k0,89`)
 this fixes.
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop0_prid tests/test_ee_cop0_prid.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+gcc -I../include -I../source -o test_ee_cop0_prid tests/test_ee_cop0_prid.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_cop0_prid
 ```
 
@@ -748,7 +748,7 @@ handler installed, so running to a BREAK that will never come would
 hang forever).
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop0_tlb tests/test_ee_cop0_tlb.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+gcc -I../include -I../source -o test_ee_cop0_tlb tests/test_ee_cop0_tlb.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_cop0_tlb
 ```
 
@@ -774,7 +774,7 @@ read-then-write of the same address would otherwise raise two
 conflicting exceptions for a single guest instruction.
 
 ```sh
-gcc -I../include -I../source -o test_ee_exceptions tests/test_ee_exceptions.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+gcc -I../include -I../source -o test_ee_exceptions tests/test_ee_exceptions.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_exceptions
 ```
 
@@ -798,7 +798,7 @@ scratchpad's special, TLB-bypassing nature was known - moved to
 `0x71000000` to keep testing genuine TLB translation.
 
 ```sh
-gcc -I../include -I../source -o test_ee_scratchpad_count tests/test_ee_scratchpad_count.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+gcc -I../include -I../source -o test_ee_scratchpad_count tests/test_ee_scratchpad_count.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_scratchpad_count
 ```
 
@@ -838,6 +838,69 @@ further, more precise wall - see docs/STATUS.md and docs/ROADMAP.md's
 "round 9" sections.
 
 ```sh
-gcc -I../include -I../source -o test_ee_timer_interrupt tests/test_ee_timer_interrupt.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+gcc -I../include -I../source -o test_ee_timer_interrupt tests/test_ee_timer_interrupt.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_timer_interrupt
+```
+
+`test_mch.c` covers `source/hw/mch.c` - the MCH_RICM/MCH_DRD RDRAM
+auto-init register pair, added in "round 11" as the root-cause fix for
+the round 10 investigation's wrong-branch bug. Ported from the
+documented PS2Tek/PCSX2 reference logic (see `include/core/hw/mch.h`
+for the full citation). 22 checks: MCH_RICM always reads back 0
+regardless of what was written; the SA=0x21 (INIT) SDEVID enumeration
+sequence returns 0x1F for the first `MCH_RDRAM_DEVICES` (2) reads then
+0 forever after; a SA=0x21/SBC=0x1 "reset strobe" write resets the
+enumeration counter back to 0 (but the strobe write itself leaves
+MCH_RICM's SOP field non-zero, so a read immediately after the strobe
+still returns 0 - matching the reference exactly; a real BIOS re-
+selects SA=0x21 with SBC=0 before actually reading results, the same
+two-step pattern the very first enumeration in this test uses); the
+reset-via-strobe is gated off when MCH_DRD's bit 7 is set; SA=0x23/
+0x24 (CNFGA/CNFGB) return their fixed 0x0D0D/0x0090 values; SA=0x40
+echoes back `MCH_RICM & 0x1F`; SOP!=0 always reads back 0 regardless
+of SA; unrelated addresses aren't claimed.
+
+```sh
+gcc -I../include -I../source -o test_mch tests/test_mch.c
+./test_mch
+```
+
+`test_ee_hw_kseg_masking.c` covers a real bug found alongside the MCH
+fix in "round 11": `ee_core.c`'s `dma_mmio_*`/`sif_mmio_*`/`mch_mmio_*`
+dispatch used to compare the RAW, unmasked virtual address against
+physical-style register constants, which only ever matched a bare
+KUSEG-style literal address (like this project's own pre-existing
+`test_ee_dma_bus.c` happens to construct) and NEVER matched a real
+KSEG1 (`0xB000_xxxx`, uncached) or KSEG0 (`0x9000_xxxx`, cached)
+access - the address forms real BIOS/game code actually uses for
+hardware registers. Fixed via a new `ee_hw_mmio_addr()` helper that
+masks KSEG0/1 addresses to their physical form before the dispatch
+checks (KUSEG addresses pass through unchanged, preserving the
+existing tests). 4 checks, each running a real tiny CPU program (SW/LW
+through the actual `ee_core.c` memory bus, not calling the register
+module directly): a KSEG1 SIF MSCOM round-trip, the same via KSEG0,
+and a KSEG1 round-trip through the new MCH registers reproducing the
+exact address forms (`0xB000F430`/`0xB000F440`) the real BIOS boot
+path that motivated this whole round uses.
+
+```sh
+gcc -I../include -I../source -o test_ee_hw_kseg_masking tests/test_ee_hw_kseg_masking.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+./test_ee_hw_kseg_masking
+```
+
+`test_ee_daddi.c` covers DADDI/DADDIU (primary opcodes 0x18/0x19),
+found missing ("unimplemented primary opcode 0x19") once the MCH fix
+above let real BIOS boot progress roughly 100x further than before,
+into RAM-resident code that uses this instruction pair. 3 checks:
+ordinary 64-bit add/subtract via immediate, and specifically that a
+negative immediate sign-extends across the *full* 64-bit register
+(not truncated to 32 bits, the mistake a naive copy-from-ADDIU
+implementation would make). Like this project's existing ADDI/ADDIU
+(which share one code path and don't implement ADDI's overflow trap),
+DADDI/DADDIU are implemented identically here too - a documented,
+consistent simplification, not a new inconsistency.
+
+```sh
+gcc -I../include -I../source -o test_ee_daddi tests/test_ee_daddi.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+./test_ee_daddi
 ```

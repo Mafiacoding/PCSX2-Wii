@@ -1013,6 +1013,106 @@ round - this is "round 10"'s starting point, the same kind of
 precisely-identified-but-open wall every round 5-9 handoff has ended
 on.
 
+### EE JALR investigation, round 11: FIXED - MCH_RICM/MCH_DRD RDRAM auto-init registers implemented, wrong branch resolved and verified live-cycle-count-accurate; a second, deeper latent bug found and fixed along the way; new honest wall (COP2/VU0) reached
+
+Direct continuation of round 10's fully-traced root cause. Round 10
+found the BIOS's SIO baud-rate "calibration loop" (`s3>=2` sanity
+check inside the subroutine at `0x9FC410E8`) failing because this
+project's SIO/UART hardware always read back 0. Verifying that
+register address (`0x1000F430`/`0x1000F440`) against a verified,
+citable reference (websearch -> PCSX2's own `Hw.h`, cross-referenced
+against PS2Tek's "EE RDRAM initialization" page) revealed round 10's
+own hypothesis was itself slightly wrong: these are **MCH_RICM/
+MCH_DRD**, not SIO - the real "Memory Control Hub" registers used for
+**RDRAM auto-initialization** (enumerating installed RDRAM devices by
+SDEVID), which lines up exactly with the printf string found in round
+10 ("Initialize memory (rev:%d.%02d, ctm:%dMhz, cpuclk:%dMhz %s)...").
+PCSX2's own comment on this area: `"MCH area -- Really not sure what
+this area is. Information is lacking."` - despite that, the emulation
+logic real emulators use to satisfy the BIOS's detection sequence is
+well documented (PS2Tek).
+
+**Fix implemented, ported directly from that reference (not
+reinvented)**: new `source/hw/mch.c`/`include/core/hw/mch.h`,
+`mch_mmio_read32`/`write32`, wired into `ee_core.c`'s dispatch exactly
+like `dma_mmio_*`/`sif_mmio_*`. `MCH_RICM` (0x1000F430) always reads
+back 0; writes decode SA (bits 16-27) and SBC (bits 6-9), and a SA=
+0x21/SBC=0x1 "reset strobe" (gated on `MCH_DRD` bit 7 being clear)
+restarts a `sdevid_counter` at 0. `MCH_DRD` (0x1000F440) reads decode
+SOP/SA from the last `MCH_RICM` write: SA=0x21 (INIT) returns 0x1F for
+each of the first `MCH_RDRAM_DEVICES` (2, matching real PS2 retail
+hardware) reads then 0 forever after (enumerating exactly 2 RDRAM
+devices is what lets the BIOS's `s3>=2` guard from round 10 clear);
+SA=0x23/0x24 (CNFGA/CNFGB) return fixed 0x0D0D/0x0090; SA=0x40 echoes
+`MCH_RICM & 0x1F`. 22 host-native checks (`tests/test_mch.c`).
+
+**A second, deeper latent bug found while wiring this in**: the first
+verification attempt still returned `v0=-1` even with MCH fully
+implemented. Root cause: `ee_core.c`'s `dma_mmio_read32/write32` and
+`sif_mmio_read32/write32` (and now `mch_mmio_*`) dispatch checks
+compared the **raw, unmasked** virtual address against physical-style
+constants (e.g. `0x1000F430`) - but real BIOS/game code always
+addresses hardware registers through their KSEG1 (uncached,
+`0xB0000000+phys`) or KSEG0 (cached, `0x90000000+phys`) mirrors, never
+through the bare physical value as a virtual address. A live trace
+confirmed the real access was `lw v0,(v1)` with `v1=0xB000F430` - which
+never matched the literal `0x1000F430` check, meaning **this hardware-
+register MMIO wiring had likely never actually fired for any real
+CPU-issued load/store**, only for the literal KUSEG-style addresses
+this project's own pre-existing tests happen to construct (e.g.
+`test_ee_dma_bus.c`'s `LUI r2,0x1000`). Fixed with a new
+`ee_hw_mmio_addr()` helper that masks KSEG0/1 addresses to physical
+form before the dispatch checks (same aliasing `ee_mem_ptr()` already
+applies for RAM/ROM) - KUSEG addresses pass through unchanged, so the
+existing KUSEG-literal tests keep passing unmodified. Verified via a
+new `tests/test_ee_hw_kseg_masking.c` (4 checks, real CPU programs
+exercising KSEG1/KSEG0 round-trips through SIF and MCH).
+
+**Live-verified against the real BIOS boot, register-by-register,
+after both fixes**: the subroutine at `0x9FC410E8` now returns
+`v0=0x08028020` - **exactly matching real hardware**. `a1=v0` positive,
+`bgez` taken, and at `pc=0xBFC0088C` `v0=0x02000000` - **exactly
+matching the original round 6 report's numbers**. Execution now takes
+the `jr t0` path into RAM (`t0=0x80001000`), **never reaching the
+`pc=0xBFC0092C` idle loop at all** - matching real hardware exactly.
+The fix took **14,932,336 host-native steps** to reach the return
+point, which lines up remarkably closely with round 10's live-traced
+**~14.9 million real CPU cycles** for the same call - strong
+independent confirmation this is the correct root cause, not a
+coincidental behavior change.
+
+**New, honest next wall (not yet fixed)**: continuing past the
+now-correct branch, execution runs deep into RAM-resident boot code
+(`pc=0x8000xxxx`) for another ~500,000 steps before cleanly halting on
+`"unimplemented primary opcode 0x12"` at `pc=0x8000B1FC` - opcode 0x12
+is `COP2`, the VU0-in-macro-mode coprocessor. This is an entirely
+separate, large, previously-unneeded subsystem (Vector Unit 0 macro
+instructions) - a legitimate new frontier, not a sign anything is
+wrong with this round's fix. Along the way, `DADDI`/`DADDIU` (primary
+opcodes 0x18/0x19) were also found missing and added (3 checks,
+`tests/test_ee_daddi.c`) - real RAM-resident code this project had
+never reached before uses this 64-bit-immediate-add pair constantly.
+
+**Verification**: full regression suite (37 test files, including the
+3 new ones this round) passes with 0 failures. **Wii/devkitPPC rebuild
+NOT verified this round** - this sandbox's `devkitPro` extraction
+(persisted under `outputs/build/devkitpro/`) is missing `base_rules`/
+libogc (an incomplete/stale extraction predating the mid-session
+sandbox reset noted earlier this session, not something this round's
+changes caused), so `make` fails before even reaching this project's
+own source. The new/changed C files (`mch.c`/`mch.h`, the
+`ee_hw_mmio_addr()` helper, the `DADDI`/`DADDIU` case) use only plain
+freestanding-style C (`stdint.h`, `string.h`, no host-specific APIs),
+matching `sif.c`/`dma.c`'s exact structure, which do compile cleanly
+for Wii in every prior round's rebuild - high confidence but not
+independently confirmed this round. Completing the devkitPro toolchain
+extraction (`base_tools` + `libogc`) is a residual task for a future
+round.
+
+**Next step (round 12, not started)**: implement COP2/VU0 macro mode
+(at minimum enough of it to get past `pc=0x8000B1FC`), and/or complete
+the devkitPro toolchain extraction to restore Wii rebuild verification.
+
 ### EE JALR investigation, round 10: idle loop confirmed dead code on real hardware; root cause fully traced to a BIOS clock-calibration loop whose retry budget this project's timing model exhausts too early
 
 Direct continuation of round 9's wall (EI never executes before

@@ -108,54 +108,57 @@ current, up-to-date status.)
   checks (`tests/test_ee_timer_interrupt.c`), 0 regressions across the
   full 34-file suite, clean Wii rebuild.
 - **Round 10 - idle loop confirmed dead code on real hardware; root
-  cause fully traced (not yet fixed)**: a new `pcsx2-mcp` MCP connector
-  gives DIRECT live access to a running PCSX2 (breakpoints/registers/
-  disasm/memory, no more user-relayed report files needed - see the
-  tool note below). Confirmed live: `pc=0xBFC0092C` gets **zero hits**
-  on a real boot - hardware takes the OTHER branch at `pc=0xBFC0088C`
-  (`bltz v0,+0x98`, v0 positive there) and jumps into RAM via `jr t0`,
-  never returning to this ROM region. This project's interpreter takes
-  the WRONG branch at that same spot (`v0` ends up `-1`), landing in
-  what round 8/9 mistook for a real "wait for interrupt" idle pattern -
-  it never was one. Traced `v0` back to a subroutine call at
-  `pc=0x9FC410E8` (fixed input `a0=0x60000012`): real hardware returns
-  `v0=0x08028020` (-> `a1` positive -> `bgez` taken -> `s0=0x20` ->
-  final `v0=0x02000000`, matching the round-6 report exactly); this
-  project returns `v0=0xFFFFFFFF` instead. **Correction of an earlier
-  mislabeling**: the calling code was originally described as "SIF
-  init/status" - it is not. Reading the actual format string it prints
-  (`"Initialize memory (rev:%d.%02d, ctm:%dMhz, cpuclk:%dMhz %s)..."`)
-  shows this is BIOS memory/clock-diagnostics + SIO/UART console setup,
-  no SIF involved. **Root cause, fully traced via a host-native tail
-  trace cross-checked against live PCSX2 disassembly**: `0x9FC410E8`'s
-  ROM-table preamble was verified byte-for-byte identical to the real
-  hardware dump (ROM loading is fine). Past that, it's a **BIOS clock/
-  baud calibration loop**: it repeatedly computes a candidate SIO baud
-  config via a helper at `0x9FC42570` and loops (`s3` counts iterations)
-  while the computed value keeps matching the previous one; once it
-  changes, it requires `s3>=2` (i.e., at least 2 loop iterations must
-  have happened) or it bails out with `v0=-1`. This project's trace
-  shows `s3` reaching only `1` before the value changes - the guard
-  trips and `-1` is returned. The underlying `0x9FC42570`/`0x9FC42650`
-  helpers poll a hardware register at KSEG1 `0xB000F430` (physical
-  `0x1000F430`, SIO/UART, not SIF) via a tight busy-bit spin. **This
-  project's emulated SIO/UART responds to that spin in essentially
-  zero elapsed time**, so the BIOS's own "did we actually see a real
-  edge transition" sanity check fails - real hardware's actual UART
-  timing takes enough polling iterations to comfortably clear `s3>=2`.
-  Same class of issue as round 9's "our timing model is faster/coarser
-  than real hardware" wall (COP0 Count there, SIO/UART poll timing
-  here). **Next step (round 11, not started)**: give the emulated
-  SIO/UART hardware behind `0x1000F430`/`0x1000F440` enough modeled
-  latency that this calibration loop's `s3>=2` guard clears naturally,
-  rather than special-casing this one call site. See `docs/STATUS.md`'s
-  "round 10" section for the full trace, disassembly excerpts, and
-  diagnostic-harness details (harnesses live in `/tmp/diag/` on the
-  machine that did this work - throwaway, not committed, may not exist
-  in a fresh environment; the *method* - disassemble the hot pc range,
-  trace register values across a run via a ring-buffer tail trace, and
-  live breakpoints/register reads directly via `pcsx2-mcp` - is the
-  reusable part, not the specific files).
+  cause traced to a subroutine returning `v0=-1` instead of real
+  hardware's `0x08028020`** at `pc=0x9FC410E8` (a new `pcsx2-mcp` MCP
+  connector gave direct live PCSX2 access - breakpoints/registers/
+  disasm/memory - see the tool note below). Live-traced 3+ levels deep
+  and initially attributed to a "SIO baud-calibration loop" polling
+  `0x1000F430`/`0x1000F440` - see docs/STATUS.md's "round 10" section
+  for the full trace (this framing was itself corrected in round 11
+  below).
+- **Round 11 - FIXED**: verifying round 10's register addresses against
+  a citable reference (PCSX2's own `Hw.h` + PS2Tek's "EE RDRAM
+  initialization" page) showed they're **MCH_RICM/MCH_DRD** (Memory
+  Control Hub RDRAM auto-init registers), not SIO - matching the printf
+  string round 10 found ("Initialize memory (rev:%d.%02d, ctm:%dMhz,
+  cpuclk:%dMhz %s)..."). Implemented per that reference: new
+  `source/hw/mch.c`/`include/core/hw/mch.h`, wired into `ee_core.c`
+  exactly like `dma_mmio_*`/`sif_mmio_*`. **A second, deeper bug found
+  while wiring it in**: the hardware-register MMIO dispatch compared
+  the raw unmasked address against physical-style constants, so it
+  never matched real KSEG0/1-addressed accesses (`0xB000Fxxx`/
+  `0x9000Fxxx`) - only the literal KUSEG-style addresses this project's
+  own pre-existing tests happened to use. This means DMA/SIF hardware-
+  register access had likely never actually fired for any real
+  CPU-issued load/store before this round. Fixed with a new
+  `ee_hw_mmio_addr()` helper masking KSEG0/1 to physical form first
+  (same aliasing `ee_mem_ptr()` already does), preserving the existing
+  KUSEG-literal tests unmodified. **Live-verified against the real
+  BIOS, register-by-register, after both fixes**: `0x9FC410E8` now
+  returns `v0=0x08028020` exactly matching real hardware; `pc=
+  0xBFC0088C` shows `v0=0x02000000` exactly matching the original round
+  6 report; `pc=0xBFC0092C`'s idle loop is never reached - execution
+  takes the real `jr t0`-into-RAM path instead. Took 14,932,336
+  host-native steps to the fix, closely matching round 10's live-traced
+  ~14.9M real CPU cycles for the same call - strong independent
+  confirmation. Also added `DADDI`/`DADDIU` (opcodes 0x18/0x19, found
+  missing once execution reached ~100x further into real BIOS code than
+  ever before). 29 new checks across 3 new test files (`test_mch.c`,
+  `test_ee_hw_kseg_masking.c`, `test_ee_daddi.c`), 37-file/0-failure
+  full regression. **New, honest wall**: an unimplemented COP2 (VU0
+  macro mode) opcode deep in RAM-resident boot code (`pc=0x8000B1FC`) -
+  a legitimate new frontier (VU0 is a large, separate subsystem), not a
+  regression. **Wii/devkitPPC rebuild NOT verified this round** - this
+  sandbox's devkitPro extraction (`outputs/build/devkitpro/`) is
+  missing `base_rules`/libogc, an incomplete/stale extraction unrelated
+  to this round's changes; the new/changed C is plain freestanding-
+  style code matching `sif.c`/`dma.c`'s exact structure (which do
+  compile cleanly for Wii every other round), so confidence is high but
+  unconfirmed. See docs/STATUS.md's "round 11" section for the full
+  trace and citations (harnesses in `/tmp/diag/` on the machine that
+  did this work - throwaway, not committed, may not exist in a fresh
+  environment; the *method* is the reusable part, not the specific
+  files).
 
 **Tool note**: `github.com/hkmodd/PCSX2-MCP` (third-party, not this
 project's own code) gives live debugging access to a real, user-run
@@ -313,10 +316,15 @@ to the right module by address range.
   ADDA/SUBA/MULA family), and a pointer to guest RAM. `ee_mem_read8/16/32/
   64` and `ee_mem_write8/16/32/64` are the single chokepoint all
   instruction implementations go through; they route hardware-register-
-  address ranges to `dma_mmio_read32/write32` (32-bit MMIO path),
-  `gs_mmio_read64/write64` (64-bit path, GS registers are genuinely 64-bit
-  on real hardware), or `sif_mmio_read32/write32` (EE-side SIF mailbox)
-  before falling through to the RAM/BIOS pointer path. **Never use
+  address ranges (after masking KSEG0/1 to physical form via
+  `ee_hw_mmio_addr()` - round 11 found this masking step missing, which
+  meant real KSEG0/1-addressed hardware-register access had never
+  actually worked, only literal KUSEG-style test addresses) to
+  `dma_mmio_read32/write32` (32-bit MMIO path), `gs_mmio_read64/write64`
+  (64-bit path, GS registers are genuinely 64-bit on real hardware),
+  `sif_mmio_read32/write32` (EE-side SIF mailbox), or `mch_mmio_read32/
+  write32` (MCH_RICM/MCH_DRD RDRAM auto-init, round 11) before falling
+  through to the RAM/BIOS pointer path. **Never use
   `memcpy` for guest memory access** - see "Known sharp edges" below for
   why this matters here specifically. COP0 support: MFC0/MTC0 (generic
   registers, Status, Config) plus the "CO"-format instructions RFE/ERET/

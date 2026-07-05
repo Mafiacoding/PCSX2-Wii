@@ -112,6 +112,7 @@
 #include "core/hw/gs.h"
 #include "core/hw/gif.h"
 #include "core/hw/sif.h"
+#include "core/hw/mch.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -445,6 +446,29 @@ static inline void ee_mem_check_tlb_fault(ee_state_t *st, uint32_t addr, int is_
         ee_raise_tlb_exception(st, is_store, addr, st->exc_this_pc, st->exc_in_delay_slot);
 }
 
+/* Real hardware/game code always accesses the 0x10000000-0x1FFFFFFF
+ * hardware-register window through its KSEG1 (uncached, 0xB0000000+
+ * phys) or occasionally KSEG0 (cached, 0x90000000+phys) mirrors, never
+ * through the bare physical value as a virtual address - exactly the
+ * same segment-aliasing ee_mem_ptr() already applies for RAM/ROM
+ * below. The dma_mmio_.../sif_mmio_.../mch_mmio_... dispatch checks below
+ * used to compare against the raw, unmasked virtual address, which
+ * only ever matched a KUSEG-style literal (as this project's own
+ * pre-existing tests happen to construct, e.g. test_ee_dma_bus.c's
+ * "LUI r2,0x1000" address) and NEVER matched real KSEG1/KSEG0 hardware
+ * accesses - meaning this hardware-register wiring was silently dead
+ * for any real BIOS/game-issued load or store. Found via round 11's
+ * live-trace investigation (see docs/STATUS.md) while wiring up
+ * MCH_RICM/MCH_DRD: the exact same bug applied to DMA/SIF too. Fixed
+ * by masking KSEG0/1 addresses down to their physical form before the
+ * mmio dispatch checks, same as ee_mem_ptr() does - KUSEG addresses
+ * (< 0x80000000) are passed through unchanged, which keeps the
+ * existing KUSEG-literal tests passing unmodified. */
+static inline uint32_t ee_hw_mmio_addr(uint32_t addr)
+{
+    return (addr >= 0x80000000u) ? (addr & 0x1FFFFFFFu) : addr;
+}
+
 uint8_t ee_mem_read8(ee_state_t *st, uint32_t addr)
 {
     uint8_t *p = ee_mem_ptr(st, addr, 1);
@@ -468,9 +492,12 @@ uint32_t ee_mem_read32(ee_state_t *st, uint32_t addr)
      * through to the silent-no-op RAM/BIOS path below, which returns
      * 0. See docs/ROADMAP.md. */
     uint32_t hw_val;
-    if (dma_mmio_read32(addr, &hw_val))
+    uint32_t hw_addr = ee_hw_mmio_addr(addr);
+    if (dma_mmio_read32(hw_addr, &hw_val))
         return hw_val;
-    if (sif_mmio_read32(addr, &hw_val))
+    if (sif_mmio_read32(hw_addr, &hw_val))
+        return hw_val;
+    if (mch_mmio_read32(hw_addr, &hw_val))
         return hw_val;
 
     uint8_t *p = ee_mem_ptr(st, addr, 4);
@@ -510,9 +537,12 @@ void ee_mem_write16(ee_state_t *st, uint32_t addr, uint16_t val)
 
 void ee_mem_write32(ee_state_t *st, uint32_t addr, uint32_t val)
 {
-    if (dma_mmio_write32(addr, val))
+    uint32_t hw_addr_w = ee_hw_mmio_addr(addr);
+    if (dma_mmio_write32(hw_addr_w, val))
         return;
-    if (sif_mmio_write32(addr, val))
+    if (sif_mmio_write32(hw_addr_w, val))
+        return;
+    if (mch_mmio_write32(hw_addr_w, val))
         return;
 
     uint8_t *p = ee_mem_ptr(st, addr, 4);
@@ -541,6 +571,7 @@ int ee_core_init(const bios_image_t *bios)
     dma_init(); /* EE DMA controller register block - see core/hw/dma.h */
     gs_init();  /* GS privileged register block - see core/hw/gs.h */
     sif_init(); /* EE-side SIF/SBUS mailbox registers - see core/hw/sif.h */
+    mch_init(); /* EE-side MCH_RICM/MCH_DRD RDRAM auto-init registers - see core/hw/mch.h */
 
     g_state.ram = memalign(32, EE_RAM_SIZE);
     if (!g_state.ram) {
@@ -886,6 +917,18 @@ static int ee_step(void)
 
     case 0x08: /* ADDI */
     case 0x09: /* ADDIU */ if (rt) GPR(rt) = sext32((uint32_t)((int32_t)rs32 + imm)); break;
+    /* DADDI/DADDIU (primary 0x18/0x19): 64-bit reg + sign-extended
+     * imm, full 64-bit result (no truncation/re-sign-extension like
+     * the 32-bit ADDI/ADDIU pair above). Found missing (halting
+     * cleanly on "unimplemented primary opcode 0x19") once round 11's
+     * MCH_RICM/MCH_DRD RDRAM auto-init fix let real BIOS boot progress
+     * roughly 100x further than before, into code this project had
+     * never reached. Like ADDI above, DADDI's real overflow-trap
+     * semantics aren't implemented (matches this project's existing,
+     * documented ADDI simplification) - both variants behave like
+     * DADDIU. */
+    case 0x18: /* DADDI */
+    case 0x19: /* DADDIU */ if (rt) GPR(rt) = GPR(rs) + (uint64_t)(int64_t)imm; break;
     case 0x0A: /* SLTI */  if (rt) GPR(rt) = ((int64_t)GPR(rs) < (int64_t)imm) ? 1 : 0; break;
     case 0x0B: /* SLTIU */ if (rt) GPR(rt) = (GPR(rs) < (uint64_t)(int64_t)imm) ? 1 : 0; break;
     case 0x0C: /* ANDI */  if (rt) GPR(rt) = GPR(rs) & (uint64_t)uimm; break;

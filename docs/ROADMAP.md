@@ -198,6 +198,34 @@ splash screen, not just difficulty.
       round 11 should add modeled latency to the SIO/UART busy-bit
       poll so this calibration loop converges the way real hardware's
       does.
+- [x] EE JALR investigation round 11: FIXED. Implemented MCH_RICM/
+      MCH_DRD (RDRAM auto-init registers, `source/hw/mch.c`) per a
+      verified PS2Tek/PCSX2 reference - round 10's "SIO calibration
+      loop" framing was itself slightly off; these are memory-
+      controller RDRAM-detection registers, not SIO. Also found and
+      fixed a deeper bug: `ee_core.c`'s hardware-register MMIO
+      dispatch compared the raw unmasked address against physical-
+      style constants, so it never matched real KSEG0/1-addressed
+      accesses (only the literal KUSEG-style addresses this project's
+      own tests happened to use) - added `ee_hw_mmio_addr()` to mask
+      KSEG0/1 addresses first, same aliasing `ee_mem_ptr()` already
+      does. Live-verified against the real BIOS: the subroutine at
+      `0x9FC410E8` now returns the exact real-hardware value
+      (`0x08028020`), the branch at `pc=0xBFC0088C` matches exactly
+      (`v0=0x02000000`), and `pc=0xBFC0092C`'s idle loop is never
+      reached - all confirmed register-by-register against the
+      original round 6 report. Step count to the fix (14.93M) lines up
+      closely with round 10's live-traced ~14.9M real CPU cycles for
+      the same call. Also added DADDI/DADDIU (found missing once
+      execution reached ~100x further into real BIOS code than ever
+      before). 29 new host-native checks across 3 new test files, 37-
+      file/0-failure full regression. New, honest next wall: an
+      unimplemented COP2 (VU0 macro mode) opcode deep in RAM-resident
+      boot code - a legitimate new frontier, not a regression. Wii/
+      devkitPPC rebuild NOT verified this round (this sandbox's
+      devkitPro extraction is missing base_rules/libogc, a pre-
+      existing, unrelated toolchain gap) - see docs/STATUS.md's
+      "round 11" section.
 - [x] SIF mailbox/flag registers (MSCOM/SMCOM/MSFLAG/SMFLAG/CTRL,
       0x1000F200-0x1000F260), EE side only - `source/hw/sif.c`, wired
       into `ee_core.c`'s 32-bit MMIO dispatch. Register-level

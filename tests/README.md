@@ -357,7 +357,7 @@ pass. Needs the full IOP hardware-model dependency set linked (same
 as `test_iop_core.c`):
 
 ```sh
-gcc -I../include -I../source -o test_iop_hle_bios tests/test_iop_hle_bios.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c
+gcc -I../include -I../source -o test_iop_hle_bios tests/test_iop_hle_bios.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c
 ./test_iop_hle_bios
 ```
 
@@ -569,6 +569,33 @@ gcc -I../include -I../source -o test_ee_fpu2 tests/test_ee_fpu2.c ../source/hw/d
 ./test_ee_fpu2
 ```
 
-Still not implemented on the COP1 side: the MADD/MSUB accumulator
-family, and BC1FL/BC1TL ("likely" branches - this project has no
-likely-branch infrastructure yet for ANY branch, integer or FP).
+`test_ee_fpu3.c` covers `ee_core.c`'s FPU accumulator (ACC) family:
+ADDA.S, SUBA.S, MULA.S, MADD.S, MSUB.S, MADDA.S, MSUBA.S, all ported
+from PCSX2's `FPU.cpp`. 19/19 checks. Since no MIPS instruction reads
+ACC directly, ACC is read back out via a trailing
+`MADD.S(fd, f_zero, f_zero)` (== `fd = ACC + 0*0` == `fpuDouble(ACC)`).
+Basic checks confirm each opcode's arithmetic (ADDA.S/SUBA.S/MULA.S
+writing ACC; MADD.S/MSUB.S reading ACC into `fd`; MADDA.S/MSUBA.S
+updating ACC in place). The last test is the important one: it
+constructs a case - ACC preset to an overflow-clamped `-Fmax` via
+`ADDA.S(-3.4e38, -3.4e38)`, and an `fs*ft` product that overflows to
+`+infinity` (`1e30 * 1e30`) - where MADD.S and MADDA.S are given
+IDENTICAL inputs but produce DIFFERENT results, because MADD.S clamps
+the intermediate product through `fpuDouble()` before adding to ACC
+(`-Fmax + Fmax == 0.0` exactly) while MADDA.S adds the raw, unclamped
+native product first and only clamps the final sum afterward
+(`-Fmax + (raw +infinity) == +infinity`, then clamped to `+Fmax`).
+This proves the double-`fpuDouble()`-pass asymmetry documented in
+`ee_core.c`'s case comments is a real, observable behavioral
+difference, not just a documentation footnote. Needs the same link
+set as the other `ee_core.c` tests:
+
+```sh
+gcc -I../include -I../source -o test_ee_fpu3 tests/test_ee_fpu3.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+./test_ee_fpu3
+```
+
+Still not implemented on the COP1 side: BC1FL/BC1TL ("likely"
+branches - this project has no likely-branch infrastructure yet for
+ANY branch, integer or FP), and the FPU exception-cause control-
+register flags (only the condition flag needed for BC1 is modeled).

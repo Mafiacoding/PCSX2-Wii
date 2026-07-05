@@ -48,19 +48,24 @@
  *   - COP2 (VU0 macro mode)
  *   - COP1 (FPU): core arithmetic (ADD/SUB/MUL/DIV/ABS/MOV/NEG.S,
  *     SQRT.S/RSQRT.S, MAX.S/MIN.S, CVT.W.S/CVT.S.W, C.EQ/LT/LE.S,
- *     MFC1/MTC1/CFC1/CTC1) plus BC1F/BC1T (branch on FP condition
- *     flag) are implemented, ported from pcsx2/FPU.cpp including the
- *     PS2's non-IEEE denormal/infinity handling (fpuDouble/
- *     checkOverflow/checkUnderflow) and the MAX.S/MIN.S bit-level
- *     signed-int comparison quirk (fp_max/fp_min). Still NOT
- *     implemented: the MADD/MSUB accumulator family, BC1FL/BC1TL
- *     ("likely" branches - this project has no likely-branch
- *     infrastructure for ANY branch yet, integer or FP), and the
- *     FPU exception-cause control-register flags (O/U/I/D/SO/SU/SI/
- *     SD) - only the condition flag (C, needed for BC1) is modeled;
- *     nothing in this project raises FPU exceptions from the others
- *     yet, a documented, consistent simplification across every FPU
- *     op in this file.
+ *     MFC1/MTC1/CFC1/CTC1), BC1F/BC1T (branch on FP condition flag),
+ *     and the full ACC (accumulator) family - ADDA.S/SUBA.S/MULA.S/
+ *     MADD.S/MSUB.S/MADDA.S/MSUBA.S - are implemented, ported from
+ *     pcsx2/FPU.cpp including the PS2's non-IEEE denormal/infinity
+ *     handling (fpuDouble/checkOverflow/checkUnderflow), the
+ *     MAX.S/MIN.S bit-level signed-int comparison quirk (fp_max/
+ *     fp_min), and a real hardware/PCSX2 asymmetry in the ACC family
+ *     worth remembering: MADD.S/MSUB.S run their intermediate
+ *     fs*ft product through fpuDouble() a SECOND time before adding/
+ *     subtracting it from ACC, but MADDA.S/MSUBA.S do NOT - ported
+ *     exactly as PCSX2 has it, not "cleaned up" to be consistent.
+ *     Still NOT implemented: BC1FL/BC1TL ("likely" branches - this
+ *     project has no likely-branch infrastructure for ANY branch yet,
+ *     integer or FP), and the FPU exception-cause control-register
+ *     flags (O/U/I/D/SO/SU/SI/SD) - only the condition flag (C,
+ *     needed for BC1) is modeled; nothing in this project raises FPU
+ *     exceptions from the others yet, a documented, consistent
+ *     simplification across every FPU op in this file.
  *   - TLB/MMU (no TLB entries modeled at all), interrupt/exception
  *     RAISING (nothing ever triggers an exception - only the
  *     exception-RETURN instructions ERET/RFE above are implemented),
@@ -663,6 +668,68 @@ static int ee_step(void)
             case 0x29: /* MIN.S - ported from PCSX2's MIN_S()/fp_min(). */
                 st->fpr[fd] = fp_min(st->fpr[fs], st->fpr[ft]);
                 break;
+            case 0x18: /* ADDA.S - ACC = fs + ft, ported from PCSX2's
+                        * ADDA_S(). */
+            {
+                float r = fpu_double(st->fpr[fs]) + fpu_double(st->fpr[ft]);
+                st->acc = float_to_bits(r);
+                if (!fpu_check_overflow(&st->acc)) fpu_check_underflow(&st->acc);
+            } break;
+            case 0x19: /* SUBA.S - ACC = fs - ft, ported from SUBA_S(). */
+            {
+                float r = fpu_double(st->fpr[fs]) - fpu_double(st->fpr[ft]);
+                st->acc = float_to_bits(r);
+                if (!fpu_check_overflow(&st->acc)) fpu_check_underflow(&st->acc);
+            } break;
+            case 0x1A: /* MULA.S - ACC = fs * ft, ported from MULA_S(). */
+            {
+                float r = fpu_double(st->fpr[fs]) * fpu_double(st->fpr[ft]);
+                st->acc = float_to_bits(r);
+                if (!fpu_check_overflow(&st->acc)) fpu_check_underflow(&st->acc);
+            } break;
+            case 0x1C: /* MADD.S - fd = ACC + (fs * ft), ported from
+                        * PCSX2's MADD_S(). Real hardware/PCSX2 quirk
+                        * worth preserving exactly: the intermediate
+                        * product is run through fpuDouble() a SECOND
+                        * time when it's read back for the addition
+                        * (PCSX2's own FPRreg temp; temp.f = fpuDouble
+                        * (fs)*fpuDouble(ft); then fpuDouble(temp.UL)
+                        * again) - unlike MADDA.S below, which doesn't
+                        * do this second pass. Not an oversight to
+                        * "simplify away" - ported as-is. */
+            {
+                float prod = fpu_double(st->fpr[fs]) * fpu_double(st->fpr[ft]);
+                uint32_t prod_bits = float_to_bits(prod);
+                float r = fpu_double(st->acc) + fpu_double(prod_bits);
+                st->fpr[fd] = float_to_bits(r);
+                if (!fpu_check_overflow(&st->fpr[fd])) fpu_check_underflow(&st->fpr[fd]);
+            } break;
+            case 0x1D: /* MSUB.S - fd = ACC - (fs * ft), same
+                        * double-fpuDouble()-pass quirk as MADD.S
+                        * above, ported from PCSX2's MSUB_S(). */
+            {
+                float prod = fpu_double(st->fpr[fs]) * fpu_double(st->fpr[ft]);
+                uint32_t prod_bits = float_to_bits(prod);
+                float r = fpu_double(st->acc) - fpu_double(prod_bits);
+                st->fpr[fd] = float_to_bits(r);
+                if (!fpu_check_overflow(&st->fpr[fd])) fpu_check_underflow(&st->fpr[fd]);
+            } break;
+            case 0x1E: /* MADDA.S - ACC += fs * ft, ported from PCSX2's
+                        * MADDA_S(). NOTE: no intermediate
+                        * fpuDouble()-of-the-product pass here, unlike
+                        * MADD.S above - that asymmetry is real,
+                        * ported exactly as PCSX2 has it. */
+            {
+                float r = fpu_double(st->acc) + (fpu_double(st->fpr[fs]) * fpu_double(st->fpr[ft]));
+                st->acc = float_to_bits(r);
+                if (!fpu_check_overflow(&st->acc)) fpu_check_underflow(&st->acc);
+            } break;
+            case 0x1F: /* MSUBA.S - ACC -= fs * ft, ported from MSUBA_S(). */
+            {
+                float r = fpu_double(st->acc) - (fpu_double(st->fpr[fs]) * fpu_double(st->fpr[ft]));
+                st->acc = float_to_bits(r);
+                if (!fpu_check_overflow(&st->acc)) fpu_check_underflow(&st->acc);
+            } break;
             case 0x32: /* C.EQ.S */
                 if (fpu_double(st->fpr[fs]) == fpu_double(st->fpr[ft])) st->fcr31 |= 0x00800000u;
                 else st->fcr31 &= ~0x00800000u;

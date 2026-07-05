@@ -351,6 +351,51 @@ none has been found yet) or further, more careful tracing of exactly
 which BIOS routine performs this dereference and why, before
 attempting a fix.
 
+### FPU accumulator (ACC) family implemented
+
+Added the last 7 COP1.S opcodes needed for the FPU's ACC register:
+`ADDA.S`/`SUBA.S`/`MULA.S` (write ACC from `fs`+/-/`*``ft`), `MADD.S`/
+`MSUB.S` (read ACC, write `fd = ACC +/- fs*ft`, leaving ACC itself
+unchanged), and `MADDA.S`/`MSUBA.S` (read+write ACC in place). All
+ported directly from PCSX2's `FPU.cpp`. See `docs/ROADMAP.md`'s COP1
+bullet for the exact case-by-case semantics.
+
+The one quirk worth calling out again here (documented in `ee_core.c`'s
+case comments and deliberately preserved, not "cleaned up"): `MADD.S`/
+`MSUB.S` run the intermediate `fs*ft` product through `fpuDouble()` a
+SECOND time before combining it with ACC, but `MADDA.S`/`MSUBA.S` don't
+- they combine the raw product directly. This is invisible for
+ordinary finite values (both paths agree), and only becomes observable
+when the product overflows to infinity, since `fpuDouble()` clamps
+infinities to `+/-Fmax` on the spot while a raw native float infinity
+does not get clamped until the final `fpu_check_overflow()` call at
+the very end.
+
+Unit tested in `tests/test_ee_fpu3.c`, 19/19 checks. Beyond the basic
+arithmetic checks for each opcode, the last test constructs exactly
+that overflow scenario to make the asymmetry directly observable:
+ACC preset to an overflow-clamped `-Fmax` (via `ADDA.S(-3.4e38,
+-3.4e38)`, which itself overflows to `-infinity` and gets clamped),
+and an `fs*ft` product that overflows to `+infinity` (`1e30 * 1e30`).
+Feeding the SAME inputs to both opcodes gives different, verifiable
+results: `MADD.S`'s `fd` ends up exactly `0.0` (`-Fmax + Fmax`, since
+the product got pre-clamped to `+Fmax`), while `MADDA.S`'s ACC ends up
+`+Fmax` (`-Fmax + raw-infinity` overflows to `+infinity`, only clamped
+afterward). This is a genuine, checkable behavioral difference, not
+just a comment - confirms the port is faithful to PCSX2's actual
+control flow rather than an equivalent-looking simplification.
+
+Regression: full suite (24 test files, including this new one) all
+pass 0 failures. Also caught and fixed a stale, unrelated regression
+script/doc bug while running the full suite: `tests/README.md`'s
+documented build command for `test_iop_hle_bios.c` was missing
+`iop_hle_modules.c` on the link line (this test's `iop_core.c`
+dependency started requiring it after the module-registry work,
+`iop_core_init()` now calls `iop_hle_modules_init()`, but the doc's
+command was never updated) - fixed the command in `tests/README.md`.
+
+Wii/devkitPPC target rebuilds clean with no warnings.
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

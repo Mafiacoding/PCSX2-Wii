@@ -39,6 +39,9 @@ typedef struct {
      * from PCSX2's pcsx2/FPU.cpp. */
     uint32_t fpr[32];
     uint32_t fcr31;
+    uint32_t acc;   /* FPU accumulator - MADDA.S/MSUBA.S/MULA.S/ADDA.S/
+                     * SUBA.S write it, MADD.S/MSUB.S read it. Same raw
+                     * IEEE-754 bit-pattern representation as fpr[]. */
 
     uint8_t *ram;           /* 32MB emulated EE RAM */
     uint32_t ram_size;

@@ -49,11 +49,22 @@ splash screen, not just difficulty.
       the real-hardware quirk that SQRT.S's source operand is Ft, not
       Fs), and MAX.S/MIN.S's bit-level signed-int comparison trick
       (`fp_max`/`fp_min` - only differs from a naive float compare
-      when both operands are negative). Unit tested in
-      `tests/test_ee_fpu.c` and `tests/test_ee_fpu2.c` (13/13 checks,
+      when both operands are negative). Also includes the FPU
+      accumulator (ACC) family: ADDA.S/SUBA.S/MULA.S (write ACC),
+      MADD.S/MSUB.S (read ACC, write fd = ACC +/- fs*ft), and
+      MADDA.S/MSUBA.S (read+write ACC directly). Ported exactly from
+      `pcsx2/FPU.cpp`, preserving a real hardware/PCSX2 quirk: MADD.S/
+      MSUB.S run the intermediate fs*ft product through `fpuDouble()`
+      a SECOND time before combining with ACC, but MADDA.S/MSUBA.S do
+      not (direct accumulation) - a genuine asymmetry, not something
+      simplified away for consistency. Unit tested in
+      `tests/test_ee_fpu.c`, `tests/test_ee_fpu2.c` (13/13 checks,
       including both branch directions for BC1F/BC1T to prove they're
-      not accidentally unconditional). Still missing: the
-      MADD/MSUB/MADDA/MSUBA accumulator family, BC1FL/BC1TL ("likely"
+      not accidentally unconditional), and `tests/test_ee_fpu3.c`
+      (19/19 checks, including a constructed overflow case that makes
+      the MADD.S-vs-MADDA.S double-fpuDouble()-pass asymmetry directly
+      observable: identical inputs give MADD.S's fd == 0.0 exactly but
+      MADDA.S's ACC == +Fmax). Still missing: BC1FL/BC1TL ("likely"
       branches - this project has no likely-branch infrastructure yet
       for ANY branch, integer or FP), and the FPU exception-cause
       control-register flags (only the condition flag needed for BC1

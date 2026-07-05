@@ -250,6 +250,23 @@ splash screen, not just difficulty.
       producing a real `pcsx2-wii.elf`/`.dol` - the first Wii/devkitPPC
       rebuild actually verified this session, retroactively confirming
       rounds 9-12's C changes compile cleanly for the real target.
+- [x] EE JALR investigation round 13: VU0 vector datapath implemented
+      - VF[32][4] register file, VU0 local data memory (4KB),
+      QMFC2/QMTC2 (128-bit transfers), VSUB (vector float subtract),
+      VISWR/VSQI (VU0-mem stores, dispatched via a decoded SPECIAL2
+      sub-table), VIADD/VISUB/VIAND/VIOR (VI integer ALU); VF00/VI0
+      hardwired like real hardware. Cleared round 12's `viswr` wall for
+      good and the subsequent VU0-register-clear routine. Also added
+      LDL/LDR/SDL/SDR (64-bit unaligned load/store-left/right, the
+      doubleword analog of this project's existing LWL/LWR/SWL/SWR) -
+      a new, unrelated wall found immediately after. Live-verified: the
+      interpreter now runs past 300M steps with no halt at all
+      (previously halted at ~15.4M), settling into a bounded ~0x420-
+      byte loop confirmed via live PCSX2 disassembly to be an ordinary
+      SIF_SMFLG polling/debounce pattern - an honest steady state given
+      this project's minimal IOP/SIF HLE model on a disc-less boot, not
+      a bug. 16 new checks across two test files, 40-file/0-failure
+      full regression, clean Wii rebuild.
 - [x] SIF mailbox/flag registers (MSCOM/SMCOM/MSFLAG/SMFLAG/CTRL,
       0x1000F200-0x1000F260), EE side only - `source/hw/sif.c`, wired
       into `ee_core.c`'s 32-bit MMIO dispatch. Register-level

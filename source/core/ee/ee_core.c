@@ -641,6 +641,46 @@ static void halt(const char *reason)
  * EE/PCSX2 behavior. */
 static inline uint64_t sext32(uint32_t v) { return (uint64_t)(int64_t)(int32_t)v; }
 
+/* --- VU0 (COP2 macro mode) helpers, round 13 ---
+ * VF00 is hardwired to (0,0,0,1.0f) on real hardware (the float bit
+ * pattern of 1.0f is 0x3F800000u); VI0 (cop2_ctrl[0]) is hardwired to
+ * 0 - both like MIPS r0. Routing every VF/VI access through these
+ * helpers (rather than special-casing register 0 at each call site)
+ * matches this project's existing style for similar "register 0 is
+ * special" cases elsewhere. */
+static inline uint32_t vu0_vf_read_lane(ee_state_t *st, uint32_t reg, uint32_t lane)
+{
+    if (reg == 0) return (lane == 3) ? 0x3F800000u : 0u;
+    return st->vu0_vf[reg][lane];
+}
+
+static inline void vu0_vf_write_lane(ee_state_t *st, uint32_t reg, uint32_t lane, uint32_t val)
+{
+    if (reg == 0) return; /* writes to VF00 are discarded on real hardware */
+    st->vu0_vf[reg][lane] = val;
+}
+
+static inline uint32_t vu0_vi_read(ee_state_t *st, uint32_t reg)
+{
+    return (reg == 0) ? 0u : st->cop2_ctrl[reg];
+}
+
+static inline void vu0_vi_write(ee_state_t *st, uint32_t reg, uint32_t val)
+{
+    if (reg == 0) return; /* writes to VI0 are discarded on real hardware */
+    st->cop2_ctrl[reg] = val;
+}
+
+/* VU0 local data memory address helper: VI holds a quadword index:
+ * byte address = (VI & 0xFF) * 16 + lane * 4 (lane 0=x,1=y,2=z,3=w).
+ * The & 0xFF wraps to VU0's real 256-quadword (4KB) address space -
+ * see ee_core.h's vu0_mem comment for the simplification note. */
+static inline uint32_t vu0_mem_addr(uint32_t vi_value, uint32_t lane)
+{
+    return ((vi_value & 0xFFu) * 16u) + lane * 4u;
+}
+
+
 /* --- COP1 (FPU) helpers, ported from PCSX2's pcsx2/FPU.cpp ---
  * PS2's FPU isn't strict IEEE-754: it treats denormal inputs as
  * signed zero and clamps infinite inputs to +/-Fmax *before* doing
@@ -1361,36 +1401,153 @@ static int ee_step(void)
         }
         break;
 
-    case 0x12: /* COP2 (VU0 macro mode) - control-register transfers only.
-                * See ee_core.h's cop2_ctrl[] comment (round 12) for
-                * scope/rationale. rd here is the COP2 control register
-                * number (e.g. 28 = FBRST, confirmed via a live PCSX2
-                * disassembly of the real BIOS call site that halted
-                * on this opcode before this round). */
-        switch (rs) {
-        case 0x00: /* MFC2 */ if (rt) GPR(rt) = sext32(st->cop2_ctrl[rd]); break;
-        case 0x02: /* CFC2 */ if (rt) GPR(rt) = sext32(st->cop2_ctrl[rd]); break;
-        case 0x04: /* MTC2 */ st->cop2_ctrl[rd] = rt32; break;
-        case 0x06: /* CTC2 */
-            /* Real FBRST (control reg 28) semantics - ported from
-             * PCSX2's own VU0.cpp CTC2(): bit 0x1 = VU0 force-break,
-             * bit 0x2 = VU0 reset, bit 0x100 = VU1 force-break,
-             * bit 0x200 = VU1 reset. Not modeled beyond plain storage
-             * (see ee_core.h comment) - no VU0/VU1 execution state
-             * exists yet for these bits to actually act on. */
-            st->cop2_ctrl[rd] = rt32;
-            break;
-        default:
-            /* MFC2/CFC2/MTC2/CTC2 cover every real BIOS/kernel use of
-             * COP2 control-register transfers found so far. The
-             * actual VU0 vector datapath (QMFC2/QMTC2 128-bit moves,
-             * and the full VU macro arithmetic opcode family - ADD/
-             * SUB/MUL/MAC/etc., dispatched via the 6-bit funct field
-             * once rs's top bit is set, matching COP0/COP1's own "CO"-
-             * format convention) is NOT implemented - a real, scoped
-             * next wall if a boot path or game ever needs it. */
-            halt("unimplemented COP2 sub-opcode (VU0 vector datapath not implemented)");
-            return 1;
+    case 0x12: /* COP2 (VU0 macro mode). Round 12 added the 32-bit
+                * control-register transfers (MFC2/CFC2/MTC2/CTC2).
+                * Round 13 adds the actual VU0 vector datapath: 128-bit
+                * QMFC2/QMTC2 transfers, plus the specific "CO"-format
+                * (rs bit 0x10 set) vector ops a real BIOS VU0 init/
+                * self-test sequence needs (VSUB, VISWR, VSQI). Field
+                * encodings (rs=destmask|0x10, FT/FS/FD positions, the
+                * SPECIAL2 sub-index formula) were derived by decoding
+                * the exact raw instruction words from a live PCSX2
+                * disassembly and cross-checked against PCSX2's own
+                * R5900OpcodeTables.cpp Int_COP2PrintTable/
+                * Int_COP2SPECIAL1PrintTable/Int_COP2SPECIAL2PrintTable
+                * decode tables - see docs/STATUS.md's "round 13"
+                * section for the full derivation. Any other CO-format
+                * op (the rest of the VU macro arithmetic family, and
+                * the rest of the memory-access family - VILWR/VLQI/
+                * VLQD/VSQD/VDIV/etc) halts honestly rather than
+                * silently doing nothing. */
+        if (rs < 0x10) {
+            switch (rs) {
+            case 0x00: /* MFC2 */ if (rt) GPR(rt) = sext32(vu0_vi_read(st, rd)); break;
+            case 0x01: /* QMFC2 - 128-bit GPR <- VF, raw bit copy (no
+                        * float conversion): lanes x,y pack into the
+                        * low 64 bits (ud0), z,w into the high 64 bits
+                        * (ud1) - matches PCSX2's VECTOR union layout
+                        * (pcsx2/VU.h). */
+                if (rt) {
+                    uint64_t x = vu0_vf_read_lane(st, rd, 0);
+                    uint64_t y = vu0_vf_read_lane(st, rd, 1);
+                    uint64_t z = vu0_vf_read_lane(st, rd, 2);
+                    uint64_t w = vu0_vf_read_lane(st, rd, 3);
+                    st->gpr[rt].ud0 = x | (y << 32);
+                    st->gpr[rt].ud1 = z | (w << 32);
+                }
+                break;
+            case 0x02: /* CFC2 */ if (rt) GPR(rt) = sext32(vu0_vi_read(st, rd)); break;
+            case 0x04: /* MTC2 */ vu0_vi_write(st, rd, rt32); break;
+            case 0x05: /* QMTC2 - 128-bit VF <- GPR, raw bit copy. */
+                vu0_vf_write_lane(st, rd, 0, (uint32_t)(st->gpr[rt].ud0 & 0xFFFFFFFFu));
+                vu0_vf_write_lane(st, rd, 1, (uint32_t)(st->gpr[rt].ud0 >> 32));
+                vu0_vf_write_lane(st, rd, 2, (uint32_t)(st->gpr[rt].ud1 & 0xFFFFFFFFu));
+                vu0_vf_write_lane(st, rd, 3, (uint32_t)(st->gpr[rt].ud1 >> 32));
+                break;
+            case 0x06: /* CTC2 */
+                /* Real FBRST (control reg 28) semantics - ported from
+                 * PCSX2's own VU0.cpp CTC2(): bit 0x1 = VU0 force-break,
+                 * bit 0x2 = VU0 reset, bit 0x100 = VU1 force-break,
+                 * bit 0x200 = VU1 reset. Not modeled beyond plain
+                 * storage - no VU0/VU1 execution state exists yet for
+                 * these bits to actually act on. */
+                vu0_vi_write(st, rd, rt32);
+                break;
+            default:
+                halt("unimplemented COP2 sub-opcode (VU0 vector datapath not implemented)");
+                return 1;
+            }
+        } else {
+            /* CO-format: rs = 0x10 | destmask (destmask bit3=X,
+             * bit2=Y, bit1=Z, bit0=W - confirmed via viswr's rs=0x18,
+             * mask 0x8 = X only, matching its ".x" mnemonic suffix;
+             * and vsub.xyzw/vsqi's rs=0x1F, mask 0xF = all lanes).
+             * 3-operand arithmetic field layout: bits 20-16=FT (2nd
+             * source), bits 15-11=FS (1st source), bits 10-6=FD
+             * (dest) - confirmed against vsub.xyzw vf01,vf00,vf00's
+             * raw fields (FT=FS=0=vf00, FD=1=vf01). */
+            uint32_t destmask = rs & 0xFu;
+            uint32_t ft = (instr >> 16) & 0x1Fu;
+            uint32_t fs = (instr >> 11) & 0x1Fu;
+            uint32_t fd = (instr >> 6) & 0x1Fu;
+
+            if (funct == 0x2C) {
+                /* VSUB: FD[lane] = FS[lane] - FT[lane] (real float
+                 * subtract on the reinterpreted bit patterns), for
+                 * each lane selected by destmask. */
+                for (int lane = 0; lane < 4; lane++) {
+                    if (!(destmask & (0x8u >> lane))) continue;
+                    uint32_t ua = vu0_vf_read_lane(st, fs, (uint32_t)lane);
+                    uint32_t ub = vu0_vf_read_lane(st, ft, (uint32_t)lane);
+                    float a, b, r; uint32_t ur;
+                    memcpy(&a, &ua, 4);
+                    memcpy(&b, &ub, 4);
+                    r = a - b;
+                    memcpy(&ur, &r, 4);
+                    vu0_vf_write_lane(st, fd, (uint32_t)lane, ur);
+                }
+            } else if ((funct & 0x3Cu) == 0x3Cu) {
+                /* SPECIAL2 sub-dispatch - index formula confirmed
+                 * against PCSX2's R5900OpcodeTables.cpp comment:
+                 * (code & 0x3) | ((code >> 4) & 0x7c). */
+                uint32_t idx = (instr & 0x3u) | ((instr >> 4) & 0x7Cu);
+                if (idx == 63) {
+                    /* VISWR: store VI[ft] (data source, "is") into VU0
+                     * mem at quadword index VI[fs] (address, "it"),
+                     * single lane selected by destmask (a single bit
+                     * for this op - ".x"/".y"/".z"/".w" only). */
+                    int lane = (destmask == 0x8u) ? 0 : (destmask == 0x4u) ? 1 : (destmask == 0x2u) ? 2 : 3;
+                    uint32_t addr_vi = vu0_vi_read(st, fs);
+                    uint32_t data = vu0_vi_read(st, ft);
+                    uint32_t off = vu0_mem_addr(addr_vi, (uint32_t)lane);
+                    memcpy(st->vu0_mem + off, &data, 4);
+                } else if (idx == 53) {
+                    /* VSQI: store all 4 lanes of VF[fs] (data source)
+                     * to VU0 mem at quadword index VI[ft] (address),
+                     * then post-increment VI[ft] by 1 quadword. */
+                    uint32_t addr_vi = vu0_vi_read(st, ft);
+                    for (int lane = 0; lane < 4; lane++) {
+                        uint32_t val = vu0_vf_read_lane(st, fs, (uint32_t)lane);
+                        uint32_t off = vu0_mem_addr(addr_vi, (uint32_t)lane);
+                        memcpy(st->vu0_mem + off, &val, 4);
+                    }
+                    vu0_vi_write(st, ft, addr_vi + 1);
+                } else {
+                    halt("unimplemented COP2 SPECIAL2 sub-opcode (VU0 vector datapath not implemented)");
+                    return 1;
+                }
+            } else if (funct == 0x30 || funct == 0x31 || funct == 0x34 || funct == 0x35) {
+                /* VIADD/VISUB/VIAND/VIOR - plain integer ALU on VI
+                 * registers (VI[fd] = VI[fs] op VI[ft]), found right
+                 * after the VSUB.xyzw sequence above in a real BIOS
+                 * "clear every VU0 register" init routine (VF0-31
+                 * cleared via self-subtract, VI0-15 cleared via
+                 * self-add-of-zero: viadd viN,vi00,vi00). Confirmed
+                 * against R5900OpcodeTables.cpp's SPECIAL1 table
+                 * (funct 0x30=VIADD,0x31=VISUB,0x34=VIAND,0x35=VIOR;
+                 * FD/FS/FT field roles carried over unchanged from
+                 * VSUB's, confirmed via a live PCSX2 disassembly of
+                 * "viadd vi02,vi00,vi00" - fd=2,fs=0,ft=0). Real VI
+                 * registers are 16-bit (PCSX2's REG_VI union), so
+                 * VIADD/VISUB results are masked to 16 bits; VIAND/
+                 * VIOR operate on already-16-bit-clean values so no
+                 * extra masking is needed there. VIADDI (immediate
+                 * form) and VIAND/VIOR's less common siblings aren't
+                 * implemented - not seen yet, a scoped future gap. */
+                uint32_t a = vu0_vi_read(st, fs);
+                uint32_t b = vu0_vi_read(st, ft);
+                uint32_t r;
+                switch (funct) {
+                case 0x30: r = (a + b) & 0xFFFFu; break; /* VIADD */
+                case 0x31: r = (a - b) & 0xFFFFu; break; /* VISUB */
+                case 0x34: r = a & b; break;              /* VIAND */
+                default:   r = a | b; break;              /* VIOR  */
+                }
+                vu0_vi_write(st, fd, r);
+            } else {
+                halt("unimplemented COP2 CO-format sub-opcode (VU0 vector datapath not implemented)");
+                return 1;
+            }
         }
         break;
 
@@ -1977,6 +2134,36 @@ static int ee_step(void)
     case 0x27: /* LWU */ if (rt) GPR(rt) = ee_mem_read32(st, rs32 + imm); else ee_mem_read32(st, rs32 + imm); break;
     case 0x37: /* LD */  if (rt) GPR(rt) = ee_mem_read64(st, rs32 + imm); else ee_mem_read64(st, rs32 + imm); break;
 
+    case 0x2C: /* SDL - Store Doubleword Left. Standard MIPS III
+                * counterpart to SWL, scaled from 4 bytes to 8 (3
+                * shift bits instead of 2) - the store-side mirror of
+                * round 13's LDL. Not PS2-specific, implemented
+                * directly from the well-documented MIPS III ISA. */
+    {
+        static const uint64_t SDL_MASK[8] = {
+            0xffffffffffffff00ULL, 0xffffffffffff0000ULL, 0xffffffffff000000ULL, 0xffffffff00000000ULL,
+            0xffffff0000000000ULL, 0xffff000000000000ULL, 0xff00000000000000ULL, 0x0000000000000000ULL
+        };
+        static const uint8_t SDL_SHIFT[8] = { 56, 48, 40, 32, 24, 16, 8, 0 };
+        uint32_t addr = rs32 + imm;
+        uint32_t shift = addr & 7u;
+        uint64_t mem = ee_mem_read64(st, addr & ~7u);
+        ee_mem_write64(st, addr & ~7u, (GPR(rt) >> SDL_SHIFT[shift]) | (mem & SDL_MASK[shift]));
+    } break;
+    case 0x2D: /* SDR - Store Doubleword Right (mirror of SDL, same
+                * relationship SWR has to SWL but for doublewords). */
+    {
+        static const uint64_t SDR_MASK[8] = {
+            0x0000000000000000ULL, 0x00000000000000ffULL, 0x000000000000ffffULL, 0x0000000000ffffffULL,
+            0x00000000ffffffffULL, 0x000000ffffffffffULL, 0x0000ffffffffffffULL, 0x00ffffffffffffffULL
+        };
+        static const uint8_t SDR_SHIFT[8] = { 0, 8, 16, 24, 32, 40, 48, 56 };
+        uint32_t addr = rs32 + imm;
+        uint32_t shift = addr & 7u;
+        uint64_t mem = ee_mem_read64(st, addr & ~7u);
+        ee_mem_write64(st, addr & ~7u, (GPR(rt) << SDR_SHIFT[shift]) | (mem & SDR_MASK[shift]));
+    } break;
+
     case 0x2A: /* SWL */ {
         static const uint32_t SWL_MASK[4]  = { 0xffffff00u, 0xffff0000u, 0xff000000u, 0x00000000u };
         static const uint8_t  SWL_SHIFT[4] = { 24, 16, 8, 0 };
@@ -2009,6 +2196,40 @@ static int ee_step(void)
      * MIPS I FPU load/store, `rt` selects the FPR (not a GPR) here. */
     case 0x31: /* LWC1 */ st->fpr[rt] = ee_mem_read32(st, rs32 + imm); break;
     case 0x39: /* SWC1 */ ee_mem_write32(st, rs32 + imm, st->fpr[rt]); break;
+
+    case 0x1A: /* LDL - Load Doubleword Left. Standard MIPS III 64-bit
+                * unaligned-load counterpart to LWL (already
+                * implemented) - same byte-merge idea scaled from a
+                * 4-byte word to an 8-byte doubleword (3 shift bits
+                * instead of 2). Found missing once round 13's VU0
+                * fixes let real BIOS boot advance past the VU0 init/
+                * self-test sequence into new code. Not PS2-specific,
+                * so implemented directly from the well-documented
+                * MIPS III ISA rather than needing live verification. */
+    {
+        static const uint64_t LDL_MASK[8] = {
+            0x00ffffffffffffffULL, 0x0000ffffffffffffULL, 0x000000ffffffffffULL, 0x00000000ffffffffULL,
+            0x0000000000ffffffULL, 0x000000000000ffffULL, 0x00000000000000ffULL, 0x0000000000000000ULL
+        };
+        static const uint8_t LDL_SHIFT[8] = { 56, 48, 40, 32, 24, 16, 8, 0 };
+        uint32_t addr = rs32 + imm;
+        uint32_t shift = addr & 7u;
+        uint64_t mem = ee_mem_read64(st, addr & ~7u);
+        if (rt) GPR(rt) = (GPR(rt) & LDL_MASK[shift]) | (mem << LDL_SHIFT[shift]);
+    } break;
+    case 0x1B: /* LDR - Load Doubleword Right (mirror of LDL, same
+                * relationship LWR has to LWL but for doublewords). */
+    {
+        static const uint64_t LDR_MASK[8] = {
+            0x0000000000000000ULL, 0xff00000000000000ULL, 0xffff000000000000ULL, 0xffffff0000000000ULL,
+            0xffffffff00000000ULL, 0xffffffffff000000ULL, 0xffffffffffff0000ULL, 0xffffffffffffff00ULL
+        };
+        static const uint8_t LDR_SHIFT[8] = { 0, 8, 16, 24, 32, 40, 48, 56 };
+        uint32_t addr = rs32 + imm;
+        uint32_t shift = addr & 7u;
+        uint64_t mem = ee_mem_read64(st, addr & ~7u);
+        if (rt) GPR(rt) = (GPR(rt) & LDR_MASK[shift]) | (mem >> LDR_SHIFT[shift]);
+    } break;
 
     case 0x1E: /* LQ - 128-bit load, ported from PCSX2's R5900OpcodeImpl.cpp.
                 * Address is masked to 16-byte alignment (real hardware

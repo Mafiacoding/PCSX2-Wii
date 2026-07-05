@@ -1224,6 +1224,80 @@ export PATH=$DEVKITPPC/bin:$PATH
 export LD_LIBRARY_PATH=$DEVKITPPC/lib:$LD_LIBRARY_PATH
 ```
 
+### EE JALR investigation, round 13: VU0 vector datapath implemented - COP2 wall cleared for good, LDL/LDR/SDL/SDR added, boot now reaches a bounded SIF-polling steady state
+
+Direct continuation of round 12's new wall: a live PCSX2 disassembly
+of the code right after the FBRST fix showed the real BIOS running a
+VU0 init/self-test sequence - `viswr`/`vsqi`/`vsub.xyzw`/`qmfc2`/
+`qmtc2`, followed (once that cleared) by a bulk "clear every VU0
+register" routine (`vsub.xyzw vfN,vf00,vf00` for all 32 VF registers,
+then `viadd viN,vi00,vi00` for all 16 VI registers).
+
+Added to `ee_core.h`/`ee_core.c`:
+- `vu0_vf[32][4]` (the real VF register file, 128 bits each stored as
+  4 raw 32-bit lanes) and `vu0_mem[4096]` (VU0's real 4KB local data
+  memory, addressed in quadwords).
+- `QMFC2`/`QMTC2` (128-bit GPR<->VF transfers).
+- `VSUB` (3-operand vector float subtract, per-lane dest masking).
+- `VISWR`/`VSQI` (VU0-mem store instructions, dispatched through a
+  second-level "SPECIAL2" sub-table).
+- `VIADD`/`VISUB`/`VIAND`/`VIOR` (plain integer ALU on VI registers).
+- VF00 hardwired to `(0,0,0,1.0f)` and VI0 hardwired to `0`, both like
+  real hardware (and like MIPS `$zero`), enforced via small helpers
+  (`vu0_vf_read_lane`/`vu0_vf_write_lane`/`vu0_vi_read`/`vu0_vi_write`)
+  rather than special-casing every call site.
+
+All of the field-encoding details here (the `rs = 0x10 | destmask`
+convention, the FT/FS/FD bit positions, and - trickiest of all - the
+SPECIAL2 sub-dispatch index formula, where `VISWR`/`VSQI` reuse what
+looks like a spare "register" field as extra opcode-select bits) were
+derived by decoding the exact raw instruction words from a live PCSX2
+disassembly and cross-checked against PCSX2's own
+`R5900OpcodeTables.cpp` (`Int_COP2PrintTable`,
+`Int_COP2SPECIAL1PrintTable`, `Int_COP2SPECIAL2PrintTable`) - the same
+"verify against PCSX2's own source" discipline as round 11's MCH
+registers, not guessed. A first attempt at a host-native test used the
+wrong `fd` value (0) for VISWR/VSQI's encoding and failed instantly,
+which is exactly what caught this being a real, load-bearing part of
+the opcode identity rather than a free operand slot.
+
+With the COP2 wall cleared, the interpreter advanced only a handful of
+instructions before hitting a completely different, unrelated wall:
+`unimplemented primary opcode 0x1A` (LDL). This project already
+implements the 32-bit LWL/LWR (round 1); LDL/LDR/SDL/SDR are their
+directly-documented MIPS III 64-bit doubleword analogs (8-byte
+version, 3 shift bits instead of 2) - not PS2-specific, so implemented
+straight from the well-known MIPS III ISA rather than needing further
+live verification, and added together with their store-side
+counterparts SDL/SDR (found immediately after, same pattern).
+
+**Live verification**: a host-native diagnostic harness
+(`/tmp/diag/round13_verify.c`) running the real BIOS through this
+project's own interpreter went from halting at ~15.4M steps (the
+FBRST/COP2 wall, round 12's stopping point) to running past 300
+million steps with no halt at all. Sampling the PC over a further 2M
+steps afterward showed execution confined to a small, bounded
+~0x420-byte loop (`0x80005E58`-`0x80006278`). A live PCSX2 disassembly
+of that loop shows it repeatedly reading `0xB000F230` (`SIF_SMFLG`,
+the IOP-to-EE SIF flag register) with a debounce-style double-read-
+and-compare, branching out once the two reads agree - a completely
+ordinary SIF handshake polling pattern, not a bug. Given this is a
+BIOS-only boot (no disc) with a minimal SIF/IOP HLE model that never
+asynchronously updates this flag the way a real IOP would, the
+interpreter legitimately has nothing new to wait for here; this is an
+honest steady state, not a new wall, and going further would mean
+investigating the IOP-side SIF/HLE model (a separate, future round) -
+not touched this round to keep scope honest.
+
+Tests: `tests/test_ee_cop2_vu0.c` (10 checks - QMFC2/QMTC2 round-trip,
+VSUB self-subtract, VF00/VI0 hardwiring including that writes to them
+are discarded, VISWR/VSQI storing to the correct VU0-mem lanes with
+VSQI's post-increment) and `tests/test_ee_ldl_ldr_sdl_sdr.c` (6 checks
+- aligned and genuinely-misaligned-crossing-a-block-boundary LDL/LDR
+round-trips, plus an SDL/SDR round-trip). Full regression (all 40
+host-native test files) passes with 0 failures, and the Wii/devkitPPC
+target rebuilds clean with 0 warnings/0 errors.
+
 ### EE JALR investigation, round 10: idle loop confirmed dead code on real hardware; root cause fully traced to a BIOS clock-calibration loop whose retry budget this project's timing model exhausts too early
 
 Direct continuation of round 9's wall (EI never executes before

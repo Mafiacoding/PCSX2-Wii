@@ -114,6 +114,34 @@ typedef struct {
      * doesn't exist yet). See docs/STATUS.md's "round 12" section. */
     uint32_t cop2_ctrl[32];
 
+    /* VU0 vector datapath (round 13): the actual VF (vector float,
+     * 32 x 128-bit) register file and VU0's small local data memory,
+     * added to get past a real BIOS VU0 init/self-test sequence
+     * (viswr/vsqi/vsub.xyzw/qmfc2/qmtc2) that halted with
+     * "unimplemented COP2 sub-opcode" once round 12's control-
+     * register transfers let boot progress far enough to reach it.
+     * Each VF register is stored as 4 raw 32-bit lanes (index
+     * 0=x,1=y,2=z,3=w - float bit patterns, not converted) matching
+     * PCSX2's own VECTOR union layout (pcsx2/VU.h). VF00 is hardwired
+     * on real hardware to (0,0,0,1.0f) and VI0 (cop2_ctrl[0]) is
+     * hardwired to 0 - both enforced via helpers in ee_core.c
+     * (vu0_vf_read_lane/vu0_vf_write_lane/vu0_vi_read/vu0_vi_write),
+     * not by special-casing every call site.
+     *
+     * vu0_mem is VU0's real 4KB local data memory (256 quadwords),
+     * addressed by ILW/ISW/LQI/SQI-family instructions using a VI
+     * register as a quadword index (byte_addr = VI*16 + lane*4).
+     * Size confirmed as a standard, widely-documented PS2 VU0
+     * property (VU0: 4KB data mem / VU1: 16KB - see PS2Tek and
+     * PCSX2's vuMemAllocate()). Address wraparound is modeled as a
+     * simple 8-bit quadword-index mask (& 0xFF) - an honest
+     * simplification if real hardware's exact out-of-range behavior
+     * differs, noted the same way gs_mem.h flags its own linear-
+     * addressing simplification. See docs/STATUS.md's "round 13"
+     * section. */
+    uint32_t vu0_vf[32][4];
+    uint8_t vu0_mem[4096];
+
     uint8_t *ram;           /* 32MB emulated EE RAM */
     uint32_t ram_size;
 

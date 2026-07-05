@@ -927,3 +927,32 @@ and is the next honest wall - see docs/STATUS.md's "round 12" section.
 gcc -I../include -I../source -o test_ee_cop2_ctrl tests/test_ee_cop2_ctrl.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_cop2_ctrl
 ```
+
+`test_ee_cop2_vu0.c` covers "round 13" - the actual VU0 vector
+datapath: `QMFC2`/`QMTC2` (128-bit GPR<->VF transfers), `VSUB.xyzw`
+(3-operand vector float subtract), `VISWR`/`VSQI` (VU0-local-memory
+stores). 10 checks: QMTC2/QMFC2 round-trip the full 128 bits exactly;
+VSUB self-subtract yields exactly zero in every lane; VF00 reads back
+the real-hardware-hardwired `(0,0,0,1.0f)` pattern and writes to it are
+silently discarded; VISWR stores the correct VI value into the correct
+VU0-mem lane (checked for two different lanes at the same address);
+VSQI stores all 4 VF lanes to the correct address and post-increments
+the address register afterward.
+
+```sh
+gcc -I../include -I../source -o test_ee_cop2_vu0 tests/test_ee_cop2_vu0.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+./test_ee_cop2_vu0
+```
+
+`test_ee_ldl_ldr_sdl_sdr.c` covers "round 13"'s `LDL`/`LDR`/`SDL`/`SDR`
+(64-bit unaligned load/store-left/right - the doubleword analog of
+this project's existing `LWL`/`LWR`/`SWL`/`SWR`). 6 checks: the
+canonical `LDL(addr+7)+LDR(addr)` idiom reconstructs a planted
+doubleword both at an 8-byte-aligned address and at a genuinely
+misaligned one that crosses an 8-byte block boundary; an `SDL`+`SDR`
+round-trip via the same idiom writes and reads back correctly.
+
+```sh
+gcc -I../include -I../source -o test_ee_ldl_ldr_sdl_sdr tests/test_ee_ldl_ldr_sdl_sdr.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+./test_ee_ldl_ldr_sdl_sdr
+```

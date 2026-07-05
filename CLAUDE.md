@@ -150,6 +150,29 @@ current, up-to-date status.)
   new checks, 38-file/0-failure regression. See `docs/STATUS.md`'s
   "round 12" section for the full trace (harnesses in `/tmp/diag/` on
   the machine that did this work - throwaway, not committed).
+- **Round 13 - VU0 vector datapath implemented**: cleared round 12's
+  `viswr` wall for good. Added the real VF register file
+  (`vu0_vf[32][4]`, 128 bits each as 4 raw 32-bit lanes) and VU0's 4KB
+  local data memory (`vu0_mem[4096]`), plus `QMFC2`/`QMTC2` (128-bit
+  GPR<->VF transfers), `VSUB` (vector float subtract with per-lane dest
+  masking), `VISWR`/`VSQI` (VU0-mem stores - dispatched through a
+  second-level "SPECIAL2" sub-table whose index formula and fixed `fd`
+  opcode-select values were derived from a live PCSX2 disassembly and
+  cross-checked against PCSX2's own `R5900OpcodeTables.cpp`), and
+  `VIADD`/`VISUB`/`VIAND`/`VIOR` (VI integer ALU) for the bulk
+  register-clear routine right after. VF00/VI0 hardwired like real
+  hardware (writes discarded). **New wall found immediately after**:
+  `unimplemented primary opcode 0x1A` (LDL) - added `LDL`/`LDR`/`SDL`/
+  `SDR` (the 64-bit doubleword analog of this project's existing
+  LWL/LWR/SWL/SWR, standard MIPS III, no live verification needed).
+  **Live-verified**: the interpreter now runs past 300M steps with no
+  halt at all (was ~15.4M before this round), settling into a bounded
+  ~0x420-byte loop that a live PCSX2 disassembly confirms is an
+  ordinary `SIF_SMFLG` (0x1000F230) polling/debounce pattern - an
+  honest steady state given this project's minimal IOP/SIF HLE model
+  on a disc-less boot, not a new bug. 16 new checks across two test
+  files, 40-file/0-failure regression. See `docs/STATUS.md`'s "round
+  13" section for the full trace.
 
 **devkitPro toolchain**: FULLY FIXED, clean Wii rebuild verified. This
 sandbox's extraction was missing `base_rules`/`base_tools` (fetched

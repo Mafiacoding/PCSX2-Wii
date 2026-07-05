@@ -27,9 +27,11 @@
  *     be set other than explicit MTC0 writes).
  *   - CACHE, SYNC, PREF: accepted as no-ops (real BIOS init code issues
  *     these constantly for cache management we don't model).
- *   - A meaningful subset (~35 of ~90) of MMI (SIMD) opcodes: the
+ *   - A meaningful subset (~48 of ~90) of MMI (SIMD) opcodes: the
  *     add/sub/logic/copy/extend/pack family across byte/half/word
- *     lanes, plus the "pipeline 1" MULT1/DIV1/MFHI1/MFLO1 family.
+ *     lanes, the "pipeline 1" MULT1/DIV1/MFHI1/MFLO1 family, and the
+ *     compare/max/min/abs family (PCGTW/H/B, PMAXW/H, PCEQW/H/B,
+ *     PMINW/H, PABSW/H, PADSBH).
  *   - LQ/SQ (128-bit load/store, primary opcodes 0x1E/0x1F) - ported
  *     from PCSX2's R5900OpcodeImpl.cpp. Address masked to 16-byte
  *     alignment (real hardware silently ignores the low 4 bits rather
@@ -43,8 +45,8 @@
  *     VU0 data staging.
  *
  * Still NOT implemented (halts cleanly, does not crash):
- *   - The other ~55 MMI opcodes (saturated arithmetic, compares,
- *     QFSRV, PMADDW/H family, PINTH/PINTEH, PROT3W, etc.)
+ *   - The other ~42 MMI opcodes (saturated arithmetic, QFSRV, PMADDW/H
+ *     family, PINTH/PINTEH, PROT3W, PMFHL/PMTHL clamping variants, etc.)
  *   - COP2 (VU0 macro mode)
  *   - COP1 (FPU): core arithmetic (ADD/SUB/MUL/DIV/ABS/MOV/NEG.S,
  *     SQRT.S/RSQRT.S, MAX.S/MIN.S, CVT.W.S/CVT.S.W, C.EQ/LT/LE.S,
@@ -865,6 +867,33 @@ static int ee_step(void)
             case 0x05: /* PSUBH */ if (rd) for (int n = 0; n < 8; n++) set_lane_h(&st->gpr[rd], n, (uint16_t)(lane_h(st->gpr[rs], n) - lane_h(st->gpr[rt], n))); break;
             case 0x08: /* PADDB */ if (rd) for (int n = 0; n < 16; n++) set_lane_b(&st->gpr[rd], n, (uint8_t)(lane_b(st->gpr[rs], n) + lane_b(st->gpr[rt], n))); break;
             case 0x09: /* PSUBB */ if (rd) for (int n = 0; n < 16; n++) set_lane_b(&st->gpr[rd], n, (uint8_t)(lane_b(st->gpr[rs], n) - lane_b(st->gpr[rt], n))); break;
+            case 0x02: /* PCGTW - per-lane signed 32-bit compare, ported
+                        * from PCSX2's _PCGTW(): result is an all-1s
+                        * (0xFFFFFFFF) or all-0s mask, not a boolean 0/1,
+                        * matching real hardware's SIMD-compare convention. */
+                if (rd) for (int n = 0; n < 4; n++)
+                    set_lane_w(&st->gpr[rd], n, ((int32_t)lane_w(st->gpr[rs], n) > (int32_t)lane_w(st->gpr[rt], n)) ? 0xFFFFFFFFu : 0x00000000u);
+                break;
+            case 0x03: /* PMAXW - per-lane signed 32-bit max, ported from _PMAXW(). */
+                if (rd) for (int n = 0; n < 4; n++) {
+                    int32_t a = (int32_t)lane_w(st->gpr[rs], n), b = (int32_t)lane_w(st->gpr[rt], n);
+                    set_lane_w(&st->gpr[rd], n, (uint32_t)((a > b) ? a : b));
+                }
+                break;
+            case 0x06: /* PCGTH - per-lane signed 16-bit compare, ported from _PCGTH(). */
+                if (rd) for (int n = 0; n < 8; n++)
+                    set_lane_h(&st->gpr[rd], n, ((int16_t)lane_h(st->gpr[rs], n) > (int16_t)lane_h(st->gpr[rt], n)) ? 0xFFFFu : 0x0000u);
+                break;
+            case 0x07: /* PMAXH - per-lane signed 16-bit max, ported from _PMAXH(). */
+                if (rd) for (int n = 0; n < 8; n++) {
+                    int16_t a = (int16_t)lane_h(st->gpr[rs], n), b = (int16_t)lane_h(st->gpr[rt], n);
+                    set_lane_h(&st->gpr[rd], n, (uint16_t)((a > b) ? a : b));
+                }
+                break;
+            case 0x0A: /* PCGTB - per-lane signed 8-bit compare, ported from _PCGTB(). */
+                if (rd) for (int n = 0; n < 16; n++)
+                    set_lane_b(&st->gpr[rd], n, ((int8_t)lane_b(st->gpr[rs], n) > (int8_t)lane_b(st->gpr[rt], n)) ? 0xFFu : 0x00u);
+                break;
             case 0x12: /* PEXTLW */
                 if (rd) {
                     ee_reg128_t Rs = st->gpr[rs], Rt = st->gpr[rt], out;
@@ -929,6 +958,68 @@ static int ee_step(void)
 
         case 0x28: /* MMI1 */
             switch (sa) {
+            case 0x01: /* PABSW - per-lane 32-bit absolute value, ported
+                        * from PCSX2's _PABSW(): real hardware quirk
+                        * preserved exactly - INT32_MIN (0x80000000) has
+                        * no positive 32-bit representation, so it's
+                        * clamped to INT32_MAX (0x7FFFFFFF) instead of
+                        * overflowing/wrapping. */
+                if (rd) for (int n = 0; n < 4; n++) {
+                    uint32_t v = lane_w(st->gpr[rt], n);
+                    uint32_t r;
+                    if (v == 0x80000000u) r = 0x7FFFFFFFu;
+                    else if ((int32_t)v < 0) r = (uint32_t)(-(int32_t)v);
+                    else r = v;
+                    set_lane_w(&st->gpr[rd], n, r);
+                }
+                break;
+            case 0x02: /* PCEQW - per-lane 32-bit equality compare (mask
+                        * result), ported from _PCEQW(). */
+                if (rd) for (int n = 0; n < 4; n++)
+                    set_lane_w(&st->gpr[rd], n, (lane_w(st->gpr[rs], n) == lane_w(st->gpr[rt], n)) ? 0xFFFFFFFFu : 0x00000000u);
+                break;
+            case 0x03: /* PMINW - per-lane signed 32-bit min, ported from _PMINW(). */
+                if (rd) for (int n = 0; n < 4; n++) {
+                    int32_t a = (int32_t)lane_w(st->gpr[rs], n), b = (int32_t)lane_w(st->gpr[rt], n);
+                    set_lane_w(&st->gpr[rd], n, (uint32_t)((a < b) ? a : b));
+                }
+                break;
+            case 0x04: /* PADSBH - "add/subtract halfword", ported from
+                        * PCSX2's PADSBH(): NOT a uniform op across all 8
+                        * lanes - the low 4 lanes get PSUBH (fs-ft), the
+                        * high 4 lanes get PADDH (fs+ft). A real,
+                        * deliberately asymmetric instruction, not a typo. */
+                if (rd) {
+                    for (int n = 0; n < 4; n++) set_lane_h(&st->gpr[rd], n, (uint16_t)(lane_h(st->gpr[rs], n) - lane_h(st->gpr[rt], n)));
+                    for (int n = 4; n < 8; n++) set_lane_h(&st->gpr[rd], n, (uint16_t)(lane_h(st->gpr[rs], n) + lane_h(st->gpr[rt], n)));
+                }
+                break;
+            case 0x05: /* PABSH - per-lane 16-bit absolute value, same
+                        * INT16_MIN-clamps-to-INT16_MAX quirk as PABSW,
+                        * ported from _PABSH(). */
+                if (rd) for (int n = 0; n < 8; n++) {
+                    uint16_t v = lane_h(st->gpr[rt], n);
+                    uint16_t r;
+                    if (v == 0x8000u) r = 0x7FFFu;
+                    else if ((int16_t)v < 0) r = (uint16_t)(-(int16_t)v);
+                    else r = v;
+                    set_lane_h(&st->gpr[rd], n, r);
+                }
+                break;
+            case 0x06: /* PCEQH - per-lane 16-bit equality compare, ported from _PCEQH(). */
+                if (rd) for (int n = 0; n < 8; n++)
+                    set_lane_h(&st->gpr[rd], n, (lane_h(st->gpr[rs], n) == lane_h(st->gpr[rt], n)) ? 0xFFFFu : 0x0000u);
+                break;
+            case 0x07: /* PMINH - per-lane signed 16-bit min, ported from _PMINH(). */
+                if (rd) for (int n = 0; n < 8; n++) {
+                    int16_t a = (int16_t)lane_h(st->gpr[rs], n), b = (int16_t)lane_h(st->gpr[rt], n);
+                    set_lane_h(&st->gpr[rd], n, (uint16_t)((a < b) ? a : b));
+                }
+                break;
+            case 0x0A: /* PCEQB - per-lane 8-bit equality compare, ported from _PCEQB(). */
+                if (rd) for (int n = 0; n < 16; n++)
+                    set_lane_b(&st->gpr[rd], n, (lane_b(st->gpr[rs], n) == lane_b(st->gpr[rt], n)) ? 0xFFu : 0x00u);
+                break;
             case 0x10: /* PADDUW */ if (rd) for (int n = 0; n < 4; n++) set_lane_w(&st->gpr[rd], n, lane_w(st->gpr[rs], n) + lane_w(st->gpr[rt], n)); break;
             case 0x11: /* PSUBUW */ if (rd) for (int n = 0; n < 4; n++) { uint32_t a = lane_w(st->gpr[rs], n), b = lane_w(st->gpr[rt], n); set_lane_w(&st->gpr[rd], n, (a > b) ? a - b : 0); } break;
             case 0x12: /* PEXTUW */

@@ -599,3 +599,32 @@ Still not implemented on the COP1 side: BC1FL/BC1TL ("likely"
 branches - this project has no likely-branch infrastructure yet for
 ANY branch, integer or FP), and the FPU exception-cause control-
 register flags (only the condition flag needed for BC1 is modeled).
+
+`test_ee_mmi_compare.c` covers `ee_core.c`'s MMI compare/max/min/abs
+opcode family: PCGTW/PCGTH/PCGTB and PMAXW/PMAXH (MMI0 sub-table),
+PABSW/PCEQW/PMINW/PADSBH/PABSH/PCEQH/PMINH/PCEQB (MMI1 sub-table), all
+ported from PCSX2's `MMI.cpp`. 32/32 checks. Operands are planted
+directly into EE RAM (`st->ram`) and loaded via LQ (128-bit load),
+since these are whole-register SIMD lane ops - same approach as
+`test_ee_lqsq.c`. Covers: the compare opcodes producing an all-1s/
+all-0s mask result rather than a boolean 0/1 (matching real hardware's
+SIMD-compare convention, checked in both the true and false direction
+for each width); PMAXW/PMAXH/PMINW/PMINH using a genuine signed
+comparison (a mixed-sign case where the "expected" max/min wouldn't
+survive a naive unsigned/bit-pattern compare); PABSW/PABSH's real
+hardware quirk where INT32_MIN/INT16_MIN (0x80000000/0x8000, which
+have no positive representation at their own width) clamp to
+INT32_MAX/INT16_MAX instead of overflowing back to themselves; and
+PADSBH's deliberate asymmetry - confirmed that its low 4 halfword
+lanes really do compute PSUBH (rs-rt) while its high 4 lanes compute
+PADDH (rs+rt), not a uniform 8-lane op. Needs the same link set as the
+other `ee_core.c` tests:
+
+```sh
+gcc -I../include -I../source -o test_ee_mmi_compare tests/test_ee_mmi_compare.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+./test_ee_mmi_compare
+```
+
+Still not implemented on the MMI side: the other ~42 opcodes
+(saturated arithmetic, QFSRV, PMADDW/H family, PINTH/PINTEH, PROT3W,
+PEXEH/PEXEW/PEXCH/PEXCW, PMFHL/PMTHL clamping variants).

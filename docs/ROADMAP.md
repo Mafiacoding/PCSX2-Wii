@@ -15,11 +15,22 @@ splash screen, not just difficulty.
       HI/LO, branches, jumps, byte/half/word/double load+store)
 - [x] Basic COP0 (MFC0/MTC0 - generic registers, Status, Config)
 - [x] CACHE/SYNC/PREF as no-ops
-- [x] ~35 of ~90 MMI (SIMD) opcodes (add/sub/logic/copy/extend/pack,
-      MULT1/DIV1/MFHI1/MFLO1 pipe-1 variants)
-- [ ] Remaining ~55 MMI opcodes (saturated arithmetic, PCGT*/PCEQ*/
-      PMAX*/PMIN* compares, QFSRV, PMADDW/H family, PINTH/PINTEH,
-      PROT3W, PEXEH/PEXEW/PEXCH/PEXCW, PMFHL/PMTHL clamping variants)
+- [x] ~48 of ~90 MMI (SIMD) opcodes (add/sub/logic/copy/extend/pack,
+      MULT1/DIV1/MFHI1/MFLO1 pipe-1 variants) plus the compare/max/
+      min/abs family: PCGTW/PCGTH/PCGTB and PMAXW/PMAXH (MMI0),
+      PABSW/PCEQW/PMINW/PADSBH/PABSH/PCEQH/PMINH/PCEQB (MMI1). All
+      ported from PCSX2's `MMI.cpp`. Compares produce an all-1s/
+      all-0s mask result (not a boolean 0/1), matching real hardware's
+      SIMD-compare convention. PABSW/PABSH preserve a real quirk:
+      INT32_MIN/INT16_MIN have no positive representation at their
+      width, so they clamp to INT32_MAX/INT16_MAX instead of
+      overflowing. PADSBH is deliberately asymmetric - its low 4
+      halfword lanes compute PSUBH (rs-rt) while its high 4 lanes
+      compute PADDH (rs+rt), not a uniform 8-lane op. Unit tested in
+      `tests/test_ee_mmi_compare.c` (32/32 checks).
+- [ ] Remaining ~42 MMI opcodes (saturated arithmetic, QFSRV,
+      PMADDW/H family, PINTH/PINTEH, PROT3W, PEXEH/PEXEW/PEXCH/PEXCW,
+      PMFHL/PMTHL clamping variants)
 - [x] LWL/LWR/SWL/SWR (unaligned word load/store) - ported from
       R5900OpcodeImpl.cpp, unit tested in `tests/test_ee_unaligned.c`
       (also gave the IOP core this ability first, then brought it to

@@ -396,6 +396,49 @@ command was never updated) - fixed the command in `tests/README.md`.
 
 Wii/devkitPPC target rebuilds clean with no warnings.
 
+### MMI compare/max/min/abs opcode family implemented
+
+Added 13 MMI (SIMD) opcodes ported directly from PCSX2's `MMI.cpp`:
+`PCGTW`/`PCGTH`/`PCGTB` and `PMAXW`/`PMAXH` (MMI0 sub-table, `sa`
+0x02/0x03/0x06/0x07/0x0A), and `PABSW`/`PCEQW`/`PMINW`/`PADSBH`/
+`PABSH`/`PCEQH`/`PMINH`/`PCEQB` (MMI1 sub-table, `sa`
+0x01/0x02/0x03/0x04/0x05/0x06/0x07/0x0A) - funct/sa values confirmed
+against the real `tbl_MMI0[32]`/`tbl_MMI1[32]` tables in
+`R5900OpcodeTables.cpp`, not assumed. This brings EE MMI coverage from
+~35 to ~48 of the roughly 90 real opcodes.
+
+Three things worth documenting explicitly (all ported as real hardware
+behavior, not simplified away): the compare opcodes (`PCGT*`/`PCEQ*`)
+produce a per-lane all-1s/all-0s mask result, not a boolean 0/1 - this
+is the standard SIMD-compare convention on real hardware, used by
+guest code to build a select mask, not just a scalar boolean.
+`PMAXW`/`PMAXH`/`PMINW`/`PMINH` use a genuine signed comparison (unlike
+the earlier `MAX.S`/`MIN.S` FPU opcodes, which needed the bit-level
+signed-int trick specifically because IEEE-754 floats don't sort as
+plain integers - these are already ordinary twos-complement integers,
+so a normal signed compare is correct and sufficient). `PABSW`/`PABSH`
+preserve a real quirk: `INT32_MIN`/`INT16_MIN` (`0x80000000`/`0x8000`)
+have no positive representation at their own bit width, so real
+hardware clamps the result to `INT32_MAX`/`INT16_MAX` instead of
+overflowing back to the same negative value. And `PADSBH` ("add/
+subtract halfword") is a genuinely asymmetric single instruction. not
+a uniform 8-lane op: its low 4 halfword lanes compute `PSUBH` (rs-rt)
+while its high 4 lanes compute `PADDH` (rs+rt).
+
+Unit tested in `tests/test_ee_mmi_compare.c`, 32/32 checks - operands
+planted directly into EE RAM and loaded via `LQ`, since these are
+whole-register SIMD lane ops (same approach as `tests/test_ee_lqsq.c`).
+Covers both directions of every compare (true and false cases, to
+prove none of them are accidentally unconditional), a mixed-sign case
+for max/min that wouldn't survive a naive unsigned/bit-pattern
+compare, the `INT32_MIN`/`INT16_MIN` clamp case for both `PABSW` and
+`PABSH`, and specific low-lane vs. high-lane checks for `PADSBH` to
+confirm the asymmetry is real.
+
+Regression: full test suite (25 test files total, including this new
+one) all pass 0 failures. Wii/devkitPPC target rebuilds clean with no
+warnings.
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

@@ -351,6 +351,95 @@ none has been found yet) or further, more careful tracing of exactly
 which BIOS routine performs this dereference and why, before
 attempting a fix.
 
+### EE JALR investigation, round 2: exact mechanism now understood byte-for-byte (root cause still open)
+
+A follow-up session re-investigated this with a purpose-built
+byte-level tracing harness (instruction-decode ring buffer plus a
+full shadow-diff over EE RAM 0x0-0x8000, logging every single byte
+write with the instruction count and pc that produced it - a more
+precise version of the same tracing technique used throughout this
+project). This replaced guesswork with exact, reproducible facts:
+
+- **The `$s3 = *(0x100)` chain is real and exact**, confirmed via the
+  actual decoded instructions at the real BIOS addresses: `ORI
+  $s3,$zero,0x100` then `LW $s3,0($s3)` at instruction #099246/#099248
+  (pc=0x00000DCC/0x00000DD4), giving `$s3 = RAM[0x100] = 0`. Then `LW
+  $s6,0($s3)` (#099253, pc=0x00000DE8) gives `$s6 = RAM[0] `. Then `LW
+  $s1,8($s6)` (#099257, pc=0x00000DF8) gives `$s1 = RAM[$s6+8]`. Then
+  `JALR $ra,$s1` (#099261, pc=0x00000E08) jumps to whatever `$s1` holds.
+  **Confirmed: there is no conditional branch anywhere in this
+  instruction window that checks whether `$s3`/`$s6` is zero before
+  using it** - real BIOS code here assumes the chain is always
+  populated, no defensive null check exists to skip this path.
+
+- **`RAM[0x100]` is confirmed to be written by NO instruction at all**
+  across the entire ~99,261-instruction run (verified via the full
+  shadow-diff log, not just a single snapshot check as in the first
+  investigation round) - it is the one and only genuinely-still-zero
+  link in the whole chain.
+
+- **The other two links are NOT simply "zero" - they resolve through
+  a scratch buffer this same boot code builds and then only partially
+  clears.** Traced via a `$k0` register-change log: earlier in the
+  same run (~instruction #084143-084153, pc=0x00000EE0), boot code
+  builds a real MIPS exception-vector trampoline - `LUI $k0,0` / `ADDIU
+  $k0,$k0,0x0C80` / `JR $k0` / `NOP` (the SAME 4-instruction convention
+  already used for the IOP's `InstallExceptionHandlers`, but this is
+  genuine EE-side kernel code doing the analogous thing independently,
+  not related to our IOP HLE code at all) - directly into RAM
+  addresses 0-15. This trampoline is later actually **jumped to and
+  executed for real** (confirmed: `$k0` is next seen changing via
+  `ADDIU $k0,$k0,0x0C80` fetched FROM address 0x00000004 at instruction
+  #099161 - i.e. the CPU's pc really was 4, executing our own
+  installed bytes as code), landing at address 0x0C80 and running
+  further init code there, including a register-context-save sequence
+  (many `SW $reg,offset($k0)` instructions with `$k0=8`) into the same
+  low-RAM area. Afterward, only bytes 0-3 of the original trampoline
+  get explicitly zeroed again (a second write at instruction #084203,
+  by different code at pc=0xBFC4D310) - **bytes 4-7 (`0x275A0C80`) and
+  8-11 (`0x03400008`) are never cleaned up and are still sitting there
+  later.** So when the `*(0x100)`-chain resolves to `$s6 = RAM[0] = 0`
+  (genuinely zero, confirmed) and then reads `RAM[$s6+8] = RAM[8] =
+  0x03400008` - **that's not a coincidental "zero decodes as a valid
+  instruction" accident like the earlier LQ/SQ finding. It's the raw
+  encoding of the JR-instruction word from boot code's own leftover,
+  not-fully-cleared scratch buffer**, being misread as a function
+  pointer through a chain that was supposed to reach a *different*,
+  legitimately-populated structure.
+
+- **Confirmed this is not reachable via our un-implemented EE SYSCALL**
+  (`ee_core.c` halts cleanly and immediately on any EE `SYSCALL` - see
+  the primary-opcode switch - and this run never halts before
+  instruction #099261, so no `SYSCALL` was ever executed in this
+  window). Whatever should populate `RAM[0x100]` before this code
+  runs, it is not done via the classic PS2 "AddXxxHandler`-style
+  kernel-call convention in this instruction range.
+
+**Net honest status**: the mechanism is now fully understood at the
+byte and instruction level - a real, reproducible fact pattern, not a
+guess - but the root cause (what real hardware puts at `RAM[0x100]`,
+and why/how) is still **unresolved**. Two live hypotheses, both
+untested: (1) a genuine gap in this project's boot/DMA modeling -
+something (possibly IOP-side, possibly a hardware hand-off mechanism
+this project doesn't implement at all) is supposed to populate this
+address before this code segment runs, or (2) real hardware only ever
+reaches this exact `*(0x100)` code path as a genuinely-vectored
+exception/interrupt handler (its instructions do resemble an exception
+prologue - register saves via a `$k0`-relative frame), and this
+project's total absence of real interrupt/exception-raising logic on
+the EE side (see `ee_core.c`'s COP0 notes: only explicit `MTC0` writes
+ever touch Status/EPC, nothing raises a real exception) means we may
+be free-running straight through code that real hardware would only
+ever reach via a hardware trap fired at a very different point in the
+boot timeline - i.e. we might be executing this code "by accident",
+too early, via plain sequential fall-through instead of a genuine
+vectored call. Neither hypothesis has supporting evidence beyond the
+plausibility argument above; flagged honestly as still open. The
+ps2tek "Debug exception vector" characterization of address `0x100`
+from the previous round doesn't contradict either hypothesis but also
+doesn't resolve the question of what specifically should be there at
+this point in boot.
+
 ### FPU accumulator (ACC) family implemented
 
 Added the last 7 COP1.S opcodes needed for the FPU's ACC register:

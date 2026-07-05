@@ -566,21 +566,34 @@ reach the hardware register window and finally decodes a live register
 value as an invalid opcode. So "53 million instructions" was never
 real boot progress; the actual, honest number is closer to 99,262.
 This is now the single most important EE investigation target - NOT
-yet solved, unlike the two IOP fixes above. The pointer chain leading
-to the bad JALR target was traced back to a dereference of EE address
-0x100, initially suspected (by analogy with the IOP's InstallExceptionHandlers
-fix) to be an unpopulated kernel table - but checked against ps2tek
-(https://psi-rockin.github.io/ps2tek/, a citable public PS2 hardware
-reference), address 0x100 is actually the CPU's own Debug exception
-vector, which real hardware never installs a handler for either - so
-the zero value there may be entirely correct, and that analogy doesn't
-hold. See docs/STATUS.md for the full, honest writeup: this remains
-unsolved, and needs either a citable EE kernel-boot-internals reference
-(ps2tek doesn't cover this) or more careful tracing before attempting a
-fix. The IOP has no known
-halt point left to chase at all right now; COP2/VU0 remains unstarted
-and unproven against real BIOS code, since the EE hasn't legitimately
-run far enough to demonstrate needing it yet.
+yet solved, unlike the two IOP fixes above, but a second investigation
+round (see docs/STATUS.md's "EE JALR investigation, round 2") pinned
+the mechanism down at the byte/instruction level using a purpose-built
+tracing harness (instruction ring buffer + full RAM shadow-diff): the
+`$s3=*(0x100)`, `$s6=*($s3+0)`, `$s1=*($s6+8)`, `JALR $ra,$s1` chain is
+confirmed exact via the real decoded instructions; `RAM[0x100]` is
+confirmed written by NO instruction across the whole ~99,261-instruction
+run; and - the new finding - `RAM[0]`/`RAM[8]` are NOT simply
+zero-by-default, they resolve through a real exception-vector-trampoline
+scratch buffer this same boot code builds (at ~instruction 84,143,
+mirroring the IOP's own InstallExceptionHandlers convention
+independently on the EE side), actually jumps to and executes (confirmed:
+pc really does reach address 4 and execute the installed bytes as
+code), and then only partially cleans up (bytes 0-3 get re-zeroed
+afterward, bytes 4-11 are leftover). So the eventual bad JALR target
+(`0x03400008`) is the raw encoding of that leftover JR instruction
+word, misread as a function pointer through a chain that was meant to
+reach a different, legitimately-populated structure - not a
+"zero-decodes-as-NOP" coincidence like the earlier LQ/SQ finding.
+Root cause of why `RAM[0x100]` itself is never populated remains
+genuinely unresolved - two hypotheses (a real unmodeled boot/DMA gap,
+vs. this code path only being reachable via a genuine hardware
+exception trap our EE core doesn't implement, meaning we may reach it
+"by accident" via plain fall-through) are documented in docs/STATUS.md
+but neither has been tested yet. The IOP has no known halt point left
+to chase at all right now; COP2/VU0 remains unstarted and unproven
+against real BIOS code, since the EE hasn't legitimately run far
+enough to demonstrate needing it yet.
 
 1. IOP CPU core skeleton (this is "just" another MIPS interpreter,
    well-scoped, and unblocks everything downstream of SIF) - DONE

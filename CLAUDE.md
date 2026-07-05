@@ -27,6 +27,84 @@ they're already reasoned through there. Both files must be kept up to date
 as part of any change (see workflow below) - they are the project's actual
 memory across sessions, more so than this file.
 
+## Current frontier: the "EE JALR investigation" (rounds 1-7, and counting)
+
+This is the single longest-running thread of work in the project and the
+most likely thing an interrupted session needs to pick back up. Full
+detail is in `docs/STATUS.md` (search for "EE JALR investigation"); this
+is the short version so a fresh session isn't lost. (The "Real BIOS
+testing" section below has an older, now-superseded summary of rounds
+1-2 written when the root cause was still unknown - this section is the
+current, up-to-date status.)
+
+- **Rounds 1-4**: chased an EE interpreter halt where `pc` escaped into
+  the hardware-register address window via a bad `JALR` target. Multiple
+  false leads ruled out (DMA bugs, a missing SYSCALL handler, a "missed
+  guard" theory) with no fabricated fix - each round is preserved in
+  `STATUS.md` because the *ruling-out* is as valuable as a fix would be.
+- **Round 5 - root cause found**: the user connected a real, working
+  PCSX2 via a third-party MCP debugger bridge (`github.com/hkmodd/
+  PCSX2-MCP`) and captured a live instruction trace + memory dump proving
+  real hardware's boot path is completely different from what this
+  project executed. Actual root cause: `ee_core_init()` never set COP0
+  register 15 (PRId) - the very first instruction of the real BIOS reads
+  it and branches on a CPU-revision check. **Fix**: `cop0[15] =
+  0x00002e20` (real value, from PCSX2's `R5900.cpp`), in
+  `ee_core_init()`.
+- **Round 6 - real COP0 TLB implemented**: past the PRId fix, boot hit a
+  new, honest wall on `TLBWI` (completely unimplemented). Implemented
+  real `TLBR`/`TLBWI`/`TLBWR`/`TLBP` (48-entry `tlb[]`, ported from
+  PCSX2's `COP0.cpp`) plus real KUSEG (`<0x80000000`) address translation
+  in `ee_mem_ptr()` via `ee_tlb_translate()`. Also fixed a kseg0-ROM-
+  mirror bug, added the MIPS "Branch Likely" family (`BEQL`/`BNEL`/etc),
+  and `LWC1`/`SWC1`. New wall: a genuine TLB miss on `$sp=0x70003eb0`
+  (no installed TLB entry covers it) - silently read as 0 (no exception
+  path yet), wandering into "zero-land".
+- **Round 7 - real exception delivery implemented**: `ee_raise_exception()`/
+  `ee_raise_tlb_exception()` in `ee_core.c`, ported from PCSX2's
+  `cpuException()`/`cpuTlbMiss()` in `R5900.cpp`. Real Cause/EPC/
+  Status.EXL/Status.BEV-dependent vectoring, correct `Cause.BD` for
+  branch-delay-slot faults (needed real delay-slot tracking, added via
+  `branch_pending` - previously an unused, vestigial field). Verified
+  as dramatic, real progress: a 20M-instruction run against the actual
+  SCPH-10000 BIOS now executes **97.62% real instructions** (was
+  0.0008%/151-out-of-20M before). Disassembly confirmed the code being
+  executed is genuine MIPS exception-handler prologue (GPR context
+  save + EPC/Cause save), not zero-decoded filler.
+- **New wall (not yet investigated - this is where to start next)**:
+  exactly 2 real exceptions fire in a 50M-instruction run (the original
+  TLB miss, then an immediate *nested* fault when the handler's own
+  register-save routine touches a different unmapped KUSEG page). After
+  that, `Status.EXL` never clears (no `ERET`) and the EE just keeps
+  running real code in that same handler-prologue region indefinitely
+  without resolving. Best current theory (not confirmed): this looks
+  like a missing "wired TLB entry" situation - real MIPS kernels reserve
+  a few TLB entries via `COP0.Wired` (`cop0[6]`, not modeled at all
+  here) specifically so kernel/handler code and its own scratch memory
+  can never TLB-miss while a miss is already being serviced - or the
+  real boot path expects more `TLBWI` calls to have executed by this
+  point than this project's trace has reached. See `docs/STATUS.md`'s
+  "round 7" section and `docs/ROADMAP.md` for the full evidence trail
+  (diagnostic harnesses referenced there live in `/tmp/diag/` on the
+  machine that did this work - throwaway, not committed, may not exist
+  in a fresh environment; the *method* - disassemble the hot pc range,
+  trace `Cause`/`EPC`/`BadVAddr` changes, check the real vs. zero-decoded
+  instruction ratio over tens of millions of steps - is the reusable
+  part, not the specific files).
+
+**Tool note**: `github.com/hkmodd/PCSX2-MCP` (third-party, not this
+project's own code) gives live debugging access to a real, user-run
+PCSX2 instance - breakpoints, memory dumps, register reads, disassembly
+- across EE (R5900) and IOP (R3000) address spaces independently. This
+was the breakthrough that unblocked round 5 after rounds 1-4 stalled for
+lack of a ground-truth reference. If stuck on a similarly opaque EE/IOP
+divergence again, asking the user whether they can run this tool against
+real PCSX2 (same BIOS) is a legitimate, previously-proven-useful move -
+just remember PCSX2-MCP's own README caveat that breakpoints often don't
+trigger until a game (not just the BIOS) is running, and that EE vs. IOP
+addresses live in numerically-overlapping-but-unrelated spaces in its
+debugger UI.
+
 ## The mandatory per-change workflow
 
 This project has a strict, consistently-applied ritual for every increment
@@ -114,12 +192,23 @@ more recent, narrowly-scoped test files worth knowing about by name:
 `test_ee_mmi_compare.c`/`test_ee_mmi_sat.c`/`test_ee_mmi_permute.c`/
 `test_ee_mmi_pvshift.c` (the compare/max/min/abs, saturated-arithmetic,
 permute/interleave, and variable-shift MMI batches, added incrementally
-across several sessions). **Check `tests/README.md` for the exact,
+across several sessions), plus the newer COP0/TLB/exception cluster:
+`test_ee_cop0_prid.c`, `test_ee_cop0_tlb.c`, and `test_ee_exceptions.c`
+(see "Current frontier" above). **Check `tests/README.md` for the exact,
 current build command for each test file** rather than guessing the link
 line - it is kept in sync with actual dependencies as they change (several
 tests need sibling `.c` files linked in because `ee_core.c`/`iop_core.c`
 have grown transitive dependencies on the hardware model), and getting it
 wrong just produces linker errors (safe to experiment with).
+
+**Single-step, don't run-to-completion, when testing a fault/exception
+path against a synthetic program with no real handler installed**: as of
+the exception-delivery work (round 7), `ee_core_run()`'s loop has no
+instruction-count cap - if a fault vectors into all-zero memory that
+never reaches a `BREAK`, it hangs forever. Use `ee_core_step()` a fixed
+number of times instead and inspect state directly. See
+`tests/test_ee_exceptions.c` and the KUSEG-miss case in
+`tests/test_ee_cop0_tlb.c` for the pattern.
 
 ## Architecture
 
@@ -154,10 +243,16 @@ to the right module by address range.
   why this matters here specifically. COP0 support: MFC0/MTC0 (generic
   registers, Status, Config) plus the "CO"-format instructions RFE/ERET/
   EI/DI (dispatched via a 6-bit `funct` field once `rs`'s top bit is set -
-  NOT via `rs` itself, matching PCSX2's `tbl_COP0_C0[64]` table). Still
-  missing: real TLB instructions and actual EE-side exception-vector
-  raising (MFC0/MTC0/RFE/ERET/EI/DI all manipulate Status/EPC directly
-  right now without a real exception ever being raised on this side).
+  NOT via `rs` itself, matching PCSX2's `tbl_COP0_C0[64]` table), a real
+  48-entry TLB (`TLBR`/`TLBWI`/`TLBWR`/`TLBP` + KUSEG address translation
+  via `ee_tlb_translate()`), and real exception delivery for KUSEG TLB
+  misses (`ee_raise_exception()`/`ee_raise_tlb_exception()` - Cause/EPC/
+  Status.EXL/BEV-dependent vectoring, correct Cause.BD for delay-slot
+  faults). See "Current frontier" above for the full story and current
+  state - this is the most actively-changing part of the codebase. Still
+  missing: general/interrupt/SYSCALL exception delivery through this same
+  path (SYSCALL still uses its own separate hand-written trap, and RFE/
+  ERET/EI/DI still only handle the exception-RETURN side).
   COP1/FPU is essentially complete for single-precision scalar work:
   core arithmetic, SQRT.S/RSQRT.S, MAX.S/MIN.S (bit-level signed-int
   compare trick), CVT.W.S/CVT.S.W, C.EQ/LT/LE.S, BC1F/BC1T, and the full
@@ -343,13 +438,17 @@ range address; because a zero-filled word happens to decode as a valid
 NOP, the CPU then just marches in a straight line through unmapped memory
 for 53+ million fake "instructions" until it reaches live, non-zero
 hardware register content that finally halts it for an unrelated reason.
-The root cause of the JALR-to-out-of-range target is still genuinely
-**unsolved** - traced the full pointer chain back to `RAM[0x100] == 0`,
-checked an initial "EE-side table of tables" hypothesis against ps2tek
-and found it doesn't hold (that address is the CPU's own Debug exception
-vector, not a kernel table), and no citable reference for EE kernel/BIOS
-boot internals has been found yet. Moral: treat a large raw instruction
-count as a hypothesis to verify (did the halt point actually move after
+**Update: this was later solved** (see "Current frontier" near the top
+of this file for the full, current story) - `RAM[0x100] == 0` was itself
+just a symptom of `ee_core_init()` never setting COP0 PRId, found via a
+live trace of real, working PCSX2. The initial "EE-side table of tables"
+hypothesis against ps2tek genuinely didn't hold (that address really is
+the CPU's own Debug exception vector, not a kernel table) - it just
+wasn't the whole story; the real fix came from ground-truth tracing, not
+further hypothesis-checking against docs. Moral (still true, keep this
+lesson regardless of which specific investigation it applied to): treat
+a large raw instruction count as a hypothesis to verify (did the halt
+point actually move after
 the fix that supposedly explained it?), not as evidence on its own - see
 `docs/STATUS.md`'s "LQ/SQ implemented" and the EE-JALR-investigation
 sections for the full trail.
@@ -415,6 +514,54 @@ if new code re-introduces the naive version:
   JAL-segment issue below bit an earlier test) - place new IOP test
   programs at a safely-clear address like `0x1000` unless the test is
   specifically about one of these reserved regions.
+- **kseg0/kseg1 both decode to the same physical memory** (segment bits
+  only affect caching, not the target) - `ee_mem_ptr()` must mask to the
+  physical address (`addr & 0x1FFFFFFF`) *before* deciding ROM-vs-RAM,
+  not special-case one virtual range (this project only handled the
+  kseg1 ROM mirror at first, silently breaking the kseg0 one).
+- **KUSEG (`<0x80000000`) is a genuinely MAPPED segment** - unlike
+  kseg0/kseg1, it needs a real TLB entry (`ee_tlb_translate()`); a naive
+  `addr & 0x1FFFFFFF` physical mask "works" by accident until real code
+  uses an address only a TLB entry (not identity mapping) resolves
+  correctly, then silently corrupts everything downstream. If a test
+  wants a plain, no-TLB-needed scratch RAM address, use a kseg0 address
+  (`0x80000000+`), not a raw KUSEG one (this bit `test_ee_unaligned.c`
+  once real TLB translation landed - it had been using a bare KUSEG
+  address as a scratch-RAM base).
+- **MFC0 sign-extends 32-bit COP0 values into the 64-bit GPR** - a COP0
+  register value with bit 31 set (e.g. TLBP's "not found" `Index =
+  0x80000000`) reads back as `0xFFFFFFFF80000000`, not the raw
+  `0x80000000`, when read via `MFC0`. Easy to get backwards in a test's
+  expected value (this project did, twice, in the same test file,
+  before fixing both).
+- **`ee_mem_ptr()`'s NULL return has two different meanings** - a KUSEG
+  TLB miss (exception-worthy, see `mem_tlb_miss`) vs. a kseg0/kseg1
+  address with no backing ROM/RAM (architecturally NOT a TLB fault on
+  real MIPS, still just reads-as-zero/no-ops). Conflating these would
+  either raise spurious exceptions for ordinary unmapped-hardware-
+  register reads, or (the original bug) silently swallow a real TLB
+  miss that should have vectored to the BIOS's own handler.
+- **SWL/SWR always report `TLBL` (load) never `TLBS` (store) on a TLB
+  miss** - a known, documented, *not yet fixed* inaccuracy: their
+  internal implementation does a read-then-write of the same address
+  (to merge partial bytes), and the read is what actually triggers the
+  fault first. Real hardware would raise `TLBS` for a faulting partial
+  store. Low priority unless/until something depends on distinguishing
+  this.
+- **C block comments and `ee_mem_read`/`ee_mem_write`-style wildcard
+  shorthand don't mix**: writing `ee_mem_read*/ee_mem_write*` inside a
+  `/* ... */` comment terminates the comment early at the `*/` in the
+  middle, even though it obviously reads as a glob in prose. Bit this
+  project during the round-7 exception work; write
+  `ee_mem_read* / ee_mem_write*` (space before the second `/`) or spell
+  out the function names instead.
+- **A single instruction can trigger the same class of fault twice**
+  (e.g. SWL/SWR's internal read-then-write of one address) - without a
+  per-instruction guard (`exc_raised_this_step`), the second call would
+  corrupt the first exception's Cause/EPC bookkeeping. Any new opcode
+  that touches memory more than once per instruction should route
+  through the existing `ee_mem_read`/`ee_mem_write` chokepoint (which
+  already has this guard) rather than reimplementing raw pointer access.
 
 ## Reference material
 

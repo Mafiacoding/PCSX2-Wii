@@ -91,21 +91,49 @@ current, up-to-date status.)
   reaches a new region, `pc=0xBFC0092C` - a real `j $` self-loop right
   after a `Compare=1` timer setup: a genuine "wait for interrupt" idle
   pattern, not a bug.
+- **Round 9 - real EE Timer (Count==Compare) interrupt delivery
+  implemented**: `ee_latch_timer_interrupt()`/`ee_check_timer_interrupt()`
+  in `ee_core.c`, ported from PCSX2's `_cpuTestTIMR()`/
+  `cpuTestTIMRInts()`. Cause.IP7 latches on `Count>=Compare` (NOT `==` -
+  a live real-BIOS instruction sequence at `pc=0xBFC0081C-0xBFC00824`
+  proved exact equality gets silently overshot: `MTC0 Count,0` then,
+  two instructions later, `MTC0 Compare,1` - Count is already past 1 by
+  the time Compare is written, since Count advances every instruction
+  including the epilogues in between). Sticky until an explicit Compare
+  write acks it (real, documented MIPS behavior). Taking the interrupt
+  (not just latching it) is deferred across branch/delay-slot
+  boundaries - splitting these two concerns was itself a real bug fix
+  during this round (an exact-equality-only draft could silently lose
+  a match that landed on a taken branch's own step). 32 host-native
+  checks (`tests/test_ee_timer_interrupt.c`), 0 regressions across the
+  full 34-file suite, clean Wii rebuild.
 - **New wall (not yet investigated - this is where to start next)**:
-  the EE core has never raised an Interrupt-class exception at all
-  (ExcCode 0/Int) - nothing ever asserts one, so the `j $` idle loop
-  above can never be escaped. This is now a well-scoped, non-
-  speculative next step (not another opaque investigation): implement
-  real EE interrupt delivery through the existing `ee_raise_exception()`
-  path (round 7), starting with the Count==Compare timer case, gated by
-  `Status.IE`/`EIE`/`IM` like real hardware. See `docs/STATUS.md`'s
-  "round 8" section and `docs/ROADMAP.md` for the full evidence trail
+  live re-verification against the real SCPH-10000 BIOS found a more
+  precise wall than "no interrupt delivery exists" - Cause.IP7 now
+  latches correctly (confirmed directly via diagnostic), but
+  `Status.IE` is never set anywhere in the boot path this project's
+  interpreter takes before reaching `pc=0xBFC0092C`'s idle loop (a
+  targeted trace confirmed **zero `EI` instructions execute** in the
+  first 5 million steps). So a maskable Count/Compare interrupt isn't
+  - at least not via this exact code path - what actually escapes this
+  loop. Open hypotheses, not yet root-caused: (a) this loop is an
+  error/dead-end path only reached because something upstream is
+  mis-emulated (wrong branch taken earlier due to an incorrectly-read
+  hardware register, say), (b) real hardware escapes it via a
+  different interrupt source entirely (INTC/DMAC-driven, not the
+  internal timer) that this project hasn't modeled at all, or (c) `EI`
+  is meant to run inside one of the `JAL`/`JALR` subroutine calls this
+  loop's surrounding code makes (`pc=0xBFC00884`, `0xBFC008A8`,
+  `0xBFC008B8`) and this project's execution of those subroutines
+  diverges from real hardware before reaching it. See `docs/STATUS.md`'s
+  "round 9" section and `docs/ROADMAP.md` for the full evidence trail
   (diagnostic harnesses referenced there live in `/tmp/diag/` on the
   machine that did this work - throwaway, not committed, may not exist
   in a fresh environment; the *method* - disassemble the hot pc range,
-  trace `Cause`/`EPC`/`BadVAddr` changes, check the real vs. zero-decoded
-  instruction ratio over tens of millions of steps - is the reusable
-  part, not the specific files).
+  trace `Cause`/`EPC`/`BadVAddr`/`Status` changes, check the real vs.
+  zero-decoded instruction ratio over tens of millions of steps, trace
+  specific opcodes (like `EI`) across a run - is the reusable part, not
+  the specific files).
 
 **Tool note**: `github.com/hkmodd/PCSX2-MCP` (third-party, not this
 project's own code) gives live debugging access to a real, user-run
@@ -260,14 +288,20 @@ to the right module by address range.
   EI/DI (dispatched via a 6-bit `funct` field once `rs`'s top bit is set -
   NOT via `rs` itself, matching PCSX2's `tbl_COP0_C0[64]` table), a real
   48-entry TLB (`TLBR`/`TLBWI`/`TLBWR`/`TLBP` + KUSEG address translation
-  via `ee_tlb_translate()`), and real exception delivery for KUSEG TLB
+  via `ee_tlb_translate()`), real exception delivery for KUSEG TLB
   misses (`ee_raise_exception()`/`ee_raise_tlb_exception()` - Cause/EPC/
   Status.EXL/BEV-dependent vectoring, correct Cause.BD for delay-slot
-  faults). See "Current frontier" above for the full story and current
-  state - this is the most actively-changing part of the codebase. Still
-  missing: general/interrupt/SYSCALL exception delivery through this same
-  path (SYSCALL still uses its own separate hand-written trap, and RFE/
-  ERET/EI/DI still only handle the exception-RETURN side).
+  faults), and a real Timer (Count==Compare) interrupt
+  (`ee_latch_timer_interrupt()`/`ee_check_timer_interrupt()`, round 9 -
+  Cause.IP7 latches on Count>=Compare, sticky until an explicit Compare
+  write acks it, gated by Status.IE/EIE/IM7/EXL/ERL, deferred across
+  branch delay slots). See "Current frontier" above for the full story
+  and current state - this is the most actively-changing part of the
+  codebase. Still missing: general/SYSCALL exception delivery through
+  this same path (SYSCALL still uses its own separate hand-written
+  trap, and RFE/ERET/EI/DI still only handle the exception-RETURN
+  side), and any INTC/DMAC-driven interrupt source (Timer is the only
+  one modeled so far).
   COP1/FPU is essentially complete for single-precision scalar work:
   core arithmetic, SQRT.S/RSQRT.S, MAX.S/MIN.S (bit-level signed-int
   compare trick), CVT.W.S/CVT.S.W, C.EQ/LT/LE.S, BC1F/BC1T, and the full

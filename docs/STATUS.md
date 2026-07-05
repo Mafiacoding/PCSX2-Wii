@@ -440,6 +440,79 @@ from the previous round doesn't contradict either hypothesis but also
 doesn't resolve the question of what specifically should be there at
 this point in boot.
 
+### EE JALR investigation, round 3: DMA and a "missed guard" both ruled out; a fix without fabrication isn't available yet
+
+A third pass tested the two open hypotheses from round 2 directly
+rather than leaving them as untested speculation:
+
+- **DMA/hardware hand-off hypothesis, tested and ruled out for this
+  instruction range.** Dumped the full `dma_state_t` (`dma_get_state()`)
+  immediately after the run: every one of the 10 DMA channels'
+  registers (CHCR/MADR/QWC/TADR) and the shared D_CTRL/D_STAT/D_PCR
+  registers are still completely zero - boot code has not touched the
+  EE's DMA controller AT ALL by instruction #099261. Whatever should
+  populate `RAM[0x100]`, it is not happening via any DMA transfer this
+  project models (or a real one would model either, since nothing has
+  been kicked).
+
+- **"Missed branch/guard" hypothesis, tested and ruled out for the
+  immediate window.** Every instruction executed between the
+  trampoline landing at `pc=0x00000C80` (~instruction #099169) and the
+  fatal `JALR` (#099261) was decoded and its primary opcode tallied:
+  the entire ~90-instruction span contains ONLY `ADDI/ADDIU/ANDI/LUI/
+  COP0/LW/SW`/R-type arithmetic opcodes - **zero branch or jump-and-
+  link opcodes of any kind** (no `BEQ/BNE/BLEZ/BGTZ`, no `REGIMM`
+  branch family, no likely-branch forms). This rules out "an
+  interpreter bug in some comparison/branch instruction is wrongly
+  skipping a null-check" for this specific window - there is no
+  conditional control flow in it at all to get wrong. If a guard
+  exists, it would have to be further back, before the trampoline was
+  even reached.
+
+- **This also weakens round 2's hypothesis (2) (a genuinely-vectored
+  hardware exception).** This project's EE core has no code path that
+  spontaneously changes `pc` (no timer/interrupt/TLB-refill logic - see
+  `ee_core.c`'s COP0 notes) - the ONLY way execution reaches
+  `pc=0x00000C80` at all is by literally decoding and executing a `JR`
+  instruction with that target already sitting in a register,
+  somewhere in the plain, sequential instruction stream. Since our
+  interpreter is fully capable of reaching this code via ordinary
+  execution (confirmed - it does, every run), and has no mechanism to
+  reach it any OTHER way, the "this should only be reachable via a
+  hardware trap" framing doesn't hold up: whatever sent execution to
+  `0x00000C80` did so through a plain, already-decoded `JR`, which
+  means the real BIOS itself treats this as reachable via normal
+  control flow at this point in boot - not as an exception handler
+  waiting for a hardware fault.
+
+**Where this leaves things, honestly**: the remaining, most plausible
+explanation is that some REAL hardware mechanism this project doesn't
+model at all - most likely something that happens before the very
+first CPU instruction executes (e.g. a boot-ROM/hardware-level initial
+program load step that pre-populates a small amount of fixed EE RAM
+content as part of physical reset, before `pc` is even set to the
+reset vector) - is responsible for `RAM[0x100]`'s real-hardware value,
+and this project's boot model (allocate 32MB of zeroed RAM, jump
+straight to `0xBFC00000`) has no equivalent step. **This project has no
+citable public reference describing PS2 EE-side pre-CPU-boot RAM
+content** (unlike psx-spx for the IOP's kernel conventions, or ps2tek
+for CPU/hardware register architecture) - inventing a plausible-looking
+value to poke into `RAM[0x100]` at `ee_core_init()` time would be
+exactly the kind of fabricated hardware behavior this project's
+standing policy prohibits, so **no code fix is being applied for this
+specific gap**. Two honest paths forward exist, neither undertaken yet
+pending a decision on priority: (a) implement a real, architecturally-
+correct COP0 TLB/exception-vector system (citable against the R5900/
+MIPS architecture and PCSX2's own `COP0.cpp`) as a legitimate feature
+in its own right - substantial scope, and not guaranteed to resolve
+this specific gap even if built, since the evidence above suggests
+this code path isn't exception-driven; or (b) accept this as a
+documented, structural limitation of the current boot model and
+continue investing effort in other well-scoped, independently
+verifiable work (remaining MMI opcodes, COP2/VU0, GS rasterization),
+revisiting this if a citable reference for EE pre-boot RAM content is
+ever found.
+
 ### FPU accumulator (ACC) family implemented
 
 Added the last 7 COP1.S opcodes needed for the FPU's ACC register:

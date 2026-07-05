@@ -586,11 +586,22 @@ word, misread as a function pointer through a chain that was meant to
 reach a different, legitimately-populated structure - not a
 "zero-decodes-as-NOP" coincidence like the earlier LQ/SQ finding.
 Root cause of why `RAM[0x100]` itself is never populated remains
-genuinely unresolved - two hypotheses (a real unmodeled boot/DMA gap,
-vs. this code path only being reachable via a genuine hardware
-exception trap our EE core doesn't implement, meaning we may reach it
-"by accident" via plain fall-through) are documented in docs/STATUS.md
-but neither has been tested yet. The IOP has no known halt point left
+genuinely unresolved. A third round tested both hypotheses directly:
+DMA is ruled out (every DMA channel register is still completely zero
+at the point of the fatal JALR - nothing has been kicked), and the
+"missed guard" idea is ruled out for the immediate window (the ~90
+instructions between the trampoline landing and the fatal JALR contain
+zero branch/jump-and-link opcodes - pure straight-line code, nothing to
+misjudge). The most plausible remaining explanation is a real
+hardware pre-boot RAM-population step (before the first CPU
+instruction even runs) that this project's boot model has no
+equivalent of - but there is no citable public reference for this,
+unlike psx-spx/ps2tek elsewhere in this project, so no fix is being
+applied rather than fabricate BIOS-internal behavior. See
+docs/STATUS.md's "round 3" section for the full reasoning and the two
+honest paths forward (a real COP0 TLB/exception system as its own
+feature, or accepting this as a documented limitation for now). The
+IOP has no known halt point left
 to chase at all right now; COP2/VU0 remains unstarted and unproven
 against real BIOS code, since the EE hasn't legitimately run far
 enough to demonstrate needing it yet.

@@ -1013,7 +1013,7 @@ round - this is "round 10"'s starting point, the same kind of
 precisely-identified-but-open wall every round 5-9 handoff has ended
 on.
 
-### EE JALR investigation, round 10 (in progress): the "idle loop" is dead code on real hardware - root cause traced to a wrong SIF/IOP-handshake return value, not found yet
+### EE JALR investigation, round 10: idle loop confirmed dead code on real hardware; root cause fully traced to a BIOS clock-calibration loop whose retry budget this project's timing model exhausts too early
 
 Direct continuation of round 9's wall (EI never executes before
 `pc=0xBFC0092C`). The user provided two more live PCSX2 traces and,
@@ -1034,57 +1034,106 @@ landing squarely in the idle loop real hardware never visits. So the
 was never a real idle pattern, it's this project's own wrong-branch
 bug wearing the disguise of one.
 
+**Correction of an earlier mislabeling in this same round:** the
+subroutine chain leading up to the `0x9FC410E8` call was originally
+(round 6 report) described as "SIF communication init/status". Live
+disassembly plus reading the actual format string this code prints
+(`pcsx2_read_memory` at `a0=0x9FC438C8`) shows this is wrong - the
+string is `"Initialize memory (rev:%d.%02d, ctm:%dMhz, cpuclk:%dMhz
+%s)..."`. The three calls preceding `0x9FC410E8` from the same parent
+(`0x9FC41000`) are siblings, not nested inside it: `0x9FC42F48` is SIO
+baud-rate-divisor setup (writes `0x1000F100`/`0x1000F120`/`0x1000F140`
+via KSEG1, `a1=0x9600`=38400 baud), `0x9FC43088` is the actual printf
+for the string above, and `0x9FC42D78` iterates a small (48-entry)
+device/module table calling a shared dispatcher (`0x9FC42D48`) - none
+of this is SIF. This whole region is BIOS console/UART setup and
+memory/clock diagnostics output, not SIF communication.
+
 **Traced the wrong value three levels deep, confirmed live against a
 real BIOS-only boot (no disc) via direct `pcsx2-mcp` breakpoints/
 register reads:**
 - `v0` at `pc=0xBFC0088C` comes from `a1`, which comes from the return
   value (`v0`) of a subroutine call at `pc=0x9FC410E8` (called with a
-  fixed constant `a0=0x60000012` from `pc=0x9FC41000`'s own SIF-init
-  routine).
+  fixed constant `a0=0x60000012` from `pc=0x9FC41000`).
 - **Real hardware**: that subroutine returns `v0=0x08028020`. `a1=v0`
   is positive, `bgez a1` (at `pc=0x9FC41078`) is taken (success path),
   `s0 = a1 & 0x7FFF = 0x20`, final `v0 = s0 << 20 = 0x02000000`) -
   matches the very first (round 6) report's numbers exactly, now
   confirmed live via direct register reads at each step.
 - **This project's interpreter**: the same subroutine call returns
-  `v0=0xFFFFFFFF` (-1, an error sentinel) instead. This is NOT a
-  timing/"hasn't finished yet" issue - it's a definitive, wrong return
-  value: verified with a fresh interleaved EE+IOP diagnostic
-  (`core/system.c`'s `ee_core_step()`/`iop_core_step()` both running,
-  IOP genuinely executing ~147,500 instructions of its own alongside
-  the EE, not stalled/halted) that still produces `-1`.
-- The real boot took **~14.9 million CPU cycles** to return from this
-  same call (per the live trace's own cycle counter) versus this
-  project's ~142,500 EE instructions - a roughly 100x difference,
-  consistent with the subroutine being a genuine SIF/IOP handshake
-  wait-loop on real hardware that gives up (wrongly, via some bounded
-  retry/comparison) far too early in this project's emulation.
+  `v0=0xFFFFFFFF` (-1, an error sentinel) instead. Confirmed NOT a
+  timing/"hasn't finished yet" issue via a fresh interleaved EE+IOP
+  diagnostic (IOP genuinely executing ~147,500 instructions alongside
+  the EE, not stalled/halted) - still produces `-1`.
+- Real hardware took **~14.9 million CPU cycles** through this call
+  (per the live trace's own cycle counter) versus this project's
+  ~142,500 EE instructions - a roughly 100x difference.
 
-**Not yet root-caused inside the subroutine itself** - it's a fairly
-large routine (calls out to `0x9FC42F48`, `0x9FC43088` (3x),
-`0x9FC42D78`, plus a fixed-table lookup at `0x9FC43850` keyed on a
-derived value `s5 = a0>>12 = 0x60000`) that appears to be genuine
-SIF-communication-status/hardware-config detection, not a simple
-arithmetic bug. An instrumented scan for any direct EE-side load
-instruction targeting the `0x1000xxxx` hardware-register window during
-this whole call found **zero** such reads in this project's execution
-- meaning either the real polling mechanism isn't a direct MMIO read
-at all (e.g. a shared-RAM handshake location written via SIF DMA
-instead), or this project's interpreter takes a narrower/different
-path through the subroutine that skips the real polling loop entirely
-one one it should be taking. This points at the IOP-side SIF/RPC HLE
-implementation (`iop_hle_modules.c`/`iop_hle_bios.c`) as the more
-likely suspect over raw EE CPU correctness, given the EE side's own
-opcodes here (SRL/ANDI/BGEZ/SLTIU/SLTU) are simple, well-tested
-primitives already covered by other regression tests.
+**Root cause, fully traced via a host-native tail trace
+(`/tmp/diag/round10_tail_trace.c`, ring buffer of the last 400 PCs/
+registers before the return) cross-checked instruction-by-instruction
+against live PCSX2 disassembly:**
 
-**Next step**: either a live trace of the actual real-hardware SIF/RAM
-handshake location this subroutine polls (to find the right target
-for this project's IOP-side emulation to write), or continuing the
-static call-graph trace into `0x9FC42F48`/`0x9FC43088`/`0x9FC42D78`
-to find the real polling mechanism directly. No code changes made
-this round yet - investigation only, captured here so the next session
-can pick this up without re-deriving the same three-levels-deep trace.
+`0x9FC410E8`'s own table-search preamble (`s5 = a0>>12`, a lookup
+against the table at `0x9FC43850`) was verified **byte-for-byte
+identical** between this project's ROM read and the real-hardware
+memory dump the user captured earlier (`ps2_bios_table_analyse.md`) -
+ROM loading/table logic is fully correct and was ruled out as the
+cause.
+
+Past that point, the real subroutine turns out to be a **BIOS
+clock/baud calibration loop**, not a SIF/IOP handshake:
+- It repeatedly calls a helper at `0x9FC42570` that writes a
+  candidate baud/clock configuration byte to the SIO control path and
+  returns the resulting 6-bit config value (`andi v0,0x3F` at
+  `pc=0x9FC42190`).
+- It compares that value against the previous iteration's value
+  (`s0`); as long as they're equal (`beq v0,s0,->0x9FC42150`) it loops
+  back, incrementing a counter `s3` (`addiu s3,0x1` at `pc=0x9FC42160`)
+  each time.
+- Once the computed config value finally differs from `s0` (the
+  calibration has "found the edge"), it falls through to a sanity
+  check: `slti v0,s3,0x0002; bnez ->0x9FC422D4` - **if fewer than 2
+  loop iterations happened before the value changed, the whole
+  subroutine bails out and returns `-1`.**
+- **This project's trace shows exactly that failure**: `s3` reaches
+  only `1` before the computed value changes, so the `s3<2` guard
+  trips and `v0=-1` is returned. On real hardware, this same
+  calibration loop evidently runs enough iterations (consistent with
+  the ~100x cycle gap observed above) to keep `s3>=2`.
+- The `0x9FC42570`/`0x9FC42650` helpers both poll a hardware register
+  at KSEG1 `0xB000F430` (physical `0x1000F430`) via a tight
+  `lw v0,(v1); bltz v0,->retry` spin (waiting for a busy/ready bit,
+  MSB) before reading/writing - this is SIO/UART hardware, confirmed
+  by the surrounding baud-rate setup code, not a SIF register.
+
+**Conclusion**: the bug is not in SIF, not in the EE CPU core's own
+opcodes (SRL/ANDI/BGEZ/SLTIU/SLTU here are simple and already
+well-tested), and not in ROM/table loading (verified byte-identical).
+It is that this project's emulated SIO/UART hardware (behind
+`0x1000F430`) responds to the calibration probe in essentially zero
+elapsed time, so the BIOS's own "did we actually wait through a real
+edge transition" sanity check (`s3>=2`) fails and the whole boot path
+takes the permanent-error branch. Real hardware's actual UART timing
+takes many more polling iterations for the same probe, comfortably
+clearing the guard. This also lines up with the round 9 finding that
+COP0 Count in this project advances once per instruction rather than
+at a real bus-clock-relative rate - the same class of "our timing
+model runs faster/coarser than real hardware" issue underlying both
+walls.
+
+**Next step (round 11, not yet started)**: give the emulated SIO/UART
+hardware behind `0x1000F430` (and its pair register `0x1000F440`)
+enough modeled latency/iteration count that this specific calibration
+loop naturally clears its `s3>=2` guard - most likely by having the
+busy/ready bit stay set for a handful of polls rather than clearing
+immediately, rather than trying to fake a hardcoded `s3` value or
+special-case this one call site. No code changes made this round -
+investigation only, captured here (plus the underlying trace/disasm
+data) so the next round can implement a fix directly instead of
+re-deriving this whole three-levels-deep-and-then-some chain again.
+
+### EE JALR investigation, round 8: real Scratchpad RAM + COP0 Count fixed via a live PCSX2 trace - two more walls cleared, boot now reaches a real "wait for interrupt" idle loop
 
 ### EE JALR investigation, round 8: real Scratchpad RAM + COP0 Count fixed via a live PCSX2 trace - two more walls cleared, boot now reaches a real "wait for interrupt" idle loop
 

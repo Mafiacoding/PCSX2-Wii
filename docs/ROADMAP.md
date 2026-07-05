@@ -179,6 +179,25 @@ splash screen, not just difficulty.
       ticking/gating/target-IRQ behavior) and INTC (interrupt
       controller) more broadly is still needed for any other timing-
       dependent BIOS code.
+- [x] EE JALR investigation round 10: root-caused (not yet fixed). The
+      `pc=0xBFC0092C` idle loop is confirmed dead code on real hardware
+      (0 hits) - real hardware takes the other branch at `pc=0xBFC0088C`
+      because a subroutine call at `pc=0x9FC410E8` returns a positive
+      value there; this project's interpreter gets `-1` from the same
+      call. Traced fully: that subroutine is a BIOS SIO/UART baud-rate
+      calibration loop (earlier "SIF init" labeling was wrong - the
+      printed string is "Initialize memory (rev:%d.%02d, ctm:%dMhz,
+      cpuclk:%dMhz %s)..."). It polls a hardware register at
+      `0x1000F430` and requires at least 2 loop iterations before a
+      polled value changes (`s3>=2` sanity check) or it returns error.
+      This project's emulated SIO/UART responds instantly, so the loop
+      only gets 1 iteration and trips the guard. Real hardware's actual
+      UART timing takes enough polling cycles to clear it - same class
+      of issue as round 8/9's COP0 Count timing simplification. See
+      docs/STATUS.md's "round 10" section for the full trace. Next:
+      round 11 should add modeled latency to the SIO/UART busy-bit
+      poll so this calibration loop converges the way real hardware's
+      does.
 - [x] SIF mailbox/flag registers (MSCOM/SMCOM/MSFLAG/SMFLAG/CTRL,
       0x1000F200-0x1000F260), EE side only - `source/hw/sif.c`, wired
       into `ee_core.c`'s 32-bit MMIO dispatch. Register-level

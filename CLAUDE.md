@@ -107,47 +107,55 @@ current, up-to-date status.)
   a match that landed on a taken branch's own step). 32 host-native
   checks (`tests/test_ee_timer_interrupt.c`), 0 regressions across the
   full 34-file suite, clean Wii rebuild.
-- **Round 10 (in progress) - the idle loop is confirmed dead code on
-  real hardware; root cause traced 3 levels deep, not yet fixed**: a
-  new `pcsx2-mcp` MCP connector gives DIRECT live access to a running
-  PCSX2 (breakpoints/registers/disasm/memory, no more user-relayed
-  report files needed - see the tool note below). Confirmed live:
-  `pc=0xBFC0092C` gets **zero hits** on a real boot - hardware takes
-  the OTHER branch at `pc=0xBFC0088C` (`bltz v0,+0x98`, v0 positive
-  there) and jumps into RAM via `jr t0`, never returning to this ROM
-  region. This project's interpreter takes the WRONG branch at that
-  same spot (`v0` ends up `-1`), landing in what round 8/9 mistook for
-  a real "wait for interrupt" idle pattern - it never was one. Traced
-  `v0` back 3 levels, confirmed live at each step (real BIOS-only boot,
-  no disc): a subroutine call at `pc=0x9FC410E8` (fixed input
-  `a0=0x60000012`) returns `v0=0x08028020` on real hardware -> `a1=v0`
-  positive -> `bgez` taken -> `s0=a1&0x7FFF=0x20` -> final
-  `v0=s0<<20=0x02000000` (matches the very first, round-6 report's
-  numbers exactly). This project's interpreter gets `v0=0xFFFFFFFF`
-  (-1) from that same subroutine call instead - confirmed NOT a
-  timing/"not finished yet" issue (a fresh interleaved EE+IOP
-  diagnostic, IOP genuinely running ~147,500 of its own instructions
-  alongside, still returns -1). Real hardware takes ~14.9M CPU cycles
-  through this call versus this project's ~142,500 EE instructions - a
-  ~100x gap, consistent with a genuine SIF/IOP handshake wait-loop that
-  this project gives up on far too early. Not yet root-caused inside
-  the subroutine itself (a fairly large SIF-status/hardware-config
-  routine with several nested calls and a table lookup at
-  `0x9FC43850`); an instrumented scan found zero direct EE-side loads
-  from the `0x1000xxxx` hardware-register window during the whole call,
-  suggesting the real handshake mechanism is a shared-RAM location
-  (written via SIF DMA) rather than a direct MMIO poll - pointing at
-  the IOP-side SIF/RPC HLE (`iop_hle_modules.c`/`iop_hle_bios.c`) as
-  the likely suspect over raw EE CPU correctness. See `docs/STATUS.md`'s
-  "round 10" section for the full trace and next-step options
-  (diagnostic harnesses referenced there live in `/tmp/diag/` on the
+- **Round 10 - idle loop confirmed dead code on real hardware; root
+  cause fully traced (not yet fixed)**: a new `pcsx2-mcp` MCP connector
+  gives DIRECT live access to a running PCSX2 (breakpoints/registers/
+  disasm/memory, no more user-relayed report files needed - see the
+  tool note below). Confirmed live: `pc=0xBFC0092C` gets **zero hits**
+  on a real boot - hardware takes the OTHER branch at `pc=0xBFC0088C`
+  (`bltz v0,+0x98`, v0 positive there) and jumps into RAM via `jr t0`,
+  never returning to this ROM region. This project's interpreter takes
+  the WRONG branch at that same spot (`v0` ends up `-1`), landing in
+  what round 8/9 mistook for a real "wait for interrupt" idle pattern -
+  it never was one. Traced `v0` back to a subroutine call at
+  `pc=0x9FC410E8` (fixed input `a0=0x60000012`): real hardware returns
+  `v0=0x08028020` (-> `a1` positive -> `bgez` taken -> `s0=0x20` ->
+  final `v0=0x02000000`, matching the round-6 report exactly); this
+  project returns `v0=0xFFFFFFFF` instead. **Correction of an earlier
+  mislabeling**: the calling code was originally described as "SIF
+  init/status" - it is not. Reading the actual format string it prints
+  (`"Initialize memory (rev:%d.%02d, ctm:%dMhz, cpuclk:%dMhz %s)..."`)
+  shows this is BIOS memory/clock-diagnostics + SIO/UART console setup,
+  no SIF involved. **Root cause, fully traced via a host-native tail
+  trace cross-checked against live PCSX2 disassembly**: `0x9FC410E8`'s
+  ROM-table preamble was verified byte-for-byte identical to the real
+  hardware dump (ROM loading is fine). Past that, it's a **BIOS clock/
+  baud calibration loop**: it repeatedly computes a candidate SIO baud
+  config via a helper at `0x9FC42570` and loops (`s3` counts iterations)
+  while the computed value keeps matching the previous one; once it
+  changes, it requires `s3>=2` (i.e., at least 2 loop iterations must
+  have happened) or it bails out with `v0=-1`. This project's trace
+  shows `s3` reaching only `1` before the value changes - the guard
+  trips and `-1` is returned. The underlying `0x9FC42570`/`0x9FC42650`
+  helpers poll a hardware register at KSEG1 `0xB000F430` (physical
+  `0x1000F430`, SIO/UART, not SIF) via a tight busy-bit spin. **This
+  project's emulated SIO/UART responds to that spin in essentially
+  zero elapsed time**, so the BIOS's own "did we actually see a real
+  edge transition" sanity check fails - real hardware's actual UART
+  timing takes enough polling iterations to comfortably clear `s3>=2`.
+  Same class of issue as round 9's "our timing model is faster/coarser
+  than real hardware" wall (COP0 Count there, SIO/UART poll timing
+  here). **Next step (round 11, not started)**: give the emulated
+  SIO/UART hardware behind `0x1000F430`/`0x1000F440` enough modeled
+  latency that this calibration loop's `s3>=2` guard clears naturally,
+  rather than special-casing this one call site. See `docs/STATUS.md`'s
+  "round 10" section for the full trace, disassembly excerpts, and
+  diagnostic-harness details (harnesses live in `/tmp/diag/` on the
   machine that did this work - throwaway, not committed, may not exist
   in a fresh environment; the *method* - disassemble the hot pc range,
-  trace `Cause`/`EPC`/`BadVAddr`/`Status` changes, check the real vs.
-  zero-decoded instruction ratio over tens of millions of steps, trace
-  specific opcodes/register values across a run, and now live
-  breakpoints/register reads directly via `pcsx2-mcp` - is the reusable
-  part, not the specific files).
+  trace register values across a run via a ring-buffer tail trace, and
+  live breakpoints/register reads directly via `pcsx2-mcp` - is the
+  reusable part, not the specific files).
 
 **Tool note**: `github.com/hkmodd/PCSX2-MCP` (third-party, not this
 project's own code) gives live debugging access to a real, user-run

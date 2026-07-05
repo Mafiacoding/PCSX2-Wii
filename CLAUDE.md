@@ -107,46 +107,73 @@ current, up-to-date status.)
   a match that landed on a taken branch's own step). 32 host-native
   checks (`tests/test_ee_timer_interrupt.c`), 0 regressions across the
   full 34-file suite, clean Wii rebuild.
-- **New wall (not yet investigated - this is where to start next)**:
-  live re-verification against the real SCPH-10000 BIOS found a more
-  precise wall than "no interrupt delivery exists" - Cause.IP7 now
-  latches correctly (confirmed directly via diagnostic), but
-  `Status.IE` is never set anywhere in the boot path this project's
-  interpreter takes before reaching `pc=0xBFC0092C`'s idle loop (a
-  targeted trace confirmed **zero `EI` instructions execute** in the
-  first 5 million steps). So a maskable Count/Compare interrupt isn't
-  - at least not via this exact code path - what actually escapes this
-  loop. Open hypotheses, not yet root-caused: (a) this loop is an
-  error/dead-end path only reached because something upstream is
-  mis-emulated (wrong branch taken earlier due to an incorrectly-read
-  hardware register, say), (b) real hardware escapes it via a
-  different interrupt source entirely (INTC/DMAC-driven, not the
-  internal timer) that this project hasn't modeled at all, or (c) `EI`
-  is meant to run inside one of the `JAL`/`JALR` subroutine calls this
-  loop's surrounding code makes (`pc=0xBFC00884`, `0xBFC008A8`,
-  `0xBFC008B8`) and this project's execution of those subroutines
-  diverges from real hardware before reaching it. See `docs/STATUS.md`'s
-  "round 9" section and `docs/ROADMAP.md` for the full evidence trail
+- **Round 10 (in progress) - the idle loop is confirmed dead code on
+  real hardware; root cause traced 3 levels deep, not yet fixed**: a
+  new `pcsx2-mcp` MCP connector gives DIRECT live access to a running
+  PCSX2 (breakpoints/registers/disasm/memory, no more user-relayed
+  report files needed - see the tool note below). Confirmed live:
+  `pc=0xBFC0092C` gets **zero hits** on a real boot - hardware takes
+  the OTHER branch at `pc=0xBFC0088C` (`bltz v0,+0x98`, v0 positive
+  there) and jumps into RAM via `jr t0`, never returning to this ROM
+  region. This project's interpreter takes the WRONG branch at that
+  same spot (`v0` ends up `-1`), landing in what round 8/9 mistook for
+  a real "wait for interrupt" idle pattern - it never was one. Traced
+  `v0` back 3 levels, confirmed live at each step (real BIOS-only boot,
+  no disc): a subroutine call at `pc=0x9FC410E8` (fixed input
+  `a0=0x60000012`) returns `v0=0x08028020` on real hardware -> `a1=v0`
+  positive -> `bgez` taken -> `s0=a1&0x7FFF=0x20` -> final
+  `v0=s0<<20=0x02000000` (matches the very first, round-6 report's
+  numbers exactly). This project's interpreter gets `v0=0xFFFFFFFF`
+  (-1) from that same subroutine call instead - confirmed NOT a
+  timing/"not finished yet" issue (a fresh interleaved EE+IOP
+  diagnostic, IOP genuinely running ~147,500 of its own instructions
+  alongside, still returns -1). Real hardware takes ~14.9M CPU cycles
+  through this call versus this project's ~142,500 EE instructions - a
+  ~100x gap, consistent with a genuine SIF/IOP handshake wait-loop that
+  this project gives up on far too early. Not yet root-caused inside
+  the subroutine itself (a fairly large SIF-status/hardware-config
+  routine with several nested calls and a table lookup at
+  `0x9FC43850`); an instrumented scan found zero direct EE-side loads
+  from the `0x1000xxxx` hardware-register window during the whole call,
+  suggesting the real handshake mechanism is a shared-RAM location
+  (written via SIF DMA) rather than a direct MMIO poll - pointing at
+  the IOP-side SIF/RPC HLE (`iop_hle_modules.c`/`iop_hle_bios.c`) as
+  the likely suspect over raw EE CPU correctness. See `docs/STATUS.md`'s
+  "round 10" section for the full trace and next-step options
   (diagnostic harnesses referenced there live in `/tmp/diag/` on the
   machine that did this work - throwaway, not committed, may not exist
   in a fresh environment; the *method* - disassemble the hot pc range,
   trace `Cause`/`EPC`/`BadVAddr`/`Status` changes, check the real vs.
   zero-decoded instruction ratio over tens of millions of steps, trace
-  specific opcodes (like `EI`) across a run - is the reusable part, not
-  the specific files).
+  specific opcodes/register values across a run, and now live
+  breakpoints/register reads directly via `pcsx2-mcp` - is the reusable
+  part, not the specific files).
 
 **Tool note**: `github.com/hkmodd/PCSX2-MCP` (third-party, not this
 project's own code) gives live debugging access to a real, user-run
 PCSX2 instance - breakpoints, memory dumps, register reads, disassembly
 - across EE (R5900) and IOP (R3000) address spaces independently. This
 was the breakthrough that unblocked round 5 after rounds 1-4 stalled for
-lack of a ground-truth reference. If stuck on a similarly opaque EE/IOP
-divergence again, asking the user whether they can run this tool against
-real PCSX2 (same BIOS) is a legitimate, previously-proven-useful move -
-just remember PCSX2-MCP's own README caveat that breakpoints often don't
-trigger until a game (not just the BIOS) is running, and that EE vs. IOP
-addresses live in numerically-overlapping-but-unrelated spaces in its
-debugger UI.
+lack of a ground-truth reference. As of round 10, this is available as a
+**directly callable MCP connector** (`mcp__pcsx2-mcp__*` tools -
+`pcsx2_connect`, `pcsx2_set_breakpoint`, `pcsx2_continue`,
+`pcsx2_read_registers`, `pcsx2_read_memory`, `pcsx2_disassemble`,
+`pcsx2_step`, `pcsx2_set_watchpoint`, etc., loaded via `ToolSearch` if
+deferred) - no more relaying through user-written report files. Requires
+the user to have a real PCSX2 instance running with the DebugServer
+enabled; use `pcsx2_connect` first, `pcsx2_status`/`pcsx2_pause` to check
+state, and note that if a game/disc is already running past boot,
+BIOS-boot-time addresses need a fresh System Reset (ask the user) before
+a breakpoint on them will ever hit again - the emulator doesn't replay
+boot on its own. If stuck on a similarly opaque EE/IOP divergence again,
+using this tool directly (or asking the user to reset if the live session
+has moved past the relevant point) is a legitimate, repeatedly-proven-
+useful move - just remember EE vs. IOP addresses live in numerically-
+overlapping-but-unrelated spaces, and confirm whether a disc/game is
+mounted before comparing against this project's disc-less BIOS-only
+boot (round 10 found the SIF/hardware-status values genuinely differ
+between "disc inserted" and "BIOS only, no disc" real hardware boots -
+always ask for/verify the no-disc case explicitly).
 
 ## The mandatory per-change workflow
 

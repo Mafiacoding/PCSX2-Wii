@@ -1013,6 +1013,79 @@ round - this is "round 10"'s starting point, the same kind of
 precisely-identified-but-open wall every round 5-9 handoff has ended
 on.
 
+### EE JALR investigation, round 10 (in progress): the "idle loop" is dead code on real hardware - root cause traced to a wrong SIF/IOP-handshake return value, not found yet
+
+Direct continuation of round 9's wall (EI never executes before
+`pc=0xBFC0092C`). The user provided two more live PCSX2 traces and,
+after this session, direct live access to a running PCSX2 via a new
+`pcsx2-mcp` MCP connector (DebugServer mode - breakpoints, register
+reads, disassembly, memory reads, all queryable directly rather than
+through user-relayed report files).
+
+**Confirmed: `pc=0xBFC0092C`/the `j $` idle loop is genuinely
+unreachable on real hardware (0 hits in a full boot trace).** Real
+hardware takes the OTHER branch at `pc=0xBFC0088C` (`bltz v0, +0x98`)
+because `v0` is positive there (`0x02000000`), falls through, and
+eventually does `jr t0` (`t0=0x80001000`) into RAM, never returning to
+this ROM region at all. This project's interpreter takes the wrong
+branch at that exact spot instead - `v0` ends up negative (`-1`) -
+landing squarely in the idle loop real hardware never visits. So the
+"wait for interrupt" framing from round 8/9 was a misreading: this
+was never a real idle pattern, it's this project's own wrong-branch
+bug wearing the disguise of one.
+
+**Traced the wrong value three levels deep, confirmed live against a
+real BIOS-only boot (no disc) via direct `pcsx2-mcp` breakpoints/
+register reads:**
+- `v0` at `pc=0xBFC0088C` comes from `a1`, which comes from the return
+  value (`v0`) of a subroutine call at `pc=0x9FC410E8` (called with a
+  fixed constant `a0=0x60000012` from `pc=0x9FC41000`'s own SIF-init
+  routine).
+- **Real hardware**: that subroutine returns `v0=0x08028020`. `a1=v0`
+  is positive, `bgez a1` (at `pc=0x9FC41078`) is taken (success path),
+  `s0 = a1 & 0x7FFF = 0x20`, final `v0 = s0 << 20 = 0x02000000`) -
+  matches the very first (round 6) report's numbers exactly, now
+  confirmed live via direct register reads at each step.
+- **This project's interpreter**: the same subroutine call returns
+  `v0=0xFFFFFFFF` (-1, an error sentinel) instead. This is NOT a
+  timing/"hasn't finished yet" issue - it's a definitive, wrong return
+  value: verified with a fresh interleaved EE+IOP diagnostic
+  (`core/system.c`'s `ee_core_step()`/`iop_core_step()` both running,
+  IOP genuinely executing ~147,500 instructions of its own alongside
+  the EE, not stalled/halted) that still produces `-1`.
+- The real boot took **~14.9 million CPU cycles** to return from this
+  same call (per the live trace's own cycle counter) versus this
+  project's ~142,500 EE instructions - a roughly 100x difference,
+  consistent with the subroutine being a genuine SIF/IOP handshake
+  wait-loop on real hardware that gives up (wrongly, via some bounded
+  retry/comparison) far too early in this project's emulation.
+
+**Not yet root-caused inside the subroutine itself** - it's a fairly
+large routine (calls out to `0x9FC42F48`, `0x9FC43088` (3x),
+`0x9FC42D78`, plus a fixed-table lookup at `0x9FC43850` keyed on a
+derived value `s5 = a0>>12 = 0x60000`) that appears to be genuine
+SIF-communication-status/hardware-config detection, not a simple
+arithmetic bug. An instrumented scan for any direct EE-side load
+instruction targeting the `0x1000xxxx` hardware-register window during
+this whole call found **zero** such reads in this project's execution
+- meaning either the real polling mechanism isn't a direct MMIO read
+at all (e.g. a shared-RAM handshake location written via SIF DMA
+instead), or this project's interpreter takes a narrower/different
+path through the subroutine that skips the real polling loop entirely
+one one it should be taking. This points at the IOP-side SIF/RPC HLE
+implementation (`iop_hle_modules.c`/`iop_hle_bios.c`) as the more
+likely suspect over raw EE CPU correctness, given the EE side's own
+opcodes here (SRL/ANDI/BGEZ/SLTIU/SLTU) are simple, well-tested
+primitives already covered by other regression tests.
+
+**Next step**: either a live trace of the actual real-hardware SIF/RAM
+handshake location this subroutine polls (to find the right target
+for this project's IOP-side emulation to write), or continuing the
+static call-graph trace into `0x9FC42F48`/`0x9FC43088`/`0x9FC42D78`
+to find the real polling mechanism directly. No code changes made
+this round yet - investigation only, captured here so the next session
+can pick this up without re-deriving the same three-levels-deep trace.
+
 ### EE JALR investigation, round 8: real Scratchpad RAM + COP0 Count fixed via a live PCSX2 trace - two more walls cleared, boot now reaches a real "wait for interrupt" idle loop
 
 Direct continuation of round 7's precisely identified wall: two real

@@ -242,6 +242,26 @@ int ee_core_init(const bios_image_t *bios)
     g_state.pc = BIOS_RESET_VECTOR;
     g_state.next_pc = BIOS_RESET_VECTOR + 4;
 
+    /* COP0 PRId (register 15, Processor Revision Identifier) - ported
+     * directly from PCSX2's own R5900.cpp ("cpuRegs.CP0.n.PRid =
+     * 0x00002e20"). Before this fix, cop0[15] was left at 0 by the
+     * memset() above.
+     *
+     * This is not a cosmetic value: it is the very first thing the
+     * real BIOS reads. Instruction #0 at the reset vector is
+     * "MFC0 $k0, $15", followed immediately by "SLTI $at, $k0, 89" /
+     * "BNE $at, $zero, ...": a CPU-revision check that picks between
+     * two completely different early-boot code paths. With PRId left
+     * at 0 (0 < 89), this project's interpreter took the WRONG branch
+     * from the very first conditional in the whole boot sequence and
+     * never reached the real vector-install copy loop the BIOS uses
+     * to populate low RAM (confirmed missing via a live trace of real,
+     * working PCSX2 - see docs/STATUS.md's "JALR investigation, round
+     * 5" for the full trail). This one missing register write is the
+     * root cause of the EE JALR-to-out-of-range halt investigated
+     * across rounds 1-4. */
+    g_state.cop0[15] = 0x00002e20u;
+
     return 0;
 }
 

@@ -611,8 +611,40 @@ what looked like a strong lead - an apparent copy loop whose `LW`/`SW`
 instructions read back as zero - only to resolve it as an ordinary,
 expected heap-allocator initialization pattern (a real BIOS routine at
 `pc=0xBFC4D30C` zeroing one word per 16 bytes across low RAM, ordinary
-free-list-header clearing, not a bug). Root cause is still open; see
-docs/STATUS.md's "round 4" section for the full trace. The
+free-list-header clearing, not a bug). See docs/STATUS.md's "round 4"
+section for the full trace.
+
+**Round 5 found and fixed the actual root cause.** The user connected a
+real, working PCSX2 instance to live-trace their own BIOS dump and
+captured what this project never had: ground truth for what real
+hardware does. `RAM[0x100]` really does hold a nonzero, valid vector
+(`0x08004469`) on real hardware, written by a real ROM-resident
+vector-install routine at `pc=0xBFC00C54-0xBFC00CB4` - which this
+project's interpreter never reaches at all. The reason: this project's
+`ee_core_init()` never set COP0 register 15 (PRId), leaving it at 0.
+The real BIOS's instruction #0 is `MFC0 $k0,$15`, and instruction #3 is
+a branch on a CPU-revision check (`SLTI $at,$k0,89`/`BNE`) that sends
+boot down one of two completely different paths depending on this
+register. With PRId=0 this project took the wrong path from the third
+instruction of the entire boot sequence onward and never rejoined the
+real vector-install code. **Fixed**: `cop0[15] = 0x00002e20`, ported
+directly from PCSX2's own `R5900.cpp` (not guessed - the same constant
+real PCSX2 uses). Verified as a real fix, not another false-progress
+trap: a ROM-coverage re-trace confirms the EE now takes the correct
+branch and runs through code it never reached before. The EE now halts
+cleanly, honestly, and much later - at `pc=0xBFC0086C`, on `TLBWI`
+(a real COP0 TLB instruction this project has always documented as
+unimplemented) - not on the old JALR-to-out-of-range bug, which no
+longer occurs at all with this fix in place. See docs/STATUS.md's
+"round 5" section for the full trace, including the live PCSX2 data
+that made finding this possible.
+
+This means the next real EE blocker is now a genuine COP0 TLB
+implementation (`TLBWI` at minimum, ideally all four real TLB ops plus
+address translation) - exactly the feature that was already flagged as
+one of the two honest paths forward after round 3, now confirmed (not
+speculative) to be what's actually needed for further real-BIOS boot
+progress. The
 IOP has no known halt point left
 to chase at all right now; COP2/VU0 remains unstarted and unproven
 against real BIOS code, since the EE hasn't legitimately run far

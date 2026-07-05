@@ -604,6 +604,87 @@ time invested. No source code was changed this round - all tools used
 `watch_loop_region.c`, `dump_clear_routine.c`) were throwaway `/tmp`
 diagnostics per the standing policy, never committed.
 
+### EE JALR investigation, round 5: root cause found and fixed (via a live trace of real, working PCSX2)
+
+The user connected a real, working PCSX2 instance (via a third-party
+MCP debugger bridge, github.com/hkmodd/PCSX2-MCP) running their own
+legally-dumped SCPH-10000 BIOS, and captured ground truth this project
+never had access to before: a live instruction-level trace of the exact
+BIOS routine that populates `RAM[0x100]` on real hardware, plus a live
+memory dump proving the real value there is `0x08004469` (a valid
+jump-instruction word, `j 0x800111A4`) - not zero.
+
+The real BIOS routine (disassembled directly from the user's PCSX2
+session, `pc=0xBFC00C54-0xBFC00CB4`) is a two-loop vector-install
+routine: loop 1 zeroes low RAM 16 bytes at a time via `sq`; loop 2
+copies a block of exception-vector words from ROM (`~0xBFCB3300`) into
+RAM through the *uncached* `0xA0000000+` window, one `sw` per word.
+When the destination pointer reaches `0xA0000100` (the same physical
+cell as `0x00000100`/`0x80000100`), it writes the real vector value.
+
+Tracing this project's own interpreter against the same BIOS showed it
+**never executes this routine at all** - not a missing opcode inside
+the loop (SQ, DADDU, and POR, all used nearby, were already
+implemented), but a complete failure to ever reach `pc=0xBFC00C54` in
+the first place. A ROM-coverage trace pinned this down precisely: this
+project's EE only ever visits BIOS ROM addresses `0xBFC00000-0xBFC00030`
+before diverging away from ROM entirely - compared to real hardware,
+which continues on through `0xBFC00800+` and eventually reaches the
+vector-install loop.
+
+The actual divergence is at the very first conditional in the entire
+boot sequence. Instruction #0 at the reset vector is `MFC0 $k0, $15`
+(read COP0 register 15, PRId - Processor Revision Identifier).
+Instruction #2 is `SLTI $at, $k0, 89`, and instruction #3 is
+`BNE $at, $zero, ...`: a CPU-revision check that picks between two
+entirely different early-boot code paths. This project's
+`ee_core_init()` never initialized `cop0[15]` - it was left at 0 by
+the function's `memset()`. Since `0 < 89`, the branch was taken,
+sending this project's interpreter down a path that (as far as could
+be traced) never rejoins the real vector-install routine at all. Real
+PCSX2 initializes this register to `0x00002e20` (`R5900.cpp`:
+`cpuRegs.CP0.n.PRid = 0x00002e20`) - `11808 < 89` is false, so real
+hardware falls through to the *other* path, the one that eventually
+reaches the vector-install loop and populates `RAM[0x100]` correctly.
+
+**The fix**: `ee_core_init()` now sets `g_state.cop0[15] = 0x00002e20u`
+immediately after the `memset()`, ported directly from PCSX2's own
+`R5900.cpp` - not a fabricated or guessed value; it is the same
+constant real PCSX2 uses for this exact model of EE. Tested in
+`tests/test_ee_cop0_prid.c` (4/4 checks, see tests/README.md).
+
+**Verified this is a real fix, not another false-progress trap** (the
+project's own documented lesson from the earlier LQ/SQ instruction-count
+mistake): a ROM-coverage re-trace after the fix confirms the EE now
+takes the correct branch at instruction #3 (previously-unreached
+addresses `0xBFC00010-0xBFC00020` are now visited, and execution
+continues on through `0xBFC00800-0xBFC0086C`, far beyond the old
+`0xBFC00030` ceiling) - concrete evidence of a different, correct
+control-flow path, not just a bigger instruction count.
+
+**New, honest halt point**: with the fix applied, the EE now runs 36
+real instructions (versus reaching instruction #3 before taking the
+wrong branch previously) and halts cleanly on a COP0 CO-format
+instruction with funct `0x02` at `pc=0xBFC0086C` - `TLBWI`, one of the
+four real TLB instructions (`TLBR`/`TLBWI`/`TLBWR`/`TLBP`) this project
+has always documented as unimplemented (see the "Still NOT implemented"
+list at the top of `ee_core.c`). This is expected, not a new problem:
+the real BIOS's correct boot path evidently sets up an initial TLB
+entry very early, and this project has no TLB/MMU model yet. The old
+JALR-to-out-of-range halt, reached by the WRONG boot path, no longer
+occurs at all with this fix in place - it was entirely a symptom of the
+PRId bug, not a separate, independent defect.
+
+**Where this leaves the project**: the real root cause of the entire
+"EE JALR investigation" (rounds 1-4) is now identified and fixed with
+a citable, non-fabricated value. The project's next real blocker -
+implementing a genuine COP0 TLB (`TLBWI` at minimum, likely all four
+TLB ops plus real address translation for a complete implementation) -
+is exactly the "COP0 TLB/exception-vector system" option that was
+already on the table as one of two honest paths forward after round 3,
+except it is now confirmed, not speculative, to be the actual next
+thing blocking real boot progress.
+
 ### FPU accumulator (ACC) family implemented
 
 Added the last 7 COP1.S opcodes needed for the FPU's ACC register:

@@ -702,3 +702,23 @@ register and MTSA/MTSAB/MTSAH to set it, none of which exist yet),
 the remaining MMI2/MMI3 HI/LO-touching arithmetic (PMADDW/H, PMSUBW/H,
 PMULTW/H, PDIVW/PDIVBW, PMULTUW/PDIVUW/PMADDUW), and PMFHL/PMTHL
 clamping variants.
+
+`test_ee_cop0_prid.c` covers `ee_core.c`'s COP0 PRId (register 15,
+Processor Revision Identifier) initialization - the fix for the root
+cause identified in "EE JALR investigation, round 5" (see
+docs/STATUS.md). Before this fix, `cop0[15]` was left at 0 by
+`ee_core_init()`'s `memset()`; the real BIOS's very first instruction
+reads this register and immediately branches on it to pick between two
+completely different early-boot code paths, so leaving it at the wrong
+value sent this project's interpreter down a path that never reaches
+the real vector-install routine that populates low RAM. 4/4 checks:
+confirms `cop0[15] == 0x00002e20` right after `ee_core_init()` (ported
+directly from PCSX2's own `R5900.cpp`), confirms `MFC0 $t0,$15` reads
+it back correctly and sign-extended, and includes a sanity check
+spelling out the exact real-BIOS branch condition (`SLTI $at,$k0,89`)
+this fixes.
+
+```sh
+gcc -I../include -I../source -o test_ee_cop0_prid tests/test_ee_cop0_prid.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+./test_ee_cop0_prid
+```

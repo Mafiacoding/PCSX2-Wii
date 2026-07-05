@@ -486,11 +486,18 @@ reach the hardware register window and finally decodes a live register
 value as an invalid opcode. So "53 million instructions" was never
 real boot progress; the actual, honest number is closer to 99,262.
 This is now the single most important EE investigation target - NOT
-yet solved, unlike the two IOP fixes above, since the root cause of
-why the JALR target lands outside RAM isn't confirmed (candidates:
-an unpopulated module/EXE descriptor, mirroring the IOP's earlier
-"expected data was never installed" bug category, or a genuine gap in
-this project's memory map/RAM-size assumptions). The IOP has no known
+yet solved, unlike the two IOP fixes above. The pointer chain leading
+to the bad JALR target was traced back to a dereference of EE address
+0x100, initially suspected (by analogy with the IOP's InstallExceptionHandlers
+fix) to be an unpopulated kernel table - but checked against ps2tek
+(https://psi-rockin.github.io/ps2tek/, a citable public PS2 hardware
+reference), address 0x100 is actually the CPU's own Debug exception
+vector, which real hardware never installs a handler for either - so
+the zero value there may be entirely correct, and that analogy doesn't
+hold. See docs/STATUS.md for the full, honest writeup: this remains
+unsolved, and needs either a citable EE kernel-boot-internals reference
+(ps2tek doesn't cover this) or more careful tracing before attempting a
+fix. The IOP has no known
 halt point left to chase at all right now; COP2/VU0 remains unstarted
 and unproven against real BIOS code, since the EE hasn't legitimately
 run far enough to demonstrate needing it yet.

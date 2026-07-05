@@ -314,24 +314,42 @@ genuinely invalid opcode, `0x3C`). The halt message now reports the
 real opcode and address (`ee_core.c`'s default case is enriched the
 same way `iop_core.c`'s already was).
 
-Traced `$s1`'s origin: it's loaded via `LW $s1, 8($s6)` at instruction
-#99,257, where `$s6` was itself loaded two instructions earlier from
-`0($s3)` - a pointer-chasing pattern consistent with reading fields
-(possibly an entry-point-like field) out of some in-memory descriptor
-structure (an EXE/module header, or similar), following the classic
-"module/EXE loading" pattern also seen on the IOP side (`Exec()`/
-`LoadExec()` in the psx-spx documentation) - but NOT yet confirmed
-against any citable reference for the EE-side equivalent. Unlike the
-two IOP fixes above, this doesn't yet have a clean, verified root
-cause - it's flagged here as the next concrete EE investigation
-target, honestly reported as unsolved rather than guessed at. Two
-open, plausible directions: (a) the pointed-to descriptor was itself
-never correctly populated (echoing the IOP's earlier "expected
-resident data was never installed" category of bug), or (b) the
-address is legitimately what real BIOS code computes, and this
-project's 32MB EE RAM allocation and/or address-space layout needs
-re-checking against real PS2 physical memory maps. Neither is
-confirmed yet.
+Traced the full pointer chain: `$s3 = *(0x100)`, then
+`$s6 = *($s3+0)`, then `$s1 = *($s6+8)` and `$s0 = *($s6+4)`, ending in
+`JALR $ra, $s1` at instruction #99,262. Confirmed directly:
+`RAM[0x100] == 0` in this run - so `$s3` (and everything chained from
+it) is zero from the very first link, and the eventual JALR target
+(`0x03400008`) is entirely a product of zero-initialized memory being
+walked and offset, not anything read from real BIOS content.
+
+**Correction to an initial hypothesis**: the first instinct was to
+treat `0x100` as an EE-side analogue of the IOP's PS1-heritage
+"table of tables" concept (psx-spx) and assume something failed to
+install a pointer there. Checked against **ps2tek**
+(https://psi-rockin.github.io/ps2tek/), a publicly published,
+citable PS2 hardware reference distinct from the IOP's PS1-lineage
+kernel - and that analogy doesn't hold: ps2tek documents EE physical
+address `0x100` (KSEG0 virtual `0x80000100`) as the CPU's own
+hardware **Debug exception vector**, not a kernel table pointer. Since
+shipping consoles never install a real debug-exception handler there,
+`RAM[0x100] == 0` may well be entirely CORRECT, expected real-hardware
+content - not a bug or an unpopulated-table gap at all. This means the
+earlier "something failed to install a table here, similar to the IOP
+fixes" framing was likely the wrong model to apply; ps2tek doesn't
+cover EE kernel/BIOS boot internals (module loading, TCBs, or any
+low-RAM descriptor layout) at all, so there's currently no citable
+reference confirming what SHOULD happen when code dereferences this
+address as a pointer during boot.
+
+Net honest status: unlike the two IOP fixes above, this does NOT have
+a clean, verified root cause yet, and the most likely next model
+(compare to IOP's InstallExceptionHandlers pattern) turned out not to
+fit on closer inspection. Flagged as the next concrete EE
+investigation target, genuinely open - needs either a citable
+reference for EE kernel boot internals (unlike psx-spx for the IOP,
+none has been found yet) or further, more careful tracing of exactly
+which BIOS routine performs this dereference and why, before
+attempting a fix.
 
 ## Endianness bug found and fixed
 

@@ -651,3 +651,29 @@ This completes all defined MMI0 sub-opcodes. Still not implemented on
 the MMI side: the other ~34 opcodes (QFSRV, PMADDW/H family,
 PINTH/PINTEH, PROT3W, PEXEH/PEXEW/PEXCH/PEXCW, PMFHL/PMTHL clamping
 variants, PMULTUW/PDIVUW/PMADDUW and other MMI2/MMI3 arithmetic).
+
+`test_ee_mmi_permute.c` covers `ee_core.c`'s MMI2/MMI3 permute/
+interleave opcode family: PINTH, PINTEH, PEXEH, PEXCH, PEXEW, PEXCW,
+PREVH, PCPYH, PROT3W - all ported from PCSX2's `MMI.cpp`. 32/32
+checks. Operands use distinct, position-identifiable lane values
+(e.g. halfword lane N = 0x50+N for Rs / 0x60+N for Rt) so a wrong
+permutation shows up immediately as the wrong value landing in the
+wrong lane, rather than accidentally passing due to a repeated value.
+Specifically distinguishes: PINTH (takes ALL of Rt's lanes plus Rs's
+UPPER 4 lanes) from PINTEH (takes only the EVEN-indexed lanes of
+BOTH Rs and Rt - a real, easy-to-confuse distinction); and PEXEH from
+PEXCH, and PEXEW from PEXCW (each "E"/"C" pair swaps a DIFFERENT lane
+pair - 0/2 for "E", 1/2 for "C" - checked so a swapped case doesn't
+silently pass the other's test). Needs the same link set as the
+other `ee_core.c` tests:
+
+```sh
+gcc -I../include -I../source -o test_ee_mmi_permute tests/test_ee_mmi_permute.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+./test_ee_mmi_permute
+```
+
+Still not implemented on the MMI side: QFSRV (needs the SA hardware
+register and MTSA/MTSAB/MTSAH to set it, none of which exist yet),
+the remaining MMI2/MMI3 HI/LO-touching arithmetic (PMADDW/H, PMSUBW/H,
+PMULTW/H, PDIVW/PDIVBW, PMULTUW/PDIVUW/PMADDUW), and PMFHL/PMTHL
+clamping variants.

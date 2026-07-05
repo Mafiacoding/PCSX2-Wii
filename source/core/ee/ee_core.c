@@ -27,14 +27,16 @@
  *     be set other than explicit MTC0 writes).
  *   - CACHE, SYNC, PREF: accepted as no-ops (real BIOS init code issues
  *     these constantly for cache management we don't model).
- *   - A meaningful subset (~56 of ~90) of MMI (SIMD) opcodes: the
+ *   - A meaningful subset (~65 of ~90) of MMI (SIMD) opcodes: the
  *     add/sub/logic/copy/extend/pack family across byte/half/word
  *     lanes, the "pipeline 1" MULT1/DIV1/MFHI1/MFLO1 family, the
  *     compare/max/min/abs family (PCGTW/H/B, PMAXW/H, PCEQW/H/B,
  *     PMINW/H, PABSW/H, PADSBH), the saturated add/sub family
  *     (PADDSW/H/B, PSUBSW/H/B - clamp to the lane width's min/max
- *     instead of wrapping), and PEXT5/PPAC5 (GS 5551-pixel-format
- *     unpack/pack). This completes MMI0's sub-table entirely.
+ *     instead of wrapping), PEXT5/PPAC5 (GS 5551-pixel-format
+ *     unpack/pack, completing MMI0's sub-table entirely), and the
+ *     MMI2/MMI3 permute/interleave family (PINTH/PINTEH, PEXEH/PEXCH,
+ *     PEXEW/PEXCW, PREVH, PCPYH, PROT3W).
  *   - LQ/SQ (128-bit load/store, primary opcodes 0x1E/0x1F) - ported
  *     from PCSX2's R5900OpcodeImpl.cpp. Address masked to 16-byte
  *     alignment (real hardware silently ignores the low 4 bits rather
@@ -48,9 +50,11 @@
  *     VU0 data staging.
  *
  * Still NOT implemented (halts cleanly, does not crash):
- *   - The other ~34 MMI opcodes (QFSRV, PMADDW/H family, PINTH/PINTEH,
- *     PROT3W, PEXEH/PEXEW/PEXCH/PEXCW, PMFHL/PMTHL clamping variants,
- *     PMULTUW/PDIVUW/PMADDUW and other MMI2/MMI3 arithmetic, etc.)
+ *   - The other ~25 MMI opcodes (QFSRV - needs the SA hardware
+ *     register and MTSA/MTSAB/MTSAH to set it, none of which exist
+ *     yet; PMADDW/H, PMSUBW/H, PMULTW/H, PDIVW/PDIVBW, PMULTUW/
+ *     PDIVUW/PMADDUW - the remaining MMI2/MMI3 HI/LO-touching
+ *     arithmetic; PMFHL/PMTHL clamping variants)
  *   - COP2 (VU0 macro mode)
  *   - COP1 (FPU): core arithmetic (ADD/SUB/MUL/DIV/ABS/MOV/NEG.S,
  *     SQRT.S/RSQRT.S, MAX.S/MIN.S, CVT.W.S/CVT.S.W, C.EQ/LT/LE.S,
@@ -1181,6 +1185,64 @@ static int ee_step(void)
                 break;
             case 0x12: /* PAND */ if (rd) { st->gpr[rd].ud0 = st->gpr[rs].ud0 & st->gpr[rt].ud0; st->gpr[rd].ud1 = st->gpr[rs].ud1 & st->gpr[rt].ud1; } break;
             case 0x13: /* PXOR */ if (rd) { st->gpr[rd].ud0 = st->gpr[rs].ud0 ^ st->gpr[rt].ud0; st->gpr[rd].ud1 = st->gpr[rs].ud1 ^ st->gpr[rt].ud1; } break;
+            case 0x0A: /* PINTH - interleaves the low halfword lanes of
+                        * Rt with the HIGH halfword lanes of Rs, ported
+                        * from PCSX2's PINTH(). Note it's Rs's UPPER 4
+                        * lanes (US[4..7]) that get interleaved in, not
+                        * the lower ones - a real, easy-to-get-backwards
+                        * detail worth preserving exactly. */
+                if (rd) {
+                    ee_reg128_t Rs = st->gpr[rs], Rt = st->gpr[rt], out;
+                    set_lane_h(&out, 0, lane_h(Rt, 0)); set_lane_h(&out, 1, lane_h(Rs, 4));
+                    set_lane_h(&out, 2, lane_h(Rt, 1)); set_lane_h(&out, 3, lane_h(Rs, 5));
+                    set_lane_h(&out, 4, lane_h(Rt, 2)); set_lane_h(&out, 5, lane_h(Rs, 6));
+                    set_lane_h(&out, 6, lane_h(Rt, 3)); set_lane_h(&out, 7, lane_h(Rs, 7));
+                    st->gpr[rd] = out;
+                }
+                break;
+            case 0x1A: /* PEXEH - swaps halfword lanes 0 and 2 within
+                        * each 64-bit half (Rt only; Rs unused), ported
+                        * from PEXEH(). */
+                if (rd) {
+                    ee_reg128_t Rt = st->gpr[rt], out;
+                    set_lane_h(&out, 0, lane_h(Rt, 2)); set_lane_h(&out, 1, lane_h(Rt, 1));
+                    set_lane_h(&out, 2, lane_h(Rt, 0)); set_lane_h(&out, 3, lane_h(Rt, 3));
+                    set_lane_h(&out, 4, lane_h(Rt, 6)); set_lane_h(&out, 5, lane_h(Rt, 5));
+                    set_lane_h(&out, 6, lane_h(Rt, 4)); set_lane_h(&out, 7, lane_h(Rt, 7));
+                    st->gpr[rd] = out;
+                }
+                break;
+            case 0x1B: /* PREVH - fully reverses the halfword lanes
+                        * within each 64-bit half (Rt only), ported
+                        * from PREVH(). */
+                if (rd) {
+                    ee_reg128_t Rt = st->gpr[rt], out;
+                    set_lane_h(&out, 0, lane_h(Rt, 3)); set_lane_h(&out, 1, lane_h(Rt, 2));
+                    set_lane_h(&out, 2, lane_h(Rt, 1)); set_lane_h(&out, 3, lane_h(Rt, 0));
+                    set_lane_h(&out, 4, lane_h(Rt, 7)); set_lane_h(&out, 5, lane_h(Rt, 6));
+                    set_lane_h(&out, 6, lane_h(Rt, 5)); set_lane_h(&out, 7, lane_h(Rt, 4));
+                    st->gpr[rd] = out;
+                }
+                break;
+            case 0x1E: /* PEXEW - swaps word lanes 0 and 2 (Rt only),
+                        * ported from PEXEW(). */
+                if (rd) {
+                    ee_reg128_t Rt = st->gpr[rt], out;
+                    set_lane_w(&out, 0, lane_w(Rt, 2)); set_lane_w(&out, 1, lane_w(Rt, 1));
+                    set_lane_w(&out, 2, lane_w(Rt, 0)); set_lane_w(&out, 3, lane_w(Rt, 3));
+                    st->gpr[rd] = out;
+                }
+                break;
+            case 0x1F: /* PROT3W - rotates word lanes 0,1,2 left by one
+                        * (lane 3 untouched), Rt only. Ported from
+                        * PROT3W(). */
+                if (rd) {
+                    ee_reg128_t Rt = st->gpr[rt], out;
+                    set_lane_w(&out, 0, lane_w(Rt, 1)); set_lane_w(&out, 1, lane_w(Rt, 2));
+                    set_lane_w(&out, 2, lane_w(Rt, 0)); set_lane_w(&out, 3, lane_w(Rt, 3));
+                    st->gpr[rd] = out;
+                }
+                break;
             default:
                 halt("unimplemented MMI2 sub-opcode");
                 return 1;
@@ -1201,6 +1263,59 @@ static int ee_step(void)
                 break;
             case 0x12: /* POR */  if (rd) { st->gpr[rd].ud0 = st->gpr[rs].ud0 | st->gpr[rt].ud0; st->gpr[rd].ud1 = st->gpr[rs].ud1 | st->gpr[rt].ud1; } break;
             case 0x13: /* PNOR */ if (rd) { st->gpr[rd].ud0 = ~(st->gpr[rs].ud0 | st->gpr[rt].ud0); st->gpr[rd].ud1 = ~(st->gpr[rs].ud1 | st->gpr[rt].ud1); } break;
+            case 0x0A: /* PINTEH - interleaves EVEN halfword lanes of
+                        * Rt with EVEN halfword lanes of Rs (odd lanes
+                        * untouched by either input), ported from
+                        * PINTEH(). Distinct from PINTH above: PINTH
+                        * takes ALL of Rt's lanes plus Rs's upper half;
+                        * PINTEH takes only the even-indexed lanes of
+                        * BOTH Rs and Rt. */
+                if (rd) {
+                    ee_reg128_t Rs = st->gpr[rs], Rt = st->gpr[rt], out;
+                    set_lane_h(&out, 0, lane_h(Rt, 0)); set_lane_h(&out, 1, lane_h(Rs, 0));
+                    set_lane_h(&out, 2, lane_h(Rt, 2)); set_lane_h(&out, 3, lane_h(Rs, 2));
+                    set_lane_h(&out, 4, lane_h(Rt, 4)); set_lane_h(&out, 5, lane_h(Rs, 4));
+                    set_lane_h(&out, 6, lane_h(Rt, 6)); set_lane_h(&out, 7, lane_h(Rs, 6));
+                    st->gpr[rd] = out;
+                }
+                break;
+            case 0x1A: /* PEXCH - swaps halfword lanes 1 and 2 within
+                        * each 64-bit half (Rt only), ported from
+                        * PEXCH(). Note this is a DIFFERENT permutation
+                        * from PEXEH above (which swaps lanes 0 and 2) -
+                        * easy to confuse, kept as two distinct case
+                        * bodies rather than merged to avoid mixing up
+                        * which lane pair each one swaps. */
+                if (rd) {
+                    ee_reg128_t Rt = st->gpr[rt], out;
+                    set_lane_h(&out, 0, lane_h(Rt, 0)); set_lane_h(&out, 1, lane_h(Rt, 2));
+                    set_lane_h(&out, 2, lane_h(Rt, 1)); set_lane_h(&out, 3, lane_h(Rt, 3));
+                    set_lane_h(&out, 4, lane_h(Rt, 4)); set_lane_h(&out, 5, lane_h(Rt, 6));
+                    set_lane_h(&out, 6, lane_h(Rt, 5)); set_lane_h(&out, 7, lane_h(Rt, 7));
+                    st->gpr[rd] = out;
+                }
+                break;
+            case 0x1B: /* PCPYH - broadcasts halfword lane 0 across the
+                        * low 64 bits and lane 4 across the high 64
+                        * bits (Rt only), ported from PCPYH(). */
+                if (rd) {
+                    ee_reg128_t Rt = st->gpr[rt], out;
+                    uint16_t lo = lane_h(Rt, 0), hi = lane_h(Rt, 4);
+                    for (int n = 0; n < 4; n++) set_lane_h(&out, n, lo);
+                    for (int n = 4; n < 8; n++) set_lane_h(&out, n, hi);
+                    st->gpr[rd] = out;
+                }
+                break;
+            case 0x1E: /* PEXCW - swaps word lanes 1 and 2 (Rt only),
+                        * ported from PEXCW(). Distinct from PEXEW
+                        * above (which swaps lanes 0 and 2). */
+                if (rd) {
+                    ee_reg128_t Rt = st->gpr[rt], out;
+                    set_lane_w(&out, 0, lane_w(Rt, 0)); set_lane_w(&out, 1, lane_w(Rt, 2));
+                    set_lane_w(&out, 2, lane_w(Rt, 1)); set_lane_w(&out, 3, lane_w(Rt, 3));
+                    st->gpr[rd] = out;
+                }
+                break;
             default:
                 halt("unimplemented MMI3 sub-opcode");
                 return 1;

@@ -479,6 +479,43 @@ Regression: full test suite (27 test files total, including this new
 one) all pass 0 failures. Wii/devkitPPC target rebuilds clean with no
 warnings.
 
+### MMI2/MMI3 permute/interleave family implemented
+
+Added 9 self-contained MMI2/MMI3 data-movement opcodes, ported
+directly from PCSX2's `MMI.cpp`: `PINTH`/`PINTEH` (interleave Rs/Rt
+halfword lanes), `PEXEH`/`PEXCH` and `PEXEW`/`PEXCW` (halfword- and
+word-granularity lane swaps), `PREVH` (full lane reverse), `PCPYH`
+(lane broadcast), and `PROT3W` (3-lane rotate). These were chosen as
+the next batch specifically because they need no additional CPU
+state (unlike `QFSRV`, which needs the SA hardware register and the
+`MTSA`/`MTSAB`/`MTSAH` instructions to set it - none of which exist
+in this project yet, so `QFSRV` stays out of scope for now) and no
+HI/LO interaction (unlike the remaining MMI2/MMI3 arithmetic opcodes,
+e.g. `PMADDW`/`PMULTW`/`PDIVW`). `sa` values confirmed against the
+real `tbl_MMI2[32]`/`tbl_MMI3[32]` tables in `R5900OpcodeTables.cpp`.
+Brings EE MMI coverage from ~56 to ~65 of the roughly 90 real opcodes.
+
+Two pairs of opcodes are easy to confuse with each other and got
+extra attention: `PINTH` takes ALL of Rt's lanes plus Rs's UPPER 4
+lanes, while `PINTEH` takes only the EVEN-indexed lanes of BOTH Rs
+and Rt - a real, distinct difference, not two names for the same
+operation. Likewise `PEXEH`/`PEXEW` swap lane pair 0/2 while their
+"C" counterparts `PEXCH`/`PEXCW` swap lane pair 1/2 - kept as
+separate case bodies rather than a shared helper with a parameter, to
+avoid a transcription slip silently making one of them wrong.
+
+Unit tested in `tests/test_ee_mmi_permute.c`, 32/32 checks - operands
+use distinct, position-identifiable lane values (e.g. halfword lane N
+= `0x50+N` for Rs / `0x60+N` for Rt) so a wrong permutation shows up
+immediately as the wrong value in the wrong lane. Specifically checks
+that `PINTH` and `PINTEH` produce different results from the same
+inputs, and likewise for the `PEXEH`/`PEXCH` and `PEXEW`/`PEXCW`
+pairs, so a copy-paste mix-up between either pair would be caught.
+
+Regression: full test suite (28 test files total, including this new
+one) all pass 0 failures. Wii/devkitPPC target rebuilds clean with no
+warnings.
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

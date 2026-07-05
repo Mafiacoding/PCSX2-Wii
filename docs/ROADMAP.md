@@ -41,9 +41,26 @@ splash screen, not just difficulty.
       `tests/test_ee_mmi_sat.c` (21/21 checks, including a PEXT5/
       PPAC5 round-trip). Brings EE MMI coverage from ~48 to ~56 of
       the roughly 90 real opcodes.
-- [ ] Remaining ~34 MMI opcodes (QFSRV, PMADDW/H family, PINTH/PINTEH,
-      PROT3W, PEXEH/PEXEW/PEXCH/PEXCW, PMFHL/PMTHL clamping variants,
-      PMULTUW/PDIVUW/PMADDUW and other MMI2/MMI3 arithmetic)
+- [x] MMI2/MMI3 permute/interleave family: PINTH/PINTEH (interleave
+      Rs/Rt halfword lanes - PINTH takes Rt's ALL lanes plus Rs's
+      UPPER lanes, PINTEH takes only the EVEN lanes of both - easy to
+      confuse, kept as distinct implementations), PEXEH/PEXCH and
+      PEXEW/PEXCW (each pair swaps a DIFFERENT lane pair - 0/2 for the
+      "E" variant, 1/2 for the "C" variant - at halfword and word
+      granularity respectively), PREVH (full reverse of the 4
+      halfword lanes within each 64-bit half), PCPYH (broadcasts lane
+      0 across the low half and lane 4 across the high half), and
+      PROT3W (rotates word lanes 0,1,2 left by one, lane 3 untouched).
+      All Rt-only except PINTH/PINTEH (which use both). Ported from
+      PCSX2's `MMI.cpp`. Unit tested in `tests/test_ee_mmi_permute.c`
+      (32/32 checks, using distinct position-identifiable lane values
+      so a wrong permutation shows up immediately). Brings EE MMI
+      coverage from ~56 to ~65 of the roughly 90 real opcodes.
+- [ ] Remaining ~25 MMI opcodes: QFSRV (needs the SA hardware register
+      and MTSA/MTSAB/MTSAH to set it, none of which exist yet);
+      PMADDW/H, PMSUBW/H, PMULTW/H, PDIVW/PDIVBW, PMULTUW/PDIVUW/
+      PMADDUW (the remaining MMI2/MMI3 HI/LO-touching arithmetic);
+      PMFHL/PMTHL clamping variants
 - [x] LWL/LWR/SWL/SWR (unaligned word load/store) - ported from
       R5900OpcodeImpl.cpp, unit tested in `tests/test_ee_unaligned.c`
       (also gave the IOP core this ability first, then brought it to

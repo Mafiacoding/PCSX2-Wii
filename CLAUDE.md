@@ -100,19 +100,26 @@ gcc -I../include -I../source -o test_ee tests/test_ee_core.c ../source/hw/dma.c 
 ./test_ee
 ```
 
-There are 21 test files as of this writing, covering both CPU cores (EE
-integer/MMI/FPU/unaligned-access/COP0-CO-format, IOP integer/unaligned/
-SYSCALL-exception), every hardware register model (EE DMA + chain-mode
-transfer engine, GS registers + local memory + Wii output blit, GIF packet
-parsing + SPRITE rasterization, EE-side and IOP-side SIF mailbox, IOP INTC/
-DMA/timers, IOP HLE BIOS trap + module registry), the BIOS ROMDIR loader,
-and the two-core interleaved scheduler with a real SIF handshake. **Check
-`tests/README.md` for the exact, current build command for each test
-file** rather than guessing the link line - it is kept in sync with actual
-dependencies as they change (several tests need sibling `.c` files linked
-in because `ee_core.c`/`iop_core.c` have grown transitive dependencies on
-the hardware model), and getting it wrong just produces linker errors
-(safe to experiment with).
+There are 29 test files as of this writing, covering both CPU cores (EE
+integer/MMI/FPU/unaligned-access/COP0-CO-format/LQ-SQ, IOP integer/
+unaligned/SYSCALL-exception/InstallExceptionHandlers), every hardware
+register model (EE DMA + chain-mode transfer engine, GS registers + local
+memory + Wii output blit, GIF packet parsing + SPRITE rasterization,
+EE-side and IOP-side SIF mailbox, IOP INTC/DMA/timers, IOP HLE BIOS trap +
+module registry), the BIOS ROMDIR loader, and the two-core interleaved
+scheduler with a real SIF handshake. The EE side has grown a cluster of
+more recent, narrowly-scoped test files worth knowing about by name:
+`test_ee_lqsq.c` (128-bit load/store), `test_ee_fpu2.c`/`test_ee_fpu3.c`
+(SQRT/RSQRT/MAX/MIN/BC1 branches, then the ACC accumulator family), and
+`test_ee_mmi_compare.c`/`test_ee_mmi_sat.c`/`test_ee_mmi_permute.c`/
+`test_ee_mmi_pvshift.c` (the compare/max/min/abs, saturated-arithmetic,
+permute/interleave, and variable-shift MMI batches, added incrementally
+across several sessions). **Check `tests/README.md` for the exact,
+current build command for each test file** rather than guessing the link
+line - it is kept in sync with actual dependencies as they change (several
+tests need sibling `.c` files linked in because `ee_core.c`/`iop_core.c`
+have grown transitive dependencies on the hardware model), and getting it
+wrong just produces linker errors (safe to experiment with).
 
 ## Architecture
 
@@ -134,22 +141,46 @@ to the right module by address range.
   the current center of gravity of the project. `ee_state_t` holds 32
   128-bit GPRs (`ee_reg128_t { ud0, ud1 }`, low/high 64 bits - MMI needs the
   full 128 bits, plain MIPS III only needs `ud0`), COP0 registers, COP1/FPU
-  registers (raw IEEE-754 bit patterns in `fpr[32]` + `fcr31`), and a
-  pointer to guest RAM. `ee_mem_read8/16/32/64` and `ee_mem_write8/16/32/64`
-  are the single chokepoint all instruction implementations go through;
-  they route hardware-register-address ranges to `dma_mmio_read32/write32`
-  (32-bit MMIO path), `gs_mmio_read64/write64` (64-bit path, GS registers
-  are genuinely 64-bit on real hardware), or `sif_mmio_read32/write32`
-  (EE-side SIF mailbox) before falling through to the RAM/BIOS pointer
-  path. **Never use `memcpy` for guest memory access** - see "Known sharp
-  edges" below for why this matters here specifically. COP0 support:
-  MFC0/MTC0 (generic registers, Status, Config) plus the "CO"-format
-  instructions RFE/ERET/EI/DI (dispatched via a 6-bit `funct` field once
-  `rs`'s top bit is set - NOT via `rs` itself, matching PCSX2's
-  `tbl_COP0_C0[64]` table). Still missing: real TLB instructions and
-  actual EE-side exception-vector raising (MFC0/MTC0/RFE/ERET/EI/DI all
-  manipulate Status/EPC directly right now without a real exception ever
-  being raised on this side).
+  registers (raw IEEE-754 bit patterns in `fpr[32]` + `fcr31`, plus a
+  32-bit `acc` accumulator register used by the MADD/MSUB/MADDA/MSUBA/
+  ADDA/SUBA/MULA family), and a pointer to guest RAM. `ee_mem_read8/16/32/
+  64` and `ee_mem_write8/16/32/64` are the single chokepoint all
+  instruction implementations go through; they route hardware-register-
+  address ranges to `dma_mmio_read32/write32` (32-bit MMIO path),
+  `gs_mmio_read64/write64` (64-bit path, GS registers are genuinely 64-bit
+  on real hardware), or `sif_mmio_read32/write32` (EE-side SIF mailbox)
+  before falling through to the RAM/BIOS pointer path. **Never use
+  `memcpy` for guest memory access** - see "Known sharp edges" below for
+  why this matters here specifically. COP0 support: MFC0/MTC0 (generic
+  registers, Status, Config) plus the "CO"-format instructions RFE/ERET/
+  EI/DI (dispatched via a 6-bit `funct` field once `rs`'s top bit is set -
+  NOT via `rs` itself, matching PCSX2's `tbl_COP0_C0[64]` table). Still
+  missing: real TLB instructions and actual EE-side exception-vector
+  raising (MFC0/MTC0/RFE/ERET/EI/DI all manipulate Status/EPC directly
+  right now without a real exception ever being raised on this side).
+  COP1/FPU is essentially complete for single-precision scalar work:
+  core arithmetic, SQRT.S/RSQRT.S, MAX.S/MIN.S (bit-level signed-int
+  compare trick), CVT.W.S/CVT.S.W, C.EQ/LT/LE.S, BC1F/BC1T, and the full
+  ACC accumulator family (ADDA/SUBA/MULA/MADD/MSUB/MADDA/MSUBA.S - MADD.S/
+  MSUB.S re-clamp the intermediate product through `fpuDouble()` a SECOND
+  time before combining with ACC, MADDA.S/MSUBA.S deliberately don't - a
+  real, tested asymmetry, not an inconsistency to "fix"). Still missing:
+  BC1FL/BC1TL ("likely" branches - no likely-branch infrastructure exists
+  for ANY branch in this project yet) and the FPU exception-cause control
+  flags (only the condition flag needed for BC1 is modeled). MMI (SIMD)
+  coverage is at ~67 of the roughly 90 real opcodes: the add/sub/logic/
+  copy/extend/pack family, MULT1/DIV1 pipe-1 variants, the compare/max/
+  min/abs family (PCGT*/PMAX*/PCEQ*/PMIN*/PABS*/PADSBH), MMI0's saturated
+  arithmetic and PEXT5/PPAC5 (completing MMI0's sub-table entirely), the
+  MMI2/MMI3 permute/interleave family, and PSLLVW/PSRLVW. Still missing:
+  QFSRV (needs a not-yet-implemented SA hardware register plus MTSA/
+  MTSAB/MTSAH), the remaining MMI2/MMI3 HI/LO-touching arithmetic
+  (PMADDW/H, PMSUBW/H, PMULTW/H, PDIVW/PDIVBW, PMULTUW/PDIVUW/PMADDUW -
+  PCSX2's own source documents a real "division voodoo" rounding
+  correction on some of these worth extra care when eventually ported),
+  and PMFHL/PMTHL. See `docs/ROADMAP.md` section 1 for the exact,
+  currently-maintained opcode-by-opcode checklist rather than trusting
+  this summary to stay perfectly in sync.
 - **`source/hw/dma.c`** - the EE DMA controller, 10 channels
   (`DMA_CHANNEL_VIF0..TOSPR`). `dma_channel_kick()` implements both NORMAL
   mode (one-shot MADR+QWC transfer) and CHAIN mode (walks DMA tags via
@@ -299,6 +330,29 @@ current diagnostic numbers). **This is the project's most effective
 debugging technique available and should be used again** whenever
 practical for finding the next real gap, rather than guessing at what
 opcode/register might matter next.
+
+**Important correction from a later session, worth internalizing before
+trusting any raw "N instructions executed" diagnostic number again**: an
+earlier session reported the EE reaching "53,592,141 instructions" before
+halting and framed that as real boot progress into "COP2/LQ-SQ
+territory". Implementing LQ/SQ (see `docs/ROADMAP.md` section 1) proved
+that framing wrong - the halt point didn't move AT ALL after the fix. A
+proper trace (same technique as above) found the EE actually executes
+only ~99,262 real instructions before a `JALR` sends it to an out-of-
+range address; because a zero-filled word happens to decode as a valid
+NOP, the CPU then just marches in a straight line through unmapped memory
+for 53+ million fake "instructions" until it reaches live, non-zero
+hardware register content that finally halts it for an unrelated reason.
+The root cause of the JALR-to-out-of-range target is still genuinely
+**unsolved** - traced the full pointer chain back to `RAM[0x100] == 0`,
+checked an initial "EE-side table of tables" hypothesis against ps2tek
+and found it doesn't hold (that address is the CPU's own Debug exception
+vector, not a kernel table), and no citable reference for EE kernel/BIOS
+boot internals has been found yet. Moral: treat a large raw instruction
+count as a hypothesis to verify (did the halt point actually move after
+the fix that supposedly explained it?), not as evidence on its own - see
+`docs/STATUS.md`'s "LQ/SQ implemented" and the EE-JALR-investigation
+sections for the full trail.
 
 ## Known sharp edges (read before touching related code)
 

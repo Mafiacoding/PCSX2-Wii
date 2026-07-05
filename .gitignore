@@ -4,3 +4,9 @@ build/
 *.map
 data/pcsx2/bios/*.bin
 tools/elf2dol_native
+
+# compiled host-native test binaries (built ad hoc per tests/README.md,
+# never meant to be committed - only the .c sources are)
+tests/test_*
+!tests/test_*.c
+!tests/README.md

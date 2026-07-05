@@ -910,6 +910,109 @@ to how round 5/6 each started from "here's the next wall, honestly
 reached."
 
 
+### EE JALR investigation, round 9: real EE Timer (Count==Compare) interrupt delivery implemented
+
+Direct continuation of round 8's final finding: with the Scratchpad
+RAM + COP0 Count fixes in place, an 800-million-instruction run
+against the real SCPH-10000 BIOS reached `pc=0xBFC0092C` - a real
+`J 0xBFC00928` ("j $") self-loop, immediately preceded by a
+`Compare=1` COP0 timer setup a few instructions earlier
+(`pc=0xBFC00824`). This is a genuine, deliberate "wait for interrupt"
+idle pattern - real hardware escapes it via an actual interrupt, and
+this project had never raised an Interrupt-class exception (ExcCode
+0) at all.
+
+**Implementation, ported directly from PCSX2's own two real checks
+(R5900.cpp)**:
+- `cpuTestTIMRInts()`: `(Status.val & 0x10007) == 0x10001`, i.e.
+  Status.IE=1, Status.EIE=1, Status.EXL=0, Status.ERL=0.
+- `_cpuTestTIMR()`: `Status.val & 0x8000` (Status.IM7, the per-line
+  interrupt mask bit for this specific line) must also be set, in
+  addition to Count reaching Compare.
+
+Two new functions in `ee_core.c`:
+- `ee_latch_timer_interrupt()` - called unconditionally, every single
+  instruction, right after Count (`cop0[9]`) increments (see round
+  8's fix). The instant Count equals Compare (`cop0[11]`), it latches
+  Cause.IP7 (bit 15) - a real, documented MIPS side effect: the
+  pending bit is sticky, staying set regardless of Count's value
+  afterward, until software explicitly writes a new value to Compare.
+- `ee_check_timer_interrupt()` - actually takes the (possibly
+  already-latched) interrupt as a real `ee_raise_exception()` call
+  (ExcCode 0/Int), but only if Cause.IP7 is pending AND the
+  IE/EIE/EXL/ERL/IM7 gating above all hold. Only called when
+  `st->branch_pending` is 0 - i.e. only at a genuine instruction
+  boundary, never in between a branch/jump and its delay slot, since
+  real hardware has no pipeline checkpoint there to service an
+  interrupt at.
+
+**A real bug found and fixed before landing on this design**: an
+initial version gated the match check itself on exact
+`Count==Compare` AND skipped that same check entirely while
+`branch_pending` was set (deferring across delay slots). That combo
+has a real hole - if the match happens to land exactly on the step
+that executes a taken branch itself, Count keeps incrementing while
+the check is deferred, and by the time a safe instruction boundary is
+reached, Count no longer equals Compare - the interrupt is silently
+lost forever. Splitting "detect and latch the edge" (unconditional,
+every instruction, can't be skipped) from "actually take the already-
+latched interrupt" (deferred across delay slots) fixes this, and is
+also simply a more accurate model of real MIPS Count/Compare hardware
+semantics than the exact-equality-only first draft was.
+
+**MTC0 side effect, also ported (not fabricated)**: writing a new
+value to Compare (register 11) now clears the latched Cause.IP7
+pending bit - the real, documented mechanism a MIPS interrupt handler
+uses to re-arm the timer for its next tick, preventing the same
+already-serviced interrupt from immediately re-triggering on `ERET`
+if the handler didn't touch Compare.
+
+**Tested**: a new `tests/test_ee_timer_interrupt.c` (24 checks) covers
+a basic fire with full gating, IE=0 and IM7=0 each independently
+blocking the interrupt from being taken (while still confirming it
+latches regardless), the branch-delay-slot deferral case specifically
+(proving the fix above works: EPC ends up at the branch's target, not
+the branch or the delay slot, and the interrupt is provably not taken
+during the branch's own step), and the Compare-write acknowledgment
+clearing the latch.
+
+Regression: full suite (34 test files now, including the new one)
+passes 0 failures. Wii/devkitPPC target rebuilds clean with no
+warnings.
+
+**Re-verified against the real SCPH-10000 BIOS - a real, more precise
+new wall found, not yet investigated**: an 800-million-instruction run
+was repeated with the finished implementation. Cause.IP7 now DOES
+latch correctly (`Cause=0x00008000` from very early on, confirmed via
+a fresh diagnostic harness), proving the Count/Compare match itself
+is being detected exactly as designed. But the interrupt is never
+actually TAKEN - `Status` stays `0x70400000` (IE bit clear) for the
+entire run, and execution never progresses past `pc=0xBFC00928`/
+`0xBFC0092C`. A second, targeted diagnostic traced every `EI`/`DI`
+COP0 "CO"-format instruction executed in the first 5 million steps:
+**zero EI instructions ever execute** before the idle loop is reached.
+This means the real BIOS's boot path taken by this project's
+interpreter never enables interrupts (`Status.IE`) at all before
+hitting this loop - so a maskable Count/Compare timer interrupt
+*cannot* be what real hardware uses to escape it, at least not along
+whatever code path this project's boot currently takes. This is a
+different, more fundamental question than "does timer interrupt
+delivery work" (it does - see the tests above): either (a) this idle
+loop is an intentional dead-end/error path that real hardware only
+reaches on a genuine boot failure (and something upstream is being
+mis-emulated, causing a wrong branch into it), (b) it's escaped by
+some other mechanism this project hasn't modeled (a different
+interrupt source entirely - INTC/DMAC rather than the internal
+timer, or even a non-maskable event), or (c) `EI` is supposed to run
+inside one of the `JAL`/`JALR` subroutine calls this loop's
+surrounding code makes (`0xBFC00884`, `0xBFC008A8`, `0xBFC008B8` -
+see the disassembly in this session's work) and something about how
+those subroutines execute in this project diverges from real
+hardware before reaching the `EI`. Not root-caused further this
+round - this is "round 10"'s starting point, the same kind of
+precisely-identified-but-open wall every round 5-9 handoff has ended
+on.
+
 ### EE JALR investigation, round 8: real Scratchpad RAM + COP0 Count fixed via a live PCSX2 trace - two more walls cleared, boot now reaches a real "wait for interrupt" idle loop
 
 Direct continuation of round 7's precisely identified wall: two real

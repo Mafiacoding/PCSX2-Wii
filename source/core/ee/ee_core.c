@@ -90,13 +90,15 @@
  *     needed for BC1) is modeled; nothing in this project raises FPU
  *     exceptions from the others yet, a documented, consistent
  *     simplification across every FPU op in this file.
- *   - General/interrupt/SYSCALL exception delivery through the real
- *     ee_raise_exception() path (only KUSEG TLB misses use it so far -
- *     see the COP0 bullet above); a real SYSCALL handler table (the
+ *   - General/SYSCALL exception delivery through the real
+ *     ee_raise_exception() path (KUSEG TLB misses AND the Timer/
+ *     Compare interrupt - round 9, see docs/STATUS.md - both use it
+ *     now; SYSCALL still doesn't); a real SYSCALL handler table (the
  *     existing InstallExceptionHandlers trap is a separate, hand-
- *     written mechanism, not real exception vectoring); interrupts
- *     (nothing ever raises Cause's Interrupt Pending bits or services
- *     Status.IM)
+ *     written mechanism, not real exception vectoring). Timer
+ *     (Count==Compare) is the only interrupt SOURCE modeled so far -
+ *     no INTC/DMAC-driven interrupts (VBlank, DMA-complete, etc.)
+ *     raise Cause's other Interrupt Pending bits yet.
  *   - The IOP has its own core (iop_core.c) and BIOS syscall trap
  *     (core/hw/iop_hle_bios.c) now - see docs/ROADMAP.md for scope
  *
@@ -186,7 +188,7 @@ static inline int ee_tlb_translate(ee_state_t *st, uint32_t vaddr, uint32_t *out
 /* MIPS/R5900 exception codes (Cause register ExcCode field, bits
  * 2-6) - only the ones this project actually raises so far. Ported
  * from PCSX2's R5900.h EXC_CODE_* table (EXC_CODE(n) = n << 2). */
-#define EE_EXC_CODE_INT   (0u << 2) /* Interrupt - defined for completeness, not raised by this project yet */
+#define EE_EXC_CODE_INT   (0u << 2) /* Interrupt - raised by ee_check_timer_interrupt() below (round 9) */
 #define EE_EXC_CODE_TLBL  (2u << 2) /* TLB miss, load or instruction fetch */
 #define EE_EXC_CODE_TLBS  (3u << 2) /* TLB miss, store */
 
@@ -261,6 +263,100 @@ static void ee_raise_tlb_exception(ee_state_t *st, int is_store, uint32_t vaddr,
     st->cop0[10] = (vaddr & 0xFFFFE000u) | (st->cop0[10] & 0x1FFFu); /* EntryHi */
 
     ee_raise_exception(st, is_store ? EE_EXC_CODE_TLBS : EE_EXC_CODE_TLBL, this_pc, in_delay_slot);
+}
+
+#define EE_CAUSE_IP7  0x00008000u /* Cause register: latched timer-interrupt pending bit */
+#define EE_STATUS_IM7 0x00008000u /* Status register: per-line mask for the same IP7 line (same bit position, different register - real MIPS layout, not a typo) */
+
+/* Latches Cause.IP7 the instant Count (cop0[9]) reaches Compare
+ * (cop0[11]) - called unconditionally, every single instruction,
+ * regardless of delay-slot/branch_pending state (see the big comment
+ * on ee_check_timer_interrupt() below for why latching and actually
+ * TAKING the interrupt have to be two separate steps). Ported from
+ * real, documented MIPS Count/Compare semantics (not fabricated):
+ * once posted, the pending bit is sticky - it stays set regardless of
+ * Count's value afterward - and is only ever cleared by software
+ * explicitly writing a new value to Compare (see the MTC0 case for
+ * register 11), which is the real, standard way a MIPS interrupt
+ * handler acknowledges/re-arms this specific interrupt for the next
+ * tick. This project advances Count by exactly 1 per instruction (see
+ * the increment in ee_step()'s epilogue just above the call site), so
+ * the match is always hit on the nose for exactly one instruction -
+ * no risk of stepping clean over it the way PCSX2's own coarser,
+ * lazily-advanced Count has to guard against with its "Count<Compare+
+ * 1000" window in _cpuTestTIMR(). */
+static void ee_latch_timer_interrupt(ee_state_t *st)
+{
+    /* >= rather than == : verified necessary, not just defensive,
+     * against a live real SCPH-10000 BIOS trace ("round 9" follow-up
+     * verification, see docs/STATUS.md). The real early-boot code at
+     * pc=0xBFC0081C does "MTC0 $0, Count" (resetting Count to 0), then
+     * TWO instructions later at pc=0xBFC00824 does "MTC0 $26, Compare"
+     * with Compare=1. Because this project's Count increments once
+     * per instruction in ee_step()'s epilogue - including the epilogue
+     * of the very instruction that just reset it to 0 - Count is
+     * already 3 by the time the Compare=1 write itself completes (0->1
+     * on the reset instruction's own epilogue, 1->2 on the next
+     * instruction, 2->3 on the Compare-write instruction's own
+     * epilogue) - the value 1 was already passed one full instruction
+     * before Compare even became 1. An exact-equality check would
+     * silently miss this real, common "reset Count then arm a small
+     * Compare shortly after" pattern forever (Count only grows from
+     * here, never revisiting 1 until a full 32-bit wraparound). Real
+     * PCSX2 has this same fundamental issue even worse (its Count
+     * advances in large, lazily-applied jumps), which is exactly why
+     * its own _cpuTestTIMR() uses a Count>=Compare window rather than
+     * exact equality too (see that function's comment for the "<
+     * Compare+1000" upper bound it additionally needs and this project
+     * doesn't - once latched here, IP7 stays latched regardless of
+     * Count's value, so no upper bound is needed, only the lower
+     * bound this check itself is). */
+    if (st->cop0[9] >= st->cop0[11])
+        st->cop0[13] |= EE_CAUSE_IP7;
+}
+
+/* Actually takes (vectors) the latched timer interrupt as a real MIPS
+ * Interrupt exception (ExcCode 0/Int - the EE_EXC_CODE_INT vector
+ * this file already had defined for completeness but never raised
+ * until this round). Gating is ported directly from PCSX2's own two
+ * checks combined (R5900.cpp):
+ *   - cpuTestTIMRInts(): (Status.val & 0x10007) == 0x10001, i.e.
+ *     IE=1, EIE=1, EXL=0, ERL=0.
+ *   - _cpuTestTIMR(): Status.val & 0x8000 (Status.IM7, the per-line
+ *     mask for this same IP7 interrupt line) must also be set.
+ *
+ * Real hardware won't (can't) service an interrupt in between a
+ * branch/jump and its delay slot - there's no pipeline checkpoint
+ * there. This project models the same thing by only calling this
+ * function when st->branch_pending is 0 (see the call site in
+ * ee_step()'s epilogue), i.e. only at instruction boundaries where
+ * the NEXT instruction is not itself a delay slot - so this function
+ * never needs to consider in_delay_slot/BD itself; EPC always simply
+ * points at the next, not-yet-executed instruction (this_pc ==
+ * st->pc at the call site). Crucially, this deferral is safe *only*
+ * because ee_latch_timer_interrupt() above already ran unconditionally
+ * on every instruction including ones inside a branch/delay-slot pair
+ * - the pending bit survives however long it takes to reach a safe
+ * boundary, instead of the match being missed if it happened to land
+ * exactly on a branch instruction's own step. */
+static void ee_check_timer_interrupt(ee_state_t *st, uint32_t this_pc)
+{
+    const uint32_t IE  = 0x00000001u;
+    const uint32_t EXL = 0x00000002u;
+    const uint32_t ERL = 0x00000004u;
+    const uint32_t EIE = 0x00010000u;
+
+    if (st->exc_raised_this_step)
+        return; /* a memory/TLB exception already vectored pc this step */
+    if (!(st->cop0[13] & EE_CAUSE_IP7))
+        return; /* no timer interrupt latched/pending */
+    if ((st->cop0[12] & (IE | EXL | ERL | EIE)) != (IE | EIE))
+        return; /* IE=0 and/or EIE=0, or already inside a handler (EXL/ERL) */
+    if (!(st->cop0[12] & EE_STATUS_IM7))
+        return; /* this specific interrupt line (IM7) is masked */
+
+    st->exc_raised_this_step = 1;
+    ee_raise_exception(st, EE_EXC_CODE_INT, this_pc, 0);
 }
 
 static inline uint8_t *ee_mem_ptr(ee_state_t *st, uint32_t addr, uint32_t size)
@@ -803,10 +899,16 @@ static int ee_step(void)
             if (rt) GPR(rt) = sext32(st->cop0[rd]);
             break;
         case 0x04: /* MTC0 */
-            if (rd == 16) /* Config: preserve read-only IC/DC bits like PCSX2's WriteCP0Config */
+            if (rd == 16) { /* Config: preserve read-only IC/DC bits like PCSX2's WriteCP0Config */
                 st->cop0[16] = (rt32 & ~0xFC0u) | 0x440u;
-            else
+            } else if (rd == 11) { /* Compare: writing it clears the latched
+                 * timer-interrupt pending bit (Cause.IP7) - see
+                 * ee_latch_timer_interrupt()'s comment above (round 9). */
+                st->cop0[11] = rt32;
+                st->cop0[13] &= ~EE_CAUSE_IP7;
+            } else {
                 st->cop0[rd] = rt32;
+            }
             break;
         default:
             if (rs & 0x10) {
@@ -1906,6 +2008,16 @@ static int ee_step(void)
      * rate fidelity, which isn't verifiable without a real timing
      * model and isn't needed just to let a delay loop terminate. */
     st->cop0[9]++;
+
+    /* Latch unconditionally - see ee_latch_timer_interrupt()'s comment
+     * for why this can't be skipped even mid-delay-slot. Only actually
+     * TAKING the (possibly already-latched) interrupt is deferred to a
+     * genuine instruction boundary: st->branch_pending here reflects
+     * whether the NEXT instruction (whatever this step just set
+     * st->pc to) is itself a delay slot. */
+    ee_latch_timer_interrupt(st);
+    if (!st->branch_pending)
+        ee_check_timer_interrupt(st, st->pc);
 
     return 0;
 }

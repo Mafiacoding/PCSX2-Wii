@@ -801,3 +801,43 @@ scratchpad's special, TLB-bypassing nature was known - moved to
 gcc -I../include -I../source -o test_ee_scratchpad_count tests/test_ee_scratchpad_count.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
 ./test_ee_scratchpad_count
 ```
+
+`test_ee_timer_interrupt.c` covers "EE JALR investigation round 9":
+real EE Timer (Count==Compare) interrupt delivery, the direct
+follow-up once round 8's Scratchpad RAM + Count fixes let the real
+SCPH-10000 BIOS boot reach pc=0xBFC0092C - a genuine "wait for
+interrupt" idle loop (`j $` right after a `Compare=1` setup) that this
+project had never implemented any interrupt delivery for. 32 checks
+across 6 cases: a basic fire (Count reaching Compare with every gating
+bit enabled actually takes a real Interrupt exception - ExcCode 0,
+Cause.IP7 set, Status.EXL set, EPC at the next not-yet-executed
+instruction, Cause.BD clear); two gating checks (Status.IE=0 and
+Status.IM7=0 each independently block the interrupt from being taken
+even though it still latches); a branch-delay-slot deferral (if Count
+reaches Compare during a taken branch's own step, the interrupt must
+NOT be taken until after the delay slot also executes, with EPC ending
+up at the branch's target - not the branch or the delay slot); a
+Compare-write acknowledgment (writing a new Compare value clears the
+latched Cause.IP7 pending bit, the real documented MIPS mechanism a
+handler uses to re-arm the timer for its next tick); and an "overshoot
+still latches" case that reproduces the exact real SCPH-10000
+instruction sequence verbatim (`MTC0 Count,0` then, two instructions
+later, `MTC0 Compare,1`) - Count has already advanced past 1 by the
+time Compare is written, so an exact-equality Count==Compare check
+would silently miss the match forever. See docs/STATUS.md's "round 9"
+section for the full design: why latching Cause.IP7 unconditionally
+every instruction (via Count>=Compare, not ==) and only deferring the
+actual TAKING of the interrupt across delay slots was necessary, and
+why every test program below deliberately arms Compare before
+enabling Status.IE (both registers reset to 0, so Count>=Compare is
+trivially true from the very first instruction any program executes -
+harmless in practice since real code always arms Compare first while
+interrupts are still masked, exactly like the real BIOS does).
+Live re-verification against the real BIOS after this fix found a
+further, more precise wall - see docs/STATUS.md and docs/ROADMAP.md's
+"round 9" sections.
+
+```sh
+gcc -I../include -I../source -o test_ee_timer_interrupt tests/test_ee_timer_interrupt.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+./test_ee_timer_interrupt
+```

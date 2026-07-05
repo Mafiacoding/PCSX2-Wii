@@ -158,13 +158,27 @@ splash screen, not just difficulty.
       advanced by 1 per instruction (a documented simplification - no
       cycle-accurate timing model exists to derive a precise bus-clock
       rate from - see docs/STATUS.md). Unblocked a real BIOS delay loop
-      at `pc=0x9FC42500`. Still NOT done: the Compare-match TIMER
-      INTERRUPT itself (ExcCode 0/Int delivery when Count==Compare) -
-      see the round 8 write-up below, this is the next concrete EE
-      blocker. IOP-side counters/timers remain register-stubs-only
-      (`iop_timers.c`, no ticking/gating/target-IRQ behavior) and INTC
-      (interrupt controller) more broadly is still needed for any other
-      timing-dependent BIOS code.
+      at `pc=0x9FC42500`.
+- [x] EE Timer (Count==Compare) interrupt delivery (round 9): a real
+      ExcCode 0/Int exception through the same `ee_raise_exception()`
+      path round 7 built, gated by Status.IE/EIE/IM7/EXL/ERL exactly
+      like PCSX2's own `cpuTestTIMRInts()`/`_cpuTestTIMR()`. Cause.IP7
+      latches on Count>=Compare (verified against a real, live SCPH-
+      10000 BIOS instruction sequence that overshoots an exact-equality
+      check - see docs/STATUS.md), stays sticky until software writes a
+      new Compare value. 32 host-native checks, 0 regressions. Live
+      re-verification against the real BIOS found a real, more precise
+      new wall: Cause.IP7 now latches correctly, but `Status.IE` is
+      never set (no `EI` instruction executes at all) anywhere in the
+      boot path this project's interpreter takes before reaching
+      `pc=0xBFC0092C`'s idle loop - so a maskable timer interrupt isn't
+      (yet, on this code path) what actually escapes it. See
+      docs/STATUS.md's "round 9" section for the full evidence and open
+      hypotheses - this is "round 10"'s starting point. IOP-side
+      counters/timers remain register-stubs-only (`iop_timers.c`, no
+      ticking/gating/target-IRQ behavior) and INTC (interrupt
+      controller) more broadly is still needed for any other timing-
+      dependent BIOS code.
 - [x] SIF mailbox/flag registers (MSCOM/SMCOM/MSFLAG/SMFLAG/CTRL,
       0x1000F200-0x1000F260), EE side only - `source/hw/sif.c`, wired
       into `ee_core.c`'s 32-bit MMIO dispatch. Register-level
@@ -730,11 +744,29 @@ setup a few instructions earlier. This is a real, intentional
 "wait for interrupt" idle pattern - real hardware escapes it via an
 actual interrupt (very plausibly the Timer/Compare-match interrupt this
 setup is meant to trigger), which this project's EE core has never
-raised at all. **This is the next concrete, non-speculative EE
-blocker**: implement real EE interrupt delivery (ExcCode 0/Int),
-starting with the Count==Compare timer case, through the same
-`ee_raise_exception()` path round 7 built. See docs/STATUS.md's
-"round 8" section for the full trace and evidence.
+raised at all.
+
+**Update (round 9): EE Timer (Count==Compare) interrupt delivery
+implemented and tested** - a real ExcCode 0/Int exception through the
+same `ee_raise_exception()` path round 7 built, gated exactly like
+PCSX2's own `cpuTestTIMRInts()`/`_cpuTestTIMR()`
+(Status.IE/EIE/IM7/EXL/ERL). Cause.IP7 latches via Count>=Compare, not
+exact equality - a live real-BIOS instruction sequence
+(`MTC0 Count,0` then, two instructions later, `MTC0 Compare,1`) proved
+exact equality would silently miss the match, since Count already
+overshoots past 1 before Compare is even written. 32 host-native
+checks pass, including that exact overshoot scenario reproduced
+verbatim. Re-verifying against the real SCPH-10000 BIOS found a more
+precise new wall, though: Cause.IP7 now latches correctly (confirmed
+directly), but `Status.IE` is never set anywhere in the boot path this
+project's interpreter takes before reaching the idle loop - a targeted
+trace confirmed zero `EI` instructions execute in the first 5 million
+steps. So a maskable Count/Compare interrupt isn't (at least not
+via this code path) what actually escapes this loop; something else -
+a wrong earlier branch, a different interrupt source, or an
+unexplored code path through the surrounding `JAL`/`JALR` calls - is
+the real next question. See docs/STATUS.md's "round 9" section for
+the full trace, evidence, and open hypotheses.
 
 The
 IOP has no known halt point left

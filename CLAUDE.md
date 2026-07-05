@@ -71,20 +71,35 @@ current, up-to-date status.)
   0.0008%/151-out-of-20M before). Disassembly confirmed the code being
   executed is genuine MIPS exception-handler prologue (GPR context
   save + EPC/Cause save), not zero-decoded filler.
+- **Round 8 - Scratchpad RAM + COP0 Count fixed via a second live
+  trace**: round 7's "wired TLB entry" guess (below, kept for context)
+  turned out to be more specific than that. A live PCSX2 trace (same
+  bridge as round 5) showed the fault address (`$sp=0x70003FC0`) is
+  inside the R5900's real Scratchpad RAM (SPR) - a fixed 16KB window
+  (`0x70000000-0x70003FFF`) that real hardware bypasses the TLB for
+  *entirely*, confirmed against PCSX2's own source (`Memory.cpp`'s
+  "scratch pad" comment, `MemoryTypes.h`'s 16KB `Ps2MemSize::Scratch`,
+  `COP0.cpp`'s `isSPR()`-gated direct-buffer mapping). Fixed by
+  intercepting this fixed range in `ee_mem_ptr()` *before* any TLB
+  lookup, routing to a new `scratch[16*1024]` buffer. A second wall
+  immediately followed: COP0 Count (`cop0[9]`) never advanced on its
+  own, hanging a real BIOS delay loop - fixed by incrementing it by 1
+  per instruction (a real, working free-running counter, just without
+  precise bus-clock-rate timing fidelity this project has no cycle-
+  accurate model to derive). With both fixes, an 800M-instruction run
+  raises **zero exceptions** (down from 2-then-stuck-forever) and
+  reaches a new region, `pc=0xBFC0092C` - a real `j $` self-loop right
+  after a `Compare=1` timer setup: a genuine "wait for interrupt" idle
+  pattern, not a bug.
 - **New wall (not yet investigated - this is where to start next)**:
-  exactly 2 real exceptions fire in a 50M-instruction run (the original
-  TLB miss, then an immediate *nested* fault when the handler's own
-  register-save routine touches a different unmapped KUSEG page). After
-  that, `Status.EXL` never clears (no `ERET`) and the EE just keeps
-  running real code in that same handler-prologue region indefinitely
-  without resolving. Best current theory (not confirmed): this looks
-  like a missing "wired TLB entry" situation - real MIPS kernels reserve
-  a few TLB entries via `COP0.Wired` (`cop0[6]`, not modeled at all
-  here) specifically so kernel/handler code and its own scratch memory
-  can never TLB-miss while a miss is already being serviced - or the
-  real boot path expects more `TLBWI` calls to have executed by this
-  point than this project's trace has reached. See `docs/STATUS.md`'s
-  "round 7" section and `docs/ROADMAP.md` for the full evidence trail
+  the EE core has never raised an Interrupt-class exception at all
+  (ExcCode 0/Int) - nothing ever asserts one, so the `j $` idle loop
+  above can never be escaped. This is now a well-scoped, non-
+  speculative next step (not another opaque investigation): implement
+  real EE interrupt delivery through the existing `ee_raise_exception()`
+  path (round 7), starting with the Count==Compare timer case, gated by
+  `Status.IE`/`EIE`/`IM` like real hardware. See `docs/STATUS.md`'s
+  "round 8" section and `docs/ROADMAP.md` for the full evidence trail
   (diagnostic harnesses referenced there live in `/tmp/diag/` on the
   machine that did this work - throwaway, not committed, may not exist
   in a fresh environment; the *method* - disassemble the hot pc range,

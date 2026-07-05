@@ -1109,6 +1109,40 @@ independently confirmed this round. Completing the devkitPro toolchain
 extraction (`base_tools` + `libogc`) is a residual task for a future
 round.
 
+### devkitPro toolchain gap (narrowed, not fully closed)
+
+Following up on round 11's "Wii rebuild NOT verified" caveat: this
+sandbox's `devkitPro` extraction (`outputs/build/devkitpro/`) was
+missing `base_rules`/`base_tools` (fetched from
+`github.com/devkitPro/devkitppc-rules`, a small public repo - no
+Cloudflare issue there) and `libogc` (found a complete, already-
+extracted prebuilt copy sitting unused at `outputs/build/libogc-src/`
+from an earlier round - symlinked to `$(DEVKITPRO)/libogc`). Both
+fixed. `make` now gets all the way to actually invoking the compiler,
+where it hits the one remaining gap: **`cc1` (the plain-C GCC front
+end) is missing** from this devkitPPC 8.1.0 extraction, even though
+`cc1plus` (C++) and `lto1` both exist in the same install - a partial/
+corrupted original extraction, not something these fixes could
+recover. The official source (`pkg.devkitpro.org`) blocks automated
+downloads behind a Cloudflare JS challenge that isn't something to try
+to route around. Attempted a from-scratch GCC bootstrap using the
+sandbox's own host gcc/binutils (existing powerpc-eabi binutils are
+present and working) but judged the dependency chain (gmp/mpfr/mpc
+headers, full GCC configure/build cycle) too slow/uncertain to
+complete productively this round - not attempted further.
+
+The user separately supplied a complete, working
+`MinGW-powerpc-eabi-13.1.0` toolchain (Windows/MinGW-hosted, all
+`.exe`/`.dll` - includes a working `cc1.exe`). This can't run directly
+in this Linux sandbox (no Wine installed; installing one without root
+means manually resolving ~20 interdependent packages, judged not worth
+pursuing here). **Recommended path**: the user can do the actual Wii/
+devkitPPC rebuild verification directly on their own Windows machine
+using this toolchain (point `DEVKITPPC`/`DEVKITPRO` at the extracted
+zip, fetch `libogc` + `base_rules`/`wii_rules` the same way this round
+did, run the bundled `make.exe` against this repo) - likely faster and
+more reliable than continuing to fight this sandbox's toolchain gap.
+
 **Next step (round 12, not started)**: implement COP2/VU0 macro mode
 (at minimum enough of it to get past `pc=0x8000B1FC`), and/or complete
 the devkitPro toolchain extraction to restore Wii rebuild verification.

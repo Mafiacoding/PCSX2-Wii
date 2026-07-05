@@ -1361,6 +1361,39 @@ static int ee_step(void)
         }
         break;
 
+    case 0x12: /* COP2 (VU0 macro mode) - control-register transfers only.
+                * See ee_core.h's cop2_ctrl[] comment (round 12) for
+                * scope/rationale. rd here is the COP2 control register
+                * number (e.g. 28 = FBRST, confirmed via a live PCSX2
+                * disassembly of the real BIOS call site that halted
+                * on this opcode before this round). */
+        switch (rs) {
+        case 0x00: /* MFC2 */ if (rt) GPR(rt) = sext32(st->cop2_ctrl[rd]); break;
+        case 0x02: /* CFC2 */ if (rt) GPR(rt) = sext32(st->cop2_ctrl[rd]); break;
+        case 0x04: /* MTC2 */ st->cop2_ctrl[rd] = rt32; break;
+        case 0x06: /* CTC2 */
+            /* Real FBRST (control reg 28) semantics - ported from
+             * PCSX2's own VU0.cpp CTC2(): bit 0x1 = VU0 force-break,
+             * bit 0x2 = VU0 reset, bit 0x100 = VU1 force-break,
+             * bit 0x200 = VU1 reset. Not modeled beyond plain storage
+             * (see ee_core.h comment) - no VU0/VU1 execution state
+             * exists yet for these bits to actually act on. */
+            st->cop2_ctrl[rd] = rt32;
+            break;
+        default:
+            /* MFC2/CFC2/MTC2/CTC2 cover every real BIOS/kernel use of
+             * COP2 control-register transfers found so far. The
+             * actual VU0 vector datapath (QMFC2/QMTC2 128-bit moves,
+             * and the full VU macro arithmetic opcode family - ADD/
+             * SUB/MUL/MAC/etc., dispatched via the 6-bit funct field
+             * once rs's top bit is set, matching COP0/COP1's own "CO"-
+             * format convention) is NOT implemented - a real, scoped
+             * next wall if a boot path or game ever needs it. */
+            halt("unimplemented COP2 sub-opcode (VU0 vector datapath not implemented)");
+            return 1;
+        }
+        break;
+
     case 0x1C: /* MMI */
         switch (funct) {
         case 0x00: /* MADD */ {

@@ -226,6 +226,19 @@ splash screen, not just difficulty.
       devkitPro extraction is missing base_rules/libogc, a pre-
       existing, unrelated toolchain gap) - see docs/STATUS.md's
       "round 11" section.
+- [x] EE JALR investigation round 12: COP2 (VU0 macro mode)
+      control-register transfers (MFC2/CFC2/MTC2/CTC2) implemented as
+      plain storage (`cop2_ctrl[32]`) - cleared a real BIOS init
+      sequence doing a read-modify-write on FBRST (control reg 28) via
+      cfc2/ori/ctc2, which halted on "unimplemented primary opcode
+      0x12" since this project had zero COP2 dispatch before. Verified
+      live against the real BIOS: correctly handles a second, different
+      real use nearby (VU0 integer register 1, same CFC2/CTC2 family).
+      New, confirmed-genuine wall: `viswr`, a real VU0 vector-datapath
+      instruction (not a register transfer) - a separate, much larger
+      subsystem (VF/VI register files, full VU macro arithmetic) left
+      for a future round rather than half-implemented. 4 new checks,
+      38-file/0-failure full regression.
 - [x] SIF mailbox/flag registers (MSCOM/SMCOM/MSFLAG/SMFLAG/CTRL,
       0x1000F200-0x1000F260), EE side only - `source/hw/sif.c`, wired
       into `ee_core.c`'s 32-bit MMIO dispatch. Register-level

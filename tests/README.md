@@ -904,3 +904,26 @@ consistent simplification, not a new inconsistency.
 gcc -I../include -I../source -o test_ee_daddi tests/test_ee_daddi.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_daddi
 ```
+
+`test_ee_cop2_ctrl.c` covers "round 12" - COP2 (VU0 macro mode)
+control-register transfer instructions (MFC2/CFC2/MTC2/CTC2), added
+after real BIOS boot (unblocked by round 11's MCH_RICM/MCH_DRD fix)
+reached a real init sequence doing a read-modify-write on FBRST
+(control register 28, confirmed via a live PCSX2 disassembly) via
+cfc2/ori/ctc2 - halting cleanly on "unimplemented primary opcode 0x12"
+since this project had zero COP2 dispatch before this round. Scope:
+only the 32-bit control-register transfer family is implemented as
+plain storage (no VU0/VU1 execution state exists to act on real
+FBRST/Status/etc. side effects - see `ee_core.h`'s `cop2_ctrl[]`
+comment). 4 checks: CFC2 reads back exactly what CTC2 wrote to FBRST;
+the underlying state array actually holds it; MFC2/MTC2 round-trip
+through an arbitrary control register; an unwritten register reads
+back 0. The actual VU0 vector datapath (QMFC2/QMTC2 128-bit moves,
+vector arithmetic like VISWR/VADD/VSUB/etc., dispatched via the 6-bit
+funct field once `rs`'s top bit is set) is confirmed NOT implemented
+and is the next honest wall - see docs/STATUS.md's "round 12" section.
+
+```sh
+gcc -I../include -I../source -o test_ee_cop2_ctrl tests/test_ee_cop2_ctrl.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+./test_ee_cop2_ctrl
+```

@@ -94,6 +94,26 @@ typedef struct {
                      * SUBA.S write it, MADD.S/MSUB.S read it. Same raw
                      * IEEE-754 bit-pattern representation as fpr[]. */
 
+    /* COP2 (VU0 in "macro mode") - control-register file only. Added
+     * round 12 to get past a real BIOS init sequence
+     * (cfc2/ori/ctc2 read-modify-write on FBRST, control register 28)
+     * that halted with "unimplemented primary opcode 0x12" once round
+     * 11's fixes let boot progress far enough to reach it. This
+     * project does NOT model VU0's actual vector datapath (VF/VI
+     * register files, the vector arithmetic opcode family - ADD/SUB/
+     * MUL/MAC pipelines etc.) - only the 32-bit control-register
+     * transfer instructions (MFC2/CFC2/MTC2/CTC2) real BIOS/kernel
+     * init code uses to read/write control state like FBRST. Real
+     * FBRST semantics (bit 0x2 = VU0 reset, bit 0x200 = VU1 reset,
+     * bits 0x1/0x100 = force-break - ported from PCSX2's own
+     * VU0.cpp CTC2() handler) aren't modeled beyond plain storage,
+     * since no VU0/VU1 execution state exists yet to actually reset -
+     * an honest simplification, not a fabricated one (matches this
+     * project's existing SIF CTRL register precedent: real documented
+     * side effects noted, not modeled, when the dependent subsystem
+     * doesn't exist yet). See docs/STATUS.md's "round 12" section. */
+    uint32_t cop2_ctrl[32];
+
     uint8_t *ram;           /* 32MB emulated EE RAM */
     uint32_t ram_size;
 

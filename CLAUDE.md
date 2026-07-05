@@ -117,48 +117,55 @@ current, up-to-date status.)
   for the full trace (this framing was itself corrected in round 11
   below).
 - **Round 11 - FIXED**: verifying round 10's register addresses against
-  a citable reference (PCSX2's own `Hw.h` + PS2Tek's "EE RDRAM
-  initialization" page) showed they're **MCH_RICM/MCH_DRD** (Memory
-  Control Hub RDRAM auto-init registers), not SIO - matching the printf
-  string round 10 found ("Initialize memory (rev:%d.%02d, ctm:%dMhz,
-  cpuclk:%dMhz %s)..."). Implemented per that reference: new
-  `source/hw/mch.c`/`include/core/hw/mch.h`, wired into `ee_core.c`
-  exactly like `dma_mmio_*`/`sif_mmio_*`. **A second, deeper bug found
-  while wiring it in**: the hardware-register MMIO dispatch compared
-  the raw unmasked address against physical-style constants, so it
-  never matched real KSEG0/1-addressed accesses (`0xB000Fxxx`/
-  `0x9000Fxxx`) - only the literal KUSEG-style addresses this project's
-  own pre-existing tests happened to use. This means DMA/SIF hardware-
-  register access had likely never actually fired for any real
-  CPU-issued load/store before this round. Fixed with a new
-  `ee_hw_mmio_addr()` helper masking KSEG0/1 to physical form first
-  (same aliasing `ee_mem_ptr()` already does), preserving the existing
-  KUSEG-literal tests unmodified. **Live-verified against the real
-  BIOS, register-by-register, after both fixes**: `0x9FC410E8` now
-  returns `v0=0x08028020` exactly matching real hardware; `pc=
-  0xBFC0088C` shows `v0=0x02000000` exactly matching the original round
-  6 report; `pc=0xBFC0092C`'s idle loop is never reached - execution
-  takes the real `jr t0`-into-RAM path instead. Took 14,932,336
-  host-native steps to the fix, closely matching round 10's live-traced
-  ~14.9M real CPU cycles for the same call - strong independent
-  confirmation. Also added `DADDI`/`DADDIU` (opcodes 0x18/0x19, found
-  missing once execution reached ~100x further into real BIOS code than
-  ever before). 29 new checks across 3 new test files (`test_mch.c`,
-  `test_ee_hw_kseg_masking.c`, `test_ee_daddi.c`), 37-file/0-failure
-  full regression. **New, honest wall**: an unimplemented COP2 (VU0
-  macro mode) opcode deep in RAM-resident boot code (`pc=0x8000B1FC`) -
-  a legitimate new frontier (VU0 is a large, separate subsystem), not a
-  regression. **Wii/devkitPPC rebuild NOT verified this round** - this
-  sandbox's devkitPro extraction (`outputs/build/devkitpro/`) is
-  missing `base_rules`/libogc, an incomplete/stale extraction unrelated
-  to this round's changes; the new/changed C is plain freestanding-
-  style code matching `sif.c`/`dma.c`'s exact structure (which do
-  compile cleanly for Wii every other round), so confidence is high but
-  unconfirmed. See docs/STATUS.md's "round 11" section for the full
-  trace and citations (harnesses in `/tmp/diag/` on the machine that
-  did this work - throwaway, not committed, may not exist in a fresh
-  environment; the *method* is the reusable part, not the specific
-  files).
+  a citable reference (PCSX2's own `Hw.h` + PS2Tek) showed they're
+  **MCH_RICM/MCH_DRD** (RDRAM auto-init), not SIO. Implemented per that
+  reference (`source/hw/mch.c`). Also found and fixed a deeper bug:
+  hardware-register MMIO dispatch compared the raw unmasked address
+  against physical-style constants, so it never matched real KSEG0/1-
+  addressed accesses - added `ee_hw_mmio_addr()` to mask first.
+  **Live-verified**: `0x9FC410E8` now returns `v0=0x08028020` exactly
+  matching real hardware, `pc=0xBFC0088C` shows `v0=0x02000000` exactly
+  matching the round 6 report, `pc=0xBFC0092C`'s idle loop is never
+  reached. Step count to the fix (14.93M) closely matches round 10's
+  live-traced ~14.9M real cycles. Also added `DADDI`/`DADDIU`. 29 new
+  checks, 37-file/0-failure regression. New wall: unimplemented COP2
+  opcode at `pc=0x8000B1FC`.
+- **Round 12 - COP2 (VU0 macro mode) control-register transfers
+  implemented**: the round 11 wall was `cfc2 v0,FBRST` / `ori v0,0x200`
+  / `ctc2 v0,FBRST` - a real BIOS read-modify-write resetting VU1
+  (FBRST bits verified against PCSX2's own `VU0.cpp` `CTC2()`: 0x1/0x2
+  = VU0 break/reset, 0x100/0x200 = VU1 break/reset). Implemented a new
+  `cop2_ctrl[32]` register file plus `MFC2`/`CFC2`/`MTC2`/`CTC2`
+  dispatch (primary opcode 0x12) as plain storage - no VU0/VU1
+  execution state exists yet to act on the real reset/break side
+  effects (same honest-simplification pattern as SIF's CTRL register).
+  **Live-verified**: correctly handles a second, different real use
+  right after (VU0 integer register 1, same CFC2/CTC2 family) with no
+  issues - not a lucky FBRST-only match. **New, confirmed-genuine
+  wall**: `viswr`, a real VU0 vector-datapath instruction (dispatched
+  via the 6-bit `funct` field once `rs`'s top bit is set, like COP0/
+  COP1's own "CO"-format) - a separate, much larger subsystem (32x
+  128-bit VF registers, 16 VI registers, the full VU macro arithmetic
+  family) intentionally left unimplemented rather than half-done. 4
+  new checks, 38-file/0-failure regression. See `docs/STATUS.md`'s
+  "round 12" section for the full trace (harnesses in `/tmp/diag/` on
+  the machine that did this work - throwaway, not committed).
+
+**devkitPro toolchain**: this sandbox's extraction was missing
+`base_rules`/`base_tools` (fetched from `github.com/devkitPro/
+devkitppc-rules`) and `libogc` (a complete prebuilt copy was already
+sitting unused at `outputs/build/libogc-src/` from an earlier round -
+now symlinked in). Both fixed. One gap remains: `cc1` (the plain-C GCC
+front end) is missing from this devkitPPC 8.1.0 install even though
+`cc1plus`/`lto1` both exist - `pkg.devkitpro.org` blocks automated
+downloads via a Cloudflare JS challenge, and a from-scratch GCC
+bootstrap was judged too slow/uncertain to finish productively. The
+user separately supplied a working `MinGW-powerpc-eabi-13.1.0`
+toolchain (Windows-hosted) - can't run in this Linux sandbox without
+Wine (not installed, ~20 interdependent packages to resolve manually).
+Recommended path: the user runs the actual Wii rebuild verification on
+their own Windows machine with that toolchain. See `docs/STATUS.md`'s
+"devkitPro toolchain gap" section.
 
 **Tool note**: `github.com/hkmodd/PCSX2-MCP` (third-party, not this
 project's own code) gives live debugging access to a real, user-run

@@ -1109,6 +1109,75 @@ independently confirmed this round. Completing the devkitPro toolchain
 extraction (`base_tools` + `libogc`) is a residual task for a future
 round.
 
+### EE JALR investigation round 12: COP2 (VU0 macro mode) control-register transfers implemented - the FBRST wall cleared, a genuine new wall (VU0 vector datapath) confirmed just past it
+
+Direct continuation of round 11's new wall: real BIOS boot (unblocked
+by the MCH_RICM/MCH_DRD fix) now runs deep into RAM-resident code and
+halted cleanly on `"unimplemented primary opcode 0x12"` at
+`pc=0x8000B1FC` - this project had zero COP2 dispatch at all before
+this round.
+
+**Live-traced via `pcsx2-mcp`**: the halting instruction is
+`cfc2 v0, FBRST` (control register 28, confirmed via the disassembler's
+own naming - live disassembly decodes it as `4842e000: cfc2 v0,
+FBRST`), part of a plain read-modify-write sequence:
+```
+cfc2 v0, FBRST      ; read
+ori  v0, 0x200      ; set bit 0x200
+ctc2 v0, FBRST      ; write back
+sync
+```
+Verified against a citable reference (websearch -> PCSX2's own
+`VU0.cpp` `CTC2()` handler): FBRST's real bits are `0x1`=VU0 force-
+break, `0x2`=VU0 reset, `0x100`=VU1 force-break, `0x200`=VU1 reset -
+this specific sequence is a plain "reset VU1" during BIOS init.
+
+**Implemented**: a new `cop2_ctrl[32]` register file in `ee_state_t`
+(see `ee_core.h`'s comment), plus COP2 (primary opcode 0x12) dispatch
+for the four control-register transfer instructions - `MFC2`(rs=0x00)/
+`CFC2`(rs=0x02)/`MTC2`(rs=0x04)/`CTC2`(rs=0x06) - as plain storage,
+matching COP0/COP1's existing dispatch pattern. Real FBRST side
+effects (actually resetting/force-breaking VU0/VU1 pipelines) are
+**not** modeled, since no VU0/VU1 execution state exists yet to act on
+- an honest simplification consistent with this project's SIF CTRL
+register precedent (real documented side effects noted, not modeled,
+when the dependent subsystem doesn't exist). 4 host-native checks
+(`tests/test_ee_cop2_ctrl.c`).
+
+**Verified against the real BIOS live**: after this fix, execution
+advances 9 more instructions past the old halt point and correctly
+executes a *second*, different COP2 use nearby (`cfc2 v0,vi01` /
+`ctc2 a0,vi01` - control register 1, one of VU0's 16 integer
+registers, which real hardware also addresses through the same
+CFC2/CTC2 family) with zero issues, confirming the control-register
+transfer implementation is genuinely correct, not a lucky one-off match
+for FBRST specifically.
+
+**New, honest wall (confirmed, not a regression)**: immediately after
+that, execution hits `viswr vi00, (vi01)x` (`op=0x12, rs=0x18` - rs's
+top bit set, meaning it's dispatched via the 6-bit `funct` field like
+COP0/COP1's own "CO"-format instructions, not a simple register
+transfer) - a genuine VU0 **vector datapath** instruction (integer-
+register-indexed memory store), confirmed via a per-instruction host-
+native trace showing the exact halting `pc`/`rs`/`funct` values. This
+is a real, separate, substantially larger subsystem (32×128-bit VF
+registers, 16 VI registers, the full VU macro arithmetic opcode family
+- ADD/SUB/MUL/MAC/etc.) - not attempted this round, scoped as a
+distinct future task rather than half-implemented.
+
+**Verification**: full regression suite (38 test files, 1 new this
+round) passes with 0 failures. Wii/devkitPPC rebuild still not
+verified (see the toolchain-gap note above/below) - the new C
+(`cop2_ctrl[]`, the COP2 dispatch case) is plain, freestanding-style
+code identical in structure to the rest of `ee_core.c`.
+
+**Next step (round 13, not started)**: implement enough of the VU0
+vector datapath (VF/VI register files, QMFC2/QMTC2 128-bit transfers,
+and at minimum whatever specific macro opcodes the real BIOS boot path
+needs - `viswr` first, then whatever comes after it) to get past this
+wall, the same incremental way rounds 9-12 each cleared one wall at a
+time.
+
 ### devkitPro toolchain gap (narrowed, not fully closed)
 
 Following up on round 11's "Wii rebuild NOT verified" caveat: this

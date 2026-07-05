@@ -239,6 +239,17 @@ splash screen, not just difficulty.
       subsystem (VF/VI register files, full VU macro arithmetic) left
       for a future round rather than half-implemented. 4 new checks,
       38-file/0-failure full regression.
+- [x] devkitPro toolchain fully fixed, clean Wii rebuild verified:
+      recovered the missing `cc1` (plain-C GCC front end) from a user-
+      supplied Linux-native `devkitPPC-r32` archive, fixed a dangling
+      `liblto_plugin.so` symlink from the same archive, fetched
+      `libmpfr.so.4` from `archive.debian.org` (cc1 needs an older
+      Debian Stretch-era mpfr than this Ubuntu 22.04 sandbox ships),
+      and built `libfat` from source once real compilation worked.
+      `make clean && make` now completes with 0 warnings/0 errors,
+      producing a real `pcsx2-wii.elf`/`.dol` - the first Wii/devkitPPC
+      rebuild actually verified this session, retroactively confirming
+      rounds 9-12's C changes compile cleanly for the real target.
 - [x] SIF mailbox/flag registers (MSCOM/SMCOM/MSFLAG/SMFLAG/CTRL,
       0x1000F200-0x1000F260), EE side only - `source/hw/sif.c`, wired
       into `ee_core.c`'s 32-bit MMIO dispatch. Register-level

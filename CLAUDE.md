@@ -151,21 +151,31 @@ current, up-to-date status.)
   "round 12" section for the full trace (harnesses in `/tmp/diag/` on
   the machine that did this work - throwaway, not committed).
 
-**devkitPro toolchain**: this sandbox's extraction was missing
-`base_rules`/`base_tools` (fetched from `github.com/devkitPro/
-devkitppc-rules`) and `libogc` (a complete prebuilt copy was already
-sitting unused at `outputs/build/libogc-src/` from an earlier round -
-now symlinked in). Both fixed. One gap remains: `cc1` (the plain-C GCC
-front end) is missing from this devkitPPC 8.1.0 install even though
-`cc1plus`/`lto1` both exist - `pkg.devkitpro.org` blocks automated
-downloads via a Cloudflare JS challenge, and a from-scratch GCC
-bootstrap was judged too slow/uncertain to finish productively. The
-user separately supplied a working `MinGW-powerpc-eabi-13.1.0`
-toolchain (Windows-hosted) - can't run in this Linux sandbox without
-Wine (not installed, ~20 interdependent packages to resolve manually).
-Recommended path: the user runs the actual Wii rebuild verification on
-their own Windows machine with that toolchain. See `docs/STATUS.md`'s
-"devkitPro toolchain gap" section.
+**devkitPro toolchain**: FULLY FIXED, clean Wii rebuild verified. This
+sandbox's extraction was missing `base_rules`/`base_tools` (fetched
+from `github.com/devkitPro/devkitppc-rules`), `libogc` (a complete
+prebuilt copy was sitting unused at `outputs/build/libogc-src/` from an
+earlier round - symlinked in), `cc1` (the plain-C GCC front end -
+`pkg.devkitpro.org` blocks automated downloads via Cloudflare, but the
+user supplied a working Linux-native `devkitPPC-r32-linux-debian-
+stretch.tar.gz` that had it), a `liblto_plugin.so` symlink target
+(missing, recovered from the same r32 archive), `libmpfr.so.4` (cc1
+needs an older Debian Stretch-era mpfr than this Ubuntu 22.04 sandbox
+ships - fetched directly from `archive.debian.org`, no Cloudflare
+issue there), and `libfat` (built from source,
+`github.com/devkitPro/libfat`, once real compilation worked). `make
+clean && make` now completes with **0 warnings, 0 errors**, producing
+a real `pcsx2-wii.elf`/`.dol` - retroactively confirms rounds 9-12's C
+changes compile cleanly for the real target. Full setup documented in
+`outputs/build/devkitpro/TOOLCHAIN_SETUP_NOTES.md` (persists through a
+`/tmp` wipe) plus `docs/STATUS.md`'s toolchain sections. Required env
+for any future build in this sandbox:
+```
+export DEVKITPRO=<path>/outputs/build/devkitpro
+export DEVKITPPC=$DEVKITPRO/devkitPPC
+export PATH=$DEVKITPPC/bin:$PATH
+export LD_LIBRARY_PATH=$DEVKITPPC/lib:$LD_LIBRARY_PATH
+```
 
 **Tool note**: `github.com/hkmodd/PCSX2-MCP` (third-party, not this
 project's own code) gives live debugging access to a real, user-run

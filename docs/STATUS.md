@@ -1178,43 +1178,51 @@ needs - `viswr` first, then whatever comes after it) to get past this
 wall, the same incremental way rounds 9-12 each cleared one wall at a
 time.
 
-### devkitPro toolchain gap (narrowed, not fully closed)
+### devkitPro toolchain: FULLY FIXED, clean Wii rebuild now verified
 
-Following up on round 11's "Wii rebuild NOT verified" caveat: this
-sandbox's `devkitPro` extraction (`outputs/build/devkitpro/`) was
-missing `base_rules`/`base_tools` (fetched from
-`github.com/devkitPro/devkitppc-rules`, a small public repo - no
-Cloudflare issue there) and `libogc` (found a complete, already-
-extracted prebuilt copy sitting unused at `outputs/build/libogc-src/`
-from an earlier round - symlinked to `$(DEVKITPRO)/libogc`). Both
-fixed. `make` now gets all the way to actually invoking the compiler,
-where it hits the one remaining gap: **`cc1` (the plain-C GCC front
-end) is missing** from this devkitPPC 8.1.0 extraction, even though
-`cc1plus` (C++) and `lto1` both exist in the same install - a partial/
-corrupted original extraction, not something these fixes could
-recover. The official source (`pkg.devkitpro.org`) blocks automated
-downloads behind a Cloudflare JS challenge that isn't something to try
-to route around. Attempted a from-scratch GCC bootstrap using the
-sandbox's own host gcc/binutils (existing powerpc-eabi binutils are
-present and working) but judged the dependency chain (gmp/mpfr/mpc
-headers, full GCC configure/build cycle) too slow/uncertain to
-complete productively this round - not attempted further.
+Direct follow-up to the toolchain gap noted above. The user supplied a
+second upload, `devkitPPC-r32-linux-debian-stretch.tar.gz` - a real,
+Linux-native devkitPPC release (not the earlier Windows/MinGW one,
+which still can't run in this sandbox without Wine). This archive's
+`libexec/gcc/powerpc-eabi/8.1.0/cc1` is the exact missing piece.
 
-The user separately supplied a complete, working
-`MinGW-powerpc-eabi-13.1.0` toolchain (Windows/MinGW-hosted, all
-`.exe`/`.dll` - includes a working `cc1.exe`). This can't run directly
-in this Linux sandbox (no Wine installed; installing one without root
-means manually resolving ~20 interdependent packages, judged not worth
-pursuing here). **Recommended path**: the user can do the actual Wii/
-devkitPPC rebuild verification directly on their own Windows machine
-using this toolchain (point `DEVKITPPC`/`DEVKITPRO` at the extracted
-zip, fetch `libogc` + `base_rules`/`wii_rules` the same way this round
-did, run the bundled `make.exe` against this repo) - likely faster and
-more reliable than continuing to fight this sandbox's toolchain gap.
+Copied it in directly (same gcc version, 8.1.0, as this sandbox's
+existing extraction). Hit two more small gaps while verifying it
+actually runs, both resolved:
+- `liblto_plugin.so` was a dangling symlink (target `.so.0.0.0` file
+  missing) - recovered from the same r32 archive.
+- `cc1` itself needs `libmpfr.so.4` (built against an older Debian
+  Stretch userland), but this Ubuntu 22.04 sandbox only ships
+  `libmpfr.so.6`. Fetched `libmpfr4_3.1.5-1_amd64.deb` directly from
+  `archive.debian.org` (Debian's permanent archive for EOL releases -
+  no Cloudflare issue, unlike `pkg.devkitpro.org`) and placed just the
+  `.so` under `devkitPPC/lib/` (not installed system-wide).
 
-**Next step (round 12, not started)**: implement COP2/VU0 macro mode
-(at minimum enough of it to get past `pc=0x8000B1FC`), and/or complete
-the devkitPro toolchain extraction to restore Wii rebuild verification.
+With `cc1` finally working, `make` reached one more gap: `libfat`
+(`fat.h`, `-lfat`) wasn't present anywhere in this sandbox. Since the
+toolchain now genuinely worked, built it directly from source
+(`github.com/devkitPro/libfat`, `make wii-release`) - a small, simple
+library, quick to build once real compilation worked at all.
+
+**Result: `make clean && make` now completes with 0 warnings, 0
+errors**, producing `pcsx2-wii.elf` (a real, statically-linked 32-bit
+big-endian PowerPC ELF, confirmed via `file`) and `pcsx2-wii.dol`. This
+is the first time in this session the Wii/devkitPPC build has actually
+been verified end to end - retroactively confirms rounds 9-12's C
+changes (the EE timer interrupt work, MCH_RICM/MCH_DRD, the KSEG0/1
+addressing fix, DADDI/DADDIU, and the new COP2 dispatch) all compile
+cleanly for the real target, not just the host-native test suite.
+
+Full setup documented in `outputs/build/devkitpro/
+TOOLCHAIN_SETUP_NOTES.md` (persisted alongside the toolchain itself,
+survives a `/tmp` wipe) so this doesn't need to be rediscovered.
+Required env for any future build in this sandbox:
+```
+export DEVKITPRO=<path>/outputs/build/devkitpro
+export DEVKITPPC=$DEVKITPRO/devkitPPC
+export PATH=$DEVKITPPC/bin:$PATH
+export LD_LIBRARY_PATH=$DEVKITPPC/lib:$LD_LIBRARY_PATH
+```
 
 ### EE JALR investigation, round 10: idle loop confirmed dead code on real hardware; root cause fully traced to a BIOS clock-calibration loop whose retry budget this project's timing model exhausts too early
 

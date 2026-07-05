@@ -600,7 +600,19 @@ unlike psx-spx/ps2tek elsewhere in this project, so no fix is being
 applied rather than fabricate BIOS-internal behavior. See
 docs/STATUS.md's "round 3" section for the full reasoning and the two
 honest paths forward (a real COP0 TLB/exception system as its own
-feature, or accepting this as a documented limitation for now). The
+feature, or accepting this as a documented limitation for now). A
+fourth round used the real BIOS dump itself as ground truth (the user's
+own legal dump - disassembling it is not fabrication): this killed the
+EE-SYSCALL-exception hypothesis outright (SYSCALL fires zero times in
+150K instructions), confirmed the interpreter never actually halts
+after the bad JALR (it wanders through zeroed memory for 3M+ more
+instructions, `RAM[0x100]` staying zero throughout), and chased down
+what looked like a strong lead - an apparent copy loop whose `LW`/`SW`
+instructions read back as zero - only to resolve it as an ordinary,
+expected heap-allocator initialization pattern (a real BIOS routine at
+`pc=0xBFC4D30C` zeroing one word per 16 bytes across low RAM, ordinary
+free-list-header clearing, not a bug). Root cause is still open; see
+docs/STATUS.md's "round 4" section for the full trace. The
 IOP has no known halt point left
 to chase at all right now; COP2/VU0 remains unstarted and unproven
 against real BIOS code, since the EE hasn't legitimately run far

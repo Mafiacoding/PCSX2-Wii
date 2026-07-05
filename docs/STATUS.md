@@ -513,6 +513,97 @@ verifiable work (remaining MMI opcodes, COP2/VU0, GS rasterization),
 revisiting this if a citable reference for EE pre-boot RAM content is
 ever found.
 
+### EE JALR investigation, round 4: real BIOS disassembly - a false lead resolved, a real lead found and also resolved
+
+Since the user owns this BIOS dump (their own legally-dumped SCPH-10000),
+disassembling and tracing the actual ROM/RAM instruction stream is not
+fabrication - it is ground truth from real hardware, exactly like citing
+`pcsx2-src` elsewhere in this project. This round built a small
+disassembler (`regname()`/`disasm()` covering the opcodes this project
+implements) as a throwaway `/tmp` tool and used it to look directly at
+what the real BIOS executes around the JALR failure, rather than reason
+about it abstractly.
+
+**First, the SYSCALL hypothesis floated at the start of this round was
+tested and killed in under two minutes.** A simple counter confirmed EE
+`SYSCALL` (SPECIAL funct `0x0C`) fires **zero times** in the first
+150,000 instructions of boot - well past the JALR failure point at
+#099,261. A missing EE syscall-table implementation (this project's
+`SYSCALL` case still just calls `halt()`) cannot be the cause of this
+specific bug, so building full EE BIOS-syscall HLE (a large undertaking,
+modeled on the IOP's existing HLE trap) was correctly not pursued as a
+"fix" for this issue - it would have been wasted, wrongly-motivated
+effort.
+
+**Also newly confirmed: the interpreter does not actually halt after the
+bad JALR.** Running 3,000,000 further instructions past the jump to
+`0x03400008` shows the EE simply continues executing - it wanders
+through effectively-zeroed memory (decoding zero words as `SLL $0,$0,0`,
+i.e. NOP) and never halts, never raises a second out-of-range jump, and
+`RAM[0x100]` is confirmed to stay zero for the entire 3M-instruction
+extension, not just the original ~99K. Whatever should write it, it
+never happens - not late, not ever, in this model.
+
+**A promising-looking lead, investigated and resolved as a false alarm.**
+Full-trace disassembly around instructions #098,890-#099,020 showed a
+tight loop at `pc=0x00000EE0-0x00000EEC` that looked, at first read, like
+a `memcpy`-style copy loop (`LW $v1,0($k0)` / `ADDIU $k0,$k0,4` /
+`ADDIU $v0,$v0,4` / `BNE $k0,$k1,loop` / `SW $v1,-4($v0)` in the delay
+slot) - except the `LW` and `SW` words at that address now read back as
+zero (decoding as NOP), meaning the loop increments two pointers from
+`$k0=0x2cbc` to `0x2d24` and `$v0=0x80001dc0` to `0x80001e28` but
+transfers nothing. Tracing back further found exactly why: a real BIOS
+ROM routine at `pc=0xBFC4D30C-0xBFC4D330` runs earlier (~instruction
+#084,143-#099,020, sweeping forward in 128-byte strides) that does:
+
+```
+SW $zero, 0($t2)
+SW $zero, 16($t2)
+SW $zero, 32($t2)
+SW $zero, 48($t2)
+SW $zero, 64($t2)
+SW $zero, 80($t2)
+SW $zero, 96($t2)
+SW $zero, 112($t2)
+BNE $t2, $t3, loop
+ADDIU $t2, $t2, 128     ; delay slot
+```
+
+This zeroes exactly one 4-byte word out of every 16 bytes across a wide
+sweep of low RAM (confirmed hitting the trampoline bytes at RAM 0-15
+from round 2, and the `0xEC0-0xEF3` region from this round). Once the
+full pattern was visible, this turned out **not** to be a bug: writing a
+single word per 16-byte-aligned block, over and over across a large
+region, is the classic shape of a real kernel heap-allocator
+initialization (zeroing a per-block size/flags header while leaving the
+rest of each block alone) - not a copy-loop-destroying defect. The
+earlier-looking "copy loop" at `0xEE0` was a coincidence of the same
+address being reused for temporary decompression-stub code much earlier
+in boot (confirmed via a byte-level shadow-diff: a real decompressor
+running at `pc=0xBFC5881C` writes genuine instruction bytes there around
+instruction #029,531-#029,621) and later reused as ordinary heap data -
+the fact that stale heap bytes still happened to *decode* as a
+plausible-looking `LW`/`SW` pair when the CPU (wrongly) reached that
+address as code again is a red herring, not a smoking gun.
+
+**Net result of this round**: two more hypotheses were tested against
+the real BIOS directly instead of guessed at - one (SYSCALL) is now
+definitively ruled out, and one (the "vanished copy loop") looked like a
+strong lead but resolved into an ordinary, expected heap-init pattern
+once fully traced. The actual root cause - why control flow reaches
+`pc=0x00000EE0`/the trampoline/the `0x100` pointer chase as code at all,
+given the region is legitimately reused as heap data by that point - is
+still open. Making further progress here would need a genuine reference
+point this project does not have access to: either a symbol-annotated
+disassembly of this exact BIOS revision's kernel, or a side-by-side
+instruction trace from a known-working PS2 emulator/real hardware to
+diff against. Absent that, continuing to guess at control-flow intent
+from raw disassembly alone has hit steeply diminishing returns for the
+time invested. No source code was changed this round - all tools used
+(`syscall_check.c`, `watch_0x100.c`, `flow_trace.c`, `disasm.c`,
+`watch_loop_region.c`, `dump_clear_routine.c`) were throwaway `/tmp`
+diagnostics per the standing policy, never committed.
+
 ### FPU accumulator (ACC) family implemented
 
 Added the last 7 COP1.S opcodes needed for the FPU's ACC register:

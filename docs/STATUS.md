@@ -516,6 +516,40 @@ Regression: full test suite (28 test files total, including this new
 one) all pass 0 failures. Wii/devkitPPC target rebuilds clean with no
 warnings.
 
+### PSLLVW/PSRLVW added
+
+Added `PSLLVW`/`PSRLVW` (MMI2, `sa` 0x02/0x03), ported from PCSX2's
+`MMI.cpp`: a variable logical shift of a word pair - Rt's word lanes
+0 and 2, each shifted by the shift amount taken from the
+CORRESPONDING lane of Rs (lane 0's amount from Rs lane 0, lane 2's
+amount from Rs lane 2, masked to 5 bits - the standard MIPS
+variable-shift convention). Each 32-bit result is sign-extended to 64
+bits into `gpr.ud0`/`gpr.ud1` (matching every other 32-bit GPR result
+in this file via the existing `sext32()` helper), but the shift
+operation itself is a plain logical shift with no sign propagation -
+worth stating explicitly since both facts are true at once and can
+read as contradictory: `PSRLVW` of `0x80000000 >> 4` gives
+`0x08000000` (no 1-bits shifted in from the top), but that 32-bit
+result is still sign-extended afterward like any other GPR value
+(irrelevant here since the top bit of the *result* happens to be 0,
+but would matter for a different shift amount).
+
+Picked as a small, self-contained next step after finishing the MMI2/
+MMI3 permute family - these two need no HI/LO interaction, unlike the
+next real chunk of remaining MMI work (the `PMADDW`/`PMSUBW`/`PMULTW`
+family), which PCSX2's own source flags with a real-hardware
+"division voodoo" rounding correction that will need extra care to
+port faithfully rather than being ported naively.
+
+Unit tested in `tests/test_ee_mmi_pvshift.c`, 6/6 checks - confirms
+the 5-bit shift-amount masking (amount 35 behaves like 3), that
+`PSLLVW` sign-extends a bit-31-set result to 64 bits, and that
+`PSRLVW`'s shift itself doesn't propagate the sign bit.
+
+Regression: full test suite (29 test files total, including this new
+one) all pass 0 failures. Wii/devkitPPC target rebuilds clean with no
+warnings.
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

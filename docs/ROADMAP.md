@@ -56,11 +56,25 @@ splash screen, not just difficulty.
       (32/32 checks, using distinct position-identifiable lane values
       so a wrong permutation shows up immediately). Brings EE MMI
       coverage from ~56 to ~65 of the roughly 90 real opcodes.
-- [ ] Remaining ~25 MMI opcodes: QFSRV (needs the SA hardware register
+- [x] PSLLVW/PSRLVW (MMI2, variable logical shift of a word pair -
+      Rt's lanes 0/2, each shifted by the shift amount taken from the
+      CORRESPONDING lane of Rs - lane 0's amount from Rs lane 0, lane
+      2's amount from Rs lane 2, masked to 5 bits). Each 32-bit
+      result is sign-extended to 64 bits into gpr.ud0/ud1 (matching
+      every other 32-bit GPR result in this file), but the shift
+      itself is a plain logical shift with no sign propagation -
+      PSRLVW of `0x80000000 >> 4` is `0x08000000`, not `0xF8000000`.
+      Ported from PCSX2's `MMI.cpp`. Unit tested in
+      `tests/test_ee_mmi_pvshift.c` (6/6 checks). Brings EE MMI
+      coverage from ~65 to ~67 of the roughly 90 real opcodes.
+- [ ] Remaining ~23 MMI opcodes: QFSRV (needs the SA hardware register
       and MTSA/MTSAB/MTSAH to set it, none of which exist yet);
       PMADDW/H, PMSUBW/H, PMULTW/H, PDIVW/PDIVBW, PMULTUW/PDIVUW/
-      PMADDUW (the remaining MMI2/MMI3 HI/LO-touching arithmetic);
-      PMFHL/PMTHL clamping variants
+      PMADDUW (the remaining MMI2/MMI3 HI/LO-touching arithmetic -
+      PMADDW/PMSUBW in particular have a documented real-hardware
+      "division voodoo" rounding quirk in PCSX2's own source worth
+      extra care when eventually ported); PMFHL/PMTHL clamping
+      variants
 - [x] LWL/LWR/SWL/SWR (unaligned word load/store) - ported from
       R5900OpcodeImpl.cpp, unit tested in `tests/test_ee_unaligned.c`
       (also gave the IOP core this ability first, then brought it to

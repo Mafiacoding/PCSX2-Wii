@@ -27,16 +27,18 @@
  *     be set other than explicit MTC0 writes).
  *   - CACHE, SYNC, PREF: accepted as no-ops (real BIOS init code issues
  *     these constantly for cache management we don't model).
- *   - A meaningful subset (~65 of ~90) of MMI (SIMD) opcodes: the
+ *   - A meaningful subset (~67 of ~90) of MMI (SIMD) opcodes: the
  *     add/sub/logic/copy/extend/pack family across byte/half/word
  *     lanes, the "pipeline 1" MULT1/DIV1/MFHI1/MFLO1 family, the
  *     compare/max/min/abs family (PCGTW/H/B, PMAXW/H, PCEQW/H/B,
  *     PMINW/H, PABSW/H, PADSBH), the saturated add/sub family
  *     (PADDSW/H/B, PSUBSW/H/B - clamp to the lane width's min/max
  *     instead of wrapping), PEXT5/PPAC5 (GS 5551-pixel-format
- *     unpack/pack, completing MMI0's sub-table entirely), and the
+ *     unpack/pack, completing MMI0's sub-table entirely), the
  *     MMI2/MMI3 permute/interleave family (PINTH/PINTEH, PEXEH/PEXCH,
- *     PEXEW/PEXCW, PREVH, PCPYH, PROT3W).
+ *     PEXEW/PEXCW, PREVH, PCPYH, PROT3W), and PSLLVW/PSRLVW
+ *     (variable logical shift of a word pair, each lane shifted by
+ *     its own per-lane shift amount).
  *   - LQ/SQ (128-bit load/store, primary opcodes 0x1E/0x1F) - ported
  *     from PCSX2's R5900OpcodeImpl.cpp. Address masked to 16-byte
  *     alignment (real hardware silently ignores the low 4 bits rather
@@ -50,11 +52,13 @@
  *     VU0 data staging.
  *
  * Still NOT implemented (halts cleanly, does not crash):
- *   - The other ~25 MMI opcodes (QFSRV - needs the SA hardware
+ *   - The other ~23 MMI opcodes (QFSRV - needs the SA hardware
  *     register and MTSA/MTSAB/MTSAH to set it, none of which exist
  *     yet; PMADDW/H, PMSUBW/H, PMULTW/H, PDIVW/PDIVBW, PMULTUW/
  *     PDIVUW/PMADDUW - the remaining MMI2/MMI3 HI/LO-touching
- *     arithmetic; PMFHL/PMTHL clamping variants)
+ *     arithmetic, some with documented real-hardware rounding quirks
+ *     in PCSX2's own source worth extra care when ported; PMFHL/PMTHL
+ *     clamping variants)
  *   - COP2 (VU0 macro mode)
  *   - COP1 (FPU): core arithmetic (ADD/SUB/MUL/DIV/ABS/MOV/NEG.S,
  *     SQRT.S/RSQRT.S, MAX.S/MIN.S, CVT.W.S/CVT.S.W, C.EQ/LT/LE.S,
@@ -1185,6 +1189,30 @@ static int ee_step(void)
                 break;
             case 0x12: /* PAND */ if (rd) { st->gpr[rd].ud0 = st->gpr[rs].ud0 & st->gpr[rt].ud0; st->gpr[rd].ud1 = st->gpr[rs].ud1 & st->gpr[rt].ud1; } break;
             case 0x13: /* PXOR */ if (rd) { st->gpr[rd].ud0 = st->gpr[rs].ud0 ^ st->gpr[rt].ud0; st->gpr[rd].ud1 = st->gpr[rs].ud1 ^ st->gpr[rt].ud1; } break;
+            case 0x02: /* PSLLVW - variable logical-left-shift of two
+                        * word lanes (Rt's lanes 0/2), each shifted by
+                        * its OWN shift amount taken from the
+                        * corresponding lane of Rs (lane 0's amount
+                        * from Rs lane 0, lane 2's amount from Rs lane
+                        * 2 - masked to 5 bits, standard MIPS variable-
+                        * shift convention), sign-extended to 64 bits
+                        * into gpr.ud0/ud1. Ported from PCSX2's
+                        * PSLLVW(). */
+                if (rd) {
+                    ee_reg128_t Rs = st->gpr[rs], Rt = st->gpr[rt];
+                    st->gpr[rd].ud0 = sext32(lane_w(Rt, 0) << (lane_w(Rs, 0) & 0x1F));
+                    st->gpr[rd].ud1 = sext32(lane_w(Rt, 2) << (lane_w(Rs, 2) & 0x1F));
+                }
+                break;
+            case 0x03: /* PSRLVW - same as PSLLVW but a variable
+                        * LOGICAL right shift (not arithmetic), ported
+                        * from PCSX2's PSRLVW(). */
+                if (rd) {
+                    ee_reg128_t Rs = st->gpr[rs], Rt = st->gpr[rt];
+                    st->gpr[rd].ud0 = sext32(lane_w(Rt, 0) >> (lane_w(Rs, 0) & 0x1F));
+                    st->gpr[rd].ud1 = sext32(lane_w(Rt, 2) >> (lane_w(Rs, 2) & 0x1F));
+                }
+                break;
             case 0x0A: /* PINTH - interleaves the low halfword lanes of
                         * Rt with the HIGH halfword lanes of Rs, ported
                         * from PCSX2's PINTH(). Note it's Rs's UPPER 4

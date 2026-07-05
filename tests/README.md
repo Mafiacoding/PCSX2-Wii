@@ -677,3 +677,28 @@ register and MTSA/MTSAB/MTSAH to set it, none of which exist yet),
 the remaining MMI2/MMI3 HI/LO-touching arithmetic (PMADDW/H, PMSUBW/H,
 PMULTW/H, PDIVW/PDIVBW, PMULTUW/PDIVUW/PMADDUW), and PMFHL/PMTHL
 clamping variants.
+
+`test_ee_mmi_pvshift.c` covers `ee_core.c`'s PSLLVW/PSRLVW (MMI2
+variable-shift word-pair opcodes), ported from PCSX2's `MMI.cpp`.
+6/6 checks. Confirms the shift amount is masked to 5 bits (an amount
+of 35 behaves identically to 3), that PSLLVW's 32-bit result is
+sign-extended to 64 bits when bit 31 is set (proving it isn't a plain
+zero-extending shift), and that PSRLVW is a genuinely LOGICAL right
+shift - `0x80000000 >> 4` gives `0x08000000`, not `0xF8000000` -
+even though the final 32-bit result is still sign-extended to 64 bits
+afterward like every other GPR result in this file (the two facts
+don't contradict: no sign propagates *during* the shift, but the
+*result* of the shift is sign-extended same as any other 32-bit
+value stored into a GPR). Needs the same link set as the other
+`ee_core.c` tests:
+
+```sh
+gcc -I../include -I../source -o test_ee_mmi_pvshift tests/test_ee_mmi_pvshift.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c
+./test_ee_mmi_pvshift
+```
+
+Still not implemented on the MMI side: QFSRV (needs the SA hardware
+register and MTSA/MTSAB/MTSAH to set it, none of which exist yet),
+the remaining MMI2/MMI3 HI/LO-touching arithmetic (PMADDW/H, PMSUBW/H,
+PMULTW/H, PDIVW/PDIVBW, PMULTUW/PDIVUW/PMADDUW), and PMFHL/PMTHL
+clamping variants.

@@ -1443,6 +1443,40 @@ Wii/devkitPPC target rebuilds clean with 0 warnings/0 errors (after
 fixing the buffer-size/NLOOP bug above, which the target compiler's
 `-Warray-bounds` caught on the first attempt).
 
+### Clock-rate-aware EE:IOP scheduler (8:1, was 1:1)
+
+Direct follow-up to wiring the real GIF-packet demo above, picking up
+another item from `docs/ROADMAP.md`'s "remaining near-term candidates"
+list. `system_run_interleaved()` (`source/core/system.c`) previously
+stepped the EE and IOP one instruction each per slice - a deliberately
+simple round-robin, explicitly documented in `system.h` as not
+clock-rate-accurate. Real hardware's EE runs at ~294.912 MHz and the
+IOP at ~36.864 MHz, a ratio of roughly 8:1 - this was already the
+project's own stated target ratio (see `system.h`'s prior wording),
+just not implemented yet.
+
+Added `EE_IOP_STEP_RATIO` (8) in `system.c`: each "slice" now steps
+the EE up to 8 times (respecting `ee->halted`) before stepping the IOP
+once, instead of 1:1. This is explicitly still NOT cycle-accurate -
+different MIPS instructions take different real cycle counts on both
+cores, and none of that is modeled - it's a ratio-aware approximation
+that gives each core roughly the right SHARE of total instructions per
+slice, an honest incremental improvement over the previous 1:1
+stepping rather than a claim of real timing fidelity. Both `system.h`
+and `system.c`'s doc comments were updated to describe this precisely
+rather than leaving the old "left for later" wording in place.
+
+No new dedicated test file: `tests/test_system_handshake.c` (the only
+existing consumer of `system_run_interleaved()`) already uses a
+generous slice cap (2000) and only asserts that both cores halt within
+it and that the SIF handshake data round-trips correctly - not exact
+instruction/slice counts - so it exercises the new ratio automatically
+and still passes unchanged, which is itself a meaningful regression
+check (a ratio bug that starved one core would show up as the slice
+cap being hit instead of a clean mutual halt). Full regression (46
+host-native test files) passes with 0 failures, and the Wii/devkitPPC
+target rebuilds clean with 0 warnings/0 errors.
+
 ### Round 14: IOP-side investigation - the EE's SIF-polling steady state is real, and a genuine IOP wild-jump root-caused and hardened against
 
 Direct follow-up to round 13's finding that the EE settles into a

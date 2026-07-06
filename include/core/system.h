@@ -13,17 +13,19 @@
  * vice versa), which can't happen if one core runs to completion
  * before the other starts at all.
  *
- * This is a deliberately simple round-robin scheduler: one EE
- * instruction, then one IOP instruction, repeat. Real hardware
- * doesn't schedule this way (both cores just run continuously at
- * their own clock rates), and a cycle-accurate scheduler would need
- * to account for the EE's ~294MHz vs the IOP's ~33MHz clock (roughly
- * 8:1) rather than 1:1 stepping - that refinement is left for later
- * (see docs/ROADMAP.md). What this does provide, for the first time
- * in this project, is genuine cross-CPU visibility: a write the EE
- * makes to a SIF register is visible to the IOP on its very next
- * step, and vice versa, which is enough to prove out a real
- * handshake protocol (see tests/test_system_handshake.c).
+ * This is a round-robin scheduler: EE_IOP_STEP_RATIO (8, matching
+ * real hardware's ~294MHz EE vs ~33-36MHz IOP clock ratio - see
+ * system.c) EE instructions, then one IOP instruction, repeat. This is
+ * NOT cycle-accurate (different MIPS instructions take different real
+ * cycle counts on both cores, none of which is modeled) - it's a
+ * ratio-aware approximation, an improvement over this project's
+ * original 1:1 stepping but still an honest simplification, not a
+ * claim of real timing fidelity. What this does provide, for the
+ * first time in this project, is genuine cross-CPU visibility: a
+ * write the EE makes to a SIF register is visible to the IOP on its
+ * very next step (rather than after a whole separate run-to-
+ * completion pass), and vice versa, which is enough to prove out a
+ * real handshake protocol (see tests/test_system_handshake.c).
  */
 #ifndef PCSX2_WII_SYSTEM_H
 #define PCSX2_WII_SYSTEM_H
@@ -37,7 +39,8 @@
  * CPUs - or different ones. Returns 0 on success. */
 int system_init(const bios_image_t *ee_bios, const bios_image_t *iop_bios);
 
-/* Steps the EE and IOP alternately (one instruction each per slice)
+/* Steps the EE and IOP alternately (EE_IOP_STEP_RATIO, currently 8,
+ * EE instructions per 1 IOP instruction per slice - see system.c)
  * until both cores have halted, or until max_slices slices have run -
  * whichever comes first. Pass max_slices == 0 for no limit (real
  * hardware has none; used by main.c). Host-native tests should pass a

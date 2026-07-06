@@ -214,6 +214,16 @@ current, up-to-date status.)
   `-Warray-bounds` warning on the first build attempt. 11 new checks
   (`tests/test_dma_gif_demo.c`, mirrors main.c's exact packet logic
   host-natively), 46-file/0-failure regression, clean Wii rebuild.
+- **Clock-rate-aware EE:IOP scheduler (8:1, was 1:1)**:
+  `system_run_interleaved()` (`source/core/system.c`) now steps the EE
+  `EE_IOP_STEP_RATIO` (8) times per 1 IOP step per slice, approximating
+  real hardware's ~294MHz EE vs ~36MHz IOP clock ratio instead of the
+  previous naive 1:1 round-robin - still explicitly NOT cycle-accurate
+  (per-instruction cycle costs aren't modeled), an honest ratio-aware
+  approximation only. `tests/test_system_handshake.c` (the only
+  existing consumer) exercises the new ratio automatically via its
+  generous slice cap and passes unchanged - no new test file needed.
+  46-file/0-failure regression, clean Wii rebuild.
 
 **devkitPro toolchain**: FULLY FIXED, clean Wii rebuild verified. This
 sandbox's extraction was missing `base_rules`/`base_tools` (fetched

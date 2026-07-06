@@ -318,6 +318,17 @@ splash screen, not just difficulty.
       11 new checks in `tests/test_dma_gif_demo.c` (mirrors main.c's
       exact packet logic host-natively), 46-file/0-failure full
       regression, clean Wii rebuild.
+- [x] Clock-rate-aware EE:IOP scheduler (8:1, was 1:1) -
+      `system_run_interleaved()` now steps the EE `EE_IOP_STEP_RATIO`
+      (8) times per 1 IOP step per slice, approximating real
+      hardware's ~294MHz EE vs ~36MHz IOP clock ratio instead of the
+      previous naive 1:1 round-robin. Still explicitly NOT
+      cycle-accurate (per-instruction cycle costs aren't modeled on
+      either core) - an honest, ratio-aware approximation, not a
+      timing-fidelity claim. `tests/test_system_handshake.c` (the only
+      existing consumer) exercises the new ratio automatically via its
+      generous slice cap and still passes unchanged. 46-file/0-failure
+      full regression, clean Wii rebuild.
 - [x] SIF mailbox/flag registers (MSCOM/SMCOM/MSFLAG/SMFLAG/CTRL,
       0x1000F200-0x1000F260), EE side only - `source/hw/sif.c`, wired
       into `ee_core.c`'s 32-bit MMIO dispatch. Register-level
@@ -962,10 +973,9 @@ unblock "the BIOS actually draws something": IOP hardware register
 stubs (INTC/DMA/timers) and/or IOP HLE stubs for the specific
 BIOS-boot-path modules (both are needed before real BIOS code - as
 opposed to hand-written test programs - can get through a real SIF
-handshake), a clock-rate-aware EE:IOP scheduler (currently 1:1
-instruction stepping, real hardware is roughly 8:1), texturing for the
-triangle rasterizer (Gouraud shading and wiring a real GIF packet
-through `dma_channel_kick` at boot are both DONE now - see above), and
+handshake), texturing for the triangle rasterizer (Gouraud shading, a
+clock-rate-aware 8:1 EE:IOP scheduler, and wiring a real GIF packet
+through `dma_channel_kick` at boot are all DONE now - see above), and
 VIF0/VIF1 passthrough.
 
 Step 7 (real GX-based rendering with textures) is where this stops

@@ -198,6 +198,49 @@ static int iop_step(void)
         return 0;
     }
 
+    /* Guard against PC escaping into memory this project doesn't
+     * model as real, fetchable code (round 14 finding: a live-traced
+     * real BIOS boot path executes a genuine JALR $s1 whose target
+     * looks like a cross-address-space pointer - plausible as an
+     * EE-RAM module image location a real IOP module/IRX loader
+     * would DMA-copy locally before jumping to it - but this
+     * project's iop_hle_modules.c deliberately doesn't implement
+     * real module loading, so no such code is ever actually present).
+     * Before this check, an out-of-range fetch silently read back 0
+     * (a NOP) forever, letting execution "wander" through effectively
+     * unmapped memory for tens of millions of steps until it
+     * coincidentally hit a non-zero MMIO register value and halted on
+     * a confusing, unrelated-looking illegal-opcode message. Detecting
+     * the escape immediately and halting with a clear, honest
+     * diagnostic is far more useful - see docs/STATUS.md's
+     * "round 14" section for the full trace. */
+    {
+        int pc_is_fetchable;
+        if (pc >= IOP_RESET_VECTOR) {
+            uint32_t off = pc - IOP_RESET_VECTOR;
+            pc_is_fetchable = (st->bios && off + 4 <= st->bios->size);
+        } else {
+            uint32_t phys = pc & 0x1FFFFFFFu;
+            pc_is_fetchable = (phys + 4 <= st->ram_size);
+        }
+        if (!pc_is_fetchable) {
+            /* Kept short and %lX-formatted (not %X) on purpose: this
+             * message is copied into halt_reason[128] by halt()'s
+             * strncpy, and uint32_t is a `long` on this project's
+             * PowerPC/Wii build target - a plain %X here mismatches
+             * the promoted argument type and warns under devkitPPC's
+             * gcc (caught by this round's "0 warnings" Wii rebuild
+             * check, not by the host-native test suite, which uses a
+             * 32-bit-int-width host where the mismatch is silent). */
+            static char msg[96];
+            snprintf(msg, sizeof(msg),
+                     "PC escaped to unfetchable addr 0x%08lX (unloaded IOP module - see STATUS.md round 14)",
+                     (unsigned long)pc);
+            halt(msg);
+            return 1;
+        }
+    }
+
     uint32_t instr = iop_mem_read32(st, pc);
 
     uint32_t op    = (instr >> 26) & 0x3F;

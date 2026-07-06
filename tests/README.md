@@ -974,3 +974,22 @@ round-trip via the same idiom writes and reads back correctly.
 gcc -I../include -I../source -o test_ee_ldl_ldr_sdl_sdr tests/test_ee_ldl_ldr_sdl_sdr.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_ldl_ldr_sdl_sdr
 ```
+
+`test_iop_pc_guard.c` covers "round 14" - the new IOP PC fetch-sanity
+guard in `iop_step()`. Round 14 found a live BIOS boot path where the
+IOP executes a genuine `JALR $ra,$s1` whose target only a real IOP
+module/IRX loader (out of scope, see `iop_hle_modules.c`) would ever
+populate; before this round, fetching from such an address silently
+returned 0 (a NOP) forever, letting the IOP "wander" through unmapped
+memory for tens of millions of steps before coincidentally halting on
+a confusing, unrelated-looking illegal opcode picked up from the SIF
+register mirror's non-zero reset default. 7 checks: a deliberately
+wild JALR halts within a handful of steps with a message naming both
+the escape and the exact offending address; a JALR to a real, valid
+BIOS ROM address still works exactly as before (correct link-register
+value), proving the guard doesn't break legitimate control flow.
+
+```sh
+gcc -I../include -I../source -o test_iop_pc_guard tests/test_iop_pc_guard.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c
+./test_iop_pc_guard
+```

@@ -173,6 +173,21 @@ current, up-to-date status.)
   on a disc-less boot, not a new bug. 16 new checks across two test
   files, 40-file/0-failure regression. See `docs/STATUS.md`'s "round
   13" section for the full trace.
+- **Round 14 - IOP-side investigation**: running the EE+IOP
+  interleaved (not EE-only, like round 13's own diagnostic) confirms
+  round 13's EE steady state is real, and finds the IOP hits its own
+  genuine wall almost immediately: a live-traced `JALR $ra,$s1` with
+  `$s1` holding `0x03400008` - an address only a real IOP module/IRX
+  loader would ever populate (this project's `iop_hle_modules.c` is an
+  explicit scaffold, not a real loader - not fabricated further, same
+  policy as ever). Added a PC fetch-sanity guard to `iop_step()`
+  (`source/core/iop/iop_core.c`): any fetch address outside real IOP
+  RAM/BIOS ROM now halts immediately with a clear diagnostic naming
+  the exact address, instead of silently reading back 0 (a NOP)
+  forever and "wandering" through unmapped memory for tens of millions
+  of steps before halting confusingly far away. 7 new checks
+  (`tests/test_iop_pc_guard.c`), 44-file/0-failure regression, clean
+  Wii rebuild.
 
 **devkitPro toolchain**: FULLY FIXED, clean Wii rebuild verified. This
 sandbox's extraction was missing `base_rules`/`base_tools` (fetched

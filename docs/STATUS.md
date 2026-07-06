@@ -1346,6 +1346,82 @@ target rebuilds clean with 0 warnings/0 errors (fixed 4 new
 `-Wmisleading-indentation` warnings from a compact bounding-box
 one-liner along the way).
 
+### Round 14: IOP-side investigation - the EE's SIF-polling steady state is real, and a genuine IOP wild-jump root-caused and hardened against
+
+Direct follow-up to round 13's finding that the EE settles into a
+bounded loop polling SIF_SMFLG after 300M+ steps. Round 13's own
+diagnostic only ran the EE in isolation (no IOP execution at all), so
+the natural next question was: does actually running the IOP
+alongside the EE (via `system_run_interleaved`, this project's
+existing interleaved scheduler) change that picture?
+
+**Short answer: no, but for an interesting, deeper reason.** Running
+both cores together for the same 300M-step budget, the EE stays
+exactly where round 13 found it (still polling SMFLAG, still a
+legitimate steady state), while the **IOP halts almost immediately**
+- after only ~111,000 real instructions - hitting a genuine, honest
+bug of its own.
+
+**Root cause, traced precisely**: a host-native diagnostic
+(`/tmp/diag/round14_iop_pc_bounds.c`) found the IOP's PC leaving all
+sane bounds (not IOP RAM, not BIOS ROM) at instruction ~3,054,825,
+jumping from `0x00000E0C` straight to `0x03400008`. Backtracking one
+more instruction and reading the actual word our own RAM held there
+(`0x0220F809`) decodes cleanly as a real, valid MIPS instruction:
+**`JALR $ra, $s1`** - and `$s1` held exactly `0x03400008`, an address
+inside neither IOP RAM (2MB) nor the BIOS ROM window. A live PCSX2
+disassembly of the surrounding addresses (`0x00000D74`-`0x00000E20`)
+confirmed this region is a real kernel routine (a linked-list/heap-
+style walker: `andi`/`srl`/`sltu`/`lw ...,4(t0)`/`bnez` in a tight
+loop) - genuine BIOS code, not garbage - but the *specific* value
+loaded into `$s1` only makes sense as a pointer a real IOP module/IRX
+loader would populate once it actually copies a module image into IOP
+RAM and jumps to it locally. This project's `iop_hle_modules.c` has
+always been an explicit scaffold, not a real loader (see its own
+scope note, unchanged since task #32) - so `$s1` ends up holding
+whatever this simplified model computed instead of a real, locally-
+loaded module address, and the JALR faithfully jumps exactly where
+that (wrong, for us) value points.
+
+This is an honest architectural boundary, not a fixable bug: making
+this jump land somewhere meaningful would require actually
+implementing IOP module/IRX loading against a verified reference this
+project has always deliberately avoided fabricating (same policy that
+shaped `iop_hle_modules.c`, `iop_hle_bios.c`, and the ROMDIR work
+originally). Not attempted this round, to keep scope honest.
+
+**What WAS fixed**: before this round, an out-of-range instruction
+fetch silently returned `0` (a NOP) forever - the IOP just "wandered"
+through effectively unmapped memory for tens of millions of steps
+until it coincidentally hit a non-zero value sitting in the SIF
+register mirror's reset default (`SIF_F260 = 0x1D000060`, which
+happens to *equal its own address* and decodes as a bogus SPECIAL
+instruction) and halted on a confusing, unrelated-looking "illegal
+opcode" message with zero clue about the real cause. Added a PC
+fetch-sanity guard to `iop_step()` (`source/core/iop/iop_core.c`):
+any fetch address that's neither real IOP RAM nor real BIOS ROM now
+halts immediately with a clear, honest diagnostic naming the exact
+escaped-to address - turning a 111,000-vs-tens-of-millions-of-
+instructions confusing false lead into an instant, precise one.
+Verified live: the interleaved diagnostic now halts the IOP in ~5.6s
+instead of ~9.7s (no more wasted cycles wandering unmapped memory),
+landing cleanly at `pc=0x03400008` with the new message, while the EE
+side is unaffected (still the same legitimate round-13 steady state).
+
+Tests: `tests/test_iop_pc_guard.c`, 7 checks - a deliberately wild
+JALR halts within a handful of steps (not after wandering) with a
+message naming both the escape and the exact address; a JALR to a
+real, valid BIOS ROM address still works exactly as before (link
+register gets the correct return address) - proving the guard doesn't
+just make everything halt, only genuinely unfetchable addresses. Full
+regression (44 host-native test files) passes with 0 failures, and
+the Wii/devkitPPC target rebuilds clean with 0 warnings/0 errors
+(fixed a `%X`-vs-`long` format-type warning and a `strncpy` truncation
+warning from the new diagnostic message along the way - devkitPPC's
+32-bit-`long` `uint32_t` differs from this project's host test
+environment here, exactly the kind of cross-compile detail the "always
+verify the real Wii rebuild too" discipline exists to catch).
+
 ### EE JALR investigation, round 10: idle loop confirmed dead code on real hardware; root cause fully traced to a BIOS clock-calibration loop whose retry budget this project's timing model exhausts too early
 
 Direct continuation of round 9's wall (EI never executes before

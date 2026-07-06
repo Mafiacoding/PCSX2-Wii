@@ -279,6 +279,19 @@ splash screen, not just difficulty.
       stale vertices into a new triangle. 13 new checks in
       `tests/test_gif_triangle.c`, 41-file/0-failure full regression,
       clean Wii rebuild.
+- [x] Round 14: interleaved EE+IOP run confirms round 13's EE steady
+      state is real; IOP side hits its own genuine wall - a live-
+      traced `JALR $ra,$s1` with `$s1` holding an address (0x03400008)
+      that only a real IOP module/IRX loader would ever populate (this
+      project's `iop_hle_modules.c` is an explicit scaffold, not a
+      real loader - not fabricated further, per this project's
+      long-standing policy). Added a PC fetch-sanity guard to
+      `iop_step()`: any fetch address outside real IOP RAM/BIOS ROM
+      now halts immediately with a clear diagnostic naming the exact
+      address, instead of silently "wandering" through unmapped
+      memory for tens of millions of steps and halting confusingly far
+      away. 7 new checks in `tests/test_iop_pc_guard.c`,
+      44-file/0-failure full regression, clean Wii rebuild.
 - [x] SIF mailbox/flag registers (MSCOM/SMCOM/MSFLAG/SMFLAG/CTRL,
       0x1000F200-0x1000F260), EE side only - `source/hw/sif.c`, wired
       into `ee_core.c`'s 32-bit MMIO dispatch. Register-level

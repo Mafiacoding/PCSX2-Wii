@@ -27,7 +27,7 @@ they're already reasoned through there. Both files must be kept up to date
 as part of any change (see workflow below) - they are the project's actual
 memory across sessions, more so than this file.
 
-## Current frontier: the "EE JALR investigation" (rounds 1-7, and counting)
+## Current frontier: the "EE JALR investigation" (rounds 1-14, and counting) + GS rasterizer work
 
 This is the single longest-running thread of work in the project and the
 most likely thing an interrupted session needs to pick back up. Full
@@ -326,14 +326,15 @@ gcc -I../include -I../source -o test_ee tests/test_ee_core.c ../source/hw/dma.c 
 ./test_ee
 ```
 
-There are 29 test files as of this writing, covering both CPU cores (EE
-integer/MMI/FPU/unaligned-access/COP0-CO-format/LQ-SQ, IOP integer/
-unaligned/SYSCALL-exception/InstallExceptionHandlers), every hardware
-register model (EE DMA + chain-mode transfer engine, GS registers + local
-memory + Wii output blit, GIF packet parsing + SPRITE rasterization,
-EE-side and IOP-side SIF mailbox, IOP INTC/DMA/timers, IOP HLE BIOS trap +
-module registry), the BIOS ROMDIR loader, and the two-core interleaved
-scheduler with a real SIF handshake. The EE side has grown a cluster of
+There are 45 test files as of this writing, covering both CPU cores (EE
+integer/MMI/FPU/unaligned-access/COP0-CO-format/LQ-SQ/VU0-vector-datapath,
+IOP integer/unaligned/SYSCALL-exception/InstallExceptionHandlers/PC-fetch-
+sanity-guard), every hardware register model (EE DMA + chain-mode transfer
+engine, GS registers + local memory + Wii output blit, GIF packet parsing +
+SPRITE/TRIANGLE rasterization with flat and Gouraud shading, EE-side and
+IOP-side SIF mailbox, IOP INTC/DMA/timers, IOP HLE BIOS trap + module
+registry), the BIOS ROMDIR loader, and the two-core interleaved scheduler
+with a real SIF handshake. The EE side has grown a cluster of
 more recent, narrowly-scoped test files worth knowing about by name:
 `test_ee_lqsq.c` (128-bit load/store), `test_ee_fpu2.c`/`test_ee_fpu3.c`
 (SQRT/RSQRT/MAX/MIN/BC1 branches, then the ACC accumulator family), and

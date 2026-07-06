@@ -188,6 +188,18 @@ current, up-to-date status.)
   of steps before halting confusingly far away. 7 new checks
   (`tests/test_iop_pc_guard.c`), 44-file/0-failure regression, clean
   Wii rebuild.
+- **GS: Gouraud shading for triangles** (task #78): PRIM's real IIP
+  bit (bit 3, confirmed against a live fetch of PCSX2's own
+  `GS/GSRegs.h`) now switches TRIANGLE/TRIANGLE_STRIP/TRIANGLE_FAN
+  between flat shading and genuine per-vertex Gouraud interpolation.
+  Added `tri_rgba[3]` color tracking alongside the existing
+  `tri_x`/`tri_y` vertex-position buffers in `gif_state_t`;
+  `rasterize_triangle()` (`source/hw/gif.c`) blends per-pixel via
+  barycentric weights derived from the existing edge-function values -
+  plain affine (screen-space) interpolation, honestly noted as NOT the
+  real GS's perspective-corrected (1/Q) interpolation. 9 new checks
+  (`tests/test_gif_gouraud.c`), 45-file/0-failure regression, clean
+  Wii rebuild.
 
 **devkitPro toolchain**: FULLY FIXED, clean Wii rebuild verified. This
 sandbox's extraction was missing `base_rules`/`base_tools` (fetched

@@ -1346,6 +1346,49 @@ target rebuilds clean with 0 warnings/0 errors (fixed 4 new
 `-Wmisleading-indentation` warnings from a compact bounding-box
 one-liner along the way).
 
+### GS: Gouraud shading for triangles (second GS increment, per-vertex color)
+
+Direct follow-up to the first flat-shaded triangle rasterizer above.
+Real hardware's PRIM register has an IIP bit (bit 3, mask 0x8) that
+switches TRIANGLE/TRIANGLE_STRIP/TRIANGLE_FAN between flat shading
+(IIP=0, single color from the last vertex) and Gouraud shading (IIP=1,
+per-vertex color interpolated across the triangle) - confirmed against
+a live fetch of PCSX2's own `GS/GSRegs.h` (`GIFRegPRIM`'s bitfield:
+`u32 PRIM:3; u32 IIP:1; ...`), not guessed.
+
+Added `tri_rgba[3]` to `gif_state_t` alongside the existing
+`tri_x`/`tri_y` vertex-position buffers - each of the 3 rolling vertex
+slots (or, for TRIANGLE_FAN, the fixed anchor slot) now also captures
+the RGBAQ color that was active when that vertex was kicked, mirroring
+the position-tracking logic exactly (including TRIANGLE_STRIP's
+rolling window and TRIANGLE_FAN's anchor-seeding step).
+`rasterize_triangle()` now takes the 3 vertex colors as parameters and
+branches on the PRIM IIP bit: flat mode is unchanged from before
+(fills with the last vertex's color); Gouraud mode computes, per
+pixel, the standard barycentric weights from the existing edge-
+function values (`b_i = w_i / area`, where `w_i` is the edge function
+opposite vertex `i`) and blends each RGBA channel as
+`b0*c0+b1*c1+b2*c2`, clamped to 0-255.
+
+Honest simplification, clearly noted in `gif.h`'s scope comment: this
+is plain affine/screen-space barycentric interpolation, NOT the real
+GS's perspective-corrected (1/Q) interpolation. Matches this project's
+established pattern of flagging where its model diverges from real
+hardware rather than silently guessing a "close enough" behavior.
+
+Tests: `tests/test_gif_gouraud.c`, 9 checks, using a right triangle
+(0,0)-(60,0)-(0,60) with distinct red/green/blue vertex colors so the
+barycentric weights have a clean closed form. Confirms: a Gouraud
+(IIP=1) triangle's sample points near each vertex are dominated by
+that vertex's color, its centroid reads back an even blend of all 3
+(not any single pure color), and alpha interpolates too; a flat (IIP=0)
+triangle with the SAME distinct per-vertex colors still uses only the
+last vertex's color everywhere (regression-proving per-vertex color
+capture didn't change flat-shading behavior); and the unrelated SPRITE
+path still flat-fills correctly. Full regression (45 host-native test
+files) passes with 0 failures, and the Wii/devkitPPC target rebuilds
+clean with 0 warnings/0 errors.
+
 ### Round 14: IOP-side investigation - the EE's SIF-polling steady state is real, and a genuine IOP wild-jump root-caused and hardened against
 
 Direct follow-up to round 13's finding that the EE settles into a

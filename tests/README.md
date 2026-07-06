@@ -199,6 +199,24 @@ gcc -I../include -I../source -o test_gif_triangle tests/test_gif_triangle.c
 ./test_gif_triangle
 ```
 
+`test_gif_gouraud.c` covers the second GS round (task #78): Gouraud
+shading for triangles, driven by PRIM's real IIP bit (bit 3). Same
+self-contained style as `test_gif_triangle.c`. Uses a right triangle
+(0,0)-(60,0)-(0,60) with distinct red/green/blue per-vertex colors, so
+the barycentric weights work out to a clean closed form. 9 checks: a
+Gouraud (IIP=1) triangle's sample points near each vertex are
+dominated by that vertex's color, its centroid reads back an even
+blend of all 3 vertex colors (not any single pure color), and alpha
+interpolates too; a flat (IIP=0) triangle with the SAME distinct
+per-vertex colors still uses only the last vertex's color everywhere
+(proves per-vertex color capture didn't change flat-shading behavior);
+and the unrelated SPRITE path still flat-fills correctly.
+
+```sh
+gcc -I../include -I../source -o test_gif_gouraud tests/test_gif_gouraud.c
+./test_gif_gouraud
+```
+
 Note: as ee_core.c has grown more hw/ dependencies (dma.c, gs.c,
 gif.c, gs_mem.c, and now sif.c since sif_init()/sif_mmio_read32/
 write32 are wired into ee_core_init() and the memory bus), tests that

@@ -57,7 +57,18 @@ static int32_t edge(int32_t ax, int32_t ay, int32_t bx, int32_t by, int32_t px, 
     return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
 }
 
-static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t x2, int32_t y2)
+/* PRIM's real IIP bit (bit 3) - 0=flat shading, 1=Gouraud - confirmed
+ * against PCSX2's own GS/GSRegs.h GIFRegPRIM bitfield layout. */
+#define PRIM_IIP_MASK 0x8u
+
+static inline uint8_t rgba_channel(uint32_t rgba, int shift) { return (uint8_t)((rgba >> shift) & 0xFFu); }
+static inline uint32_t rgba_pack(uint32_t r, uint32_t g, uint32_t b, uint32_t a)
+{
+    return (a << 24) | (b << 16) | (g << 8) | r;
+}
+
+static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t x2, int32_t y2,
+                                uint32_t c0, uint32_t c1, uint32_t c2)
 {
     int32_t minx = x0, maxx = x0, miny = y0, maxy = y0;
     if (x1 < minx) minx = x1;
@@ -76,6 +87,17 @@ static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, i
     int32_t area = edge(x0, y0, x1, y1, x2, y2);
     if (area == 0) return;
 
+    int gouraud = (g_gif.prim & PRIM_IIP_MASK) != 0;
+    /* Flat shading uses the LAST vertex's color on real hardware
+     * (matches this rasterizer's pre-Gouraud behavior, which always
+     * used whichever RGBAQ was active when the triangle completed -
+     * i.e. exactly c2's value, since c2 is always the most-recently-
+     * kicked vertex's color). */
+    uint32_t flat_r = rgba_channel(c2, 0), flat_g = rgba_channel(c2, 8);
+    uint32_t flat_b = rgba_channel(c2, 16), flat_a = rgba_channel(c2, 24);
+
+    double inv_area = 1.0 / (double)area;
+
     for (int32_t yy = miny; yy <= maxy; yy++) {
         for (int32_t xx = minx; xx <= maxx; xx++) {
             int32_t w0 = edge(x1, y1, x2, y2, xx, yy);
@@ -87,7 +109,30 @@ static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, i
              * guaranteed consistent. */
             if ((area > 0 && w0 >= 0 && w1 >= 0 && w2 >= 0) ||
                 (area < 0 && w0 <= 0 && w1 <= 0 && w2 <= 0)) {
-                gs_mem_write_psmct32(g_gif.fbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy, g_gif.rgba);
+                uint32_t out;
+                if (!gouraud) {
+                    out = rgba_pack(flat_r, flat_g, flat_b, flat_a);
+                } else {
+                    /* Barycentric weights (w0 corresponds to the
+                     * vertex OPPOSITE it, i.e. weights c0 by w0 etc -
+                     * standard edge-function barycentric convention).
+                     * Plain affine (screen-space) interpolation, NOT
+                     * the real GS's perspective-corrected (1/Q) one -
+                     * see gif.h's scope comment. */
+                    double b0 = (double)w0 * inv_area;
+                    double b1 = (double)w1 * inv_area;
+                    double b2 = (double)w2 * inv_area;
+                    uint32_t r = (uint32_t)(b0 * rgba_channel(c0, 0)  + b1 * rgba_channel(c1, 0)  + b2 * rgba_channel(c2, 0)  + 0.5);
+                    uint32_t g = (uint32_t)(b0 * rgba_channel(c0, 8)  + b1 * rgba_channel(c1, 8)  + b2 * rgba_channel(c2, 8)  + 0.5);
+                    uint32_t b = (uint32_t)(b0 * rgba_channel(c0, 16) + b1 * rgba_channel(c1, 16) + b2 * rgba_channel(c2, 16) + 0.5);
+                    uint32_t a = (uint32_t)(b0 * rgba_channel(c0, 24) + b1 * rgba_channel(c1, 24) + b2 * rgba_channel(c2, 24) + 0.5);
+                    if (r > 255) r = 255;
+                    if (g > 255) g = 255;
+                    if (b > 255) b = 255;
+                    if (a > 255) a = 255;
+                    out = rgba_pack(r, g, b, a);
+                }
+                gs_mem_write_psmct32(g_gif.fbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy, out);
             }
         }
     }
@@ -117,29 +162,33 @@ static void apply_xyz2(uint32_t word0, uint32_t word1)
             int slot = (g_gif.tri_vseq - 1) % 3;
             g_gif.tri_x[slot] = x;
             g_gif.tri_y[slot] = y;
+            g_gif.tri_rgba[slot] = g_gif.rgba;
             if (g_gif.tri_vseq % 3 == 0)
-                rasterize_triangle(g_gif.tri_x[0], g_gif.tri_y[0], g_gif.tri_x[1], g_gif.tri_y[1], g_gif.tri_x[2], g_gif.tri_y[2]);
+                rasterize_triangle(g_gif.tri_x[0], g_gif.tri_y[0], g_gif.tri_x[1], g_gif.tri_y[1], g_gif.tri_x[2], g_gif.tri_y[2],
+                                    g_gif.tri_rgba[0], g_gif.tri_rgba[1], g_gif.tri_rgba[2]);
         } else if (ptype == PRIM_TYPE_TRIANGLE_STRIP) {
             /* TRIANGLE_STRIP: each new vertex (from the 3rd onward)
              * forms a triangle with the previous 2 - a rolling
              * 3-slot window. */
-            g_gif.tri_x[0] = g_gif.tri_x[1]; g_gif.tri_y[0] = g_gif.tri_y[1];
-            g_gif.tri_x[1] = g_gif.tri_x[2]; g_gif.tri_y[1] = g_gif.tri_y[2];
-            g_gif.tri_x[2] = x; g_gif.tri_y[2] = y;
+            g_gif.tri_x[0] = g_gif.tri_x[1]; g_gif.tri_y[0] = g_gif.tri_y[1]; g_gif.tri_rgba[0] = g_gif.tri_rgba[1];
+            g_gif.tri_x[1] = g_gif.tri_x[2]; g_gif.tri_y[1] = g_gif.tri_y[2]; g_gif.tri_rgba[1] = g_gif.tri_rgba[2];
+            g_gif.tri_x[2] = x; g_gif.tri_y[2] = y; g_gif.tri_rgba[2] = g_gif.rgba;
             if (g_gif.tri_vseq >= 3)
-                rasterize_triangle(g_gif.tri_x[0], g_gif.tri_y[0], g_gif.tri_x[1], g_gif.tri_y[1], g_gif.tri_x[2], g_gif.tri_y[2]);
+                rasterize_triangle(g_gif.tri_x[0], g_gif.tri_y[0], g_gif.tri_x[1], g_gif.tri_y[1], g_gif.tri_x[2], g_gif.tri_y[2],
+                                    g_gif.tri_rgba[0], g_gif.tri_rgba[1], g_gif.tri_rgba[2]);
         } else { /* PRIM_TYPE_TRIANGLE_FAN */
             /* TRIANGLE_FAN: the first vertex is a fixed anchor
              * (slot 0, never overwritten); each new vertex forms a
              * triangle with the anchor and the previous vertex. */
             if (g_gif.tri_vseq == 1) {
-                g_gif.tri_x[0] = x; g_gif.tri_y[0] = y;
-                g_gif.tri_x[1] = x; g_gif.tri_y[1] = y; /* also seed "previous" so vseq==2 has something to pair with */
+                g_gif.tri_x[0] = x; g_gif.tri_y[0] = y; g_gif.tri_rgba[0] = g_gif.rgba;
+                g_gif.tri_x[1] = x; g_gif.tri_y[1] = y; g_gif.tri_rgba[1] = g_gif.rgba; /* also seed "previous" so vseq==2 has something to pair with */
             } else {
-                g_gif.tri_x[2] = x; g_gif.tri_y[2] = y;
+                g_gif.tri_x[2] = x; g_gif.tri_y[2] = y; g_gif.tri_rgba[2] = g_gif.rgba;
                 if (g_gif.tri_vseq >= 3)
-                    rasterize_triangle(g_gif.tri_x[0], g_gif.tri_y[0], g_gif.tri_x[1], g_gif.tri_y[1], g_gif.tri_x[2], g_gif.tri_y[2]);
-                g_gif.tri_x[1] = g_gif.tri_x[2]; g_gif.tri_y[1] = g_gif.tri_y[2];
+                    rasterize_triangle(g_gif.tri_x[0], g_gif.tri_y[0], g_gif.tri_x[1], g_gif.tri_y[1], g_gif.tri_x[2], g_gif.tri_y[2],
+                                        g_gif.tri_rgba[0], g_gif.tri_rgba[1], g_gif.tri_rgba[2]);
+                g_gif.tri_x[1] = g_gif.tri_x[2]; g_gif.tri_y[1] = g_gif.tri_y[2]; g_gif.tri_rgba[1] = g_gif.tri_rgba[2];
             }
         }
         return;

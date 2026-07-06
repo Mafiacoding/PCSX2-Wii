@@ -292,6 +292,17 @@ splash screen, not just difficulty.
       memory for tens of millions of steps and halting confusingly far
       away. 7 new checks in `tests/test_iop_pc_guard.c`,
       44-file/0-failure full regression, clean Wii rebuild.
+- [x] GS: Gouraud shading for triangles - PRIM's real IIP bit (bit 3,
+      confirmed against PCSX2's own `GS/GSRegs.h`) now switches
+      TRIANGLE/TRIANGLE_STRIP/TRIANGLE_FAN between flat shading and
+      genuine per-vertex Gouraud interpolation. Added `tri_rgba[3]`
+      color tracking alongside the existing vertex-position buffers;
+      `rasterize_triangle()` blends per-pixel via barycentric weights
+      derived from the existing edge-function values - plain affine
+      (screen-space) interpolation, honestly noted as NOT the real
+      GS's perspective-corrected (1/Q) interpolation. 9 new checks in
+      `tests/test_gif_gouraud.c`, 45-file/0-failure full regression,
+      clean Wii rebuild.
 - [x] SIF mailbox/flag registers (MSCOM/SMCOM/MSFLAG/SMFLAG/CTRL,
       0x1000F200-0x1000F260), EE side only - `source/hw/sif.c`, wired
       into `ee_core.c`'s 32-bit MMIO dispatch. Register-level

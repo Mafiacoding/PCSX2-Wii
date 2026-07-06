@@ -200,6 +200,20 @@ current, up-to-date status.)
   real GS's perspective-corrected (1/Q) interpolation. 9 new checks
   (`tests/test_gif_gouraud.c`), 45-file/0-failure regression, clean
   Wii rebuild.
+- **Wired a real GIF packet through DMA in main.c's on-device demo**:
+  previously the "pixels reach the screen" milestone wrote GS memory
+  directly, bypassing DMA/GIF. Now builds a real A+D-mode GIF packet,
+  copies it into EE RAM, and calls `dma_channel_kick()` on the GIF
+  channel (the real `dma_set_sink`/`gif_process_quadwords` pipeline
+  wired up in `ee_core_init()`), drawing a Gouraud triangle below the
+  color bars. Promoted `GIF_REG_*`/`GS_REG_*`/`PRIM_TYPE_*`/
+  `PRIM_IIP_MASK` from `gif.c`-private to public in `gif.h` for this.
+  Caught a real NLOOP/buffer-size bug in the process (`3 + n_verts`
+  instead of `3 + 2*n_verts` - each vertex needs 2 register entries,
+  RGBAQ and XYZ2, not 1) via the Wii target compiler's
+  `-Warray-bounds` warning on the first build attempt. 11 new checks
+  (`tests/test_dma_gif_demo.c`, mirrors main.c's exact packet logic
+  host-natively), 46-file/0-failure regression, clean Wii rebuild.
 
 **devkitPro toolchain**: FULLY FIXED, clean Wii rebuild verified. This
 sandbox's extraction was missing `base_rules`/`base_tools` (fetched
@@ -326,7 +340,7 @@ gcc -I../include -I../source -o test_ee tests/test_ee_core.c ../source/hw/dma.c 
 ./test_ee
 ```
 
-There are 45 test files as of this writing, covering both CPU cores (EE
+There are 46 test files as of this writing, covering both CPU cores (EE
 integer/MMI/FPU/unaligned-access/COP0-CO-format/LQ-SQ/VU0-vector-datapath,
 IOP integer/unaligned/SYSCALL-exception/InstallExceptionHandlers/PC-fetch-
 sanity-guard), every hardware register model (EE DMA + chain-mode transfer

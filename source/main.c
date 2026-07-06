@@ -19,6 +19,8 @@
 #include "core/bios_loader.h"
 #include "core/hw/gs_mem.h"
 #include "core/hw/gs_wii_output.h"
+#include "core/hw/dma.h"
+#include "core/hw/gif.h"
 
 static void *xfb = NULL;
 static GXRModeObj *rmode = NULL;
@@ -120,6 +122,81 @@ int main(int argc, char **argv)
                                 rmode->fbWidth, 40);
         DCFlushRange(xfb, rmode->fbWidth * 40 * VI_DISPLAY_PIX_SZ);
         printf("[+] Pixel pipeline demo: 4-color test bars written to the real framebuffer.\n");
+    }
+
+    /* Second milestone: drive the SAME pixel path through the REAL
+     * DMA -> GIF -> rasterizer pipeline instead of writing GS memory
+     * directly - i.e. a genuine (if hand-built, not BIOS-driven) GIF
+     * packet, delivered exactly the way real EE code would deliver
+     * one: written into EE RAM, then kicked via dma_channel_kick() on
+     * the GIF channel (normal mode), which calls gif_process_
+     * quadwords() through the sink wired up in ee_core_init(). Draws
+     * a Gouraud-shaded triangle (PRIM's real IIP bit) below the color
+     * bars, proving the GS Gouraud-shading work from this session
+     * exercises the real pipeline, not just host-native tests. */
+    {
+        static uint8_t pkt[16 * (1 + 3 + 3 * 2)]; /* tag + (FRAME_1+XYOFFSET_1+PRIM) + 3*(RGBAQ+XYZ2) */
+        memset(pkt, 0, sizeof(pkt));
+        int off = 0;
+
+#define WLE32(p, v) do { \
+    uint32_t _v = (uint32_t)(v); \
+    (p)[0] = (uint8_t)(_v);       (p)[1] = (uint8_t)(_v >> 8); \
+    (p)[2] = (uint8_t)(_v >> 16); (p)[3] = (uint8_t)(_v >> 24); \
+} while (0)
+#define APPEND_AD(data_lo, data_hi, addr) do { \
+    WLE32(pkt + off,      (data_lo)); \
+    WLE32(pkt + off + 4,  (data_hi)); \
+    WLE32(pkt + off + 8,  (addr));    \
+    WLE32(pkt + off + 12, 0);         \
+    off += 16; \
+} while (0)
+
+        const int n_verts = 3;
+        const int nloop = 3 + 2 * n_verts; /* FRAME_1, XYOFFSET_1, PRIM, then (RGBAQ+XYZ2) per vertex */
+        WLE32(pkt + off,     (uint32_t)nloop | (1u << 15));
+        WLE32(pkt + off + 4, (0u << 26) | (1u << 28)); /* PACKED mode, NREG=1 */
+        WLE32(pkt + off + 8, GIF_REG_AD);
+        WLE32(pkt + off + 12, 0);
+        off += 16;
+
+        uint32_t fbw_field = rmode->fbWidth / 64u; /* FRAME_1's FBW is in units of 64px */
+        APPEND_AD((fbw_field << 9), 0, GS_REG_FRAME_1);
+        APPEND_AD(0, 0, GS_REG_XYOFFSET_1);
+        APPEND_AD((uint32_t)PRIM_TYPE_TRIANGLE | PRIM_IIP_MASK, 0, GS_REG_PRIM);
+
+        /* Triangle below the color bars: (40,60)-(220,60)-(40,200),
+         * red/green/blue vertices - same Gouraud demo as
+         * tests/test_gif_gouraud.c, now driven through real DMA. */
+        static const uint32_t vcolor[3] = { 0xFF0000FFu, 0xFF00FF00u, 0xFFFF0000u }; /* red, green, blue */
+        static const int32_t vpos[3][2] = { { 40, 60 }, { 220, 60 }, { 40, 200 } };
+        for (int i = 0; i < n_verts; i++) {
+            uint32_t rgba = vcolor[i];
+            uint32_t rgbaq_lo = (rgba & 0xFFu) | (((rgba >> 8) & 0xFFu) << 8) |
+                                (((rgba >> 16) & 0xFFu) << 16) | (((rgba >> 24) & 0xFFu) << 24);
+            APPEND_AD(rgbaq_lo, 0, GS_REG_RGBAQ);
+            APPEND_AD((uint32_t)(vpos[i][0] << 4), (uint32_t)(vpos[i][1] << 4), GS_REG_XYZ2);
+        }
+#undef APPEND_AD
+#undef WLE32
+
+        ee_state_t *ee = ee_core_get_state();
+        const uint32_t pkt_ram_addr = 0x00100000u; /* 1MB in - unused scratch region for this demo */
+        memcpy(ee->ram + pkt_ram_addr, pkt, (size_t)off);
+
+        dma_state_t *dma = dma_get_state();
+        dma->chan[DMA_CHANNEL_GIF].chcr = 0; /* NORMAL mode (mod=0) */
+        dma->chan[DMA_CHANNEL_GIF].madr = pkt_ram_addr;
+        dma->chan[DMA_CHANNEL_GIF].qwc  = (uint32_t)(off / 16);
+        dma_channel_kick(DMA_CHANNEL_GIF);
+
+        gs_blit_psmct32_to_xfb(xfb, rmode->fbWidth, 0, 40,
+                                0, rmode->fbWidth, 0, 40,
+                                rmode->fbWidth, 180);
+        DCFlushRange((uint8_t *)xfb + 40 * rmode->fbWidth * VI_DISPLAY_PIX_SZ,
+                     rmode->fbWidth * 180 * VI_DISPLAY_PIX_SZ);
+        printf("[+] Real GIF-packet demo: Gouraud triangle drawn via dma_channel_kick()"
+               " (DMA channel error: %u).\n", (unsigned)dma->chan[DMA_CHANNEL_GIF].last_error);
     }
 
 halt:

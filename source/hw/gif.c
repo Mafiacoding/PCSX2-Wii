@@ -16,24 +16,7 @@ void gif_init(void)
 
 gif_state_t *gif_get_state(void) { return &g_gif; }
 
-/* GIF register codes (PACKED mode descriptor nibbles / A+D addresses).
- * Cross-checked against PCSX2's GS/GSRegs.h GIF_A_D_REG enum. */
-#define GIF_REG_PRIM      0x00
-#define GIF_REG_RGBAQ     0x01
-#define GIF_REG_XYZ2      0x05
-#define GIF_REG_AD        0x0E
-#define GIF_REG_NOP       0x0F
-
-#define GS_REG_PRIM       0x00
-#define GS_REG_RGBAQ      0x01
-#define GS_REG_XYZ2       0x05
-#define GS_REG_FRAME_1    0x4C
-#define GS_REG_XYOFFSET_1 0x18
-
-#define PRIM_TYPE_TRIANGLE       3
-#define PRIM_TYPE_TRIANGLE_STRIP 4
-#define PRIM_TYPE_TRIANGLE_FAN   5
-#define PRIM_TYPE_SPRITE  6
+/* GIF_REG_* / GS_REG_* / PRIM_TYPE_* are now public - see gif.h. */
 
 static inline uint32_t rd_le32(const uint8_t *p)
 {
@@ -57,9 +40,7 @@ static int32_t edge(int32_t ax, int32_t ay, int32_t bx, int32_t by, int32_t px, 
     return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
 }
 
-/* PRIM's real IIP bit (bit 3) - 0=flat shading, 1=Gouraud - confirmed
- * against PCSX2's own GS/GSRegs.h GIFRegPRIM bitfield layout. */
-#define PRIM_IIP_MASK 0x8u
+/* PRIM_IIP_MASK is now public - see gif.h. */
 
 static inline uint8_t rgba_channel(uint32_t rgba, int shift) { return (uint8_t)((rgba >> shift) & 0xFFu); }
 static inline uint32_t rgba_pack(uint32_t r, uint32_t g, uint32_t b, uint32_t a)

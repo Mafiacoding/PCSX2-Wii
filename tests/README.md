@@ -217,6 +217,24 @@ gcc -I../include -I../source -o test_gif_gouraud tests/test_gif_gouraud.c
 ./test_gif_gouraud
 ```
 
+`test_dma_gif_demo.c` mirrors main.c's "real GIF-packet demo" (added
+right after the Gouraud round): builds the exact same A+D-mode GIF
+packet main.c builds (FRAME_1 + XYOFFSET_1 + PRIM(TRIANGLE|IIP) +
+3x(RGBAQ+XYZ2) for a red/green/blue Gouraud triangle) and drives it
+through the real `dma.c`/`gif.c` code via `dma_channel_kick()` -
+proving the packet layout is well-formed host-natively, since a clean
+devkitPPC compile alone doesn't prove that (this test caught a real
+NLOOP/buffer-size bug this same round). 11 checks: the packet builder
+fills its buffer exactly, the DMA kick reports no error and fully
+consumes QWC/advances MADR, exactly one triangle is drawn with IIP
+set, and the same red/green/blue/centroid sample-point checks as
+`test_gif_gouraud.c` pass through the real DMA path.
+
+```sh
+gcc -I../include -I../source -o test_dma_gif_demo tests/test_dma_gif_demo.c
+./test_dma_gif_demo
+```
+
 Note: as ee_core.c has grown more hw/ dependencies (dma.c, gs.c,
 gif.c, gs_mem.c, and now sif.c since sif_init()/sif_mmio_read32/
 write32 are wired into ee_core_init() and the memory bus), tests that

@@ -1389,6 +1389,60 @@ path still flat-fills correctly. Full regression (45 host-native test
 files) passes with 0 failures, and the Wii/devkitPPC target rebuilds
 clean with 0 warnings/0 errors.
 
+### Wiring a real GIF packet through DMA in main.c's on-device demo
+
+Direct follow-up to the Gouraud shading round above. Until now,
+main.c's "pixels reach the actual screen" milestone wrote directly
+into GS local memory (`gs_mem_write_psmct32`) - proving the GS-memory
+-> YCbCr -> Wii XFB output path works, but bypassing the DMA/GIF
+pipeline entirely (the actual consumer real BIOS/game code would use).
+
+Added a second demo, right after the first: builds a real, well-formed
+A+D-mode GIF packet in memory (FRAME_1 + XYOFFSET_1 + PRIM(TRIANGLE |
+IIP) + 3x(RGBAQ + XYZ2), exactly the same wire format
+`gif_process_quadwords()` parses and this round's own
+`tests/test_gif_gouraud.c` exercises), copies it into the EE's actual
+RAM buffer, sets the GIF DMA channel's MADR/QWC/CHCR registers, and
+calls `dma_channel_kick()` - the same function real EE `SIF`-driven
+DMA writes would trigger. This routes through the real sink wiring
+(`dma_set_sink(DMA_CHANNEL_GIF, gif_process_quadwords)`, done in
+`ee_core_init()`) end to end, drawing a Gouraud-shaded red/green/blue
+triangle below the existing 4-color test bars - proving this session's
+Gouraud-shading work exercises the real DMA->GIF->rasterizer pipeline,
+not just host-native tests in isolation.
+
+`GIF_REG_*`/`GS_REG_*`/`PRIM_TYPE_*`/`PRIM_IIP_MASK` were promoted from
+`gif.c`-private `#define`s to public macros in `gif.h`, since any real
+GIF-packet producer (this demo, and future VIF passthrough work) needs
+them, not just the parser itself.
+
+Caught and fixed a real bug during this round, not just a Wii-rebuild
+formatting nit: the packet buffer was initially sized and the tag's
+NLOOP field computed using `3 + n_verts` (6) instead of the correct
+`3 + 2*n_verts` (9) - undercounting by one register-entry per vertex,
+since each vertex contributes 2 register writes (RGBAQ then XYZ2), not
+1. This would have both overflowed the buffer (an `-Warray-bounds`
+warning from the Wii-target compiler this round is exactly what
+surfaced it) and silently truncated the GIF packet mid-parse on real
+hardware (the parser would stop after `NLOOP` register-entries,
+dropping the last vertex's `XYZ2` write). Fixed by correcting both the
+buffer size and the NLOOP computation to `3 + 2*n_verts`.
+
+Tests: `tests/test_dma_gif_demo.c`, 11 checks - mirrors main.c's exact
+packet-building logic host-natively (not achievable by compiling for
+Wii alone, since a clean compile doesn't prove the packet bytes/NLOOP
+count are actually well-formed) and drives it through the real
+`dma.c`/`gif.c` code via `dma_channel_kick()`. Confirms: the packet
+builder fills its buffer exactly (regression-proving the NLOOP bug
+above stays fixed), the DMA kick reports no error and fully consumes
+QWC/advances MADR, exactly one triangle is drawn with IIP set, and the
+same red/green/blue/centroid-blend sample-point checks as
+`test_gif_gouraud.c` pass through the real DMA path. Full regression
+(46 host-native test files) passes with 0 failures, and the
+Wii/devkitPPC target rebuilds clean with 0 warnings/0 errors (after
+fixing the buffer-size/NLOOP bug above, which the target compiler's
+`-Warray-bounds` caught on the first attempt).
+
 ### Round 14: IOP-side investigation - the EE's SIF-polling steady state is real, and a genuine IOP wild-jump root-caused and hardened against
 
 Direct follow-up to round 13's finding that the EE settles into a

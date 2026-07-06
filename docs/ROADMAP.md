@@ -303,6 +303,21 @@ splash screen, not just difficulty.
       GS's perspective-corrected (1/Q) interpolation. 9 new checks in
       `tests/test_gif_gouraud.c`, 45-file/0-failure full regression,
       clean Wii rebuild.
+- [x] Wired a real GIF packet through DMA in main.c's on-device demo -
+      previously the "pixels reach the screen" milestone wrote GS
+      memory directly, bypassing DMA/GIF entirely. Now builds a real
+      A+D-mode GIF packet, copies it into EE RAM, and calls
+      `dma_channel_kick()` on the GIF channel - the same real pipeline
+      (`dma_set_sink`/`gif_process_quadwords`) real EE code would
+      drive - drawing a Gouraud triangle below the existing color
+      bars. Promoted `GIF_REG_*`/`GS_REG_*`/`PRIM_TYPE_*`/
+      `PRIM_IIP_MASK` from `gif.c`-private to public in `gif.h` for
+      this. Caught a real NLOOP/buffer-size bug in the process (3 +
+      n_verts instead of 3 + 2*n_verts - each vertex needs 2 register
+      entries, not 1) via the Wii target compiler's `-Warray-bounds`.
+      11 new checks in `tests/test_dma_gif_demo.c` (mirrors main.c's
+      exact packet logic host-natively), 46-file/0-failure full
+      regression, clean Wii rebuild.
 - [x] SIF mailbox/flag registers (MSCOM/SMCOM/MSFLAG/SMFLAG/CTRL,
       0x1000F200-0x1000F260), EE side only - `source/hw/sif.c`, wired
       into `ee_core.c`'s 32-bit MMIO dispatch. Register-level
@@ -948,11 +963,10 @@ stubs (INTC/DMA/timers) and/or IOP HLE stubs for the specific
 BIOS-boot-path modules (both are needed before real BIOS code - as
 opposed to hand-written test programs - can get through a real SIF
 handshake), a clock-rate-aware EE:IOP scheduler (currently 1:1
-instruction stepping, real hardware is roughly 8:1), per-vertex
-Gouraud shading and texturing for the new triangle rasterizer,
-VIF0/VIF1 passthrough, and wiring a real GIF packet through
-`dma_channel_kick` at boot in `main.c` as a live demo (currently only
-the hardcoded 4-color pattern runs there).
+instruction stepping, real hardware is roughly 8:1), texturing for the
+triangle rasterizer (Gouraud shading and wiring a real GIF packet
+through `dma_channel_kick` at boot are both DONE now - see above), and
+VIF0/VIF1 passthrough.
 
 Step 7 (real GX-based rendering with textures) is where this stops
 being "a lot of careful work" and becomes genuinely research-scale for

@@ -45,6 +45,33 @@
  * color/perspective).
  */
 
+/* GIF register codes (PACKED mode descriptor nibbles / A+D addresses)
+ * and PRIM primitive-type/IIP values - cross-checked against PCSX2's
+ * GS/GSRegs.h GIF_A_D_REG enum and GIFRegPRIM bitfield layout. Public
+ * (not just gif.c-internal) so any real GIF-packet producer - e.g.
+ * main.c's demo, or a future VIF passthrough - can build a well-formed
+ * packet without duplicating these constants. */
+#define GIF_REG_PRIM      0x00
+#define GIF_REG_RGBAQ     0x01
+#define GIF_REG_XYZ2      0x05
+#define GIF_REG_AD        0x0E
+#define GIF_REG_NOP       0x0F
+
+#define GS_REG_PRIM       0x00
+#define GS_REG_RGBAQ      0x01
+#define GS_REG_XYZ2       0x05
+#define GS_REG_FRAME_1    0x4C
+#define GS_REG_XYOFFSET_1 0x18
+
+#define PRIM_TYPE_TRIANGLE       3
+#define PRIM_TYPE_TRIANGLE_STRIP 4
+#define PRIM_TYPE_TRIANGLE_FAN   5
+#define PRIM_TYPE_SPRITE         6
+
+/* PRIM bit 3 (IIP): 0 = flat shading, 1 = Gouraud (per-vertex color
+ * interpolation) - see gif.c's rasterize_triangle(). */
+#define PRIM_IIP_MASK 0x8u
+
 void gif_init(void);
 
 /* Matches dma_sink_fn - register with dma_set_sink(DMA_CHANNEL_GIF, gif_process_quadwords). */

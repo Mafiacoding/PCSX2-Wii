@@ -968,24 +968,37 @@ enough to demonstrate needing it yet.
    - it's proven with a hand-written toy handshake, not the actual
    BIOS/PCSX2 SIF DMA protocol (`Sif0.cpp`/`Sif1.cpp`).
 4. IOP HLE stubs for the specific modules the BIOS boot path calls -
-   PARTIAL, and meaningfully further along now: the IOP has register
-   stubs for its interrupt controller, DMA controller, and timers
-   (section 2), a BIOS syscall trap for the classic A0/B0/C0 call
-   convention (`source/hw/iop_hle_bios.c`), and a module registry
-   scaffold (`source/hw/iop_hle_modules.c`) - see section 2 for exact
-   scope and the important caveat that neither of the last two is a
-   port of PCSX2's actual, much more involved `IopBios.cpp` (which
-   depends on a real, working BIOS ROM this project doesn't have and
-   can't fake convincingly). What real BIOS/game code would still need
-   before any of this does something meaningful: a verified reference
-   for actual PS1/PS2 BIOS syscall function numbers (this project
-   doesn't have one and deliberately hasn't guessed), and/or a decision
-   to go the PCSX2 route (parse real BIOS structures - needs a real
-   BIOS ROM) vs. inventing this project's own from-scratch IOP "OS"
-   that real game IRX modules could never actually run against anyway
-   (game code is compiled against the real IOP kernel's ABI). This is
-   the crux of why "just get the BIOS splash to render" remains hard
-   even with all the hardware register plumbing in place.
+   PARTIAL, further along again: the IOP has register stubs for its
+   interrupt controller, DMA controller, and timers (section 2), a
+   BIOS syscall trap for the classic A0/B0/C0 call convention
+   (`source/hw/iop_hle_bios.c`) that now implements ~17 real A0-table
+   function numbers for real (ABS/LABS, STRCAT/STRNCAT/STRCMP/STRNCMP/
+   STRCPY/STRNCPY/STRLEN, BCOPY/BZERO, MEMCPY/MEMSET/MEMMOVE, INITHEAP,
+   FLUSHCACHE, EXIT/_EXIT) against the psx-spx public reference (the
+   same reference already used for InstallExceptionHandlers), plus a
+   module registry scaffold (`source/hw/iop_hle_modules.c`) - see
+   section 2 for exact scope and the important caveat that none of
+   this is a port of PCSX2's actual, much more involved `IopBios.cpp`
+   (which depends on a real, working BIOS ROM this project doesn't
+   have and can't fake convincingly). The verified-reference gap that
+   used to block ALL per-function behavior is now closed for the pure-
+   computation subset of the A0 table; what's still missing is
+   anything touching files/devices, heap allocation, threads/events,
+   CD-ROM/memory-card functions, or - the actual round-14 wall - real
+   IOP module/IRX loading (a genuine `JALR $ra,$s1` into an address
+   only a real module loader would populate). A live PCSX2-MCP trace
+   against the user's real SCPH-10000 BIOS this round confirmed the
+   real, full list of 16 IOP modules a working boot loads
+   (`System_Memory_Manager`, `Module_Manager`, `Exception_Manager`,
+   `Interrupt_Manager`, `ssbus_service`, `dmacman`, `Timer_Manager`,
+   `System_C_lib`, `Heap_lib`, `Multi_Thread_Manager`,
+   `Vblank_service`, `IO/File_Manager`, `Moldule_File_loader`,
+   `ROM_file_driver`, `Stdio`, `IOP_SIF_manager`) - a concrete
+   reference point for whenever this project attempts real module
+   loading, still not attempted itself this round (needs a verified
+   IRX/SIF-RPC protocol reference this project doesn't have). This
+   remains the crux of why "just get the BIOS splash to render"
+   stays hard even with all the hardware register plumbing in place.
 5. GIF/VIF passthrough - DONE for PACKED-mode GIF + SPRITE
    rasterization (see section 4 above); VIF0/VIF1 itself is still
    open

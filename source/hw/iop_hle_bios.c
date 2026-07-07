@@ -113,6 +113,163 @@ static void try_install_exception_handlers(iop_state_t *st)
     g_hle.exception_handler_installed = 1;
 }
 
+
+/* -- Real A0-table pure-computation calls added this round -- see the
+ * header comment for full scope/citation. All operate only on IOP
+ * RAM (via iop_mem_read8/write8, so they're correct regardless of
+ * alignment) and CPU registers ($a0-$a3 = gpr[4..7], the standard
+ * MIPS o32 argument registers real calling code already uses to
+ * reach these same functions) - never on any unmodeled internal BIOS
+ * kernel structure. */
+
+static uint32_t iop_strlen(iop_state_t *st, uint32_t src)
+{
+    uint32_t n = 0;
+    while (iop_mem_read8(st, src + n) != 0)
+        n++;
+    return n;
+}
+
+static void iop_memcpy_bytes(iop_state_t *st, uint32_t dst, uint32_t src, uint32_t len)
+{
+    for (uint32_t i = 0; i < len; i++)
+        iop_mem_write8(st, dst + i, iop_mem_read8(st, src + i));
+}
+
+/* Handles the A0-table function numbers this round implements for
+ * real. Returns 1 and leaves the correct value in st->gpr[2] ($v0) if
+ * `function` was one of these; returns 0 (caller falls back to the
+ * generic default) otherwise. */
+static int try_handle_a0_real_function(iop_state_t *st, uint32_t function)
+{
+    uint32_t a0 = st->gpr[4], a1 = st->gpr[5], a2 = st->gpr[6];
+
+    switch (function) {
+    case IOP_HLE_A0_ABS: {
+        int32_t v = (int32_t)a0;
+        st->gpr[2] = (uint32_t)(v < 0 ? -v : v);
+        return 1;
+    }
+    case IOP_HLE_A0_LABS: {
+        int32_t v = (int32_t)a0;
+        st->gpr[2] = (uint32_t)(v < 0 ? -v : v);
+        return 1;
+    }
+    case IOP_HLE_A0_STRLEN:
+        st->gpr[2] = iop_strlen(st, a0);
+        return 1;
+    case IOP_HLE_A0_STRCPY: {
+        uint32_t len = iop_strlen(st, a1);
+        iop_memcpy_bytes(st, a0, a1, len + 1); /* +1: include NUL terminator */
+        st->gpr[2] = a0; /* standard strcpy contract: returns dst */
+        return 1;
+    }
+    case IOP_HLE_A0_STRNCPY: {
+        /* Standard C strncpy semantics: copy up to maxlen bytes from
+         * src (stopping early at src's NUL), zero-pad the remainder
+         * of the destination up to maxlen - and do NOT add a
+         * terminator if src's length >= maxlen. */
+        uint32_t maxlen = a2;
+        uint32_t i = 0;
+        int hit_nul = 0;
+        for (; i < maxlen; i++) {
+            uint8_t c = hit_nul ? 0 : iop_mem_read8(st, a1 + i);
+            if (c == 0) hit_nul = 1;
+            iop_mem_write8(st, a0 + i, c);
+        }
+        st->gpr[2] = a0;
+        return 1;
+    }
+    case IOP_HLE_A0_STRCAT: {
+        uint32_t dstlen = iop_strlen(st, a0);
+        uint32_t srclen = iop_strlen(st, a1);
+        iop_memcpy_bytes(st, a0 + dstlen, a1, srclen + 1);
+        st->gpr[2] = a0;
+        return 1;
+    }
+    case IOP_HLE_A0_STRNCAT: {
+        uint32_t maxlen = a2;
+        uint32_t dstlen = iop_strlen(st, a0);
+        uint32_t i;
+        for (i = 0; i < maxlen; i++) {
+            uint8_t c = iop_mem_read8(st, a1 + i);
+            if (c == 0) break;
+            iop_mem_write8(st, a0 + dstlen + i, c);
+        }
+        iop_mem_write8(st, a0 + dstlen + i, 0); /* always NUL-terminates, per standard strncat */
+        st->gpr[2] = a0;
+        return 1;
+    }
+    case IOP_HLE_A0_STRCMP: {
+        uint32_t i = 0;
+        for (;;) {
+            uint8_t c1 = iop_mem_read8(st, a0 + i);
+            uint8_t c2 = iop_mem_read8(st, a1 + i);
+            if (c1 != c2 || c1 == 0) {
+                st->gpr[2] = (uint32_t)((int32_t)c1 - (int32_t)c2);
+                break;
+            }
+            i++;
+        }
+        return 1;
+    }
+    case IOP_HLE_A0_STRNCMP: {
+        uint32_t maxlen = a2;
+        uint32_t i = 0;
+        uint32_t result = 0;
+        for (; i < maxlen; i++) {
+            uint8_t c1 = iop_mem_read8(st, a0 + i);
+            uint8_t c2 = iop_mem_read8(st, a1 + i);
+            if (c1 != c2 || c1 == 0) {
+                result = (uint32_t)((int32_t)c1 - (int32_t)c2);
+                break;
+            }
+        }
+        st->gpr[2] = result;
+        return 1;
+    }
+    case IOP_HLE_A0_BCOPY:
+        /* NOTE: bcopy's argument order is (src, dst, len) - reversed
+         * from memcpy's (dst, src, len) - see psx-spx's A(27h) entry. */
+        iop_memcpy_bytes(st, a1, a0, a2);
+        return 1;
+    case IOP_HLE_A0_BZERO:
+        for (uint32_t i = 0; i < a1; i++)
+            iop_mem_write8(st, a0 + i, 0);
+        return 1;
+    case IOP_HLE_A0_MEMCPY:
+        iop_memcpy_bytes(st, a0, a1, a2);
+        st->gpr[2] = a0; /* standard memcpy contract: returns dst */
+        return 1;
+    case IOP_HLE_A0_MEMSET:
+        for (uint32_t i = 0; i < a2; i++)
+            iop_mem_write8(st, a0 + i, (uint8_t)a1);
+        st->gpr[2] = a0; /* standard memset contract: returns dst */
+        return 1;
+    case IOP_HLE_A0_MEMMOVE:
+        /* psx-spx annotates A(2Ch) memmove as ";Bugged" on real
+         * hardware - implemented here as a plain forward byte-copy
+         * (NOT overlap-safe, same as memcpy) to match that documented
+         * real behavior rather than silently upgrading it to correct
+         * modern libc semantics no real IOP BIOS ever had. */
+        iop_memcpy_bytes(st, a0, a1, a2);
+        st->gpr[2] = a0;
+        return 1;
+    case IOP_HLE_A0_INITHEAP:
+        /* Bookkeeping only, same "scaffold, not a port" caveat as
+         * iop_hle_modules.c - no real allocator backs this. */
+        g_hle.heap_addr = a0;
+        g_hle.heap_size = a1;
+        g_hle.heap_initialized = 1;
+        return 1;
+    case IOP_HLE_A0_FLUSHCACHE:
+        /* Correct no-op: this project has no IOP cache model. */
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 int iop_hle_bios_try_handle(iop_state_t *st, uint32_t pc)
 {
     if (pc != IOP_HLE_TABLE_A0 && pc != IOP_HLE_TABLE_B0 && pc != IOP_HLE_TABLE_C0)
@@ -129,6 +286,28 @@ int iop_hle_bios_try_handle(iop_state_t *st, uint32_t pc)
 
     if (pc == IOP_HLE_TABLE_C0 && function == 0x07u) {
         try_install_exception_handlers(st);
+        g_hle.known_calls_handled++;
+    } else if (pc == IOP_HLE_TABLE_A0 &&
+               (function == IOP_HLE_A0_EXIT || function == IOP_HLE_A0__EXIT)) {
+        /* EXIT/_EXIT: real hardware never returns from this call -
+         * halt with an honest, descriptive reason instead of
+         * silently returning 0 and letting the caller run past a
+         * call that was never meant to return. */
+        g_hle.exited = 1;
+        g_hle.exit_code = st->gpr[4]; /* $a0 = exitcode */
+        g_hle.known_calls_handled++;
+        st->halted = 1;
+        snprintf(st->halt_reason, sizeof(st->halt_reason),
+                 "IOP BIOS EXIT/_EXIT called with exitcode=%d (A0 function 0x%02X)",
+                 (int)(int32_t)g_hle.exit_code, (unsigned int)function);
+        st->pc      = ra;
+        st->next_pc = ra + 4;
+        return 1;
+    } else if (pc == IOP_HLE_TABLE_A0 && try_handle_a0_real_function(st, function)) {
+        g_hle.known_calls_handled++;
+        st->pc      = ra;
+        st->next_pc = ra + 4;
+        return 1;
     }
 
     /* No other specific function-number behavior is implemented (see

@@ -262,6 +262,36 @@ current, up-to-date status.)
   nearest-neighbor sampling, unlike Gouraud's continuous color blend),
   and a TME=0 regression check. 48-file/0-failure regression, clean
   Wii rebuild.
+- **IOP HLE: real A0-table BIOS calls implemented** (task #86,
+  user's explicit top priority this round): psx-spx's public
+  A0/B0/C0 "Function Summary" tables (same reference already used for
+  InstallExceptionHandlers) unblocked implementing ~17 pure-
+  computation A0-table calls for real in `source/hw/iop_hle_bios.c`:
+  ABS/LABS, STRCAT/STRNCAT/STRCMP/STRNCMP/STRCPY/STRNCPY/STRLEN,
+  BCOPY/BZERO (BCOPY's arg order is `(src,dst,len)`, reversed from
+  MEMCPY's), MEMCPY/MEMSET/MEMMOVE (MEMMOVE deliberately reproduces
+  psx-spx's documented ";Bugged" real-hardware behavior - a plain,
+  NOT-overlap-safe forward copy, matching real hardware rather than
+  "fixing" it), INITHEAP (bookkeeping only, no real allocator), 
+  FLUSHCACHE (correct no-op), and EXIT/_EXIT (now halts the core with
+  a descriptive reason instead of silently returning 0 past a call
+  real hardware never returns from). Live-reconnected to the user's
+  real SCPH-10000 PCSX2-MCP session mid-round: confirmed the real,
+  full 16-module IOP boot list (System_Memory_Manager, Module_Manager,
+  Exception_Manager, Interrupt_Manager, ssbus_service, dmacman,
+  Timer_Manager, System_C_lib, Heap_lib, Multi_Thread_Manager,
+  Vblank_service, IO/File_Manager, Moldule_File_loader,
+  ROM_file_driver, Stdio, IOP_SIF_manager) and live-disassembled the
+  real (self-installed) A0/B0 vector dispatcher at RAM
+  0x000000A0-0x000000C4 - uses `$k0` internally, which does NOT
+  contradict psx-spx's documented `$t1`/R9 caller convention since
+  this project's HLE intercepts execution at the trap address itself,
+  before any real vector code would run. The round-14 wall (a genuine
+  `JALR $ra,$s1` needing a real IOP module/IRX loader) is **not**
+  cleared by this round - still the same honest architectural
+  boundary, no fabrication attempted. 26 new checks
+  (`tests/test_iop_hle_bios_functions.c`), 49-file/0-failure
+  regression, clean Wii rebuild.
 
 **devkitPro toolchain**: FULLY FIXED, clean Wii rebuild verified. This
 sandbox's extraction was missing `base_rules`/`base_tools` (fetched
@@ -388,7 +418,7 @@ gcc -I../include -I../source -o test_ee tests/test_ee_core.c ../source/hw/dma.c 
 ./test_ee
 ```
 
-There are 48 test files as of this writing, covering both CPU cores (EE
+There are 49 test files as of this writing, covering both CPU cores (EE
 integer/MMI/FPU/unaligned-access/COP0-CO-format/LQ-SQ/VU0-vector-datapath,
 IOP integer/unaligned/SYSCALL-exception/InstallExceptionHandlers/PC-fetch-
 sanity-guard), every hardware register model (EE DMA + chain-mode transfer

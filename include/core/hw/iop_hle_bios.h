@@ -82,6 +82,43 @@
  * different BIOS revision structures this differently, or no BIOS
  * ROM is loaded), this falls back to the same generic default as
  * every other function - no fabricated bytes are ever written.
+ *
+ * FURTHER EXCEPTIONS added this round (task: "IOP HLE stubs for
+ * BIOS-boot-path modules"): the same psx-spx reference
+ * (https://psx-spx.consoledev.net/kernelbios/, "A-Functions"/
+ * "B-Functions" tables) also documents a set of A0-table calls that
+ * are pure, fully-specified computation on IOP RAM/registers only -
+ * no dependency on any real BIOS internal kernel structure (unlike
+ * e.g. module loading, thread control blocks, or device drivers,
+ * which this project still has no verified reference for - see
+ * iop_hle_modules.h and docs/STATUS.md's "round 14" finding). These
+ * are implemented for real below: ABS/LABS(0x0E/0x0F), STRCAT/
+ * STRNCAT(0x15/0x16), STRCMP/STRNCMP(0x17/0x18), STRCPY/STRNCPY
+ * (0x19/0x1A), STRLEN(0x1B), BCOPY/BZERO(0x27/0x28), MEMCPY/MEMSET/
+ * MEMMOVE(0x2A/0x2B/0x2C), INITHEAP(0x39, bookkeeping only - no real
+ * allocator, same "scaffold, not a port" caveat as
+ * iop_hle_modules.c), FLUSHCACHE(0x44, a correct no-op - this project
+ * has no cache model to flush), and EXIT/_EXIT(0x06/0x3A, which halts
+ * the core with an honest, descriptive reason instead of silently
+ * returning 0 and letting the caller proceed past a call that real
+ * hardware never returns from).
+ *
+ * MEMMOVE is a deliberate exception to "implement it correctly":
+ * psx-spx annotates A(2Ch) memmove as ";Bugged" on real hardware
+ * (i.e. the real BIOS's memmove does NOT handle overlapping regions
+ * safely, unlike a standard C memmove). This is implemented here as
+ * a plain forward byte-copy (matching memcpy, NOT overlap-safe) to
+ * match that documented real (buggy) behavior, rather than silently
+ * "fixing" it to modern libc semantics no real IOP BIOS ever had.
+ *
+ * Still NOT implemented (same rationale as the rest of this file):
+ * anything touching files/devices (open/read/write/close/ioctl),
+ * heap allocation (malloc/free/calloc/realloc - InitHeap is recorded
+ * but nothing actually allocates from it), threads/events (SetConf/
+ * EnqueueCdIntr/etc.), or any CD-ROM/memory-card function - all of
+ * these depend on internal BIOS kernel structures (TCBs, EvCBs, file
+ * control blocks) this project has never modeled and has no verified
+ * layout for.
  */
 #ifndef PCSX2_WII_IOP_HLE_BIOS_H
 #define PCSX2_WII_IOP_HLE_BIOS_H
@@ -92,6 +129,27 @@
 #define IOP_HLE_TABLE_A0 0x000000A0u
 #define IOP_HLE_TABLE_B0 0x000000B0u
 #define IOP_HLE_TABLE_C0 0x000000C0u
+
+/* A0-table function numbers this round implements for real - see the
+ * header comment above and psx-spx's "A-Functions" table. */
+#define IOP_HLE_A0_EXIT       0x06u
+#define IOP_HLE_A0_ABS        0x0Eu
+#define IOP_HLE_A0_LABS       0x0Fu
+#define IOP_HLE_A0_STRCAT     0x15u
+#define IOP_HLE_A0_STRNCAT    0x16u
+#define IOP_HLE_A0_STRCMP     0x17u
+#define IOP_HLE_A0_STRNCMP    0x18u
+#define IOP_HLE_A0_STRCPY     0x19u
+#define IOP_HLE_A0_STRNCPY    0x1Au
+#define IOP_HLE_A0_STRLEN     0x1Bu
+#define IOP_HLE_A0_BCOPY      0x27u
+#define IOP_HLE_A0_BZERO      0x28u
+#define IOP_HLE_A0_MEMCPY     0x2Au
+#define IOP_HLE_A0_MEMSET     0x2Bu
+#define IOP_HLE_A0_MEMMOVE    0x2Cu
+#define IOP_HLE_A0_INITHEAP   0x39u
+#define IOP_HLE_A0__EXIT      0x3Au
+#define IOP_HLE_A0_FLUSHCACHE 0x44u
 
 typedef struct {
     uint64_t calls_seen;
@@ -108,6 +166,19 @@ typedef struct {
     uint8_t  exception_handler_installed;      /* 1 once the template
                                                  * has actually been
                                                  * written to RAM */
+
+    /* Real-behavior A0-table calls added this round - see the header
+     * comment above. */
+    uint64_t known_calls_handled; /* count of calls that got real
+                                    * behavior (not the generic
+                                    * default) - includes C(07h) and
+                                    * every IOP_HLE_A0_* function
+                                    * below */
+    uint32_t heap_addr, heap_size; /* InitHeap(0x39) bookkeeping only -
+                                     * no real allocator, see header */
+    uint8_t  heap_initialized;
+    uint8_t  exited;               /* 1 once EXIT/_EXIT has halted the core */
+    uint32_t exit_code;
 } iop_hle_bios_state_t;
 
 void iop_hle_bios_init(void);

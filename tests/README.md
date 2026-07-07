@@ -457,6 +457,34 @@ it before fetching/decoding any real instruction), so
 test_iop_core.c and test_system_handshake.c both need it linked in -
 see the updated commands above.
 
+`test_iop_hle_bios_functions.c` covers the real A0-table BIOS calls
+added to `source/hw/iop_hle_bios.c` this round (task #86): ABS/LABS,
+STRCAT/STRNCAT, STRCMP/STRNCMP, STRCPY/STRNCPY, STRLEN, BCOPY/BZERO,
+MEMCPY/MEMSET/MEMMOVE, INITHEAP, FLUSHCACHE, and EXIT/_EXIT - see
+`include/core/hw/iop_hle_bios.h` for the psx-spx citation and exact
+scope (this closes the "no verified reference" gap for this pure-
+computation subset of the A0 table only; module loading and anything
+touching files/devices/threads/CD-ROM/memory-cards remains out of
+scope). Calls `iop_hle_bios_try_handle()` directly with hand-set
+registers/memory rather than hand-encoding MIPS programs for every
+case - these calls don't need real instruction-level control flow to
+exercise. 26 checks, all passing, including: BCOPY's reversed
+`(src,dst,len)` argument order (vs MEMCPY's `(dst,src,len)`); MEMMOVE
+deliberately matching psx-spx's documented ";Bugged" real-hardware
+behavior (a plain forward byte-copy, NOT overlap-safe) with the
+expected corrupted result computed independently in the test rather
+than by calling the implementation under test; INITHEAP's
+bookkeeping-only recording; FLUSHCACHE's no-op guarantee; an
+unimplemented function number correctly falling back to the generic
+default without incrementing `known_calls_handled`; and EXIT halting
+the core with a descriptive reason. Needs the same link set as
+`test_iop_hle_bios.c`:
+
+```sh
+gcc -I../include -I../source -o test_iop_hle_bios_functions tests/test_iop_hle_bios_functions.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c
+./test_iop_hle_bios_functions
+```
+
 `test_iop_hle_modules.c` covers the IOP module registry
 (`source/hw/iop_hle_modules.c`) - a plain, project-owned bookkeeping
 scaffold, NOT a port of real IRX module parsing (see

@@ -1613,6 +1613,92 @@ texturing code path. Full regression (48 host-native test files)
 passes with 0 failures, and the Wii/devkitPPC target rebuilds clean
 with 0 warnings/0 errors.
 
+### IOP HLE: real A0-table BIOS calls implemented for the first time (task #86, priority round)
+
+Direct response to the user's explicit priority instruction ("mach 1
+3 4 6 komplett... am wichtigsten ist 1 komplett" - do items 1/3/4/6
+completely, item 1 most important). Item 1 is IOP HLE stubs for the
+BIOS-boot-path modules - previously blocked (see `iop_hle_bios.h`'s
+header comment and the ROADMAP's own "crux" note) on not having a
+verified, citable reference for real PS1/PS2 BIOS syscall function
+numbers beyond the single existing exception (`InstallExceptionHandlers`,
+C(07h)).
+
+**What changed**: psx-spx (https://psx-spx.consoledev.net/kernelbios/),
+the same community reference already cited for C(07h), documents the
+full A0/B0/C0 "Function Summary" tables. Cross-checking that table
+against this project's existing "no fabrication" bar, a clear subset
+stood out as safe to implement for real right now: pure computation on
+IOP RAM/registers only, with no dependency on any unmodeled internal
+BIOS kernel structure (unlike module loading, TCBs/EvCBs, or device
+drivers, which genuinely do need such structures and remain out of
+reach - see below).
+
+Implemented in `source/hw/iop_hle_bios.c` (all A0-table, real $a0-$a3
+argument registers, real IOP RAM via `iop_mem_read8`/`iop_mem_write8`):
+`ABS`/`LABS`(0x0E/0x0F), `STRCAT`/`STRNCAT`(0x15/0x16), `STRCMP`/
+`STRNCMP`(0x17/0x18), `STRCPY`/`STRNCPY`(0x19/0x1A), `STRLEN`(0x1B),
+`BCOPY`/`BZERO`(0x27/0x28 - note BCOPY's argument order is
+`(src,dst,len)`, reversed from MEMCPY's `(dst,src,len)`, exactly as
+psx-spx documents it), `MEMCPY`/`MEMSET`/`MEMMOVE`(0x2A/0x2B/0x2C),
+`INITHEAP`(0x39, bookkeeping only - records addr/size, no real
+allocator, same "scaffold not a port" caveat as `iop_hle_modules.c`),
+`FLUSHCACHE`(0x44, a correct no-op - no cache model exists to flush),
+and `EXIT`/`_EXIT`(0x06/0x3A, which now halts the core with an honest,
+descriptive reason instead of silently returning 0 and letting the
+caller run past a call real hardware never returns from).
+
+One deliberately-preserved real bug: psx-spx annotates `A(2Ch) memmove`
+as ";Bugged" on real hardware. Rather than "fixing" it to correct,
+overlap-safe modern libc semantics, `MEMMOVE` here is implemented as a
+plain forward byte-copy (identical to `MEMCPY`, NOT overlap-safe) to
+match that documented real (buggy) behavior.
+
+**Live ground-truth cross-check**: reconnected to the user's real,
+running SCPH-10000 BIOS session via PCSX2-MCP's DebugServer. Confirmed
+16 real IOP modules load successfully on real hardware
+(`System_Memory_Manager`, `Module_Manager`, `Exception_Manager`,
+`Interrupt_Manager`, `ssbus_service`, `dmacman`, `Timer_Manager`,
+`System_C_lib`, `Heap_lib`, `Multi_Thread_Manager`, `Vblank_service`,
+`IO/File_Manager`, `Moldule_File_loader`, `ROM_file_driver`, `Stdio`,
+`IOP_SIF_manager`) - useful confirmation that a real, working IOP BIOS
+does reach a fully-loaded steady state, and a concrete list of exactly
+which subsystems the round-14 wall still stands between this project
+and. Also live-disassembled the real A0/B0 vector region
+(0x000000A0-0x000000C4) in RAM: it decodes as a real (self-installed,
+not ROM-resident) dispatcher using `$k0` as scratch for a masked
+jump-table lookup at RAM 0x440, sharing/overlapping code between the
+A0 and B0 16-byte vector windows. This is consistent with - not
+contradicting - psx-spx's documented `$t1`/R9 calling convention: the
+caller still sets `$t1` before jumping to 0xA0, and since this
+project's HLE intercepts execution AT the trap address itself (before
+any real vector code would run), the internal register choreography
+of the real ROM-installed dispatcher is moot for our purposes - it's
+never actually executed.
+
+**Still NOT implemented** (unchanged rationale): anything touching
+files/devices (open/read/write/close/ioctl), heap allocation (malloc/
+free/calloc/realloc - INITHEAP is recorded but nothing allocates from
+it), threads/events, or CD-ROM/memory-card functions - all depend on
+internal BIOS kernel structures this project has never modeled and has
+no verified layout for. Real IOP module/IRX loading (the round-14 wall
+itself - a genuine `JALR $ra,$s1` into an address only a real module
+loader would populate) is **not** cleared by this round; it remains the
+same honest architectural boundary described in round 14, now with a
+concrete real-module-list reference point (above) for whenever this
+project returns to attempting it.
+
+New test file `tests/test_iop_hle_bios_functions.c` (26 checks, all
+passing): every new function number exercised directly via
+`iop_hle_bios_try_handle()` with hand-set registers/memory, including
+the reversed-argument-order BCOPY case, the documented-buggy MEMMOVE
+overlap case (computed independently in the test, not by calling the
+implementation under test), INITHEAP bookkeeping, FLUSHCACHE's no-op
+guarantee, an unimplemented function number correctly NOT incrementing
+`known_calls_handled`, and EXIT's halt-with-reason behavior. Full
+regression (49 host-native test files) passes with 0 failures, and the
+Wii/devkitPPC target rebuilds clean with 0 warnings/0 errors.
+
 ### Round 14: IOP-side investigation - the EE's SIF-polling steady state is real, and a genuine IOP wild-jump root-caused and hardened against
 
 Direct follow-up to round 13's finding that the EE settles into a

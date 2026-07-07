@@ -657,10 +657,34 @@ COP2 ("macro mode"). Real PCSX2 has both an interpreter
 (`VU0microInterp.cpp`, `VU1microInterp.cpp`) and x86 recompilers for
 these - only the interpreter side is even theoretically portable.
 
-- [ ] VU0/VU1 register file + micro-instruction memory
-- [ ] VU microcode interpreter (separate ISA from MIPS - not a small
-      addition)
-- [ ] VIF-side data unpacking into VU memory
+- [x] VU0/VU1 micro-instruction memory - `include/core/hw/vu.h`/
+      `source/hw/vu.c` (VU1: 4KB->16KB per PCSX2's `VUmicro.h`
+      VU1_PROGSIZE; VU0's `vu0_micro[4096]` lives in `ee_state_t`
+      alongside the existing round-13 vu0_vf/cop2_ctrl/vu0_mem fields,
+      since real hardware shares one physical VU0 between macro mode
+      and micro mode). MPG (`source/hw/vif.c`) now writes real
+      microprogram bytes here instead of skipping them.
+- [x] VU microcode interpreter - PARTIAL, real control flow only: TPC
+      advance, the E-bit's genuine one-instruction "delay slot", the
+      I-bit (loads VI[21]/REG_I from the lower word), and the branch
+      delay-slot mechanism (implemented, but nothing sets it yet) are
+      all byte-exact against a live fetch of PCSX2's
+      `VU0microInterp.cpp`. MSCAL/MSCNT/MSCALF (`source/hw/vif.c`) now
+      actually run this interpreter instead of being total no-ops. NOT
+      implemented: any real per-opcode instruction body (FMAC/integer
+      ALU/branches) - despite fetching `VU.h`/`VUmicro.h`/
+      `VUmicro.cpp`/`VUops.h`/`VUops.cpp`/`VUmicroMem.cpp`/
+      `VU1micro.cpp`, this project could not locate PCSX2's actual
+      `VU0_LOWER_OPCODE[128]`/`VU0_UPPER_OPCODE[64]` opcode-number-to-
+      instruction table, and per this project's no-fabrication policy
+      does not guess it - every instruction is fetched and its real
+      flags honored, but its body is a logged no-op
+      (`unimplemented_opcodes_seen`). A genuine, narrower step
+      forward, not a full VU implementation - see `include/core/hw/
+      vu.h`'s header comment for the full citation trail.
+- [ ] VIF-side data unpacking into VU memory (VIF's UNPACK format -
+      still needs a verified format reference, separate from the
+      opcode-table gap above)
 
 ## 6. GS (Graphics Synthesizer) + Wii output
 

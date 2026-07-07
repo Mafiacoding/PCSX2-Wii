@@ -142,6 +142,28 @@ typedef struct {
     uint32_t vu0_vf[32][4];
     uint8_t vu0_mem[4096];
 
+    /* VU0 "micro mode" (task: "VU0/VU1 data memory + VU microcode
+     * interpreter") - a COMPLETELY SEPARATE thing from the VU0 macro-
+     * mode (COP2) state directly above, sharing only the same
+     * physical VF/VI register file and data memory, exactly like real
+     * hardware - see include/core/hw/vu.h's header comment for the
+     * full explanation and citations. vu0_micro is VU0's real 4KB
+     * micro-instruction memory (PCSX2's VU0_PROGSIZE); the TPC/
+     * branch/E-bit fields below are transient execution-control state
+     * (not real architectural registers, matching how PCSX2's own
+     * VURegs struct also keeps `branch`/`branchpc`/`ebit` alongside
+     * its real VI[] array) - VU0's real TPC register itself is
+     * cop2_ctrl[26] (REG_TPC per PCSX2's VU.h VURegFlags enum, the
+     * same generic CTC2/CFC2-addressable register file round 12
+     * already implemented) and is kept in sync by vu0_exec_micro() in
+     * ee_core.c. */
+    uint8_t  vu0_micro[4096];
+    uint32_t vu0_branch_delay, vu0_branch_target;
+    uint32_t vu0_ebit_delay;
+    uint8_t  vu0_running;
+    uint64_t vu0_instructions_executed;
+    uint64_t vu0_unimplemented_opcodes_seen;
+
     uint8_t *ram;           /* 32MB emulated EE RAM */
     uint32_t ram_size;
 
@@ -192,5 +214,11 @@ void     ee_mem_write8(ee_state_t *st, uint32_t addr, uint8_t val);
 void     ee_mem_write16(ee_state_t *st, uint32_t addr, uint16_t val);
 void     ee_mem_write32(ee_state_t *st, uint32_t addr, uint32_t val);
 void     ee_mem_write64(ee_state_t *st, uint32_t addr, uint64_t val);
+
+/* VU0 micro mode (see this struct's vu0_micro comment above and
+ * include/core/hw/vu.h) - called from vif.c's VIF0 MPG/MSCAL/MSCNT/
+ * MSCALF handling. */
+void vu0_micro_write32(ee_state_t *st, uint32_t addr, uint32_t value);
+void vu0_exec_micro(ee_state_t *st, uint32_t start_addr);
 
 #endif

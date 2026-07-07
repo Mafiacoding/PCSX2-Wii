@@ -4,6 +4,8 @@
 
 #include "core/hw/vif.h"
 #include "core/hw/gif.h"
+#include "core/hw/vu.h"
+#include "core/ee/ee_core.h"
 #include <string.h>
 
 /* VIFcode CMD field values (bits 24-30 of the code word) - cross-
@@ -122,14 +124,32 @@ static void vif_process(vif_state_t *vif, const uint8_t *data, uint32_t qwc)
             break;
 
         case VIF_CMD_FLUSHE:
-        case VIF_CMD_MSCAL:
-        case VIF_CMD_MSCALF:
-        case VIF_CMD_MSCNT:
-            /* No VU microcode interpreter exists (docs/ROADMAP.md
-             * section 5) - there is nothing queued to flush or
-             * execute, so "do nothing" is the correct behavior for
-             * this project's current scope, not a shortcut. */
+            /* Real hardware waits for the VU's microprogram to
+             * finish; this project's vu0_exec_micro()/vu1_exec_micro()
+             * already run synchronously to completion (or the safety
+             * cap) inside MSCAL/MSCNT/MSCALF below, so by the time
+             * control reaches a later FLUSHE there is never anything
+             * left to wait for - a correct no-op given that. */
             break;
+
+        case VIF_CMD_MSCAL:
+        case VIF_CMD_MSCNT:
+        case VIF_CMD_MSCALF: {
+            /* Real hardware: MSCAL/MSCALF start the microprogram at
+             * IMM (MSCNT starts it at the CURRENT TPC instead - not
+             * modeled distinctly this round, since this project's
+             * vu0/vu1_exec_micro() always take an explicit start
+             * address; MSCNT is treated the same as MSCAL, an honest
+             * simplification noted here rather than silently). See
+             * include/core/hw/vu.h for what "execute" actually means
+             * this round (real control flow, no real opcode bodies
+             * yet - a genuine, narrower step from vif.c's prior total
+             * no-op). */
+            if (vif->is_vif1)
+                vu1_exec_micro(imm);
+            else
+                vu0_exec_micro(ee_core_get_state(), imm);
+        } break;
 
         case VIF_CMD_FLUSH:
         case VIF_CMD_FLUSHA:
@@ -161,16 +181,27 @@ static void vif_process(vif_state_t *vif, const uint8_t *data, uint32_t qwc)
         case VIF_CMD_MPG: {
             /* NUM field (bits 16-23): number of VU micro-instructions,
              * each 2 words (8 bytes); NUM==0 means 256 instructions
-             * (512 words) - matches Vif_Codes.cpp's vifCode_MPG. No VU
-             * micro-instruction memory exists yet, so the data is
-             * skipped (correctly, so the VIFcode stream stays in
-             * sync) rather than written anywhere. */
+             * (512 words) - matches Vif_Codes.cpp's vifCode_MPG. IMM
+             * is the destination micro-instruction-memory address, in
+             * the same "instruction pair index" units MSCAL/MSCNT use
+             * (byte offset = imm*8 - see vu.h's vu1_exec_micro() doc
+             * comment, same addressing convention). Now that real
+             * VU0/VU1 micro-instruction memory exists (this round),
+             * the data is actually written there instead of just
+             * being skipped over. */
             uint32_t num = (code >> 16) & 0xFFu;
             uint32_t words = (num ? num : 256u) * 2u;
             if (words > total_words - pos)
                 words = total_words - pos;
+            uint32_t dest_byte = imm * 8u;
+            for (uint32_t w = 0; w < words; w++) {
+                uint32_t word = vif_rd_le32(data + (pos + w) * 4u);
+                if (vif->is_vif1)
+                    vu1_micro_write32(dest_byte + w * 4u, word);
+                else
+                    vu0_micro_write32(ee_core_get_state(), dest_byte + w * 4u, word);
+            }
             pos += words;
-            vif->unsupported_cmds_seen++;
         } break;
 
         case VIF_CMD_DIRECT:

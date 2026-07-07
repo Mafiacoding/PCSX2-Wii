@@ -293,6 +293,40 @@ current, up-to-date status.)
   (`tests/test_iop_hle_bios_functions.c`), 49-file/0-failure
   regression, clean Wii rebuild.
 
+- **VU0/VU1 micro-instruction memory + microcode interpreter
+  control flow** (task #87, task 3): a COMPLETELY SEPARATE thing from
+  round 13's VU0 macro-mode (COP2) work - real hardware's VU "micro
+  mode" runs an asynchronous microprogram (uploaded via VIF's MPG,
+  kicked by MSCAL/MSCNT/MSCALF) using a totally different, VU-native
+  64-bit-per-instruction ISA. New `include/core/hw/vu.h`/
+  `source/hw/vu.c` (VU1: full 16KB/16KB mem+micro, own VF/VI regs) and
+  `ee_core.c` additions (`vu0_exec_micro`/`vu0_micro_write32`, reusing
+  round 13's existing `vu0_vf`/`cop2_ctrl`/`vu0_mem` fields - real
+  hardware shares one physical VU0 between macro and micro mode).
+  Live-fetched 7 real PCSX2 source files (`VU.h`, `VUmicro.h`,
+  `VUmicro.cpp`, `VUops.h`, `VUops.cpp`, `VUmicroMem.cpp`,
+  `VU1micro.cpp`) to get byte-exact real control flow: 8-byte
+  instruction pairs, the E-bit's genuine one-instruction "delay slot"
+  (verified against the exact countdown arithmetic in
+  `VU0microInterp.cpp`), the I-bit (loads VI[21]/REG_I), and a
+  correct-but-currently-unused branch delay-slot mechanism. **Honest
+  scope boundary**: despite fetching all 7 files, this project could
+  not locate PCSX2's actual `VU0_LOWER_OPCODE[128]`/
+  `VU0_UPPER_OPCODE[64]` opcode-number table - no per-instruction
+  FMAC/integer/branch body is decoded (every instruction is a real
+  fetch with real flags honored, but a logged no-op body). MPG
+  (`vif.c`) now writes real microprogram bytes instead of skipping
+  them; MSCAL/MSCNT/MSCALF now actually run the real fetch-execute-
+  until-E-bit loop instead of being total no-ops - exactly task 3's
+  own bar, without fabricating opcode semantics. Required converting
+  `tests/test_vif.c` from self-contained `#include` style to proper
+  multi-TU linking (vif.c now calls into `ee_core.c`/`vu.c`) and
+  adding `source/hw/vu.c` to every test that already needed
+  `source/hw/vif.c`. New `tests/test_vu_micro.c`, 14 checks. 50-file/
+  0-failure regression, clean Wii rebuild.
+
+**devkitPro toolchain**:
+
 **devkitPro toolchain**: FULLY FIXED, clean Wii rebuild verified. This
 sandbox's extraction was missing `base_rules`/`base_tools` (fetched
 from `github.com/devkitPro/devkitppc-rules`), `libogc` (a complete
@@ -418,7 +452,7 @@ gcc -I../include -I../source -o test_ee tests/test_ee_core.c ../source/hw/dma.c 
 ./test_ee
 ```
 
-There are 49 test files as of this writing, covering both CPU cores (EE
+There are 50 test files as of this writing, covering both CPU cores (EE
 integer/MMI/FPU/unaligned-access/COP0-CO-format/LQ-SQ/VU0-vector-datapath,
 IOP integer/unaligned/SYSCALL-exception/InstallExceptionHandlers/PC-fetch-
 sanity-guard), every hardware register model (EE DMA + chain-mode transfer

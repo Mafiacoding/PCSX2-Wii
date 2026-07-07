@@ -112,6 +112,7 @@
 #include "core/hw/gs.h"
 #include "core/hw/gif.h"
 #include "core/hw/vif.h"
+#include "core/hw/vu.h"
 #include "core/hw/sif.h"
 #include "core/hw/mch.h"
 #include <stdio.h>
@@ -682,6 +683,46 @@ static inline void vu0_vi_write(ee_state_t *st, uint32_t reg, uint32_t val)
 static inline uint32_t vu0_mem_addr(uint32_t vi_value, uint32_t lane)
 {
     return ((vi_value & 0xFFu) * 16u) + lane * 4u;
+}
+
+/* VU0 "micro mode" - see ee_core.h's vu0_micro field comment and
+ * include/core/hw/vu.h's header comment for the full scope/citation.
+ * Reuses the SAME vu0_vf/cop2_ctrl/vu0_mem fields as VU0 macro mode
+ * above (real hardware shares one physical VU0 between both access
+ * paths) plus the new vu0_micro/vu0_*_delay/vu0_running fields for
+ * micro-mode-only execution-control state. */
+void vu0_micro_write32(ee_state_t *st, uint32_t addr, uint32_t value)
+{
+    uint32_t off = addr & (sizeof(st->vu0_micro) - 1u);
+    st->vu0_micro[off]     = (uint8_t)value;
+    st->vu0_micro[off + 1] = (uint8_t)(value >> 8);
+    st->vu0_micro[off + 2] = (uint8_t)(value >> 16);
+    st->vu0_micro[off + 3] = (uint8_t)(value >> 24);
+}
+
+#define VU0_EXEC_STEP_CAP 65536u /* this project's own safety cap - see vu.c's identical VU1 cap */
+
+void vu0_exec_micro(ee_state_t *st, uint32_t start_addr)
+{
+    /* VU0's real TPC register is cop2_ctrl[26] (REG_TPC) - kept in
+     * sync here so a CFC2/MFC2 read of it during/after execution sees
+     * a sensible live value, same real register slot round 12's
+     * generic CTC2/CFC2 dispatch already exposes. */
+    st->cop2_ctrl[26] = (start_addr << 3) & (uint32_t)(sizeof(st->vu0_micro) - 1u);
+    st->vu0_running = 1;
+
+    for (uint32_t i = 0; i < VU0_EXEC_STEP_CAP; i++) {
+        int stopped = vu_micro_step(st->vu0_vf, st->cop2_ctrl,
+                                     st->vu0_mem, (uint32_t)(sizeof(st->vu0_mem) - 1u),
+                                     st->vu0_micro, (uint32_t)(sizeof(st->vu0_micro) - 1u),
+                                     &st->cop2_ctrl[26], &st->vu0_branch_delay, &st->vu0_branch_target,
+                                     &st->vu0_ebit_delay,
+                                     &st->vu0_instructions_executed, &st->vu0_unimplemented_opcodes_seen);
+        if (stopped)
+            break;
+    }
+
+    st->vu0_running = 0;
 }
 
 

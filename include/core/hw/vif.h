@@ -30,20 +30,37 @@
  *   project reads them back yet (they exist so real VIF code streams
  *   parse without desyncing, and so a later round has somewhere to
  *   read them from).
- *   FLUSHE/FLUSH(VIF1)/FLUSHA(VIF1), MSCAL/MSCNT/MSCALF - real
- *   no-ops here: on real hardware these synchronize with the VU
- *   microcode engine, which this project does not have (see
- *   docs/ROADMAP.md section 5, "VU0/VU1 register file + micro-
- *   instruction memory" and "VU microcode interpreter" are both
- *   still open) - correctly modeled as "nothing to wait for".
+ *   FLUSHE - a correct no-op (see below for why).
+ *   MSCAL/MSCNT/MSCALF - now call into the real VU0/VU1 microcode
+ *   interpreter (`include/core/hw/vu.h`, added alongside this round's
+ *   VU0/VU1 micro-instruction memory work): this synchronously runs
+ *   the microprogram at the VIFcode's IMM address until a real E-bit-
+ *   flagged instruction retires (with the real one-more-instruction
+ *   delay - see vu.h) or a safety cap is hit. MSCNT is treated
+ *   identically to MSCAL (both start at IMM) rather than modeling
+ *   MSCNT's real "start at the current TPC instead" distinction - an
+ *   honest simplification, noted here rather than silently, since
+ *   this project's vu0_exec_micro()/vu1_exec_micro() always take an
+ *   explicit start address. Because MSCAL/MSCNT/MSCALF now run
+ *   synchronously to completion, FLUSHE never actually has anything
+ *   left to wait for by the time it's reached - a correct no-op given
+ *   that, not a shortcut. See vu.h for the important caveat that no
+ *   real per-opcode VU instruction body is decoded yet (real control
+ *   flow only) - this is a genuine, narrower step forward, not a full
+ *   VU implementation.
+ *   FLUSH(VIF1)/FLUSHA(VIF1) - real no-ops, same rationale as FLUSHE.
  *   STMASK/STROW/STCOL - store their trailing data word(s) into
  *   mask/row[4]/col[4], matching real register semantics, even
  *   though nothing consumes them yet (UNPACK, which would, is out of
  *   scope this round - see below).
- *   MPG - recognized and its data span correctly skipped (so the
- *   VIFcode stream doesn't desync), but the microprogram bytes
- *   themselves go nowhere - there is no VU micro-instruction memory
- *   to write them into yet. Counted as unsupported.
+ *   MPG - now writes its microprogram data for real into VU0/VU1
+ *   micro-instruction memory (via `vu0_micro_write32()`/
+ *   `vu1_micro_write32()`), at the destination address given by the
+ *   VIFcode's IMM field (same "instruction pair index" addressing
+ *   units as MSCAL/MSCNT - see vu.h). Previously (before this round's
+ *   VU work) this data had nowhere to go and was just skipped;
+ *   no longer counted as unsupported since it now does something
+ *   real.
  *   DIRECT/DIRECTHL (VIF1 only) - THE one command this round actually
  *   produces pixels: forwards its data span verbatim to
  *   `gif_process_quadwords()`, exactly the real hardware behavior

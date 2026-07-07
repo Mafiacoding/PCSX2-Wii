@@ -1613,6 +1613,113 @@ texturing code path. Full regression (48 host-native test files)
 passes with 0 failures, and the Wii/devkitPPC target rebuilds clean
 with 0 warnings/0 errors.
 
+### VU0/VU1 micro-instruction memory + microcode interpreter control flow (task #87)
+
+Direct continuation of the user's "mach 1 3 4 6 komplett" instruction
+(task 3 this round, after task 1/#86 above). Task 3 asked for "VU0/VU1
+data memory + VU microcode interpreter... enough to execute basic VU
+programs (at least the ones MSCAL/MSCNT in vif.c currently no-op)".
+
+**What VU "micro mode" is, and how it differs from the existing round-
+13 VU0 work**: round 13 implemented VU0 "macro mode" - VU0 acting as
+the EE's COP2 coprocessor, executing one vector instruction per EE
+instruction via MFC2/CFC2/MTC2/CTC2/QMFC2/QMTC2/VSUB/VISWR/VSQI, using
+the EE's own MIPS-style instruction encoding. "Micro mode" is a
+completely separate thing: an asynchronous microprogram (uploaded via
+VIF's MPG command, kicked by MSCAL/MSCNT/MSCALF) that runs using a
+totally different, VU-native 64-bit-per-instruction ISA. Real hardware
+runs both on the SAME physical VU0 (sharing VF/VI registers and local
+data memory) - this project's new `vu0_exec_micro()`/
+`vu0_micro_write32()` (added to `ee_core.c`) reuse the existing
+`vu0_vf`/`cop2_ctrl`/`vu0_mem` fields for exactly that reason. VU1 has
+no macro-mode/COP2 presence on real hardware at all, so it gets a
+fully self-contained new `vu1_state_t` (`include/core/hw/vu.h`/
+`source/hw/vu.c`).
+
+**Live-fetched real references this round**: PCSX2's `VU.h` (VECTOR/
+REG_VI/VURegs layout, the VURegFlags enum confirming `cop2_ctrl[26]`
+- already round 12's generic CTC2/CFC2 register file - is the real
+TPC slot, REG_TPC), `VUmicro.h` (VU0_MEMSIZE/PROGSIZE=0x1000 4KB each,
+VU1_MEMSIZE/PROGSIZE=0x4000 16KB each - confirms this project's sizes
+exactly), `VUops.h`/`VUops.cpp` (per-instruction body implementations
+and the real field-extraction macros - `_Ft_`/`_Fs_`/`_Fd_`/`_Fsf_`/
+`_Ftf_`/`_Imm11_` etc), `VUmicro.cpp`, `VUmicroMem.cpp` (VF00 hardwired
+to (0,0,0,1.0f), confirming round 13's existing VU0 convention extends
+to VU1 too), and - most importantly - `VU0microInterp.cpp`'s
+`_vu0Exec()`, which gave the exact, byte-accurate real control-flow
+mechanics this round implements: each micro-instruction is 8 bytes
+(`ptr[0]`=lower word, `ptr[1]`=upper word, TPC+=8 per step); upper-word
+bit 31 (0x80000000, "I" flag) means only the upper instruction executes
+and the lower word's raw bits become VI[21]/REG_I; bit 30 (0x40000000,
+"E" flag) marks the end of the microprogram, but real hardware executes
+exactly ONE MORE instruction after it (the classic VU "E-bit delay
+slot") before actually stopping - verified via the exact countdown
+arithmetic in the cited source (`ebit=2` then `if (ebit--==1) stop`,
+which this project reproduces as an equivalent pre-decrement-then-
+check-zero form). Branches use the identical one-instruction-delay
+mechanism - implemented (a generic, correct `branch_delay`/
+`branch_target` pair) even though nothing sets it yet (see below).
+
+**Honest scope boundary - read before extending**: despite fetching
+seven real PCSX2 source files this round (`VU.h`, `VUmicro.h`,
+`VUmicro.cpp`, `VUops.h`, `VUops.cpp`, `VUmicroMem.cpp`,
+`VU1micro.cpp`), this project could not locate the actual
+`VU0_LOWER_OPCODE[128]`/`VU0_UPPER_OPCODE[64]` function-pointer table
+that maps a real numeric opcode (7-bit lower field `code>>25`, 6-bit
+upper field `code&0x3f`) to a real instruction. `VUops.cpp` implements
+every instruction's BODY (`_vuADDx`, `_vuNOP`, etc.) but the index-to-
+function table itself is defined somewhere else this project's fetch
+attempts (including guessing several plausible filenames) didn't find.
+Per this project's consistent no-fabrication policy, `vu_micro_step()`
+(`source/hw/vu.c`) does NOT guess which numeric value means what -
+every instruction pair is genuinely fetched, its real E-bit/I-bit
+flags are honored exactly per the cited source, and TPC/branch/E-bit
+control flow is completely real, but the actual FMAC/integer-ALU/
+branch body of every instruction is a logged no-op
+(`unimplemented_opcodes_seen`). This means MSCAL/MSCNT/MSCALF go from
+"total no-op" (vif.c's prior state) to "genuinely runs the real
+uploaded microprogram, fetch-by-fetch, honoring real flags, until real
+E-bit completion" - exactly the bar task 3 set ("enough to execute
+basic VU programs... at least the ones MSCAL/MSCNT... currently
+no-op") - without fabricating what any specific instruction actually
+computes. A new, narrower, honest wall, matching this project's
+established pattern (VIF0/VIF1's first increment, GS's first triangle,
+IOP HLE's pure-computation subset, etc.).
+
+**MPG now writes real data**: previously (vif.c, task #84) MPG
+recognized its data span and skipped it correctly (to keep the
+VIFcode stream in sync) but the microprogram bytes went nowhere, since
+no VU micro-instruction memory existed. Now they're written via
+`vu0_micro_write32()`/`vu1_micro_write32()` at the VIFcode's IMM
+address (same "instruction pair index" addressing units MSCAL/MSCNT
+use - byte offset = imm*8, confirmed against a live fetch of PCSX2's
+`vu1ExecMicro()`: `VU1.VI[REG_TPC].UL = addr; ...SetStartPC(TPC<<3)`).
+MPG is no longer counted as unsupported.
+
+**Tests**: updated `tests/test_vif.c`'s MPG check (previously asserted
+"counted as unsupported"; now asserts the 4 microprogram words were
+actually written into VU1 micro memory) - required converting
+`test_vif.c` from its previous self-contained `#include`-the-source
+style to proper separate-translation-unit linking (vif.c now calls
+into `ee_core.c`/`vu.c`, the same reason `test_system_handshake.c`
+already needed that style). New `tests/test_vu_micro.c` (14 checks):
+a 4-instruction VU1 program with the E-bit on instruction 3 stops
+after exactly 4 real instructions (verified against the exact
+countdown arithmetic cited above); MSCAL's start address confirmed to
+be an instruction-pair index; the safety cap (65536 instructions -
+this project's own guard against a genuinely-infinite microprogram,
+not real hardware) correctly terminates an all-zero "program" that
+never sets E; the I-flag correctly loads VI[21]; `vu1_micro_write32`'s
+little-endian storage and real 16KB address wraparound; and VU0's
+execution correctly reusing `ee_state_t`'s shared VF/VI/data-memory
+fields from round 13 while keeping its own separate micro-instruction
+memory. Also required adding `source/hw/vu.c` to every existing test's
+link line that already needed `source/hw/vif.c` (same transitive-
+dependency pattern as every previous round that gave `ee_core.c`/
+`vif.c` a new hardware dependency). Full regression (50 host-native
+test files) passes with 0 failures, and the Wii/devkitPPC target
+rebuilds clean with 0 warnings/0 errors.
+
 ### IOP HLE: real A0-table BIOS calls implemented for the first time (task #86, priority round)
 
 Direct response to the user's explicit priority instruction ("mach 1

@@ -1,8 +1,10 @@
 #include <stdio.h>
 #include <string.h>
-#include "hw/gs_mem.c"
-#include "hw/gif.c"
-#include "hw/vif.c"
+#include "core/hw/gs_mem.h"
+#include "core/hw/gif.h"
+#include "core/hw/vif.h"
+#include "core/hw/vu.h"
+#include "core/hw/dma.h"
 
 static int failures = 0;
 #define CHECK(cond, msg) do { \
@@ -124,8 +126,17 @@ int main(void)
         while (off < (int)sizeof(buf)) { wle32(buf + off, enc_vifcode(VIF_CMD_NOP, 0, 0)); off += 4; }
         vif1_process_quadwords(DMA_CHANNEL_VIF1, buf, sizeof(buf) / 16);
         vif_state_t *v1 = vif1_get_state();
-        CHECK(v1->unsupported_cmds_seen == 1, "MPG: counted as unsupported (no VU micro-instruction memory)");
+        CHECK(v1->unsupported_cmds_seen == 0, "MPG: no longer counted as unsupported (now writes real VU1 micro-instruction memory)");
         CHECK(v1->cycle_cl == 9 && v1->cycle_wl == 9, "MPG: correctly skipped its 4-word data span and parsed the marker code right after it");
+
+        vu1_state_t *vu1 = vu1_get_state();
+        int mpg_ok = 1;
+        for (int i = 0; i < 4; i++) {
+            uint32_t w = (uint32_t)vu1->micro[i*4] | ((uint32_t)vu1->micro[i*4+1]<<8) |
+                         ((uint32_t)vu1->micro[i*4+2]<<16) | ((uint32_t)vu1->micro[i*4+3]<<24);
+            if (w != 0xAAu + (uint32_t)i) mpg_ok = 0;
+        }
+        CHECK(mpg_ok, "MPG: the 4 microprogram words were actually written into VU1 micro-instruction memory at IMM=0");
     }
 
     {

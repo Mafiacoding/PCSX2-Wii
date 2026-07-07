@@ -2557,6 +2557,38 @@ this same round, harmless - the copied ROMDIR name field is always
 exactly 10 bytes and the destination buffer is 11 bytes with an
 explicit trailing NUL set separately).
 
+### Round 16 (2026-07-07): third BIOS-filename candidate for the test menu, user's own real BIOS validated for local Dolphin testing
+
+Follow-up to Round 15's native Wii test menu (task #97). The user provided
+their own real, legally-owned PS2 BIOS dump (SCPH-10000, 4,194,304 bytes -
+the correct size for a real PS2 BIOS ROM) for local testing purposes.
+
+**Change made to the repo (source only, no BIOS bytes involved):**
+`source/main.c`'s `action_bios_boot_test()` previously only tried
+`sd:/pcsx2/bios/SCPH39001.bin` and `sd:/pcsx2/bios/bios.bin`. Added a third
+candidate filename, `sd:/pcsx2/bios/SCPH10000.bin`, so a user with an
+SCPH-10000 dump doesn't have to rename their file to use the BIOS Boot Test
+menu action. This is a one-line string-literal change; no BIOS bytes are
+embedded anywhere in the repo.
+
+**Handling of the user's real BIOS file (per this project's absolute,
+standing rule):** the file was inspected transiently in the sandbox only
+(size/header sanity-checked - it starts with plausible MIPS boot-code
+opcodes, consistent with a real BIOS ROM) and was never copied into
+`/tmp/pcsx2-wii` (the git repo), never committed, never pushed, and never
+placed in the rsync'd outputs mirror of the repo. Instead, a separate,
+non-repo deliverable folder (`dolphin_sdcard/pcsx2/bios/SCPH10000.bin`) was
+created directly in the outputs folder, structured as a virtual SD card
+root the user can point Dolphin's "SD Card Folder" device at, so the BIOS
+Boot Test menu action can load it. This folder is not tracked by git, not
+part of the PCSX2-Wii repository, and is delivered to the user only as a
+local convenience artifact.
+
+**Regression / build status:** all 93 host-native regression test binaries
+continue to pass (0 failures). Clean devkitPPC/libogc rebuild of
+`boot.dol`, same single pre-existing harmless `strncpy` truncation warning
+in `iop_module_loader.c` as prior rounds (unrelated to this change).
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

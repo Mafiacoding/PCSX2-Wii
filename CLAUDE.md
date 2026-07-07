@@ -475,6 +475,36 @@ always ask for/verify the no-disc case explicitly).
   access, time permitting. 54-file/0-failure regression, clean Wii
   rebuild.
 
+- **Round 15b - native Wii test menu added to main.c (user request)**:
+  user asked, in German, for a "nice PCSX2-style PS2-layout" test menu
+  built directly into `boot.dol` so the .dol's basic liveness/navigation
+  could be verified before continuing deeper emulator work. Rewrote
+  `source/main.c` (209 -> 454 lines) into a real interactive menu: direct
+  XFB pixel drawing (gradient background, borders, highlight box) reusing
+  the already-tested `gs_rgb8_pair_to_ycbcr()`, D-pad navigation between
+  3 items (BIOS Boot Test / GS-GIF Demo / About), a heartbeat+frame-
+  counter indicator drawn every loop iteration (proves the app is alive
+  even mid-action), and a bounded (`DEMO_STEP_CAP=2,000,000`) real call
+  into `system_run_interleaved()` for the BIOS Boot Test action so the UI
+  never appears to hang. User confirmed via a real Dolphin screenshot that
+  the menu, navigation, heartbeat, and the expected "no SD/USB storage
+  found" no-BIOS error path all work correctly (59.93 FPS). Hit the
+  Write-tool-truncation bug again on this file (see workflow notes below)
+  - fixed the same way, via a bash heredoc instead of the Write tool.
+
+- **Round 16 - user's own real BIOS validated for local Dolphin testing,
+  third BIOS-filename candidate added**: user uploaded their own real,
+  legally-owned SCPH-10000 BIOS dump for local testing. Added a one-line
+  source change - a third filename candidate,
+  `sd:/pcsx2/bios/SCPH10000.bin`, in `source/main.c`'s
+  `action_bios_boot_test()` - so an SCPH-10000 dump works without
+  renaming. No BIOS bytes were ever copied into this repo, committed, or
+  pushed; the user's BIOS file was only inspected transiently in the
+  sandbox (size/header sanity check) and a separate, non-repo
+  `dolphin_sdcard/` folder was built directly in the outputs directory as
+  a virtual-SD-card deliverable for the user's own local Dolphin setup.
+  93-binary/0-failure regression, clean Wii rebuild.
+
 ## The mandatory per-change workflow
 
 This project has a strict, consistently-applied ritual for every increment

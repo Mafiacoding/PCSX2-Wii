@@ -251,6 +251,7 @@ static void action_bios_boot_test(void)
         if (!g_bios_ok) {
             memset(&g_bios, 0, sizeof(g_bios));
             g_bios_ok = (bios_load("sd:/pcsx2/bios/SCPH39001.bin", &g_bios) == 0 ||
+                         bios_load("sd:/pcsx2/bios/SCPH10000.bin", &g_bios) == 0 ||
                          bios_load("sd:/pcsx2/bios/bios.bin", &g_bios) == 0);
         }
         if (!g_bios_ok) {

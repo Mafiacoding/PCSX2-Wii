@@ -300,11 +300,38 @@ each vertex's own screen coordinate (where the barycentric weights are
 exactly 1/0/0 by construction - a merely-nearby sample point can snap
 to the wrong texel under nearest-neighbor sampling, unlike Gouraud
 color's continuous blend); and a TME=0 regression proving flat-shaded
-triangles are unaffected by the new texturing code path.
+triangles are unaffected by the new texturing code path. Task #88
+added `PRIM_FST_MASK` to the 3 textured-PRIM constructions here (this
+test never touches ST/Q, so FST=1/UV mode is what it always actually
+intended - see task #88's own test file below for why this mattered).
 
 ```sh
 gcc -I../include -I../source -o test_gif_texture tests/test_gif_texture.c
 ./test_gif_texture
+```
+
+`test_gif_stq_sprite.c` covers task #88: perspective-correct (ST+Q,
+PRIM's FST=0) texture coordinates on triangles, and SPRITE texturing
+(previously flat-color only). 15 checks: an exact-centroid test
+(barycentric weights of exactly 1/3,1/3,1/3 for ANY triangle -
+vertices (0,0)/(9,0)/(0,9) give integer centroid (3,3)) with differing
+per-vertex Q (1/1/4) proves genuine 1/Q perspective correction is
+happening (samples texel 4) rather than a plain-affine fallback
+(which would wrongly give texel 3); a second case with equal Q
+everywhere confirms the math correctly reduces to the plain-affine
+answer when there's nothing to correct for; SPRITE texturing via a new
+`rasterize_sprite()` (identity-mapped UV over a 2-axis gradient
+texture, exact midpoint sample); and a SPRITE TME=0 regression. Caught
+a real test-construction bug while writing this: `GS_REG_UV`'s real
+packing puts BOTH U and V in the first A+D word (`GIFRegUV: u16 U;
+u16 V; u32 _PAD3` - word1 is pure padding), not one value per word
+like ST/RGBAQ/XYZ2 - confirmed against PCSX2's own GS/GSRegs.h. This
+was a test bug only; `gif.c`'s own (unchanged) UV handling was already
+correct.
+
+```sh
+gcc -I../include -I../source -o test_gif_stq_sprite tests/test_gif_stq_sprite.c
+./test_gif_stq_sprite
 ```
 
 Note: as ee_core.c has grown more hw/ dependencies (dma.c, gs.c,

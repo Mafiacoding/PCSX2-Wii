@@ -1613,6 +1613,86 @@ texturing code path. Full regression (48 host-native test files)
 passes with 0 failures, and the Wii/devkitPPC target rebuilds clean
 with 0 warnings/0 errors.
 
+### Perspective-correct (ST+Q) texture coordinates + SPRITE texturing (task #88)
+
+Direct continuation of "mach 1 3 4 6 komplett" - task 4 this round
+(after tasks 1/#86 and 3/#87 above). Task 4 asked for real ST+Q
+(FST=0) perspective-correct texture coordinates on triangles, plus
+texturing support for SPRITE (previously flat-color only).
+
+**Real references, live-fetched this round**: PCSX2's `GS/GSRegs.h`
+gave the exact real bitfield layouts needed: `GIFRegPRIM`'s FST bit is
+bit 8 (`PRIM:3,IIP:1,TME:1,FGE:1,ABE:1,AA1:1,FST:1,...`); `GIFRegRGBAQ`
+is `u8 R,G,B,A; float Q` - Q occupies the ENTIRE second 32-bit word of
+an A+D RGBAQ write as a real IEEE-754 float (previously this project
+read but discarded that word - `(void)data_hi` - now decoded for
+real); `GIFRegST` is `float S; float T` (no Q - unlike PACKED mode's
+combined STQ tag, A+D mode's Q arrives bundled with RGBAQ instead, a
+real hardware quirk now correctly modeled); and `GIFRegTEX0`'s TW/TH
+fields (previously ignored entirely) - TW is a clean 4-bit field
+(word0 bits 26-29), but TH is a real hardware oddity that straddles
+the 64-bit register's word boundary (2 bits from word0's top, bits
+30-31, plus 2 bits from word1's bottom, bits 0-1), confirmed via
+PCSX2's own overlapping-bitfield union for this exact register.
+
+**Triangle ST+Q**: `rasterize_triangle()` (`source/hw/gif.c`) now
+branches on PRIM's real FST bit. FST=1 (UV) keeps the exact existing
+affine-interpolation code path unchanged. FST=0 implements the
+standard perspective-correct texture-mapping algorithm real GS
+hardware uses: 1/Q, S/Q, and T/Q (NOT S, T, Q directly) are affine/
+linear in screen space, so those are what get barycentrically
+interpolated; the true per-pixel S/T is then recovered by dividing
+back out the per-pixel Q. Verified with a specifically-designed test
+that distinguishes genuine perspective correction from a plain-affine
+bug: for ANY triangle, the centroid (average of the 3 vertices) has
+barycentric weights of exactly (1/3, 1/3, 1/3) - a well-known,
+independently-verifiable geometric fact. Using vertices (0,0)/(9,0)/
+(0,9) (centroid exactly (3,3)) with S=0/9/0 and Q=1/1/4 (differing Q
+to force real perspective skew), plain affine interpolation of S alone
+would wrongly give 3.0, while genuine perspective correction gives
+exactly 4.0 (hand-verified: inv_q_avg=(1+1+0.25)/3=0.75, s_over_q_avg=
+(0+9+0)/3=3.0, q_at_pixel=1/0.75=1.3333, s_norm=3.0*1.3333=4.0) - and
+the implementation samples texel 4 exactly, confirming real 1/Q
+division is happening, not a fallback. A second case with equal Q at
+every vertex confirms the perspective-correct math correctly reduces
+to the same answer plain affine would give when there's nothing to
+correct for.
+
+**SPRITE texturing**: new `rasterize_sprite()` replaces the previous
+inline flat-fill-only code. Since SPRITE is screen-axis-aligned (U
+varies only with X, V only with Y), this uses a deliberately simpler
+approximation than triangles: each corner's texture coordinate is
+resolved to final texel space FIRST (applying the FST=0 perspective
+divide at the corner, if applicable), then plain linear interpolation
+runs between the two corners' already-resolved texel coordinates.
+This is exact when both corners share the same Q (the overwhelmingly
+common real case for a 2D sprite) - explicitly documented as a
+simplification for the rarer differing-Q "billboard" case, not
+silently assumed correct. Verified with an identity-mapped UV sprite
+(corner0 (0,0)->uv(0,0), corner1 (10,10)->uv(10,10)) sampling a
+red=x*10,green=y*10 gradient texture: the exact midpoint (5,5) reads
+back texel (5,5) via the axis-aligned bilinear interpolation.
+
+**Bug caught while writing the SPRITE test**: the test initially packed
+UV's V coordinate into the A+D write's second word (`data_hi`),
+mirroring how ST/RGBAQ/XYZ2 spread their two logical values across two
+words - but real hardware's `GIFRegUV` packs BOTH U and V into the
+FIRST word alone (`u16 U; u16 V; u32 _PAD3` - word1 is pure padding),
+confirmed against PCSX2's own GS/GSRegs.h. This was a test-construction
+bug, not a `gif.c` bug - the existing UV handling in `apply_ad_write`
+(unchanged this round) was already doing this correctly; the
+pre-existing `test_gif_texture.c` never caught it because its
+V-in-data_hi mistake happened to coincide with the real, correct V
+value (0) in every case it tested.
+
+Full regression (51 host-native test files) passes with 0 failures,
+and the Wii/devkitPPC target rebuilds clean with 0 warnings/0 errors.
+New `tests/test_gif_stq_sprite.c`, 15 checks. Updated
+`tests/test_gif_texture.c`'s 3 textured-PRIM constructions to
+explicitly set `PRIM_FST_MASK` (UV mode) - needed since FST now has
+real meaning and those tests never touch ST/Q, matching what they
+always actually intended.
+
 ### VU0/VU1 micro-instruction memory + microcode interpreter control flow (task #87)
 
 Direct continuation of the user's "mach 1 3 4 6 komplett" instruction

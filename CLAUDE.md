@@ -325,6 +325,38 @@ current, up-to-date status.)
   `source/hw/vif.c`. New `tests/test_vu_micro.c`, 14 checks. 50-file/
   0-failure regression, clean Wii rebuild.
 
+- **Perspective-correct (ST+Q) texture coordinates + SPRITE
+  texturing** (task #88, task 4): PRIM's real FST bit (bit 8) now
+  selects UV (FST=1, unchanged from task #85) vs. genuine perspective-
+  correct ST+Q (FST=0, the real GS default) interpolation on
+  triangles - the standard 1/Q, S/Q, T/Q barycentric algorithm real
+  GS hardware uses (those ratios are affine in screen space; true
+  per-pixel S/T is recovered afterward by dividing back out the per-
+  pixel Q). `GS_REG_ST` (real IEEE-754 floats, live-fetched from
+  PCSX2's `GS/GSRegs.h`) and Q (bundled into `GS_REG_RGBAQ`'s high
+  word on real hardware - previously discarded via `(void)data_hi`)
+  are now decoded; TEX0's TW/TH fields (previously ignored) scale
+  normalized S/T into texel space (TH is a real hardware oddity
+  straddling the 64-bit register's word boundary - 2 bits from word0's
+  top + 2 bits from word1's bottom - confirmed against PCSX2's own
+  overlapping-bitfield union). Verified with an exact-centroid test (a
+  triangle's centroid always has barycentric weights of exactly
+  1/3,1/3,1/3, for ANY triangle) using differing per-vertex Q values to
+  prove genuine 1/Q division happens (samples texel 4) rather than a
+  plain-affine bypass (would wrongly give texel 3). SPRITE gained real
+  texturing too via a new `rasterize_sprite()` - a simpler, explicitly-
+  documented per-corner-then-linear approximation (exact when both
+  corners share the same Q, the common real-content case). Caught a
+  real test-construction bug along the way: `GIFRegUV` packs BOTH U
+  and V into the FIRST A+D word alone (word1 is pure padding) - a test
+  bug, not a `gif.c` bug (existing UV decode was already correct; the
+  pre-existing texture test never exposed it because it always used
+  V=0 in both slots). New `tests/test_gif_stq_sprite.c`, 5 checks;
+  fixed `tests/test_gif_texture.c`'s 3 pre-existing textured-PRIM
+  constructions to set FST explicitly (now that FST=0 is a real,
+  meaningful default rather than an ignored bit). 51-file/0-failure
+  regression, clean Wii rebuild.
+
 **devkitPro toolchain**:
 
 **devkitPro toolchain**: FULLY FIXED, clean Wii rebuild verified. This
@@ -452,7 +484,7 @@ gcc -I../include -I../source -o test_ee tests/test_ee_core.c ../source/hw/dma.c 
 ./test_ee
 ```
 
-There are 50 test files as of this writing, covering both CPU cores (EE
+There are 51 test files as of this writing, covering both CPU cores (EE
 integer/MMI/FPU/unaligned-access/COP0-CO-format/LQ-SQ/VU0-vector-datapath,
 IOP integer/unaligned/SYSCALL-exception/InstallExceptionHandlers/PC-fetch-
 sanity-guard), every hardware register model (EE DMA + chain-mode transfer

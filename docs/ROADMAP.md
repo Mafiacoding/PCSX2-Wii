@@ -639,15 +639,30 @@ the SPU2. Reference: `Dmac.cpp` (583) + `Dmac.h` (570).
       TME bit and TEX0's TBP0/TBW/TFX fields (cross-checked against
       PCSX2's own `GS/GSRegs.h`) now drive real texture mapping on
       TRIANGLE/TRIANGLE_STRIP/TRIANGLE_FAN. Nearest-neighbor PSMCT32
-      sampling, UV-only "FST=1" coordinates (no ST+Q perspective-
-      correct path), DECAL and MODULATE TFX modes (HIGHLIGHT/
-      HIGHLIGHT2 simplified to behave like MODULATE), no CLAMP/wrap
-      modeling. Texture-coordinate interpolation reuses the same
-      barycentric weights as Gouraud color, since real hardware
-      interpolates UV whenever texturing is on regardless of the IIP
-      bit. 10 new checks in `tests/test_gif_texture.c`, 48-file/0-
-      failure full regression, clean Wii rebuild. SPRITE texturing and
-      perspective-correct coordinates remain open.
+      sampling, DECAL and MODULATE TFX modes (HIGHLIGHT/HIGHLIGHT2
+      simplified to behave like MODULATE), no CLAMP/wrap modeling.
+      10 new checks in `tests/test_gif_texture.c`, 48-file/0-failure
+      full regression, clean Wii rebuild.
+- [x] Perspective-correct (ST+Q) texture coordinates + SPRITE
+      texturing (task #88): PRIM's real FST bit (bit 8, cross-checked
+      against PCSX2's own `GS/GSRegs.h` GIFRegPRIM) now selects
+      between UV (FST=1, unchanged) and genuine perspective-correct
+      ST+Q (FST=0) interpolation on TRIANGLE/TRIANGLE_STRIP/
+      TRIANGLE_FAN - the standard 1/Q, S/Q, T/Q barycentric algorithm
+      real GS hardware uses, verified with an exact-centroid test case
+      (barycentric weights of exactly 1/3,1/3,1/3 for any triangle)
+      that distinguishes genuine perspective correction from a plain-
+      affine fallback. S/T (`GS_REG_ST` A+D write) and Q (bundled with
+      `GS_REG_RGBAQ`'s high word, per real hardware) are real IEEE-754
+      floats; TEX0's TW/TH fields (previously ignored) are now parsed
+      to scale normalized ST into texel space. SPRITE gained real
+      texturing too (previously flat-color only) via a new
+      `rasterize_sprite()`, using a simpler, explicitly-documented
+      per-corner-then-linear approximation rather than triangles' full
+      per-pixel perspective correction (exact when a sprite's two
+      corners share the same Q, which is the common real case). 15 new
+      checks (`tests/test_gif_stq_sprite.c`), 51-file/0-failure full
+      regression, clean Wii rebuild.
 
 ## 5. VU0 / VU1 (Vector Units)
 
@@ -709,13 +724,13 @@ programmable GPU nor any of those APIs).
       `tests/test_gs_mem.c`. Real swizzle addressing is still open -
       needed before texture sampling or certain blit tricks would
       work correctly.
-- [x] Primitive rasterization - SPRITE (filled, untextured, flat-
-      color axis-aligned rectangles) and TRIANGLE/TRIANGLE_STRIP/
-      TRIANGLE_FAN (flat, Gouraud-shaded, and now texture-mapped -
-      DECAL/MODULATE TFX modes, nearest-neighbor PSMCT32 sampling, UV-
-      only "FST=1" coordinates, no CLAMP/perspective-correction), all
-      via the GIF parser (`source/hw/gif.c`). Lines/points and
-      perspective-correct (ST+Q) texture coordinates are still open.
+- [x] Primitive rasterization - SPRITE (filled, flat-color, and now
+      texture-mapped too - task #88) and TRIANGLE/TRIANGLE_STRIP/
+      TRIANGLE_FAN (flat, Gouraud-shaded, and texture-mapped - DECAL/
+      MODULATE TFX modes, nearest-neighbor PSMCT32 sampling, both UV
+      "FST=1" and perspective-correct ST+Q "FST=0" coordinates, no
+      CLAMP/wrap modeling), all via the GIF parser (`source/hw/gif.c`).
+      Lines/points are still open.
 - [x] A first, minimal translation layer from GS memory to the Wii's
       display: `source/hw/gs_wii_output.c` converts a rectangular
       PSMCT32 region to the Wii's packed Y1CbY2Cr XFB format (RGB->YUV
@@ -1044,11 +1059,12 @@ opposed to hand-written test programs - can get through a real SIF
 handshake). (Gouraud shading, a clock-rate-aware 8:1 EE:IOP scheduler,
 wiring a real GIF packet through `dma_channel_kick` at boot, a first
 VIF0/VIF1 passthrough increment, and texturing for the triangle
-rasterizer are all DONE now - see above.) Beyond that: VIF's UNPACK
-format (needs VU0/VU1 data memory to unpack into), the VU microcode
-interpreter itself (section 5), and perspective-correct (ST+Q) texture
-coordinates are the natural next VIF/VU/GS-side steps once this
-project returns to those threads.
+rasterizer, VU0/VU1 micro-instruction memory + microcode interpreter
+control flow, and perspective-correct/SPRITE texturing are all DONE
+now - see above.) Beyond that: VIF's UNPACK format (needs a verified
+format reference) and a real per-opcode VU instruction table (section
+5's remaining honest gap) are the natural next VIF/VU-side steps once
+this project returns to those threads.
 
 Step 7 (real GX-based rendering with textures) is where this stops
 being "a lot of careful work" and becomes genuinely research-scale for

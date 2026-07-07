@@ -66,7 +66,7 @@ int main(void)
         append_ad(buf, &off, 0, 0, GS_REG_XYOFFSET_1);
         /* TEX0_1: TBP0=tex_bp, TBW field = tex_bw/64, TFX = DECAL (bits 3-4 of word1) */
         append_ad(buf, &off, (tex_bp & 0x3FFFu) | (((tex_bw / 64u) & 0x3Fu) << 14), (TEX_TFX_DECAL << 3), GS_REG_TEX0_1);
-        append_ad(buf, &off, (uint32_t)PRIM_TYPE_TRIANGLE | PRIM_IIP_MASK | PRIM_TME_MASK, 0, GS_REG_PRIM);
+        append_ad(buf, &off, (uint32_t)PRIM_TYPE_TRIANGLE | PRIM_IIP_MASK | PRIM_TME_MASK | PRIM_FST_MASK, 0, GS_REG_PRIM); /* FST=1: UV mode (task #88 added FST=0/ST+Q as an alternative) */
 
         uint32_t red = 0xFF0000FFu; /* vertex color - should be IGNORED under DECAL */
         int32_t verts[3][2] = { { 10, 10 }, { 60, 10 }, { 10, 60 } };
@@ -107,7 +107,7 @@ int main(void)
         append_ad(buf, &off, 0, 0, GS_REG_XYOFFSET_1);
         append_ad(buf, &off, (tex_bp & 0x3FFFu) | (((tex_bw / 64u) & 0x3Fu) << 14), (TEX_TFX_MODULATE << 3), GS_REG_TEX0_1);
         /* IIP not set (flat shading) - proves MODULATE works with flat color too, not just Gouraud. */
-        append_ad(buf, &off, (uint32_t)PRIM_TYPE_TRIANGLE | PRIM_TME_MASK, 0, GS_REG_PRIM);
+        append_ad(buf, &off, (uint32_t)PRIM_TYPE_TRIANGLE | PRIM_TME_MASK | PRIM_FST_MASK, 0, GS_REG_PRIM); /* FST=1: UV mode */
 
         /* vertex color r=128(1.0x), g=64(0.5x), b=32(0.25x), a=128(1.0x) */
         uint32_t vcolor = ((uint32_t)128 << 24) | ((uint32_t)32 << 16) | ((uint32_t)64 << 8) | 128u;
@@ -157,7 +157,7 @@ int main(void)
         append_ad(buf, &off, (10u << 9), 0, GS_REG_FRAME_1);
         append_ad(buf, &off, 0, 0, GS_REG_XYOFFSET_1);
         append_ad(buf, &off, (tex_bp & 0x3FFFu) | (((tex_bw / 64u) & 0x3Fu) << 14), (TEX_TFX_DECAL << 3), GS_REG_TEX0_1);
-        append_ad(buf, &off, (uint32_t)PRIM_TYPE_TRIANGLE | PRIM_TME_MASK, 0, GS_REG_PRIM);
+        append_ad(buf, &off, (uint32_t)PRIM_TYPE_TRIANGLE | PRIM_TME_MASK | PRIM_FST_MASK, 0, GS_REG_PRIM); /* FST=1: UV mode */
 
         /* Right triangle (0,0)-(60,0)-(0,60), same closed-form
          * barycentric weights as test_gif_gouraud.c: vertex0 dominant

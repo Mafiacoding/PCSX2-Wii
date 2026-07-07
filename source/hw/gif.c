@@ -48,9 +48,22 @@ static inline uint32_t rgba_pack(uint32_t r, uint32_t g, uint32_t b, uint32_t a)
     return (a << 24) | (b << 16) | (g << 8) | r;
 }
 
+/* Reinterprets a raw 32-bit GIF/A+D data word as the IEEE-754 float
+ * it represents on real hardware (S/T/Q are all real floats - GS/
+ * GSRegs.h's GIFRegRGBAQ/GIFRegST/GIFPackedSTQ all use `float`
+ * members directly). memcpy avoids strict-aliasing UB from a
+ * pointer-cast/union reinterpretation. */
+static inline float u32_to_float(uint32_t v)
+{
+    float f;
+    memcpy(&f, &v, sizeof(f));
+    return f;
+}
+
 static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t x2, int32_t y2,
                                 uint32_t c0, uint32_t c1, uint32_t c2,
-                                int32_t u0, int32_t v0, int32_t u1, int32_t v1, int32_t u2, int32_t v2)
+                                int32_t u0, int32_t v0, int32_t u1, int32_t v1, int32_t u2, int32_t v2,
+                                float s0, float t0, float q0, float s1, float t1, float q1, float s2, float t2, float q2)
 {
     int32_t minx = x0, maxx = x0, miny = y0, maxy = y0;
     if (x1 < minx) minx = x1;
@@ -125,8 +138,46 @@ static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, i
                 if (!textured) {
                     out = rgba_pack(shaded_r, shaded_g, shaded_b, shaded_a);
                 } else {
-                    double tu = b0 * (double)u0 + b1 * (double)u1 + b2 * (double)u2;
-                    double tv = b0 * (double)v0 + b1 * (double)v1 + b2 * (double)v2;
+                    double tu, tv;
+                    if (g_gif.prim & PRIM_FST_MASK) {
+                        /* FST=1 (UV mode): plain affine interpolation,
+                         * exactly as before task #88 - UV is already
+                         * in integer texel units. */
+                        tu = b0 * (double)u0 + b1 * (double)u1 + b2 * (double)u2;
+                        tv = b0 * (double)v0 + b1 * (double)v1 + b2 * (double)v2;
+                    } else {
+                        /* FST=0 (ST+Q mode, task #88): genuine
+                         * perspective-correct interpolation - the
+                         * standard algorithm real GS hardware uses.
+                         * 1/Q and S/Q, T/Q (NOT S, T, Q themselves)
+                         * are what's affine/linear in screen space;
+                         * interpolate those barycentrically, then
+                         * recover the true per-pixel S/T by dividing
+                         * back out the per-pixel Q. Guard against a
+                         * degenerate Q of 0 (real hardware would
+                         * produce a divide fault/undefined result
+                         * too - clamped to a safe fallback here rather
+                         * than crashing or reading garbage memory). */
+                        double inv_q0 = (q0 != 0.0f) ? 1.0 / (double)q0 : 0.0;
+                        double inv_q1 = (q1 != 0.0f) ? 1.0 / (double)q1 : 0.0;
+                        double inv_q2 = (q2 != 0.0f) ? 1.0 / (double)q2 : 0.0;
+                        double s_over_q0 = (double)s0 * inv_q0, s_over_q1 = (double)s1 * inv_q1, s_over_q2 = (double)s2 * inv_q2;
+                        double t_over_q0 = (double)t0 * inv_q0, t_over_q1 = (double)t1 * inv_q1, t_over_q2 = (double)t2 * inv_q2;
+
+                        double inv_q_interp = b0 * inv_q0 + b1 * inv_q1 + b2 * inv_q2;
+                        double s_over_q_interp = b0 * s_over_q0 + b1 * s_over_q1 + b2 * s_over_q2;
+                        double t_over_q_interp = b0 * t_over_q0 + b1 * t_over_q1 + b2 * t_over_q2;
+
+                        double q_at_pixel = (inv_q_interp != 0.0) ? 1.0 / inv_q_interp : 0.0;
+                        double s_norm = s_over_q_interp * q_at_pixel; /* normalized 0.0-1.0 texture-space S */
+                        double t_norm = t_over_q_interp * q_at_pixel;
+
+                        /* Scale normalized ST into texel space using
+                         * TEX0's real TW/TH (log2 texture width/
+                         * height) fields. */
+                        tu = s_norm * (double)(1u << g_gif.tex_tw);
+                        tv = t_norm * (double)(1u << g_gif.tex_th);
+                    }
                     /* No CLAMP register modeling (wrap/clamp/region) -
                      * negative coordinates are simply clamped to 0, a
                      * defensive simplification, not real repeat/clamp
@@ -163,6 +214,95 @@ static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, i
     g_gif.triangles_drawn++;
 }
 
+/* SPRITE rasterizer (task #88 adds texturing here - previously
+ * SPRITE was always flat-color only). Real hardware: SPRITE is a
+ * filled, axis-aligned rectangle between 2 vertices, always flat-
+ * shaded (no Gouraud) - but CAN be textured (PRIM's TME bit) just
+ * like triangles.
+ *
+ * Texture-coordinate interpolation here is a deliberate, simpler
+ * approximation than rasterize_triangle()'s full per-pixel
+ * perspective correction: since SPRITE is screen-axis-aligned (U
+ * varies only with X, V varies only with Y), each corner's texture
+ * coordinate is resolved to final texel space FIRST (applying the
+ * perspective divide at the corner, for FST=0/ST+Q mode), and then
+ * plain linear interpolation is used between the two corners' already-
+ * resolved texel coordinates. This is exact when Q is equal at both
+ * corners (the overwhelmingly common real case for an axis-aligned
+ * 2D sprite) but is a noted simplification - not silently assumed
+ * correct - for the rarer case of a genuinely different Q per corner
+ * (e.g. a "billboarded" sprite in true 3D perspective), where real
+ * hardware would still interpolate more precisely. */
+static void rasterize_sprite(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
+                              int32_t u0, int32_t v0, int32_t u1, int32_t v1,
+                              float s0, float t0, float q0, float s1, float t1, float q1)
+{
+    int textured = (g_gif.prim & PRIM_TME_MASK) != 0;
+
+    /* Resolve each corner's texture coordinate into texel space
+     * BEFORE the min/max reordering below, so the X/Y->U/V
+     * correspondence direction is preserved regardless of which
+     * corner the caller gave first (real hardware allows either
+     * vertex order). */
+    double tex_u0 = 0.0, tex_v0 = 0.0, tex_u1 = 0.0, tex_v1 = 0.0;
+    if (textured) {
+        if (g_gif.prim & PRIM_FST_MASK) {
+            tex_u0 = (double)u0; tex_v0 = (double)v0;
+            tex_u1 = (double)u1; tex_v1 = (double)v1;
+        } else {
+            double inv_q0 = (q0 != 0.0f) ? 1.0 / (double)q0 : 0.0;
+            double inv_q1 = (q1 != 0.0f) ? 1.0 / (double)q1 : 0.0;
+            tex_u0 = (double)s0 * inv_q0 * (double)(1u << g_gif.tex_tw);
+            tex_v0 = (double)t0 * inv_q0 * (double)(1u << g_gif.tex_th);
+            tex_u1 = (double)s1 * inv_q1 * (double)(1u << g_gif.tex_tw);
+            tex_v1 = (double)t1 * inv_q1 * (double)(1u << g_gif.tex_th);
+        }
+    }
+
+    int32_t sx0 = x0, sx1 = x1, sy0 = y0, sy1 = y1;
+    if (sx1 < sx0) { int32_t t = sx0; sx0 = sx1; sx1 = t; }
+    if (sy1 < sy0) { int32_t t = sy0; sy0 = sy1; sy1 = t; }
+
+    double x_span = (double)(x1 - x0);
+    double y_span = (double)(y1 - y0);
+
+    for (int32_t yy = sy0; yy < sy1; yy++) {
+        if (yy < 0) continue;
+        double frac_y = (y_span != 0.0) ? ((double)yy - (double)y0) / y_span : 0.0;
+        for (int32_t xx = sx0; xx < sx1; xx++) {
+            if (xx < 0) continue;
+
+            uint32_t out;
+            if (!textured) {
+                out = g_gif.rgba;
+            } else {
+                double frac_x = (x_span != 0.0) ? ((double)xx - (double)x0) / x_span : 0.0;
+                double tu = tex_u0 + frac_x * (tex_u1 - tex_u0);
+                double tv = tex_v0 + frac_y * (tex_v1 - tex_v0);
+                int32_t tex_x = (tu < 0.0) ? 0 : (int32_t)(tu + 0.5);
+                int32_t tex_y = (tv < 0.0) ? 0 : (int32_t)(tv + 0.5);
+                uint32_t texel = gs_mem_read_psmct32(g_gif.tex_tbp0, g_gif.tex_tbw,
+                                                      (uint32_t)tex_x, (uint32_t)tex_y);
+                if (g_gif.tex_tfx == TEX_TFX_DECAL) {
+                    out = texel;
+                } else {
+                    uint32_t r = (rgba_channel(texel, 0)  * rgba_channel(g_gif.rgba, 0))  / 128u;
+                    uint32_t g = (rgba_channel(texel, 8)  * rgba_channel(g_gif.rgba, 8))  / 128u;
+                    uint32_t b = (rgba_channel(texel, 16) * rgba_channel(g_gif.rgba, 16)) / 128u;
+                    uint32_t a = (rgba_channel(texel, 24) * rgba_channel(g_gif.rgba, 24)) / 128u;
+                    if (r > 255) r = 255;
+                    if (g > 255) g = 255;
+                    if (b > 255) b = 255;
+                    if (a > 255) a = 255;
+                    out = rgba_pack(r, g, b, a);
+                }
+            }
+            gs_mem_write_psmct32(g_gif.fbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy, out);
+        }
+    }
+    g_gif.sprites_drawn++;
+}
+
 static void apply_xyz2(uint32_t word0, uint32_t word1)
 {
     /* PACKED XYZ2 layout (GS/GSRegs.h-compatible bit positions): X in
@@ -189,24 +329,36 @@ static void apply_xyz2(uint32_t word0, uint32_t word1)
             g_gif.tri_rgba[slot] = g_gif.rgba;
             g_gif.tri_u[slot] = g_gif.cur_u;
             g_gif.tri_v[slot] = g_gif.cur_v;
+            g_gif.tri_s[slot] = g_gif.cur_s;
+            g_gif.tri_t[slot] = g_gif.cur_t;
+            g_gif.tri_q[slot] = g_gif.cur_q;
             if (g_gif.tri_vseq % 3 == 0)
                 rasterize_triangle(g_gif.tri_x[0], g_gif.tri_y[0], g_gif.tri_x[1], g_gif.tri_y[1], g_gif.tri_x[2], g_gif.tri_y[2],
                                     g_gif.tri_rgba[0], g_gif.tri_rgba[1], g_gif.tri_rgba[2],
-                                    g_gif.tri_u[0], g_gif.tri_v[0], g_gif.tri_u[1], g_gif.tri_v[1], g_gif.tri_u[2], g_gif.tri_v[2]);
+                                    g_gif.tri_u[0], g_gif.tri_v[0], g_gif.tri_u[1], g_gif.tri_v[1], g_gif.tri_u[2], g_gif.tri_v[2],
+                                    g_gif.tri_s[0], g_gif.tri_t[0], g_gif.tri_q[0],
+                                    g_gif.tri_s[1], g_gif.tri_t[1], g_gif.tri_q[1],
+                                    g_gif.tri_s[2], g_gif.tri_t[2], g_gif.tri_q[2]);
         } else if (ptype == PRIM_TYPE_TRIANGLE_STRIP) {
             /* TRIANGLE_STRIP: each new vertex (from the 3rd onward)
              * forms a triangle with the previous 2 - a rolling
              * 3-slot window. */
             g_gif.tri_x[0] = g_gif.tri_x[1]; g_gif.tri_y[0] = g_gif.tri_y[1]; g_gif.tri_rgba[0] = g_gif.tri_rgba[1];
             g_gif.tri_u[0] = g_gif.tri_u[1]; g_gif.tri_v[0] = g_gif.tri_v[1];
+            g_gif.tri_s[0] = g_gif.tri_s[1]; g_gif.tri_t[0] = g_gif.tri_t[1]; g_gif.tri_q[0] = g_gif.tri_q[1];
             g_gif.tri_x[1] = g_gif.tri_x[2]; g_gif.tri_y[1] = g_gif.tri_y[2]; g_gif.tri_rgba[1] = g_gif.tri_rgba[2];
             g_gif.tri_u[1] = g_gif.tri_u[2]; g_gif.tri_v[1] = g_gif.tri_v[2];
+            g_gif.tri_s[1] = g_gif.tri_s[2]; g_gif.tri_t[1] = g_gif.tri_t[2]; g_gif.tri_q[1] = g_gif.tri_q[2];
             g_gif.tri_x[2] = x; g_gif.tri_y[2] = y; g_gif.tri_rgba[2] = g_gif.rgba;
             g_gif.tri_u[2] = g_gif.cur_u; g_gif.tri_v[2] = g_gif.cur_v;
+            g_gif.tri_s[2] = g_gif.cur_s; g_gif.tri_t[2] = g_gif.cur_t; g_gif.tri_q[2] = g_gif.cur_q;
             if (g_gif.tri_vseq >= 3)
                 rasterize_triangle(g_gif.tri_x[0], g_gif.tri_y[0], g_gif.tri_x[1], g_gif.tri_y[1], g_gif.tri_x[2], g_gif.tri_y[2],
                                     g_gif.tri_rgba[0], g_gif.tri_rgba[1], g_gif.tri_rgba[2],
-                                    g_gif.tri_u[0], g_gif.tri_v[0], g_gif.tri_u[1], g_gif.tri_v[1], g_gif.tri_u[2], g_gif.tri_v[2]);
+                                    g_gif.tri_u[0], g_gif.tri_v[0], g_gif.tri_u[1], g_gif.tri_v[1], g_gif.tri_u[2], g_gif.tri_v[2],
+                                    g_gif.tri_s[0], g_gif.tri_t[0], g_gif.tri_q[0],
+                                    g_gif.tri_s[1], g_gif.tri_t[1], g_gif.tri_q[1],
+                                    g_gif.tri_s[2], g_gif.tri_t[2], g_gif.tri_q[2]);
         } else { /* PRIM_TYPE_TRIANGLE_FAN */
             /* TRIANGLE_FAN: the first vertex is a fixed anchor
              * (slot 0, never overwritten); each new vertex forms a
@@ -214,17 +366,24 @@ static void apply_xyz2(uint32_t word0, uint32_t word1)
             if (g_gif.tri_vseq == 1) {
                 g_gif.tri_x[0] = x; g_gif.tri_y[0] = y; g_gif.tri_rgba[0] = g_gif.rgba;
                 g_gif.tri_u[0] = g_gif.cur_u; g_gif.tri_v[0] = g_gif.cur_v;
+                g_gif.tri_s[0] = g_gif.cur_s; g_gif.tri_t[0] = g_gif.cur_t; g_gif.tri_q[0] = g_gif.cur_q;
                 g_gif.tri_x[1] = x; g_gif.tri_y[1] = y; g_gif.tri_rgba[1] = g_gif.rgba; /* also seed "previous" so vseq==2 has something to pair with */
                 g_gif.tri_u[1] = g_gif.cur_u; g_gif.tri_v[1] = g_gif.cur_v;
+                g_gif.tri_s[1] = g_gif.cur_s; g_gif.tri_t[1] = g_gif.cur_t; g_gif.tri_q[1] = g_gif.cur_q;
             } else {
                 g_gif.tri_x[2] = x; g_gif.tri_y[2] = y; g_gif.tri_rgba[2] = g_gif.rgba;
                 g_gif.tri_u[2] = g_gif.cur_u; g_gif.tri_v[2] = g_gif.cur_v;
+                g_gif.tri_s[2] = g_gif.cur_s; g_gif.tri_t[2] = g_gif.cur_t; g_gif.tri_q[2] = g_gif.cur_q;
                 if (g_gif.tri_vseq >= 3)
                     rasterize_triangle(g_gif.tri_x[0], g_gif.tri_y[0], g_gif.tri_x[1], g_gif.tri_y[1], g_gif.tri_x[2], g_gif.tri_y[2],
                                         g_gif.tri_rgba[0], g_gif.tri_rgba[1], g_gif.tri_rgba[2],
-                                        g_gif.tri_u[0], g_gif.tri_v[0], g_gif.tri_u[1], g_gif.tri_v[1], g_gif.tri_u[2], g_gif.tri_v[2]);
+                                        g_gif.tri_u[0], g_gif.tri_v[0], g_gif.tri_u[1], g_gif.tri_v[1], g_gif.tri_u[2], g_gif.tri_v[2],
+                                        g_gif.tri_s[0], g_gif.tri_t[0], g_gif.tri_q[0],
+                                        g_gif.tri_s[1], g_gif.tri_t[1], g_gif.tri_q[1],
+                                        g_gif.tri_s[2], g_gif.tri_t[2], g_gif.tri_q[2]);
                 g_gif.tri_x[1] = g_gif.tri_x[2]; g_gif.tri_y[1] = g_gif.tri_y[2]; g_gif.tri_rgba[1] = g_gif.tri_rgba[2];
                 g_gif.tri_u[1] = g_gif.tri_u[2]; g_gif.tri_v[1] = g_gif.tri_v[2];
+                g_gif.tri_s[1] = g_gif.tri_s[2]; g_gif.tri_t[1] = g_gif.tri_t[2]; g_gif.tri_q[1] = g_gif.tri_q[2];
             }
         }
         return;
@@ -233,6 +392,11 @@ static void apply_xyz2(uint32_t word0, uint32_t word1)
     if (!g_gif.has_vertex0) {
         g_gif.v0x = x;
         g_gif.v0y = y;
+        g_gif.v0u = g_gif.cur_u;
+        g_gif.v0v = g_gif.cur_v;
+        g_gif.v0s = g_gif.cur_s;
+        g_gif.v0t = g_gif.cur_t;
+        g_gif.v0q = g_gif.cur_q;
         g_gif.has_vertex0 = 1;
         return;
     }
@@ -240,19 +404,9 @@ static void apply_xyz2(uint32_t word0, uint32_t word1)
     /* Second vertex: if we're drawing a SPRITE, fill the rectangle
      * between v0 and this vertex now. */
     if (ptype == PRIM_TYPE_SPRITE) {
-        int32_t x0 = g_gif.v0x, y0 = g_gif.v0y;
-        int32_t x1 = x, y1 = y;
-        if (x1 < x0) { int32_t t = x0; x0 = x1; x1 = t; }
-        if (y1 < y0) { int32_t t = y0; y0 = y1; y1 = t; }
-
-        for (int32_t yy = y0; yy < y1; yy++) {
-            if (yy < 0) continue;
-            for (int32_t xx = x0; xx < x1; xx++) {
-                if (xx < 0) continue;
-                gs_mem_write_psmct32(g_gif.fbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy, g_gif.rgba);
-            }
-        }
-        g_gif.sprites_drawn++;
+        rasterize_sprite(g_gif.v0x, g_gif.v0y, x, y,
+                          g_gif.v0u, g_gif.v0v, g_gif.cur_u, g_gif.cur_v,
+                          g_gif.v0s, g_gif.v0t, g_gif.v0q, g_gif.cur_s, g_gif.cur_t, g_gif.cur_q);
     } else {
         g_gif.unsupported_prims_seen++;
     }
@@ -289,13 +443,16 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
     case GS_REG_RGBAQ: {
         /* A+D packs RGBAQ's R/G/B/A/Q into one 64-bit data value
          * rather than 4 separate qwords like PACKED mode does: R in
-         * bits 0-7, G in 8-15, B in 16-23, A in 24-31 of the low word. */
+         * bits 0-7, G in 8-15, B in 16-23, A in 24-31 of the low word;
+         * Q is the ENTIRE high word, as a real IEEE-754 float - cross-
+         * checked against PCSX2's own GS/GSRegs.h GIFRegRGBAQ layout
+         * (task #88 - previously data_hi/Q was read but discarded). */
         uint8_t r = (uint8_t)(data_lo & 0xFFu);
         uint8_t g = (uint8_t)((data_lo >> 8) & 0xFFu);
         uint8_t b = (uint8_t)((data_lo >> 16) & 0xFFu);
         uint8_t a = (uint8_t)((data_lo >> 24) & 0xFFu);
         g_gif.rgba = ((uint32_t)a << 24) | ((uint32_t)b << 16) | ((uint32_t)g << 8) | r;
-        (void)data_hi;
+        g_gif.cur_q = u32_to_float(data_hi);
     } break;
     case GS_REG_XYZ2:
         apply_xyz2(data_lo, data_hi);
@@ -325,6 +482,15 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
         g_gif.cur_u = (int32_t)(data_lo & 0xFFFFu) >> 4;
         g_gif.cur_v = (int32_t)((data_lo >> 16) & 0xFFFFu) >> 4;
         break;
+    case GS_REG_ST:
+        /* Real hardware (FST=0 mode, task #88): S/T are real IEEE-754
+         * floats, one per word - cross-checked against PCSX2's own
+         * GS/GSRegs.h GIFRegST layout (`float S; float T;`, no Q -
+         * unlike PACKED mode's STQ tag, A+D mode's Q instead arrives
+         * together with RGBAQ, see above). */
+        g_gif.cur_s = u32_to_float(data_lo);
+        g_gif.cur_t = u32_to_float(data_hi);
+        break;
     case GS_REG_TEX0_1: {
         /* TEX0 bitfield cross-checked against PCSX2's own
          * GS/GSRegs.h GIFRegTEX0: word0 = TBP0(14):TBW(6):PSM(6):
@@ -342,6 +508,14 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
         g_gif.tex_tbw = tbw_field * 64u;
         if (g_gif.tex_tbw == 0) g_gif.tex_tbw = 640; /* guard against a zero TBW making every texel alias, same as FRAME_1's FBW guard */
         g_gif.tex_tfx = tfx;
+        /* TW (bits 26-29 of word0) / TH (task #88: a 4-bit field that
+         * straddles the 64-bit register - 2 bits from word0's top,
+         * bits 30-31, plus 2 bits from word1's bottom, bits 0-1) -
+         * cross-checked against PCSX2's own GS/GSRegs.h GIFRegTEX0's
+         * union of two overlapping bitfield layouts. Needed to scale
+         * normalized ST+Q coordinates into texel space. */
+        g_gif.tex_tw = (data_lo >> 26) & 0xFu;
+        g_gif.tex_th = ((data_lo >> 30) & 0x3u) | ((data_hi & 0x3u) << 2);
     } break;
     default:
         break; /* unhandled register - ignored, not an error */

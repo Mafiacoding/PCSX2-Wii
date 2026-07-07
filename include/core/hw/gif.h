@@ -19,20 +19,25 @@
  *     XYOFFSET_1. Everything else (alpha blending, Z-buffer, CLAMP/
  *     TEST/scissor beyond basic XY offset, contexts 2, CLUT/paletted
  *     textures, mipmaps, ...) is ignored.
- *   - Primitive types: SPRITE (a filled, untextured, flat-color
- *     axis-aligned rectangle from 2 vertices, always flat-shaded like
- *     real hardware - texturing is NOT modeled for SPRITE, only for
- *     triangles) and TRIANGLE/TRIANGLE_STRIP/TRIANGLE_FAN (types
- *     3/4/5), which respect PRIM's real IIP bit (bit 3, flat vs.
- *     Gouraud shading) and TME bit (bit 4, flat/Gouraud color vs.
- *     texture-mapped) - see gif.c's rasterize_triangle(). Color
- *     interpolation (Gouraud) and texture-coordinate interpolation
- *     (when TME=1) both use plain affine (screen-space) barycentric
- *     weighting, NOT the real GS's perspective-corrected (1/Q)
- *     interpolation - an honest, noted simplification, not a silently
- *     guessed one. Texture coordinates come from the UV register only
- *     (real hardware's "FST=1" mode) - the ST+Q floating-point/
- *     perspective-correct coordinate path (FST=0) is NOT supported.
+ *   - Primitive types: SPRITE (a filled, flat-color or - as of task
+ *     #88 - texture-mapped axis-aligned rectangle from 2 vertices,
+ *     always flat-shaded like real hardware; see gif.c's
+ *     rasterize_sprite() for its simplified, explicitly-noted texture-
+ *     coordinate approximation, distinct from triangles' full
+ *     per-pixel perspective correction) and TRIANGLE/TRIANGLE_STRIP/
+ *     TRIANGLE_FAN (types 3/4/5), which respect PRIM's real IIP bit
+ *     (bit 3, flat vs. Gouraud shading), TME bit (bit 4, flat/Gouraud
+ *     color vs. texture-mapped), and - as of task #88 - FST bit (bit
+ *     8: 1 = UV fixed-point texel coordinates, 0 = ST+Q floating-point
+ *     perspective-correct coordinates) - see gif.c's
+ *     rasterize_triangle(). Color interpolation (Gouraud) always uses
+ *     plain affine (screen-space) barycentric weighting. Texture-
+ *     coordinate interpolation (when TME=1) uses plain affine
+ *     interpolation when FST=1 (UV mode, matching real hardware) but
+ *     genuine perspective-correct (1/Q) interpolation when FST=0
+ *     (ST+Q mode, added this round - see rasterize_triangle()'s S/Q,
+ *     T/Q, 1/Q barycentric interpolation, matching the standard
+ *     perspective-texture-mapping algorithm real GS hardware uses).
  *     Texture sampling is nearest-neighbor from GS memory (PSMCT32
  *     only, matching gs_mem's existing format limitation) with no
  *     CLAMP/wrap modeling (negative interpolated coordinates are
@@ -91,6 +96,12 @@
  * bitfield layout. */
 #define PRIM_IIP_MASK 0x8u
 #define PRIM_TME_MASK 0x10u
+/* PRIM bit 8 (FST): 1 = UV fixed-point texel coordinates (this
+ * project's original, still-supported mode), 0 = ST+Q floating-point
+ * perspective-correct coordinates (task #88) - cross-checked against
+ * PCSX2's own GS/GSRegs.h GIFRegPRIM bitfield (PRIM:3,IIP:1,TME:1,
+ * FGE:1,ABE:1,AA1:1,FST:1,... - FST is the 7th field, bit offset 8). */
+#define PRIM_FST_MASK 0x100u
 
 /* TEX0's TFX field (2 bits) - cross-checked against PCSX2's own
  * GS/GSRegs.h GS_TFX enum. HIGHLIGHT/HIGHLIGHT2 are simplified to
@@ -120,6 +131,16 @@ typedef struct {
      * fields are ignored (PSMCT32 always assumed, matching gs_mem). */
     uint32_t tex_tbp0, tex_tbw;
     uint32_t tex_tfx;
+    /* TEX0's TW/TH fields (log2 texture width/height, real hardware
+     * bitfield - TW is 4 bits within word0 alone (bits 26-29); TH is
+     * a 4-bit field that straddles the 64-bit register's word
+     * boundary (2 bits from word0's top, bits 30-31, plus 2 bits from
+     * word1's bottom, bits 0-1) - cross-checked against PCSX2's own
+     * GS/GSRegs.h GIFRegTEX0's union of two overlapping bitfield
+     * layouts. Needed (added task #88) to scale normalized ST+Q
+     * texture coordinates (0.0-1.0 range) into texel space - UV mode
+     * (FST=1) doesn't need these, since UV is already in texel units. */
+    uint32_t tex_tw, tex_th;
 
     /* Current UV register value (real hardware's 12.4 fixed-point
      * texel coordinate "FST=1" mode - see gif.h's scope comment),
@@ -127,8 +148,24 @@ typedef struct {
      * >>4 conversion. */
     int32_t cur_u, cur_v;
 
+    /* Current ST+Q state (real hardware's "FST=0" perspective-correct
+     * mode, task #88): S/T are real IEEE-754 floats (normalized
+     * texture-space coordinates, 0.0-1.0 typically), latched by either
+     * an A+D ST write (GS_REG_ST - S,T only, no Q) or a PACKED STQ tag
+     * (S,T,Q together - not yet implemented as a distinct PACKED
+     * register path, see below). Q is a real float too, latched
+     * together with RGBAQ on real hardware (GIFRegRGBAQ's layout:
+     * R/G/B/A bytes in word0, Q as a float in word1) - cross-checked
+     * against PCSX2's own GS/GSRegs.h. */
+    float cur_s, cur_t, cur_q;
+
     int has_vertex0;
     int32_t v0x, v0y;
+    /* SPRITE's first-vertex texture coordinates (task #88 - SPRITE
+     * texturing), captured alongside v0x/v0y so rasterize_sprite()
+     * can interpolate between the two corners. */
+    int32_t v0u, v0v;
+    float v0s, v0t, v0q;
 
     /* Triangle vertex accumulation (TRIANGLE/TRIANGLE_STRIP/
      * TRIANGLE_FAN, prim types 3/4/5). tri_vseq counts vertices
@@ -147,6 +184,11 @@ typedef struct {
     int32_t tri_x[3], tri_y[3];
     uint32_t tri_rgba[3];
     int32_t tri_u[3], tri_v[3];
+    /* Per-vertex ST+Q (task #88) - captured alongside tri_u/tri_v at
+     * every vertex kick regardless of FST (harmless when unused);
+     * rasterize_triangle() picks UV (affine) or ST+Q (perspective-
+     * correct) interpolation based on PRIM's real FST bit. */
+    float tri_s[3], tri_t[3], tri_q[3];
 
     uint64_t quadwords_seen;
     uint64_t sprites_drawn;

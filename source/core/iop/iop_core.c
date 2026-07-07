@@ -48,6 +48,7 @@
 #include "core/hw/iop_hle_bios.h"
 #include "core/hw/iop_hle_modules.h"
 #include "core/hw/iop_module_loader.h" /* real IOP module/IRX loader - task #92 */
+#include "core/hw/iop_excb.h" /* real exception-handler priority chains at RAM[0x100] - Round 22 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -189,6 +190,13 @@ int iop_core_init(const bios_image_t *bios)
      * exception handling (above) would incorrectly default to the
      * "normal" vector (0x80000080) from the very start. */
     g_iop.cop0[12] = 0x00400000u;
+
+    /* Round 22: real RAM[0x100] exception-handler priority-chain
+     * table + array, all-empty (no handler registered) - see
+     * include/core/hw/iop_excb.h. Must run after g_iop.ram is
+     * allocated (iop_excb_init() writes through iop_mem_write32()). */
+    iop_excb_init(&g_iop);
+
     return 0;
 }
 

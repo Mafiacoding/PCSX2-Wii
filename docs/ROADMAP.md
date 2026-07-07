@@ -589,38 +589,30 @@ instead of fully emulating the real IOP BIOS ROM.
       >> 2)`. Unit tested in `tests/test_iop_rfe.c` (3/3 checks,
       hand-verified bit-for-bit through a full exception-entry-then-
       RFE round trip). See docs/STATUS.md's "Round 22" section.
-- [ ] Real exception-handler-chain default behavior at `RAM[0x100]`
-      - Round 18's "SYSCALL dispatch table" framing was corrected in
-      Round 19: precise tracing (real `a0=2` right before the trap)
-      showed the SYSCALL firing is a genuine, ordinary
-      `SYS(02h) ExitCriticalSection()`, and the real BIOS-resident
-      exception dispatcher at `0x00000c80`-`0x00000e30` (a real,
-      disassembled R3000A generic dispatcher, not something this
-      project fabricates) correctly looks up a registered handler
-      through a chain rooted at `RAM[0x100]` - the actual gap is that
-      this chain has never had a real handler registered at this
-      point in boot, so the lookup finds stale template bytes and
-      falls through to the same "load SYSMEM" escape hatch Round 15
-      already documented, rather than really returning from the
-      syscall. Round 22 (docs/STATUS.md) recovered a partial, citable
-      reference (psx-spx's kernelbios page): `RAM[0x100]` is the start
-      of an 8-entry "Table of Tables", whose first entry documents
-      `RAM[0x100]`/`RAM[0x104]` as "ExCB Exception Chain Entrypoints
-      (addr=var, size=4*08h)" - a pointer+size pair to 4 real
-      exception-chain-root entries, typically living in the E000h+
-      Kernel Memory region. The deeper "Priority Chains"/"ExCB"
-      structure-layout sections needed to implement a fully-cited
-      default-fallback behavior didn't fit in one fetch and still need
-      retrieval. Two well-defined next targets remain:
-      (a) research + implement what real IOP kernel init does at
-      `RAM[0x100]` before any handler is registered (needs the fuller
-      citable reference, not a guess), and (b) wire up real hardware-
-      interrupt delivery in the IOP interpreter (see the new bullet
-      below) so that `Status.IEc` - now correctly restorable via RFE,
-      per the fix above - actually has an observable effect. See
-      docs/STATUS.md's "Round 19" and "Round 22" sections for the full
-      trace. Substantial, well-defined scope for a future round; not
-      attempted yet.
+- [x] Real exception-handler-chain mechanism at `RAM[0x100]`
+      (`include/core/hw/iop_excb.h` / `source/hw/iop_excb.c`) -
+      completed in Round 22 after re-fetching psx-spx's kernelbios
+      page as raw markdown (the earlier rendered-HTML fetch had been
+      truncated before reaching the needed section). Full citable
+      reference recovered: 4 real priority chains (0-3), each a
+      singly-linked list of 16-byte nodes (`00h`=next-pointer,
+      `04h`=second-function ptr, `08h`=first-function ptr,
+      `0Ch`=unused); `RAM[0x100]`/`RAM[0x104]` point at a real 4-entry
+      chain-head array. `C(02h) SysEnqIntRP`/`C(03h) SysDeqIntRP`
+      implemented byte-exactly, including SysDeqIntRP's documented
+      real BUG (can only correctly remove a chain's first element -
+      modeled as a safe no-op for any other position, since the real
+      "garbage stack read" outcome isn't citable/reproducible).
+      Deliberately NOT implemented: the real default handler CONTENTS
+      (`EnqueueSyscallHandler`/`EnqueueTimerAndVblankIrqs`/`InitDefInt`)
+      - these would need the real BIOS-ROM machine code bodies of
+      SyscallException/VblankIrq/etc., which this project has no
+      verified reference for and will not fabricate; the chains
+      correctly start all-empty instead, matching the exact "before
+      any handler is registered" scenario Round 19's trace hit. Unit
+      tested in `tests/test_iop_excb.c` (18/18 checks). See
+      docs/STATUS.md's "Round 19" and "Round 22" sections for the
+      full trace.
 - [x] Real hardware-interrupt delivery in the IOP interpreter (I_STAT
       & I_MASK -> a real Cause.ExcCode=0 "Interrupt" exception, gated
       by Status.IEc) - implemented in Round 22, same session as the

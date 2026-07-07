@@ -8,6 +8,7 @@
  * header comment).
  */
 #include "core/hw/iop_hle_bios.h"
+#include "core/hw/iop_excb.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -286,6 +287,18 @@ int iop_hle_bios_try_handle(iop_state_t *st, uint32_t pc)
 
     if (pc == IOP_HLE_TABLE_C0 && function == 0x07u) {
         try_install_exception_handlers(st);
+        g_hle.known_calls_handled++;
+    } else if (pc == IOP_HLE_TABLE_C0 && function == IOP_HLE_C0_SYSENQINTRP) {
+        /* Round 22: real SysEnqIntRP(priority, struc) - see
+         * iop_excb.h. Standard MIPS calling convention: $a0=priority,
+         * $a1=struc (same convention already used by this file's own
+         * A0-table real functions, e.g. INITHEAP's a0/a1 reads
+         * above). No return value on real hardware, matching this. */
+        iop_excb_sys_enq_int_rp(st, st->gpr[4], st->gpr[5]);
+        g_hle.known_calls_handled++;
+    } else if (pc == IOP_HLE_TABLE_C0 && function == IOP_HLE_C0_SYSDEQINTRP) {
+        /* Round 22: real (bug-preserving) SysDeqIntRP(priority, struc). */
+        iop_excb_sys_deq_int_rp(st, st->gpr[4], st->gpr[5]);
         g_hle.known_calls_handled++;
     } else if (pc == IOP_HLE_TABLE_A0 &&
                (function == IOP_HLE_A0_EXIT || function == IOP_HLE_A0__EXIT)) {

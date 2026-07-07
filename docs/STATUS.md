@@ -3129,10 +3129,88 @@ harmless `strncpy` warning as every prior round.
 With this, `Status.IEc` finally has a real, observable, end-to-end
 effect for the first time in this project: RFE can restore it (fixed
 earlier this round) AND the interpreter now actually checks it before
-delivering a hardware interrupt. The only concretely open IOP item
-left from this sweep is the `RAM[0x100]` exception-chain default-
-handler behavior itself (needs the deeper psx-spx Priority-Chains/
-ExCB structure-layout sections, not yet retrieved in full).
+delivering a hardware interrupt.
+
+**Update, same session: RAM[0x100] itself, now with the full
+reference.** The earlier fetch of psx-spx's kernelbios page (the
+rendered HTML version) was truncated before reaching the "BIOS
+Interrupt/Exception Handling" section. Re-fetched the page's raw
+markdown source directly from GitHub
+(`raw.githubusercontent.com/psx-spx/psx-spx.github.io/master/docs/
+kernelbios.md`) instead of the rendered HTML - smaller, no navigation/
+CSS bloat - which got substantially further (1775 lines) and reached
+the needed section in full: "Priority Chains", "C(02h) - SysEnqIntRP",
+"C(03h) - SysDeqIntRP", "SYS(01h)/SYS(02h) - Enter/ExitCriticalSection",
+"C(06h) - ExceptionHandler()", "B(17h) - ReturnFromException()",
+"C(00h)/C(01h)/C(0Ch) - EnqueueTimerAndVblankIrqs/EnqueueSyscallHandler/
+InitDefInt", and "No Nested Exceptions" - the complete real mechanism
+Round 19 needed a citable reference for.
+
+Key facts from this reference: the Kernel's exception handler has
+**4 priority chains** (0-3), each a singly-linked list of handlers;
+the default population is `Prio 0: CdromDmaIrq, CdromIoIrq,
+SyscallException` / `Prio 1: CardSpecificIrq, VblankIrq, Timer2Irq,
+Timer1Irq, Timer0Irq` / `Prio 2: PadCardIrq` / `Prio 3: DefInt`.
+`C(02h) SysEnqIntRP(priority, struc)` documents the EXACT node byte
+layout (`00h`=next-pointer, written by the BIOS; `04h`=second-function
+pointer; `08h`=first-function pointer; `0Ch`=unused) and real behavior
+(always inserts at the chain HEAD - newest-first). `C(03h)
+SysDeqIntRP(priority, struc)` has a documented, real BUG: it can only
+correctly remove the FIRST element of a chain - removing anything else
+"reads a garbage value from an uninitialized stack location, and acts
+more or less unpredictable." `RAM[0x100]`'s earlier-documented "Table
+of Tables" entry (`addr=var, size=4*08h`) is therefore a pointer to a
+real 4-entry array of chain-head pointers, one per priority level.
+
+**Implemented** (`include/core/hw/iop_excb.h` / `source/hw/
+iop_excb.c`, new files): `iop_excb_init()` writes `RAM[0x100]`/
+`RAM[0x104]` to point at a real 4-entry, 8-byte-per-slot chain-head
+array in the documented "Kernel Memory" region (`0xE000`+), all-empty
+(head=NULL) - correctly matching "before any handler is registered",
+the exact scenario Round 19's trace found. `iop_excb_sys_enq_int_rp()`
+implements the real head-insertion byte-exactly. `iop_excb_sys_deq_int_rp()`
+implements the real first-element-removal case byte-exactly, and
+models the documented non-first-element BUG as a safe no-op rather
+than fabricating a specific garbage-dependent outcome (there is
+nothing citable to reproduce there - the real behavior is documented
+as genuinely undefined). Wired into `iop_hle_bios.c`'s existing C0-
+table real-function dispatch as `C(02h)`/`C(03h)`, alongside the
+already-real `C(07h)` (InstallExceptionHandlers).
+
+**Deliberately NOT implemented, same rationale as every other HLE
+function in this project**: the real default handler CONTENTS
+(`EnqueueSyscallHandler`/`EnqueueTimerAndVblankIrqs`/`InitDefInt`,
+`C(01h)`/`C(00h)`/`C(0Ch)`) - actually populating the chains with
+`SyscallException`/`VblankIrq`/`Timer0-2Irq`/`CardSpecificIrq`/
+`PadCardIrq`/`CdromDmaIrq`/`CdromIoIrq`/`DefInt` would require those
+functions' real BIOS-ROM machine code bodies, which this project has
+no verified byte-for-byte reference for and will not fabricate. What
+IS now real and byte-exact is the container/mechanism itself - the
+chain data structure and its two manipulation primitives - which is
+the part Round 19's trace actually needed a citable reference for.
+
+`tests/test_iop_excb.c` (18 checks): the Table-of-Tables pointer/size
+fields, all 4 chains starting empty, real head-insertion order (newest
+first) across two nodes with byte-exact next-pointer linking, chain
+isolation between priorities, real first-element removal, the non-
+first-element bug modeled as a no-op (and counted, not silently
+dropped), out-of-range-priority handled safely, and the real C0-table
+`C(02h)` HLE trap end-to-end (register-convention parameter reads,
+correct chain mutation, correct return-to-`$ra`).
+
+Regression: 56 host-native test binaries (was 55, +`test_iop_excb.c`),
+0 failures. Clean Wii/devkitPPC rebuild, same single pre-existing
+harmless `strncpy` warning as every prior round.
+
+**Net result for this entire IOP sweep (Round 22)**: three real,
+previously-undocumented/unimplemented gaps found and fixed in one
+session (RFE, hardware-interrupt delivery, the RAM[0x100] chain
+mechanism), each backed by a citable real-hardware reference, each
+with its own host-native regression test, none fabricated. The only
+remaining honestly-open piece is the real default handler BODIES
+(actual BIOS-ROM machine code for SyscallException/VblankIrq/etc.) -
+which this project has never had and is not attempting to synthesize,
+consistent with its established no-fabrication policy.
 
 ## Endianness bug found and fixed
 

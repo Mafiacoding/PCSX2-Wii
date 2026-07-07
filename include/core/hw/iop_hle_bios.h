@@ -111,6 +111,18 @@
  * match that documented real (buggy) behavior, rather than silently
  * "fixing" it to modern libc semantics no real IOP BIOS ever had.
  *
+ * ANOTHER EXCEPTION added in Round 22 (see docs/STATUS.md): C(02h)/
+ * C(03h), SysEnqIntRP/SysDeqIntRP - the real, byte-exact exception-
+ * handler priority-chain manipulation mechanism rooted at RAM[0x100]
+ * (see include/core/hw/iop_excb.h for the full citation trail and
+ * implementation). This is the mechanism Round 19's real-BIOS trace
+ * found being looked up with no handler ever registered - these two
+ * C-functions are how a real BIOS registers/unregisters one. Only the
+ * container/mechanism is real here, not the real default handler
+ * bodies (EnqueueSyscallHandler/EnqueueTimerAndVblankIrqs/InitDefInt
+ * remain un-implemented, same rationale as everything else in this
+ * file - see iop_excb.h's scope note).
+ *
  * Still NOT implemented (same rationale as the rest of this file):
  * anything touching files/devices (open/read/write/close/ioctl),
  * heap allocation (malloc/free/calloc/realloc - InitHeap is recorded
@@ -129,6 +141,13 @@
 #define IOP_HLE_TABLE_A0 0x000000A0u
 #define IOP_HLE_TABLE_B0 0x000000B0u
 #define IOP_HLE_TABLE_C0 0x000000C0u
+
+/* C0-table function numbers this project also implements for real -
+ * see iop_excb.h. Real, byte-exact chain-manipulation mechanism
+ * (including the documented SysDeqIntRP bug), NOT the real default
+ * handler contents (see iop_excb.h's scope note). */
+#define IOP_HLE_C0_SYSENQINTRP 0x02u
+#define IOP_HLE_C0_SYSDEQINTRP 0x03u
 
 /* A0-table function numbers this round implements for real - see the
  * header comment above and psx-spx's "A-Functions" table. */

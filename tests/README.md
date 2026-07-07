@@ -1318,3 +1318,23 @@ the (expected, unrelated) halt is exact.
 gcc -I../include -I../source -o test_iop_hw_interrupt tests/test_iop_hw_interrupt.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
 ./test_iop_hw_interrupt
 ```
+
+`test_iop_excb.c` covers Round 22's real RAM[0x100] exception-handler
+priority-chain mechanism (`source/hw/iop_excb.c`) - see
+`docs/STATUS.md`'s "Round 22" section for the full citation trail
+(psx-spx kernelbios.md's "BIOS Interrupt/Exception Handling" section:
+"Priority Chains", "C(02h) - SysEnqIntRP", "C(03h) - SysDeqIntRP").
+18 checks: the Table-of-Tables pointer/size fields at RAM[0x100]/
+RAM[0x104], all 4 priority chains starting empty, real head-insertion
+order (newest-first) across two chained nodes with byte-exact next-
+pointer linking, chain isolation between different priorities, real
+first-element removal, the documented non-first-element SysDeqIntRP
+bug modeled as a counted no-op (not silently dropped, not a fabricated
+outcome), out-of-range priority handled safely, and the real C0-table
+`C(02h)` HLE trap end-to-end (register-convention parameter reads via
+$a0/$a1, correct chain mutation, correct return-to-$ra).
+
+```sh
+gcc -I../include -I../source -o test_iop_excb tests/test_iop_excb.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+./test_iop_excb
+```

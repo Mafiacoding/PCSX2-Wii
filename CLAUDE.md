@@ -635,9 +635,36 @@ always ask for/verify the no-disc case explicitly).
   a real, observable, end-to-end effect for the first time in this
   project (RFE can restore it, and the interpreter now checks it).
   See docs/STATUS.md's "Round 22" section for the full trace.
-  ROADMAP.md section 2's only remaining open IOP bullet after this
-  round is the `RAM[0x100]` exception-chain default-handler behavior
-  itself.
+  **Same round, continued once more**: the `RAM[0x100]` exception-
+  chain mechanism itself was then also completed. The earlier
+  rendered-HTML psx-spx fetch had been truncated before reaching the
+  needed section - re-fetching the page's raw markdown source
+  directly from GitHub instead got far enough to recover the full,
+  complete reference: 4 real priority chains (0-3), each a singly-
+  linked list of 16-byte nodes (`00h`=next-pointer, `04h`=second-
+  function ptr, `08h`=first-function ptr, `0Ch`=unused);
+  `RAM[0x100]`/`RAM[0x104]` point at a real 4-entry chain-head array.
+  New `include/core/hw/iop_excb.h`/`source/hw/iop_excb.c` implement
+  `C(02h) SysEnqIntRP`/`C(03h) SysDeqIntRP` byte-exactly, including
+  SysDeqIntRP's documented real BUG (can only correctly remove a
+  chain's first element - any other position is modeled as a safe
+  no-op, since the real "garbage stack read" outcome isn't citable).
+  Deliberately NOT implemented: the real default handler CONTENTS
+  (EnqueueSyscallHandler/EnqueueTimerAndVblankIrqs/InitDefInt) - would
+  need real BIOS-ROM machine code this project has no reference for;
+  the chains correctly start all-empty instead, matching the exact
+  scenario Round 19's trace hit. 18 new checks in `tests/
+  test_iop_excb.c` (55->56 test binaries), full regression still
+  0-failure, clean Wii rebuild. **This closes out the user's "all IOP
+  problems" sweep**: three real, previously-undocumented/unimplemented
+  gaps found and fixed in one session (RFE, hardware-interrupt
+  delivery, the RAM[0x100] chain mechanism), each with a citable real-
+  hardware reference and its own regression test, none fabricated.
+  ROADMAP.md section 2 has no remaining open bullets after this round
+  (the only honestly-open piece left - real default handler BODIES -
+  isn't something this project has ever had a reference for and isn't
+  being synthesized). See docs/STATUS.md's "Round 22" section for the
+  full trace.
 
 ## The mandatory per-change workflow
 
@@ -1214,7 +1241,7 @@ rsync -a --delete --exclude '.git' --exclude 'test_*' \
 # rsync's include/exclude ORDER means the 3 test_*.c source files
 # still get excluded by the earlier --exclude 'test_*' rule (basename
 # match, first-match-wins) - work around it by re-copying them directly:
-for f in tests/test_iop_elf.c tests/test_iop_spu2.c tests/test_vu_micro.c tests/test_gif_line.c tests/test_iop_rfe.c tests/test_iop_hw_interrupt.c; do
+for f in tests/test_iop_elf.c tests/test_iop_spu2.c tests/test_vu_micro.c tests/test_gif_line.c tests/test_iop_rfe.c tests/test_iop_hw_interrupt.c tests/test_iop_excb.c; do
   cp "/tmp/pcsx2-wii-git/$f" "$OUT/pcsx2-wii/$f"
 done
 ```
@@ -1230,26 +1257,29 @@ round).
 frontier" section above (kept as a running per-round log) and
 docs/ROADMAP.md's "Suggested near-term order" section (kept short and
 current, not a history log - docs/STATUS.md has the full history) for
-the actual next task. As of Round 22, the user has explicitly overridden
-the prior "1, 4, then 5" ordering with a broader standing directive:
-**handle ALL IOP problems first, before any other task (including GS)
-resumes.** Round 22 fixed two real, previously-undocumented gaps found
-via direct code inspection (not just re-reading prior round
-narratives - a reminder to keep reading the actual code during this
-sweep, since more undocumented gaps may still be hiding): RFE was
-completely unimplemented, and no hardware-interrupt delivery existed
-in the IOP interpreter at all. `Status.IEc` now has a real, observable
-effect for the first time in this project. ROADMAP.md section 2's only
-remaining open IOP bullet is the real exception-handler-chain default-
-fallback behavior at `RAM[0x100]` - partial psx-spx research recovered
-the Table-of-Tables/ExCB pointer-pair layout, but the deeper Priority-
-Chains/ExCB structure-layout sections needed for a fully cited
-implementation still haven't been retrieved (the psx-spx kernelbios
-page is large enough that one fetch didn't cover it - see the earlier
-"Optional Next Step" note in this session's own history for how to
-approach re-fetching it, e.g. via a dedicated subagent or targeted
-grep of a saved fetch). Do NOT resume GS/CDVD/COP2 work until this IOP
-sweep is genuinely exhausted, per the user's explicit instruction.
+the actual next task. As of Round 22, the user had explicitly
+overridden the prior "1, 4, then 5" ordering with a broader standing
+directive: **handle ALL IOP problems first, before any other task
+(including GS) resumes.** Round 22 fixed THREE real, previously-
+undocumented/unimplemented gaps found via direct code inspection and
+completed research (not just re-reading prior round narratives - a
+reminder to keep reading the actual code/sources during any future
+sweep like this, since more undocumented gaps may still be hiding):
+RFE was completely unimplemented; no hardware-interrupt delivery
+existed in the IOP interpreter at all; and the real RAM[0x100]
+exception-handler-chain mechanism (SysEnqIntRP/SysDeqIntRP, byte-exact
+per a fully-recovered psx-spx reference - fetched as raw markdown
+directly from GitHub after the rendered-HTML version kept truncating)
+is now implemented. `Status.IEc` now has a real, observable
+end-to-end effect for the first time in this project. **ROADMAP.md
+section 2 (IOP) has NO remaining open bullets after Round 22** - the
+user's "all IOP problems" sweep is genuinely done, modulo the one
+honestly-unclosable gap (real default handler BODIES - actual BIOS-
+ROM machine code for SyscallException/VblankIrq/etc. - which this
+project has never had a reference for and correctly does not
+fabricate). The next session should feel free to resume GS/CDVD/COP2
+work, or pick a new priority with the user, now that this directive's
+scope is exhausted.
 
 ## Reference material
 

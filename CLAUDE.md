@@ -694,6 +694,29 @@ always ask for/verify the no-disc case explicitly).
   block-swizzled addressing, REGLIST/IMAGE transfer modes, GS context
   2, mipmaps).
 
+- **GS Round 24 (same session, continued)**: per the user's follow-up
+  directive to complete CLUT, block-swizzled addressing, REGLIST/
+  IMAGE modes, GS context 2, and mipmaps "step by step" in one go,
+  this round implements CLUT/paletted textures (PSMT8/PSMT4). TEX0's
+  PSM field is now parsed (was previously ignored); its CLUT fields
+  (CBP/CPSM/CSA/CLD) are new. The CLUT is modeled as its own small
+  gs_mem region at CBP, 16 entries/row, with CSA selecting a bank
+  offset (so multiple PSMT4 palettes can share one CLUT region).
+  PSMT8 implements the real CSM1 8-bit index swizzle (index bits 3/4
+  swapped before lookup) - proven by two symmetric test cases in the
+  new `tests/test_gs_clut.c` (6 checks, 58->59 test binaries, full
+  regression 0-failure, clean Wii rebuild). **Important caveat for
+  this round**: a dedicated research-subagent dispatch (the same
+  technique that worked well for Round 23's alpha citations) hit this
+  session's own usage/session limit before it could run - so this
+  round's PSM/CLUT field layout and the CSM1 swizzle are implemented
+  from established PS2 GS knowledge rather than a freshly-verified
+  primary-source citation trail, explicitly flagged as such in the
+  code comments and docs/STATUS.md's "GS Round 24" section. A future
+  round should try the live research pass again if it becomes
+  available, to strengthen this citation trail. See docs/STATUS.md's
+  "GS Round 24" section for the full detail.
+
 ## The mandatory per-change workflow
 
 This project has a strict, consistently-applied ritual for every increment
@@ -1269,7 +1292,7 @@ rsync -a --delete --exclude '.git' --exclude 'test_*' \
 # rsync's include/exclude ORDER means the 3 test_*.c source files
 # still get excluded by the earlier --exclude 'test_*' rule (basename
 # match, first-match-wins) - work around it by re-copying them directly:
-for f in tests/test_iop_elf.c tests/test_iop_spu2.c tests/test_vu_micro.c tests/test_gif_line.c tests/test_iop_rfe.c tests/test_iop_hw_interrupt.c tests/test_iop_excb.c tests/test_gs_alpha.c; do
+for f in tests/test_iop_elf.c tests/test_iop_spu2.c tests/test_vu_micro.c tests/test_gif_line.c tests/test_iop_rfe.c tests/test_iop_hw_interrupt.c tests/test_iop_excb.c tests/test_gs_alpha.c tests/test_gs_clut.c; do
   cp "/tmp/pcsx2-wii-git/$f" "$OUT/pcsx2-wii/$f"
 done
 ```
@@ -1319,6 +1342,18 @@ remaining open GS gaps are: CLUT/paletted textures, real
 block-swizzled addressing, REGLIST/IMAGE GIF transfer modes, GS
 context 2 (dual-context), and mipmaps - any of these is a reasonable
 next increment if "complete GS port" work continues.
+
+**Update (GS Round 24, same session)**: the user directed all four
+remaining items (CLUT, block-swizzled addressing, REGLIST/IMAGE
+modes, GS context 2, mipmaps) be completed immediately, step by step,
+also asking for an explicit checkpoint given this session's own usage
+limits - meaning: commit+push after EACH increment individually
+(never batch multiple features into one uncommitted working state),
+so a session cutoff mid-sweep never risks losing already-finished
+work. Round 24 (CLUT/paletted textures) is the first of these five and
+is complete, committed, and pushed - see "Current frontier" above.
+Remaining, in the user's stated order: real block-swizzled addressing,
+REGLIST/IMAGE transfer modes, GS context 2, mipmaps.
 
 ## Reference material
 

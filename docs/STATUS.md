@@ -3356,6 +3356,117 @@ simplified linear addressing throughout), REGLIST/IMAGE transfer
 modes (only PACKED mode is implemented in the GIF parser), GS context
 2 (dual-context - only context 1 is modeled), and mipmaps.
 
+## GS Round 24: CLUT/paletted textures (PSMT8/PSMT4)
+
+Continuing the user's "implement the complete GS port" directive after
+Round 23's alpha unit, this round tackles CLUT/paletted textures - the
+next item on ROADMAP.md section 6's remaining-gaps list.
+
+**Citation-honesty note for this round.** A dedicated research
+subagent dispatch (the same technique used successfully for Round 23's
+alpha-unit citations) hit this session's own usage/session limit
+before it could run and return results. Rather than block on that or
+fabricate specific PCSX2 source line citations I can't verify this
+round, the PSM enum values, TEX0's CLUT field layout, and the CLUT
+addressing/swizzle scheme below are implemented from established,
+widely-published PS2 GS hardware knowledge (the kind referenced
+repeatedly across PS2 homebrew texture-conversion tooling and general
+GS documentation), NOT a fresh primary-source citation trail. This is
+flagged explicitly in the code comments (`gif.h`'s `TEX_PSM_xxx`/
+`CLUT_ROW_WIDTH` and `gif.c`'s `gs_sample_texel()`/`gs_sample_clut()`)
+so a future round can strengthen the citation trail with a live
+GSRegs.h/GSLocalMemory.cpp fetch if/when research tooling is available
+again - consistent with this project's standing policy of flagging
+weaker-than-usual citations rather than presenting them as equally
+solid.
+
+**TEX0's PSM + CLUT fields (`include/core/hw/gif.h`,
+`source/hw/gif.c`).** TEX0's previously-ignored PSM field (6 bits,
+word0 bits 20-25) is now parsed - real GS pixel-storage-mode values
+`PSMCT32`=0x00, `PSMCT24`=0x01, `PSMCT16`=0x02, `PSMCT16S`=0x0A,
+`PSMT8`=0x13, `PSMT4`=0x14, `PSMT8H`=0x1B, `PSMT4HL`=0x24,
+`PSMT4HH`=0x2C are all defined for documentation, but this project's
+`gs_mem` is PSMCT32-storage-only (an established limitation from
+earlier rounds), so only `PSMCT32`/`PSMT8`/`PSMT4` are actually
+sampled specially - any other PSM value falls back to direct PSMCT32
+sampling rather than crashing or silently misbehaving. TEX0 word1's
+CLUT fields are also now parsed: `CBP` (14 bits, bits 5-18, the
+CLUT's storage location - used directly as this project's own
+`gs_mem` bp convention, exactly like `TBP0`/`FBP`/`ZBP` elsewhere),
+`CPSM` (4 bits, bits 19-22, CLUT entry format - only `PSMCT32` is
+supported, `PSMCT16`/`PSMCT16S` is a documented gap since `gs_mem` has
+no 16-bit storage format at all), `CSA` (5 bits, bits 24-28, a
+16-entry-unit offset into the CLUT storage), and `CLD` (3 bits, bits
+29-31, CLUT load control - parsed but unused, since this emulator has
+no CLUT cache to manage; every sample simply re-reads the CLUT fresh
+from `gs_mem`, which is always correct, just not a claim of matching
+real hardware's cache timing/behavior).
+
+**CLUT addressing (`gs_sample_clut()`).** The CLUT is modeled as its
+own small `gs_mem` region at `CBP`, with a fixed row width of 16
+entries (`CLUT_ROW_WIDTH`) - matching real hardware's 16-entries-per-
+CSA-unit addressing granularity (`CLUT_CSA_UNIT`=16). A palette entry
+at flat index N lives at gs_mem pixel `(N % 16, N / 16)` within that
+region. `CSA` selects a bank offset: `flat = CSA*16 + index`. This
+means PSMT4's 16-entry palette occupies exactly one CSA unit (so up to
+32 independent 4-bit palettes can share one CLUT storage region at
+different CSA offsets - Round 24's test file proves this explicitly),
+while PSMT8's 256-entry palette spans all 16 CSA units and
+conventionally starts at CSA=0.
+
+**PSMT8's CSM1 index swizzle (`gs_sample_texel()`).** Real PS2 GS
+hardware does not store 8-bit CLUT-indexed texture data with the
+palette index used as a flat 0-255 array position - CSM1-mode 8-bit
+CLUT storage swaps bits 3 and 4 of the raw index before lookup:
+`real_index = (idx & 0xE7) | ((idx & 0x08) << 1) | ((idx & 0x10) >> 1)`.
+This is a well-known PS2 GS quirk frequently referenced in PS2
+homebrew texture-conversion tooling as the "CSM1 8-bit CLUT swizzle" -
+implemented here and proven by two symmetric test cases (raw index 8
+resolves to CLUT entry 16, and raw index 16 resolves to CLUT entry 8),
+plus a third case (index 3, both swizzle bits already 0) confirming
+indices outside the swapped bit range are left untouched. PSMT4 does
+not need this swizzle - its 16-entry palette has no sub-block
+structure to rearrange.
+
+**No real texture-upload/bit-packing path.** Consistent with this
+project's already-established, documented limitation (see
+`test_gif_texture.c`'s own scope note: there is no `TRXDIR`/
+`BITBLTBUF` texture-upload path yet, textures are pre-existing
+`gs_mem` content filled directly via `gs_mem_write_psmct32()` before a
+test packet runs), PSMT8/PSMT4 texture data here is stored as one raw
+palette-index value per texel SLOT (a full `gs_mem` "pixel", not a
+packed byte/nibble) - masked down to the relevant range (0-255 for
+PSMT8, 0-15 for PSMT4) at sample time. Real hardware's tightly-packed
+byte/nibble-per-texel storage is a separate concern from CLUT lookup
+itself and is deliberately not conflated here - it belongs to the
+REGLIST/IMAGE transfer-mode work (a separate, still-open ROADMAP.md
+item), which is what would actually deliver bit-packed texture data
+into `gs_mem` on real hardware.
+
+**Testing (`tests/test_gs_clut.c`, 6 checks).** PSMT4 basic lookup
+against a known CLUT entry; PSMT4 with CSA=2 proving bank selection
+actually changes which palette is used (not silently ignored); PSMT8
+index 8 resolving through the swizzle to entry 16; the symmetric PSMT8
+index 16 resolving to entry 8; a PSMT8 index (3) with both swizzle
+bits already clear, confirming it's unaffected; and a PSMCT32
+regression check proving the default (unset) PSM samples directly,
+with the new CLUT machinery not engaged at all.
+
+Regression: 59 host-native test binaries (was 58, +`test_gs_clut.c`),
+0 failures (`-lm` appended locally per this sandbox's own linker
+behavior, documented in Round 23's section). Clean Wii/devkitPPC
+rebuild, same single pre-existing harmless `strncpy` warning as every
+prior round.
+
+**Net result for GS Round 24**: CLUT/paletted textures (PSMT8/PSMT4)
+are implemented against real (if this-round-unverified-live) GS
+hardware semantics, with a dedicated regression test and zero
+regressions elsewhere. Per ROADMAP.md section 6, the remaining known
+GS gaps after this round are: real block-swizzled addressing,
+REGLIST/IMAGE transfer modes, GS context 2 (dual-context), and
+mipmaps - the user has directed all four to be completed next, in
+that order, as part of the same standing "complete GS port" session.
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

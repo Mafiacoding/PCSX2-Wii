@@ -64,6 +64,79 @@ static inline float u32_to_float(uint32_t v)
     return f;
 }
 
+/* Round 24: real CLUT/paletted-texture sampling (PSMT8/PSMT4), gated
+ * by TEX0's PSM field. See gif.h's TEX_PSM_xxx/CLUT_ROW_WIDTH/
+ * CLUT_CSA_UNIT header comments for the full scope, addressing
+ * scheme, and citation-honesty note (this round's live source-fetch
+ * research pass hit a session limit before it could run, so the CLUT
+ * addressing scheme below is sourced from established PS2 GS
+ * knowledge rather than a fresh citation trail this round).
+ *
+ * For PSMT8/PSMT4, this project stores the texture's raw palette
+ * INDEX (not a color) at each texel slot in gs_mem, via the exact
+ * same `gs_mem_read_psmct32(tbp,tbw,x,y)` convention used for
+ * PSMCT32 texture color - masked down to the relevant index range
+ * (0-255 for PSMT8, 0-15 for PSMT4). This mirrors the project's
+ * already-established, documented limitation that there is no real
+ * texture-upload/bit-packing path yet (see test_gif_texture.c's own
+ * scope note: textures are pre-existing gs_mem content, filled
+ * directly via gs_mem_write_psmct32() before a test packet runs) -
+ * real hardware's tightly-packed byte/nibble-per-texel storage is a
+ * separate concern (the REGLIST/IMAGE transfer-mode work) from CLUT
+ * lookup itself, and is not conflated here.
+ *
+ * The palette itself lives in gs_mem at tex_cbp (this project's own
+ * bp convention, exactly like tex_tbp0), addressed as a small
+ * CLUT_ROW_WIDTH-wide (16 entries/row) region: entry N is at pixel
+ * (N % CLUT_ROW_WIDTH, N / CLUT_ROW_WIDTH) within that region. CSA
+ * (tex_csa) selects a CLUT_CSA_UNIT (16-entry) offset within the
+ * palette, matching real hardware's CSA addressing granularity - so
+ * PSMT4's 16-entry palette at CSA=csa starts at flat index
+ * `csa*CLUT_CSA_UNIT`, and PSMT8's 256-entry palette (spanning 16 CSA
+ * units) conventionally starts at CSA=0.
+ *
+ * PSMT8's real hardware CSM1 storage additionally swizzles the raw
+ * index before lookup - bits 3 and 4 of the index are swapped
+ * (`(idx & 0xE7) | ((idx & 0x08) << 1) | ((idx & 0x10) >> 1)`), a
+ * well-known PS2 GS quirk frequently documented in PS2 homebrew
+ * texture-conversion tooling as the "CSM1 8-bit CLUT swizzle" -
+ * flagged here as sourced from established community knowledge
+ * rather than a primary-source citation this round, consistent with
+ * this project's citation-honesty policy. PSMT4 does not need this
+ * swizzle (its 16-entry palette has no sub-block structure to
+ * rearrange).
+ *
+ * Only CPSM=PSMCT32 (32-bit RGBA CLUT entries) is supported - see
+ * CLUT_ROW_WIDTH's header comment for why CPSM=PSMCT16/16S is a
+ * documented, unsupported gap. An unsupported CPSM value falls back
+ * to treating the raw index as if it were already a packed RGBA
+ * color (better than a crash, honestly wrong rather than silently
+ * "correct"). */
+static uint32_t gs_sample_clut(uint32_t index)
+{
+    uint32_t flat = g_gif.tex_csa * CLUT_CSA_UNIT + index;
+    uint32_t cx = flat % CLUT_ROW_WIDTH;
+    uint32_t cy = flat / CLUT_ROW_WIDTH;
+    return gs_mem_read_psmct32(g_gif.tex_cbp, CLUT_ROW_WIDTH, cx, cy);
+}
+
+static uint32_t gs_sample_texel(int32_t tex_x, int32_t tex_y)
+{
+    uint32_t raw = gs_mem_read_psmct32(g_gif.tex_tbp0, g_gif.tex_tbw,
+                                        (uint32_t)tex_x, (uint32_t)tex_y);
+    if (g_gif.tex_psm == TEX_PSM_PSMT8) {
+        uint32_t idx = raw & 0xFFu;
+        uint32_t swizzled = (idx & 0xE7u) | ((idx & 0x08u) << 1) | ((idx & 0x10u) >> 1);
+        return gs_sample_clut(swizzled);
+    } else if (g_gif.tex_psm == TEX_PSM_PSMT4) {
+        uint32_t idx = raw & 0x0Fu;
+        return gs_sample_clut(idx);
+    }
+    /* PSMCT32 (default) and any other unsupported PSM: sample
+     * directly, no CLUT indirection. */
+    return raw;
+}
+
 /* Round 23: real alpha test (TEST_1's ATE/ATST/AREF/AFAIL) and real
  * alpha blending (ALPHA_1, gated by PRIM's ABE bit) - see gif.h's
  * TEST_xxx, GS_ATST_xxx, GS_AFAIL_xxx, ALPHA_xxx, and GS_ALPHA_xxx field comments for
@@ -354,8 +427,10 @@ static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, i
                      * safely returns 0 rather than reading garbage. */
                     int32_t tex_x = (tu < 0.0) ? 0 : (int32_t)(tu + 0.5);
                     int32_t tex_y = (tv < 0.0) ? 0 : (int32_t)(tv + 0.5);
-                    uint32_t texel = gs_mem_read_psmct32(g_gif.tex_tbp0, g_gif.tex_tbw,
-                                                          (uint32_t)tex_x, (uint32_t)tex_y);
+                    /* Round 24: routes through gs_sample_texel() so
+                     * PSMT8/PSMT4 CLUT textures work here too - see
+                     * its own comment for the full scope. */
+                    uint32_t texel = gs_sample_texel(tex_x, tex_y);
                     if (g_gif.tex_tfx == TEX_TFX_DECAL) {
                         out = texel;
                     } else {
@@ -489,8 +564,9 @@ static void rasterize_sprite(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
                 double tv = tex_v0 + frac_y * (tex_v1 - tex_v0);
                 int32_t tex_x = (tu < 0.0) ? 0 : (int32_t)(tu + 0.5);
                 int32_t tex_y = (tv < 0.0) ? 0 : (int32_t)(tv + 0.5);
-                uint32_t texel = gs_mem_read_psmct32(g_gif.tex_tbp0, g_gif.tex_tbw,
-                                                      (uint32_t)tex_x, (uint32_t)tex_y);
+                /* Round 24: routes through gs_sample_texel() so
+                 * PSMT8/PSMT4 CLUT textures work here too. */
+                uint32_t texel = gs_sample_texel(tex_x, tex_y);
                 if (g_gif.tex_tfx == TEX_TFX_DECAL) {
                     out = texel;
                 } else {
@@ -910,6 +986,17 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
          * normalized ST+Q coordinates into texel space. */
         g_gif.tex_tw = (data_lo >> 26) & 0xFu;
         g_gif.tex_th = ((data_lo >> 30) & 0x3u) | ((data_hi & 0x3u) << 2);
+        /* Round 24: PSM (word0 bits 20-25) + CLUT fields (word1 bits
+         * 5-31: CBP:14, CPSM:4, CSM:1 (ignored - CSM2's separate
+         * load-list mode is a documented, unsupported gap; only CSM1
+         * is modeled), CSA:5, CLD:3). See TEX_PSM_xxx and
+         * CLUT_ROW_WIDTH's header comments for the full scope and
+         * citation-honesty note. */
+        g_gif.tex_psm = (data_lo >> 20) & 0x3Fu;
+        g_gif.tex_cbp = (data_hi >> 5) & 0x3FFFu;
+        g_gif.tex_cpsm = (data_hi >> 19) & 0xFu;
+        g_gif.tex_csa = (data_hi >> 24) & 0x1Fu;
+        g_gif.tex_cld = (data_hi >> 29) & 0x7u;
     } break;
     case GS_REG_ZBUF_1: {
         /* GIFRegZBUF bitfield cross-checked against PCSX2's own

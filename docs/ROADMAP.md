@@ -863,6 +863,26 @@ programmable GPU nor any of those APIs).
       COLCLAMP=0's wrap-instead-of-clamp mode, and DATE/DATM
       (destination-alpha test, a separate mechanism from the alpha
       test above) remain unmodeled.
+- [x] CLUT/paletted textures (PSMT8/PSMT4, Round 24) - TEX0's PSM
+      field now actually parsed (previously ignored), plus its CLUT
+      fields (CBP/CPSM/CSA/CLD). CLUT storage modeled as its own small
+      gs_mem region at CBP with a 16-entries/row layout (CLUT_ROW_WIDTH,
+      matching real hardware's 16-entry CSA-unit granularity); CSA
+      selects a bank offset, letting multiple PSMT4 palettes share one
+      CLUT region. PSMT8 implements the real CSM1 8-bit index swizzle
+      (swaps index bits 3/4 before lookup). Only CPSM=PSMCT32 is
+      supported (CPSM=PSMCT16/16S is a documented gap, matching
+      gs_mem's own PSMCT32-only limitation); no real texture-upload/
+      bit-packing path exists yet (indices are stored one-per-texel-
+      slot, same simplification as every other texture format here) -
+      that's covered by the separate REGLIST/IMAGE work below. This
+      round's citation trail is weaker than usual: a live source-fetch
+      research pass hit a session limit, so the PSM/CLUT field layout
+      and the CSM1 swizzle are sourced from established PS2 GS
+      knowledge rather than a fresh primary-source citation - flagged
+      explicitly in code comments and docs/STATUS.md's "GS Round 24"
+      section. 6 new checks (tests/test_gs_clut.c), 59-file/0-failure
+      regression, clean Wii rebuild.
 - [x] A first, minimal translation layer from GS memory to the Wii's
       display: `source/hw/gs_wii_output.c` converts a rectangular
       PSMCT32 region to the Wii's packed Y1CbY2Cr XFB format (RGB->YUV
@@ -961,13 +981,12 @@ already documented, rather than truly returning from the syscall.
 
 5. **GS coverage breadth** (section 6) - primitives (flat/Gouraud
    triangles, textured sprites, Z-test, POINT/LINE/LINE_STRIP - Round
-   21, and - Round 23 - alpha test/blending) exist, but this is still
-   a sliver of real GS - real PCSX2's own GS code is ~114,500 lines.
-   Still open: REGLIST/IMAGE GIF transfer modes, CLUT/paletted
-   textures, real block-swizzled addressing, GS context 2, mipmaps,
-   and more. Revisit further once real EE/IOP code is actually driving
-   the pipeline (no urgency before then - there's nothing real to
-   render yet).
+   21, alpha test/blending - Round 23, and - Round 24 - CLUT/paletted
+   textures) exist, but this is still a sliver of real GS - real
+   PCSX2's own GS code is ~114,500 lines. Still open (user has
+   directed all four to be done next, in this order): real
+   block-swizzled addressing, REGLIST/IMAGE GIF transfer modes, GS
+   context 2, mipmaps.
 
 6. Lower priority, deferred: the remaining ~23 EE MMI opcodes (section
    1), Pad/memory card (section 7).

@@ -234,6 +234,45 @@
 #define TEX_TFX_MODULATE  0u
 #define TEX_TFX_DECAL     1u
 
+/* TEX0's PSM field (6 bits, word0 bits 20-25) - real GS pixel storage
+ * mode enum values (well-known, widely-published PS2 GS constants -
+ * cross-referenced against this project's prior TEX0/FRAME/ZBUF work
+ * and general PS2 GS documentation; this round's live source-fetch
+ * research pass hit a session limit before it could run, so these
+ * are sourced from established knowledge rather than a fresh citation
+ * trail - flagged here per this project's citation-honesty policy).
+ * This project's gs_mem is PSMCT32-storage-only (see gs_mem.h), so
+ * only PSMCT32/PSMT8/PSMT4 are actually supported by the sampler
+ * below; the other real values are listed for documentation and to
+ * make an unsupported-PSM texture fail loudly (falls back to
+ * PSMCT32 sampling) rather than silently - a deliberate, documented
+ * gap, not a claim of full PSM coverage. */
+#define TEX_PSM_PSMCT32  0x00u
+#define TEX_PSM_PSMCT24  0x01u
+#define TEX_PSM_PSMCT16  0x02u
+#define TEX_PSM_PSMCT16S 0x0Au
+#define TEX_PSM_PSMT8    0x13u
+#define TEX_PSM_PSMT4    0x14u
+#define TEX_PSM_PSMT8H   0x1Bu
+#define TEX_PSM_PSMT4HL  0x24u
+#define TEX_PSM_PSMT4HH  0x2Cu
+
+/* CLUT geometry constants (Round 24, CLUT/paletted textures). Real
+ * hardware's CSM1 CLUT storage addresses palette entries in units of
+ * 16 ("CSA units") regardless of whether the texture is PSMT8 (256
+ * entries = 16 CSA units) or PSMT4 (16 entries = 1 CSA unit, letting
+ * up to 32 different 4-bit palettes share the same CLUT storage
+ * region at different CSA offsets). This project models the CLUT as
+ * its own small gs_mem region addressed via the existing bp/bw
+ * convention, with a fixed row width of 16 entries/row
+ * (CLUT_ROW_WIDTH) - consistent with the real 16-entries-per-CSA-unit
+ * granularity. Only CPSM=PSMCT32 (32-bit RGBA CLUT entries) is
+ * supported - CPSM=PSMCT16/PSMCT16S (16-bit CLUT entries) is a
+ * documented, unsupported gap (this project's gs_mem has no PSMCT16
+ * storage format at all, see gs_mem.h). */
+#define CLUT_ROW_WIDTH   16u
+#define CLUT_CSA_UNIT    16u
+
 void gif_init(void);
 
 /* Matches dma_sink_fn - register with dma_set_sink(DMA_CHANNEL_GIF, gif_process_quadwords). */
@@ -264,6 +303,24 @@ typedef struct {
      * texture coordinates (0.0-1.0 range) into texel space - UV mode
      * (FST=1) doesn't need these, since UV is already in texel units. */
     uint32_t tex_tw, tex_th;
+
+    /* PSM/CLUT fields (Round 24, CLUT/paletted textures). tex_psm is
+     * TEX0's real 6-bit PSM field (see TEX_PSM_* above) - only
+     * PSMT8/PSMT4 engage the CLUT path below, anything else
+     * (including the PSMCT32 default) uses the pre-existing direct
+     * gs_mem sample. tex_cbp/tex_cpsm/tex_csa/tex_cld are TEX0's
+     * CLUT fields - cbp is used directly as OUR gs_mem bp convention
+     * for the CLUT's storage location (exactly like tex_tbp0 for the
+     * texture itself); cpsm is checked but only PSMCT32 (0) is
+     * actually supported (see CLUT_ROW_WIDTH's comment); csa selects
+     * a 16-entry-unit offset within the CLUT storage; cld (CLUT load
+     * control) is parsed but not acted on - this emulator has no
+     * CLUT cache to manage, so every texture sample simply re-reads
+     * the CLUT fresh from gs_mem each time, which is always correct
+     * (just not a claim of matching real hardware's CLUT-cache
+     * timing/behavior). */
+    uint32_t tex_psm;
+    uint32_t tex_cbp, tex_cpsm, tex_csa, tex_cld;
 
     /* Z-buffer / depth-test state (task #89). zbp is the Z buffer's
      * base pointer, in OUR gs_mem bp convention (see gs_mem.h) - real

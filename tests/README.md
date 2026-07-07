@@ -1362,3 +1362,26 @@ direction differs by operand sign); and a regression check that
 gcc -I../include -I../source -o test_gs_alpha tests/test_gs_alpha.c ../source/hw/gif.c ../source/hw/gs_mem.c
 ./test_gs_alpha
 ```
+
+`test_gs_clut.c` covers GS Round 24: CLUT/paletted textures (PSMT8/
+PSMT4), driven by TEX0's PSM/CBP/CPSM/CSA fields. **Citation-honesty
+note**: this round's live source-fetch research pass hit a session
+limit before it could run, so the CLUT addressing scheme and the
+PSMT8 CSM1 index-swizzle below are sourced from established PS2 GS
+knowledge rather than a fresh primary-source citation trail this
+round (see `docs/STATUS.md`'s "GS Round 24" section for the full
+caveat). 6 checks, using TRIANGLE + UV-mode (FST=1) single-texel
+sampling (reusing `test_gif_texture.c`'s own established convention):
+PSMT4 basic lookup against a known CLUT entry; PSMT4 with CSA=2
+proving bank selection actually changes which palette is used;
+PSMT8 index 8 resolving through the real CSM1 swizzle (bits 3/4
+swapped) to CLUT entry 16; the symmetric PSMT8 index 16 resolving to
+entry 8; a PSMT8 index (3) with both swizzle bits already clear,
+confirming it's left unaffected; and a PSMCT32 regression check
+proving the default (unset) PSM samples directly, CLUT path not
+engaged.
+
+```sh
+gcc -I../include -I../source -o test_gs_clut tests/test_gs_clut.c
+./test_gs_clut
+```

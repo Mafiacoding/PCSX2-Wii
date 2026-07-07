@@ -2745,6 +2745,107 @@ touches module-entry argument setup, not any tested opcode behavior).
 Clean Wii/devkitPPC rebuild, same single pre-existing harmless
 `strncpy` truncation warning as prior rounds.
 
+### Round 19 (2026-07-07): IOP SYSCALL investigation, corrected - the real gap is an unregistered exception-handler chain, not a missing dispatch table
+
+Direct follow-up to Round 18's fix and its own stated hypothesis ("most
+likely...a real IOP kernel SYSCALL dispatch table was never
+implemented"). This round traced the actual instruction-level sequence
+around the SYSCALL exception precisely and found that hypothesis was
+**wrong** - the real situation is more specific and points at a
+different, better-scoped gap.
+
+**What's actually happening, traced precisely** (host-native
+diagnostics `/tmp/diag20.c`-`/tmp/diag28.c`, transient, not committed):
+
+1. At instruction 3,054,722, real ROM bootstrap code executes a genuine
+   `SYSCALL` with `$a0=0x00000002` - confirmed via the psx-spx public
+   kernel reference (https://psx-spx.consoledev.net/kernelbios/,
+   "SYS-Functions (Syscall opcode with function number in R4 aka A0
+   Register)") to be real `SYS(02h) ExitCriticalSection()` - about as
+   ordinary a kernel call as exists.
+2. The exception correctly vectors to `0x80000080`; the real,
+   dump-specific trampoline `InstallExceptionHandlers` installed there
+   (task #42) correctly executes (`LUI $k0/ADDIU $k0/JR $k0`) and jumps
+   into real BIOS RAM code at `0x00000c80`.
+3. Disassembly of `0x00000c80`-`0x00000e30` (`capstone`) confirms this
+   is a genuine, textbook R3000A generic exception dispatcher: it
+   saves the ENTIRE GPR context into a save area, reads `EPC` via
+   `MFC0`, then looks up a registered handler through a linked
+   structure rooted at `RAM[0x100]` (`addiu $s3,zero,0x100; lw
+   $s3,($s3)`, then two more indirections) and calls it: `jalr $s1`.
+   This is a real exception-handler-CHAIN mechanism (multiple handlers
+   can be registered; `beqz $s0,...`/`lw $s6,($s6)` afterward walk to
+   the next node) - not something this project needs to fabricate, it
+   is genuinely present in the loaded BIOS/RAM image.
+4. The problem: at this point in boot, `RAM[0x100]`'s chain has never
+   had a real handler registered - the value found through it is the
+   same leftover exception-vector-template bytes (`0x03400008`,
+   literally the `JR $k0` instruction encoding) this project has
+   already found and explained twice before (round 14's original
+   finding, and again here). The `jalr $s1` therefore jumps to
+   `0x03400008`, which this project's PC-fetch-sanity guard catches -
+   and, since `iop_module_loader_boot()` had never yet run (`g.attempted`
+   was still 0 at this exact point - confirmed via a temporary debug
+   build), this is the SAME event round 15 already documented as "how
+   SYSMEM first gets loaded." Round 15's account of this event is
+   correct on its own terms, but this round adds the missing piece of
+   context: it happens as a side effect of an early, real
+   `ExitCriticalSection` syscall's exception-chain lookup finding an
+   unpopulated/stale entry, not as an independent, freestanding event.
+
+**Consequence**: because the loader's guard treats this escape as "go
+load the next real module" rather than "no handler registered, fall
+back to whatever real hardware's kernel does by default," this project
+never actually returns from the original SYSCALL exception at all
+(no `ERET` back to the ROM bootstrap code that issued
+`ExitCriticalSection`) - execution is diverted into SYSMEM's own
+module-init code instead. That code is genuinely real and mostly
+plausible (see below), but it is a different, disconnected program
+from whatever the ROM bootstrap was doing before the syscall - not a
+continuation of a single coherent boot sequence.
+
+**SYSMEM's own init code, traced further**: with round 18's stack fix
+in place, SYSMEM's entry code runs a very real-looking sequence: a
+17-iteration array-zeroing loop (round 14/18), then what disassembly
+confirms is a genuine phase-based driver-dispatch loop at
+`0x0010119c`-`0x00101264` - iterating a linked list of
+(function-pointer | phase-tag) entries, calling (`jalr`) each entry
+whose low 2 tag bits match the current phase counter (0..3), matching
+a classic RTOS "call all registered drivers for phase N, then advance"
+pattern. Once all 4 phases complete, execution falls through to
+`0x00101268`-`0x00101288`: `sb` a status byte (value 2) to IOP RAM
+address 0, then an unconditional `j` back to itself. Checked whether
+this is a real crash/panic or an idle wait: `Status.IEc` (COP0
+register 12, bit 0 - global interrupt enable) is `0x00000000` the
+entire time this loop runs, and stays exactly `0` across 2,000,000
+further instructions with zero interrupts ever taken (`Cause` never
+changes). So even if this project's IOP timer/interrupt-controller
+model correctly raised a pending interrupt condition here, the CPU
+would not take it while `IEc=0` - this loop cannot be broken by an
+interrupt in its current state regardless of timer/INTC correctness.
+
+**Not fixed this round** (correctly scoped as substantial, not a quick
+patch): two independent, well-defined next targets, either of which
+could plausibly move this forward:
+  (a) make the generic exception dispatcher's "no handler registered"
+      case behave like real hardware's actual default instead of
+      relying on the module-loader escape hatch as a lucky substitute
+      - needs research into what real IOP kernel init does at
+        `RAM[0x100]` before any handler is registered (a citable
+        reference, not a guess);
+  (b) figure out why `Status.IEc` never gets set to 1 anywhere in the
+      traced execution - either a missing real "enable interrupts"
+      step this project's model doesn't yet reach, or confirmation
+      that real hardware genuinely keeps interrupts masked at this
+      exact point too (in which case the idle loop is a real, if
+      early, resting state and this project's IOP model is behaving
+      correctly - just incomplete elsewhere).
+
+Regression: no source changes this round (pure investigation), 93/93
+tests unaffected. No BIOS bytes committed; all diagnostics are
+`/tmp`-only, discarded at session end.
+
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

@@ -548,6 +548,25 @@ always ask for/verify the no-disc case explicitly).
   A0/B0/C0 jump-table mechanism). Flagged as the next concrete target
   in ROADMAP.md, not attempted this round. 93/93 regression unchanged,
   clean Wii rebuild.
+- **Round 19 - corrected Round 18's own hypothesis**: precise
+  instruction-level tracing (`/tmp/diag20.c`-`diag28.c`, real `$a0=2`
+  captured right before the trap, cross-checked against psx-spx's
+  public kernel syscall reference) found the panic loop is NOT caused
+  by a missing SYSCALL dispatch table. It's a genuine, ordinary
+  `SYS(02h) ExitCriticalSection()` correctly vectoring into a real,
+  disassembled BIOS exception dispatcher at 0x00000c80-0x00000e30,
+  whose handler-chain lookup at RAM[0x100] finds no handler registered
+  yet - falling through to the same "load SYSMEM" escape hatch Round
+  15 already documented, instead of really returning from the syscall.
+  Also confirmed the "panic loop" itself is a real 4-phase driver-
+  dispatch pattern completing normally, and that Status.IEc (interrupt
+  enable) stays 0 throughout - no interrupt could break the loop
+  regardless of timer/INTC state. Two next targets identified, neither
+  fixed yet: (a) real handler-chain default-fallback behavior at
+  RAM[0x100], (b) why IEc never gets enabled. Pure investigation, no
+  source changes, 93/93 regression unaffected. See docs/STATUS.md's
+  "Round 19" section for the full trace; ROADMAP.md's item 1 wording
+  corrected to match.
 
 ## The mandatory per-change workflow
 
@@ -1140,10 +1159,12 @@ round).
 frontier" section above (kept as a running per-round log) and
 docs/ROADMAP.md's "Suggested near-term order" section (kept short and
 current, not a history log - docs/STATUS.md has the full history) for
-the actual next task. As of Round 18, that's a real IOP kernel SYSCALL
-dispatch table - see ROADMAP.md section 2's new bullet and
-docs/STATUS.md's "Round 17"/"Round 18" sections for the full trace
-that motivates it.
+the actual next task. As of Round 19, that's the real exception-
+handler-chain default-fallback behavior at RAM[0x100] plus the
+Status.IEc-never-enabled gap (corrected from Round 18's original
+"SYSCALL dispatch table" framing) - see ROADMAP.md section 2's bullet
+and docs/STATUS.md's "Round 17"/"Round 18"/"Round 19" sections for the
+full trace that motivates it.
 
 ## Reference material
 

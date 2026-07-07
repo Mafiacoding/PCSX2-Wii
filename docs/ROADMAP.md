@@ -579,17 +579,29 @@ instead of fully emulating the real IOP BIOS ROM.
       (the bogus near-zero stack pointer had been silently overwriting
       the real exception-vector trampoline at address 0x80) - see
       docs/STATUS.md's "Round 18" section.
-- [ ] Real IOP kernel SYSCALL dispatch table - Round 18 found that,
-      with the boot-info fix above, the IOP now runs cleanly through a
-      real SYSCALL exception into what disassembly shows is a genuine
-      BIOS panic/halt loop (write error code 2 to address 0, spin
-      forever) - most likely because this project has never modeled
-      the real IOP kernel's SYSCALL-number-driven dispatch table
-      (ThreadMan/semaphores/etc., distinct from the existing, separate
-      A0/B0/C0 jump-table BIOS-call mechanism in `iop_hle_bios.c`).
-      This is the next concrete boundary standing between this project
-      and a real IOP boot completing - substantial, well-defined scope
-      for a future round; not attempted yet.
+- [ ] Real exception-handler-chain default behavior at `RAM[0x100]`
+      - Round 18's "SYSCALL dispatch table" framing was corrected in
+      Round 19: precise tracing (real `a0=2` right before the trap)
+      showed the SYSCALL firing is a genuine, ordinary
+      `SYS(02h) ExitCriticalSection()`, and the real BIOS-resident
+      exception dispatcher at `0x00000c80`-`0x00000e30` (a real,
+      disassembled R3000A generic dispatcher, not something this
+      project fabricates) correctly looks up a registered handler
+      through a chain rooted at `RAM[0x100]` - the actual gap is that
+      this chain has never had a real handler registered at this
+      point in boot, so the lookup finds stale template bytes and
+      falls through to the same "load SYSMEM" escape hatch Round 15
+      already documented, rather than really returning from the
+      syscall. Two well-defined, not-yet-attempted next targets:
+      (a) research + implement what real IOP kernel init does at
+      `RAM[0x100]` before any handler is registered (needs a citable
+      reference, not a guess), and (b) figure out why `Status.IEc`
+      (global interrupt enable) never gets set to 1 anywhere in the
+      traced execution - either a missing "enable interrupts" step
+      this project doesn't yet reach, or confirmation real hardware
+      keeps interrupts masked here too. See docs/STATUS.md's "Round 19"
+      section for the full trace. Substantial, well-defined scope for
+      a future round; not attempted yet.
 
 ## 3. DMA controller
 
@@ -833,7 +845,7 @@ log. That full history is preserved in STATUS.md; this section is now
 kept short and current on purpose - update it, don't let it regrow into
 a second history log.)
 
-**Where things stand after Round 18**: both CPU cores run real,
+**Where things stand after Round 19**: both CPU cores run real,
 substantial stretches of the actual SCPH-10000 BIOS (verified both in
 host-native diagnostics and, as of Round 17, in a real Dolphin session
 on the actual Wii .dol). Neither core has halted/crashed in the
@@ -841,20 +853,26 @@ traditional sense in a long time - both reach genuine steady states.
 The EE legitimately polls real SIF mailbox/flag registers waiting for
 the IOP (Round 17's disassembly-confirmed finding). The IOP, after
 Round 18's boot-info fix, cleanly reaches what disassembly confirms is
-a real BIOS panic/halt loop - almost certainly because a real IOP
-kernel SYSCALL dispatch table has never been implemented.
+a real BIOS panic/halt loop - Round 19 traced this precisely and found
+it is NOT a missing SYSCALL dispatch table (that Round 18 hypothesis
+was corrected): it's a genuine, real exception dispatcher correctly
+handling an ordinary `ExitCriticalSection()` syscall, whose
+handler-chain lookup at `RAM[0x100]` finds no handler registered yet
+and falls through to the same module-loader escape hatch Round 15
+already documented, rather than truly returning from the syscall.
 
 **Next concrete tasks, roughly in dependency order:**
 
-1. **Real IOP kernel SYSCALL dispatch table** (section 2, new bullet
-   this round) - the immediate next wall. This is a different, larger
-   mechanism than the existing A0/B0/C0 jump-table HLE
-   (`iop_hle_bios.c`): real IOP kernel calls go through the actual
-   `SYSCALL` instruction with a request number, and a real kernel would
-   dispatch ThreadMan/heap/semaphore/etc. calls from a real table. No
-   verified reference for this table's exact layout has been found yet
-   in this project - this is genuinely the next research task, not just
-   an implementation task.
+1. **Real exception-handler-chain default behavior at `RAM[0x100]`**
+   (section 2, bullet corrected in Round 19) - the immediate next wall,
+   more precisely scoped than originally thought. Not a missing
+   SYSCALL-number dispatch table (Round 18's original hypothesis, ruled
+   out by Round 19's precise trace) - the real gap is two-part: (a) what
+   real IOP kernel init does at `RAM[0x100]` before any handler chain
+   entry is registered (needs a citable reference, not a guess), and
+   (b) why `Status.IEc` (global interrupt enable) never gets set to 1
+   anywhere in the traced execution. See docs/STATUS.md's "Round 19"
+   section for the full trace.
 
 2. **CDVD (disc) stub** (section 7) - even a diskless BIOS-only boot
    polls CDVD status registers; nothing at all is modeled for this yet.
@@ -887,13 +905,13 @@ project has now spent many rounds (see STATUS.md in full) each finding
 and fixing one real, concrete, well-evidenced bug or gap - and each fix
 has reliably uncovered a NEW wall a bit further in, never yet reaching
 a natural end-of-boot condition. That pattern is likely to continue:
-item 1 above (a full kernel syscall table) is itself a substantial,
-multi-round undertaking on the scale of the module loader work (Round
-15), and there is no guarantee it's the LAST such wall before the
-splash screen - CDVD and COP2/VIF work (items 2-4) are independent
-prerequisites likely to surface their own walls once reached. A
-grounded estimate: this is more "several more focused rounds of
-real investigation-and-fix work, each on the scale of Round 15/18"
+item 1 above (the exception-handler-chain / IEc gap) is itself a
+substantial, multi-round undertaking on the scale of the module loader
+work (Round 15), and there is no guarantee it's the LAST such wall
+before the splash screen - CDVD and COP2/VIF work (items 2-4) are
+independent prerequisites likely to surface their own walls once
+reached. A grounded estimate: this is more "several more focused rounds
+of real investigation-and-fix work, each on the scale of Round 15/18"
 than "one or two more fixes." Nobody should read the current EE/IOP
 steady states as "almost there" - they're real, verified progress, but
 a real PS2 BIOS boot sequence is an extremely long, precisely

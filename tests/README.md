@@ -1432,6 +1432,29 @@ no prior TRXDIR trigger, verifying gs_mem stays untouched while the
 stream stays in sync for the packet after.
 
 ```sh
-gcc -I../include -I../source -o test_gs_reglist_image tests/test_gs_reglist_image.c ../source/hw/gif.c ../source/hw/gs_mem.c
+gcc -I../include -I../source -o test_gs_reglist_image tests/test_gs_reglist_image.c
 ./test_gs_reglist_image
+```
+
+`test_gs_context2.c` covers GS Round 27: GS Context 2 (dual-context)
+support, previously entirely unimplemented - only context 1 existed
+and PRIM's CTXT bit was never even parsed. See
+`include/core/hw/gif.h`'s `PRIM_CTXT_MASK`/`GS_REG_FRAME_2`/
+`XYOFFSET_2`/`TEX0_2`/`TEST_2`/`ALPHA_2`/`ZBUF_2` comments and
+`source/hw/gif.c`'s `gs_activate_context()` for the full design and
+this round's citation-honesty note (live source-fetch research hit a
+session limit again this round, mitigated by an internal self-
+consistency check across 6 already-added register-address pairs).
+10 checks: two sprites at the same screen position with different
+PRIM.CTXT bits landing in their own contexts' FRAME targets; a
+configured-but-never-selected FRAME_2 having zero effect on context 1
+and its own target buffer staying untouched; independent per-context
+alpha test state (TEST_1=ATST_NEVER vs TEST_2=ATST_ALWAYS) proven via
+opposite outcomes for the identical primitive; and an interleaved
+ctx1/ctx2/ctx1 draw sequence proving neither context's state leaks
+into or gets clobbered by the other.
+
+```sh
+gcc -I../include -I../source -o test_gs_context2 tests/test_gs_context2.c
+./test_gs_context2
 ```

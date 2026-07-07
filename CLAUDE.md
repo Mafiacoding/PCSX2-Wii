@@ -753,6 +753,23 @@ always ask for/verify the no-disc case explicitly).
   full regression 0-failure, clean Wii rebuild. See docs/STATUS.md's
   "GS Round 26" section.
 
+- **GS Round 27 (same session, continued)**: GS Context 2 (dual-
+  context support) - previously only context 1 existed, PRIM's CTXT
+  bit was never parsed. Added genuinely separate per-context
+  permanent storage (ctx1_xxx/ctx2_xxx fields) plus a single new
+  `gs_activate_context()` called at the top of each of the 4
+  rasterizers, refreshing the pre-existing "active" fields from
+  whichever context is selected - deliberately non-invasive, requiring
+  zero changes to gs_finish_pixel()/gs_sample_texel()/gs_sample_clut()
+  or the rasterizers' own bodies (validated: the full pre-existing
+  61-test suite passes completely unmodified). Also found and fixed a
+  real Round 26 doc-drift bug along the way (a `tests/README.md`
+  command for `test_gs_reglist_image.c` that would fail to link if
+  used verbatim - it double-included/linked gif.c/gs_mem.c). 10 new
+  checks (`tests/test_gs_context2.c`, 61->62 test binaries), full
+  regression 0-failure, clean Wii rebuild. See docs/STATUS.md's "GS
+  Round 27" section.
+
 ## The mandatory per-change workflow
 
 This project has a strict, consistently-applied ritual for every increment
@@ -1328,7 +1345,7 @@ rsync -a --delete --exclude '.git' --exclude 'test_*' \
 # rsync's include/exclude ORDER means the 3 test_*.c source files
 # still get excluded by the earlier --exclude 'test_*' rule (basename
 # match, first-match-wins) - work around it by re-copying them directly:
-for f in tests/test_iop_elf.c tests/test_iop_spu2.c tests/test_vu_micro.c tests/test_gif_line.c tests/test_iop_rfe.c tests/test_iop_hw_interrupt.c tests/test_iop_excb.c tests/test_gs_alpha.c tests/test_gs_clut.c tests/test_gs_swizzle.c tests/test_gs_reglist_image.c; do
+for f in tests/test_iop_elf.c tests/test_iop_spu2.c tests/test_vu_micro.c tests/test_gif_line.c tests/test_iop_rfe.c tests/test_iop_hw_interrupt.c tests/test_iop_excb.c tests/test_gs_alpha.c tests/test_gs_clut.c tests/test_gs_swizzle.c tests/test_gs_reglist_image.c tests/test_gs_context2.c; do
   cp "/tmp/pcsx2-wii-git/$f" "$OUT/pcsx2-wii/$f"
 done
 ```
@@ -1391,7 +1408,8 @@ is complete, committed, and pushed - see "Current frontier" above.
 Round 25 (real block-swizzled addressing, additive API) is the
 second and is also complete/committed/pushed. Round 26 (REGLIST/IMAGE
 transfer modes) is the third and is also complete/committed/pushed.
-Remaining, in the user's stated order: GS context 2, mipmaps.
+Round 27 (GS context 2) is the fourth and is also complete/committed/
+pushed. Remaining, in the user's stated order: mipmaps.
 
 ## Reference material
 

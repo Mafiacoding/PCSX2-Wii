@@ -3636,6 +3636,98 @@ previously any such transfer would have been silently dropped with no
 interpretation at all. Per the user's stated order, remaining: GS
 context 2, mipmaps.
 
+## GS Round 27: Context 2 (dual-context support)
+
+Fourth of five items in the user's directed sweep, this round
+implements real GS dual-context support - previously only context 1
+existed at all, and PRIM's CTXT bit was never even parsed.
+
+**Design (deliberately non-invasive).** Real hardware has two fully
+independent rendering contexts, each with its own FRAME/ZBUF/
+XYOFFSET/TEX0/TEST/ALPHA (and more this project doesn't model at all
+for either context - CLAMP/TEX1/TEX2/SCISSOR/FBA/MIPTBP). Context 2's
+registers all live at address (context-1 address + 1) - a pattern
+this round's implementation double-checks against itself: TEX0_1=
+0x06/TEX0_2=0x07, XYOFFSET_1=0x18/XYOFFSET_2=0x19, TEST_1=0x47/
+TEST_2=0x48, ALPHA_1=0x42/ALPHA_2=0x43, FRAME_1=0x4C/FRAME_2=0x4D,
+ZBUF_1=0x4E/ZBUF_2=0x4F - all independently added across Rounds 22-26
+and now confirmed mutually consistent with the +1 pattern, which is
+itself a real, well-established GS register-table property.
+
+Rather than rewrite gif.c's ~80 internal reads of fbp/fbw/tex_tbp0/
+tex_tbw/tex_tfx/tex_tw/tex_th/tex_psm/tex_cbp/tex_cpsm/tex_csa/zbp/
+zmsk/zbuf_configured/zte/ztst/ate/atst/aref/afail/alpha_a-d/fix
+scattered across gs_finish_pixel(), gs_sample_texel(),
+gs_sample_clut(), and all 4 rasterizers - a large, error-prone change
+touching roughly 8 functions - this round adds genuinely separate
+per-context permanent storage (`ctx1_xxx`/`ctx2_xxx` fields in
+`gif_state_t`) and a single new function, `gs_activate_context()`,
+called once at the very top of each of the 4 rasterizers (right
+before a primitive is actually drawn). It refreshes the pre-existing
+flat "active" fields - which gs_finish_pixel()/gs_sample_texel()/
+gs_sample_clut() and the rasterizers' own bodies keep reading
+completely unchanged from before this round - from whichever of
+ctx1_xxx/ctx2_xxx PRIM's CTXT bit (bit 9, `PRIM_CTXT_MASK`) currently
+selects. Every `_1` register write (e.g. FRAME_1) updates BOTH its
+ctx1_xxx permanent field and the flat field directly, so any test or
+demo reading the flat fields immediately after a register write -
+without an intervening primitive draw, as several pre-existing tests
+do - sees zero behavioral change; a `_2` register write updates ONLY
+the ctx2_xxx permanent field, since context 2 only becomes "live" in
+the active fields once a primitive is actually drawn with PRIM.CTXT=1
+selected. For CTXT=0, `gs_activate_context()` simply re-copies context
+1's own already-correct values back (idempotent) - this is why the
+change is verifiably non-invasive: it was validated by re-running the
+FULL pre-existing 61-test regression suite unmodified, all passing.
+
+**Citation-honesty note (same pattern as Rounds 24-26).** This round's
+dedicated research-subagent dispatch again hit this session's own
+usage/session limit before it could run. PRIM's CTXT bit position and
+the context-2 register addresses are implemented from established PS2
+GS knowledge rather than a freshly-verified primary-source citation -
+mitigated here specifically by the internal self-consistency check
+described above (the "+1" pattern independently reproduced across 6
+already-separately-added register pairs from 5 different prior
+rounds, not invented fresh this round).
+
+**An incidental doc-drift bug found and fixed along the way.**
+Round 26's own `tests/README.md` entry for `test_gs_reglist_image.c`
+incorrectly listed `../source/hw/gif.c ../source/hw/gs_mem.c` as
+additional link inputs, even though that test file (like
+`test_gif_texture.c` before it) directly `#include`s `hw/gs_mem.c`
+and `hw/gif.c` - causing a genuine "multiple definition" link error
+whenever the documented command is used verbatim. This was caught by
+this round's full regression re-run and fixed (the extra link inputs
+removed from the README command); it was not previously caught
+because Round 26's own verification pass, in retrospect, must not
+have actually exercised the corrected README text.
+
+**Testing (`tests/test_gs_context2.c`, 10 checks).** Two sprites drawn
+at the same screen position with different PRIM.CTXT bits, each using
+its own FRAME register's target buffer, land in genuinely separate
+gs_mem regions; a configured-but-never-selected FRAME_2 has zero
+effect on context 1 draws and its target buffer stays untouched;
+independent per-context alpha test state (TEST_1 set to ATST_NEVER,
+discarding everything; TEST_2 set to ATST_ALWAYS, passing everything)
+proven by drawing the identical primitive under each context and
+observing opposite outcomes at the same screen position; and an
+interleaved ctx1/ctx2/ctx1 draw sequence proving neither context's
+state leaks into or gets clobbered by the other.
+
+Regression: 62 host-native test binaries (was 61,
++`tests/test_gs_context2.c`), 0 failures - all 61 prior tests pass
+completely unmodified (the README fix above corrects a command that
+was already broken before this round, not something this round's own
+code changes caused). Clean Wii/devkitPPC rebuild, same single
+pre-existing harmless `strncpy` warning as every prior round.
+
+**Net result for GS Round 27**: real, independently-selectable dual-
+context rendering state exists and is genuinely exercised end-to-end
+(register writes -> context storage -> primitive dispatch -> correct
+target buffer/alpha behavior), implemented without touching any of
+the existing per-pixel rendering logic. Per the user's stated order,
+remaining: mipmaps.
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

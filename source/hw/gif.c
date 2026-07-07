@@ -12,6 +12,12 @@ void gif_init(void)
 {
     memset(&g_gif, 0, sizeof(g_gif));
     g_gif.fbw = 640; /* sane default so an A+D FRAME write isn't strictly required for tests/demos */
+    /* Round 27: both contexts' permanent storage gets the same guarded
+     * default, so a PRIM.CTXT=1 draw before ANY FRAME_2 write behaves
+     * exactly as sanely as context 1's pre-existing default (no
+     * aliasing/zero-width surprise). */
+    g_gif.ctx1_fbw = 640;
+    g_gif.ctx2_fbw = 640;
 }
 
 gif_state_t *gif_get_state(void) { return &g_gif; }
@@ -270,12 +276,91 @@ static void gs_finish_pixel(int32_t xx, int32_t yy, uint32_t frag_color, uint32_
     }
 }
 
+/* Round 27: GS Context 2 (dual-context support) - see gif.h's
+ * PRIM_CTXT_MASK/GS_REG_FRAME_2/etc and gif_state_t's ctx1_xxx/
+ * ctx2_xxx field comments for the full design. Called once at the
+ * very top of each of the 4 rasterizers, right before a primitive is
+ * actually drawn - refreshes the flat "active" fields (which
+ * gs_finish_pixel()/gs_sample_texel()/gs_sample_clut() and the
+ * rasterizers themselves keep reading completely unchanged from
+ * before this round) from whichever of ctx1_xxx/ctx2_xxx PRIM's CTXT
+ * bit (bit 9) currently selects. For CTXT=0 this simply re-copies
+ * context 1's own already-correct values back (idempotent, matching
+ * exactly what apply_ad_write's _1 cases already wrote directly) -
+ * so existing single-context callers/tests see zero behavioral
+ * change. For CTXT=1, context 2's permanent storage becomes "live"
+ * in the active fields for the duration of this primitive's
+ * rasterization. */
+static void gs_activate_context(void)
+{
+    if (g_gif.prim & PRIM_CTXT_MASK) {
+        g_gif.fbp = g_gif.ctx2_fbp;
+        g_gif.fbw = g_gif.ctx2_fbw;
+        g_gif.xyoffset_x = g_gif.ctx2_xyoffset_x;
+        g_gif.xyoffset_y = g_gif.ctx2_xyoffset_y;
+        g_gif.tex_tbp0 = g_gif.ctx2_tex_tbp0;
+        g_gif.tex_tbw = g_gif.ctx2_tex_tbw;
+        g_gif.tex_tfx = g_gif.ctx2_tex_tfx;
+        g_gif.tex_tw = g_gif.ctx2_tex_tw;
+        g_gif.tex_th = g_gif.ctx2_tex_th;
+        g_gif.tex_psm = g_gif.ctx2_tex_psm;
+        g_gif.tex_cbp = g_gif.ctx2_tex_cbp;
+        g_gif.tex_cpsm = g_gif.ctx2_tex_cpsm;
+        g_gif.tex_csa = g_gif.ctx2_tex_csa;
+        g_gif.tex_cld = g_gif.ctx2_tex_cld;
+        g_gif.zbp = g_gif.ctx2_zbp;
+        g_gif.zmsk = g_gif.ctx2_zmsk;
+        g_gif.zbuf_configured = g_gif.ctx2_zbuf_configured;
+        g_gif.zte = g_gif.ctx2_zte;
+        g_gif.ztst = g_gif.ctx2_ztst;
+        g_gif.ate = g_gif.ctx2_ate;
+        g_gif.atst = g_gif.ctx2_atst;
+        g_gif.aref = g_gif.ctx2_aref;
+        g_gif.afail = g_gif.ctx2_afail;
+        g_gif.alpha_a = g_gif.ctx2_alpha_a;
+        g_gif.alpha_b = g_gif.ctx2_alpha_b;
+        g_gif.alpha_c = g_gif.ctx2_alpha_c;
+        g_gif.alpha_d = g_gif.ctx2_alpha_d;
+        g_gif.alpha_fix = g_gif.ctx2_alpha_fix;
+    } else {
+        g_gif.fbp = g_gif.ctx1_fbp;
+        g_gif.fbw = g_gif.ctx1_fbw;
+        g_gif.xyoffset_x = g_gif.ctx1_xyoffset_x;
+        g_gif.xyoffset_y = g_gif.ctx1_xyoffset_y;
+        g_gif.tex_tbp0 = g_gif.ctx1_tex_tbp0;
+        g_gif.tex_tbw = g_gif.ctx1_tex_tbw;
+        g_gif.tex_tfx = g_gif.ctx1_tex_tfx;
+        g_gif.tex_tw = g_gif.ctx1_tex_tw;
+        g_gif.tex_th = g_gif.ctx1_tex_th;
+        g_gif.tex_psm = g_gif.ctx1_tex_psm;
+        g_gif.tex_cbp = g_gif.ctx1_tex_cbp;
+        g_gif.tex_cpsm = g_gif.ctx1_tex_cpsm;
+        g_gif.tex_csa = g_gif.ctx1_tex_csa;
+        g_gif.tex_cld = g_gif.ctx1_tex_cld;
+        g_gif.zbp = g_gif.ctx1_zbp;
+        g_gif.zmsk = g_gif.ctx1_zmsk;
+        g_gif.zbuf_configured = g_gif.ctx1_zbuf_configured;
+        g_gif.zte = g_gif.ctx1_zte;
+        g_gif.ztst = g_gif.ctx1_ztst;
+        g_gif.ate = g_gif.ctx1_ate;
+        g_gif.atst = g_gif.ctx1_atst;
+        g_gif.aref = g_gif.ctx1_aref;
+        g_gif.afail = g_gif.ctx1_afail;
+        g_gif.alpha_a = g_gif.ctx1_alpha_a;
+        g_gif.alpha_b = g_gif.ctx1_alpha_b;
+        g_gif.alpha_c = g_gif.ctx1_alpha_c;
+        g_gif.alpha_d = g_gif.ctx1_alpha_d;
+        g_gif.alpha_fix = g_gif.ctx1_alpha_fix;
+    }
+}
+
 static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t x2, int32_t y2,
                                 uint32_t c0, uint32_t c1, uint32_t c2,
                                 int32_t u0, int32_t v0, int32_t u1, int32_t v1, int32_t u2, int32_t v2,
                                 float s0, float t0, float q0, float s1, float t1, float q1, float s2, float t2, float q2,
                                 uint32_t z0, uint32_t z1, uint32_t z2)
 {
+    gs_activate_context(); /* Round 27: dual-context - see its own comment */
     int32_t minx = x0, maxx = x0, miny = y0, maxy = y0;
     if (x1 < minx) minx = x1;
     if (x1 > maxx) maxx = x1;
@@ -486,6 +571,7 @@ static void rasterize_sprite(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
                               float s0, float t0, float q0, float s1, float t1, float q1,
                               uint32_t z0, uint32_t z1)
 {
+    gs_activate_context(); /* Round 27: dual-context - see its own comment */
     int textured = (g_gif.prim & PRIM_TME_MASK) != 0;
     /* Z (task #89): real hardware treats SPRITE Z the same way it
      * treats SPRITE color - a single flat value for the whole
@@ -595,6 +681,7 @@ static void rasterize_sprite(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
  * other primitive uses. */
 static void rasterize_point(int32_t x, int32_t y, uint32_t rgba, uint32_t z)
 {
+    gs_activate_context(); /* Round 27: dual-context - see its own comment */
     if (x < 0 || y < 0) return;
 
     int z_pass = 1;
@@ -637,6 +724,7 @@ static void rasterize_point(int32_t x, int32_t y, uint32_t rgba, uint32_t z)
 static void rasterize_line(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
                             uint32_t c0, uint32_t c1, uint32_t z0, uint32_t z1)
 {
+    gs_activate_context(); /* Round 27: dual-context - see its own comment */
     int gouraud = (g_gif.prim & PRIM_IIP_MASK) != 0;
     uint32_t flat_r = rgba_channel(c1, 0), flat_g = rgba_channel(c1, 8);
     uint32_t flat_b = rgba_channel(c1, 16), flat_a = rgba_channel(c1, 24);
@@ -932,16 +1020,39 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
          * convention), PSM: bits 15-20 (ignored, PSMCT32 assumed).
          * FBP here is used directly as our gs_mem "bp" word-offset
          * convention - not a claim it matches real hardware block
-         * addressing (see gs_mem.h). */
+         * addressing (see gs_mem.h). Round 27: also mirrors into
+         * ctx1_fbp/ctx1_fbw (context 1's permanent storage - see
+         * gif.h's dual-context field comment). */
         uint32_t fbp = data_lo & 0x1FFu;
         uint32_t fbw_field = (data_lo >> 9) & 0x3Fu;
+        uint32_t fbw = fbw_field * 64u;
+        if (fbw == 0) fbw = 640; /* guard against a zero FBW making every pixel alias */
         g_gif.fbp = fbp;
-        g_gif.fbw = fbw_field * 64u;
-        if (g_gif.fbw == 0) g_gif.fbw = 640; /* guard against a zero FBW making every pixel alias */
+        g_gif.fbw = fbw;
+        g_gif.ctx1_fbp = fbp;
+        g_gif.ctx1_fbw = fbw;
+    } break;
+    case GS_REG_FRAME_2: {
+        /* Context 2's FRAME - identical bitfield to FRAME_1 above,
+         * written ONLY into ctx2_fbp/ctx2_fbw (context 2 only becomes
+         * "live" in the flat/active fields once a primitive is
+         * actually drawn with PRIM.CTXT=1 - see gs_activate_context()). */
+        uint32_t fbp = data_lo & 0x1FFu;
+        uint32_t fbw_field = (data_lo >> 9) & 0x3Fu;
+        uint32_t fbw = fbw_field * 64u;
+        if (fbw == 0) fbw = 640;
+        g_gif.ctx2_fbp = fbp;
+        g_gif.ctx2_fbw = fbw;
     } break;
     case GS_REG_XYOFFSET_1:
         g_gif.xyoffset_x = data_lo & 0xFFFFu;
         g_gif.xyoffset_y = data_hi & 0xFFFFu;
+        g_gif.ctx1_xyoffset_x = g_gif.xyoffset_x;
+        g_gif.ctx1_xyoffset_y = g_gif.xyoffset_y;
+        break;
+    case GS_REG_XYOFFSET_2:
+        g_gif.ctx2_xyoffset_x = data_lo & 0xFFFFu;
+        g_gif.ctx2_xyoffset_y = data_hi & 0xFFFFu;
         break;
     case GS_REG_UV:
         /* Real hardware: 12.4 fixed-point texel coordinates (this
@@ -961,42 +1072,58 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
         g_gif.cur_s = u32_to_float(data_lo);
         g_gif.cur_t = u32_to_float(data_hi);
         break;
-    case GS_REG_TEX0_1: {
+    case GS_REG_TEX0_1:
+    case GS_REG_TEX0_2: {
         /* TEX0 bitfield cross-checked against PCSX2's own
          * GS/GSRegs.h GIFRegTEX0: word0 = TBP0(14):TBW(6):PSM(6):
          * TW(4):pad(2); word1 = pad(2):TCC(1):TFX(2):CBP(14):CPSM(4):
-         * CSM(1):CSA(5):CLD(3). Only TBP0/TBW/TFX are modeled here
-         * (PSM/TW/TH/CLUT fields ignored - PSMCT32 always assumed,
-         * matching gs_mem's existing format limitation). TBP0/TBW are
-         * used directly as OUR gs_mem bp/bw convention, exactly like
-         * FRAME_1's FBP/FBW above - not a claim of matching real
-         * hardware block-swizzled addressing (see gs_mem.h). */
+         * CSM(1):CSA(5):CLD(3). TBP0/TBW are used directly as OUR
+         * gs_mem bp/bw convention, exactly like FRAME_1's FBP/FBW
+         * above - not a claim of matching real hardware block-
+         * swizzled addressing (see gs_mem.h). Round 27: TEX0_1 and
+         * TEX0_2 share this parsing logic (identical bitfield),
+         * writing into ctx1_xxx (+ the flat fields, for immediate
+         * visibility) or ctx2_xxx respectively - see gif.h's dual-
+         * context field comment. */
         uint32_t tbp0 = data_lo & 0x3FFFu;
         uint32_t tbw_field = (data_lo >> 14) & 0x3Fu;
         uint32_t tfx = (data_hi >> 3) & 0x3u;
-        g_gif.tex_tbp0 = tbp0;
-        g_gif.tex_tbw = tbw_field * 64u;
-        if (g_gif.tex_tbw == 0) g_gif.tex_tbw = 640; /* guard against a zero TBW making every texel alias, same as FRAME_1's FBW guard */
-        g_gif.tex_tfx = tfx;
+        uint32_t tbw = tbw_field * 64u;
+        if (tbw == 0) tbw = 640; /* guard against a zero TBW making every texel alias, same as FRAME_1's FBW guard */
         /* TW (bits 26-29 of word0) / TH (task #88: a 4-bit field that
          * straddles the 64-bit register - 2 bits from word0's top,
          * bits 30-31, plus 2 bits from word1's bottom, bits 0-1) -
          * cross-checked against PCSX2's own GS/GSRegs.h GIFRegTEX0's
-         * union of two overlapping bitfield layouts. Needed to scale
-         * normalized ST+Q coordinates into texel space. */
-        g_gif.tex_tw = (data_lo >> 26) & 0xFu;
-        g_gif.tex_th = ((data_lo >> 30) & 0x3u) | ((data_hi & 0x3u) << 2);
+         * union of two overlapping bitfield layouts. */
+        uint32_t tw = (data_lo >> 26) & 0xFu;
+        uint32_t th = ((data_lo >> 30) & 0x3u) | ((data_hi & 0x3u) << 2);
         /* Round 24: PSM (word0 bits 20-25) + CLUT fields (word1 bits
          * 5-31: CBP:14, CPSM:4, CSM:1 (ignored - CSM2's separate
          * load-list mode is a documented, unsupported gap; only CSM1
          * is modeled), CSA:5, CLD:3). See TEX_PSM_xxx and
          * CLUT_ROW_WIDTH's header comments for the full scope and
          * citation-honesty note. */
-        g_gif.tex_psm = (data_lo >> 20) & 0x3Fu;
-        g_gif.tex_cbp = (data_hi >> 5) & 0x3FFFu;
-        g_gif.tex_cpsm = (data_hi >> 19) & 0xFu;
-        g_gif.tex_csa = (data_hi >> 24) & 0x1Fu;
-        g_gif.tex_cld = (data_hi >> 29) & 0x7u;
+        uint32_t psm = (data_lo >> 20) & 0x3Fu;
+        uint32_t cbp = (data_hi >> 5) & 0x3FFFu;
+        uint32_t cpsm = (data_hi >> 19) & 0xFu;
+        uint32_t csa = (data_hi >> 24) & 0x1Fu;
+        uint32_t cld = (data_hi >> 29) & 0x7u;
+
+        if (addr == GS_REG_TEX0_1) {
+            g_gif.tex_tbp0 = tbp0; g_gif.tex_tbw = tbw; g_gif.tex_tfx = tfx;
+            g_gif.tex_tw = tw; g_gif.tex_th = th;
+            g_gif.tex_psm = psm; g_gif.tex_cbp = cbp; g_gif.tex_cpsm = cpsm;
+            g_gif.tex_csa = csa; g_gif.tex_cld = cld;
+            g_gif.ctx1_tex_tbp0 = tbp0; g_gif.ctx1_tex_tbw = tbw; g_gif.ctx1_tex_tfx = tfx;
+            g_gif.ctx1_tex_tw = tw; g_gif.ctx1_tex_th = th;
+            g_gif.ctx1_tex_psm = psm; g_gif.ctx1_tex_cbp = cbp; g_gif.ctx1_tex_cpsm = cpsm;
+            g_gif.ctx1_tex_csa = csa; g_gif.ctx1_tex_cld = cld;
+        } else {
+            g_gif.ctx2_tex_tbp0 = tbp0; g_gif.ctx2_tex_tbw = tbw; g_gif.ctx2_tex_tfx = tfx;
+            g_gif.ctx2_tex_tw = tw; g_gif.ctx2_tex_th = th;
+            g_gif.ctx2_tex_psm = psm; g_gif.ctx2_tex_cbp = cbp; g_gif.ctx2_tex_cpsm = cpsm;
+            g_gif.ctx2_tex_csa = csa; g_gif.ctx2_tex_cld = cld;
+        }
     } break;
     case GS_REG_ZBUF_1: {
         /* GIFRegZBUF bitfield cross-checked against PCSX2's own
@@ -1012,10 +1139,21 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
          * this project's choice to pass g_gif.fbw to the Z-buffer
          * gs_mem_read/write_psmct32() calls in rasterize_triangle()/
          * rasterize_sprite(). zbuf_configured is this project's own
-         * safety gate - see gif.h's field comment. */
+         * safety gate - see gif.h's field comment. Round 27: also
+         * mirrors into ctx1_zbp/ctx1_zmsk/ctx1_zbuf_configured. */
         g_gif.zbp = data_lo & 0x1FFu;
         g_gif.zmsk = (int)(data_hi & 0x1u);
         g_gif.zbuf_configured = 1;
+        g_gif.ctx1_zbp = g_gif.zbp;
+        g_gif.ctx1_zmsk = g_gif.zmsk;
+        g_gif.ctx1_zbuf_configured = 1;
+    } break;
+    case GS_REG_ZBUF_2: {
+        /* Context 2's ZBUF - identical bitfield to ZBUF_1 above,
+         * written ONLY into the ctx2_zxxx permanent fields. */
+        g_gif.ctx2_zbp = data_lo & 0x1FFu;
+        g_gif.ctx2_zmsk = (int)(data_hi & 0x1u);
+        g_gif.ctx2_zbuf_configured = 1;
     } break;
     case GS_REG_TEST_1: {
         /* GIFRegTEST bitfield cross-checked against PCSX2's own
@@ -1023,13 +1161,30 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
          * etc in gif.h). Round 23 adds real ATE/ATST/AREF/AFAIL
          * (alpha test) - see gs_finish_pixel() below. DATE/DATM
          * (destination-alpha test) remain unmodeled, a separate,
-         * still-open gap. */
+         * still-open gap. Round 27: also mirrors into ctx1_zte/
+         * ctx1_ztst/ctx1_ate/ctx1_atst/ctx1_aref/ctx1_afail. */
         g_gif.zte = (data_lo & TEST_ZTE_MASK) ? 1 : 0;
         g_gif.ztst = (int)((data_lo >> TEST_ZTST_SHIFT) & TEST_ZTST_MASK);
         g_gif.ate = (data_lo & TEST_ATE_MASK) ? 1 : 0;
         g_gif.atst = (int)((data_lo >> TEST_ATST_SHIFT) & TEST_ATST_MASK);
         g_gif.aref = (data_lo >> TEST_AREF_SHIFT) & TEST_AREF_MASK;
         g_gif.afail = (int)((data_lo >> TEST_AFAIL_SHIFT) & TEST_AFAIL_MASK);
+        g_gif.ctx1_zte = g_gif.zte;
+        g_gif.ctx1_ztst = g_gif.ztst;
+        g_gif.ctx1_ate = g_gif.ate;
+        g_gif.ctx1_atst = g_gif.atst;
+        g_gif.ctx1_aref = g_gif.aref;
+        g_gif.ctx1_afail = g_gif.afail;
+    } break;
+    case GS_REG_TEST_2: {
+        /* Context 2's TEST - identical bitfield to TEST_1 above,
+         * written ONLY into the ctx2_xxx permanent fields. */
+        g_gif.ctx2_zte = (data_lo & TEST_ZTE_MASK) ? 1 : 0;
+        g_gif.ctx2_ztst = (int)((data_lo >> TEST_ZTST_SHIFT) & TEST_ZTST_MASK);
+        g_gif.ctx2_ate = (data_lo & TEST_ATE_MASK) ? 1 : 0;
+        g_gif.ctx2_atst = (int)((data_lo >> TEST_ATST_SHIFT) & TEST_ATST_MASK);
+        g_gif.ctx2_aref = (data_lo >> TEST_AREF_SHIFT) & TEST_AREF_MASK;
+        g_gif.ctx2_afail = (int)((data_lo >> TEST_AFAIL_SHIFT) & TEST_AFAIL_MASK);
     } break;
     case GS_REG_ALPHA_1: {
         /* GIFRegALPHA bitfield (Round 23) - see ALPHA_*_SHIFT/
@@ -1040,12 +1195,27 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
          * way every other A+D register in this file already does
          * (confirmed against this same function's GS_REG_ZBUF_1 case
          * just above: ZBP comes from data_lo, ZMSK - a word1 field -
-         * comes from data_hi). */
+         * comes from data_hi). Round 27: also mirrors into
+         * ctx1_alpha_a/b/c/d/fix. */
         g_gif.alpha_a = (data_lo >> ALPHA_A_SHIFT) & ALPHA_ABCD_MASK;
         g_gif.alpha_b = (data_lo >> ALPHA_B_SHIFT) & ALPHA_ABCD_MASK;
         g_gif.alpha_c = (data_lo >> ALPHA_C_SHIFT) & ALPHA_ABCD_MASK;
         g_gif.alpha_d = (data_lo >> ALPHA_D_SHIFT) & ALPHA_ABCD_MASK;
         g_gif.alpha_fix = data_hi & ALPHA_FIX_MASK;
+        g_gif.ctx1_alpha_a = g_gif.alpha_a;
+        g_gif.ctx1_alpha_b = g_gif.alpha_b;
+        g_gif.ctx1_alpha_c = g_gif.alpha_c;
+        g_gif.ctx1_alpha_d = g_gif.alpha_d;
+        g_gif.ctx1_alpha_fix = g_gif.alpha_fix;
+    } break;
+    case GS_REG_ALPHA_2: {
+        /* Context 2's ALPHA - identical bitfield to ALPHA_1 above,
+         * written ONLY into the ctx2_alpha_xxx permanent fields. */
+        g_gif.ctx2_alpha_a = (data_lo >> ALPHA_A_SHIFT) & ALPHA_ABCD_MASK;
+        g_gif.ctx2_alpha_b = (data_lo >> ALPHA_B_SHIFT) & ALPHA_ABCD_MASK;
+        g_gif.ctx2_alpha_c = (data_lo >> ALPHA_C_SHIFT) & ALPHA_ABCD_MASK;
+        g_gif.ctx2_alpha_d = (data_lo >> ALPHA_D_SHIFT) & ALPHA_ABCD_MASK;
+        g_gif.ctx2_alpha_fix = data_hi & ALPHA_FIX_MASK;
     } break;
     case GS_REG_BITBLTBUF: {
         /* GIFRegBITBLTBUF (Round 26): word0 = SBP:14(0-13),

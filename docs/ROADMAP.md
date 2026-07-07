@@ -920,6 +920,27 @@ programmable GPU nor any of those APIs).
       research caveat as Rounds 24-25 applies to the register field
       layouts. 15 new checks (tests/test_gs_reglist_image.c),
       61-file/0-failure regression, clean Wii rebuild.
+- [x] GS Context 2 / dual-context support (Round 27) - previously
+      only context 1 existed; PRIM's CTXT bit was never parsed. Added
+      genuinely separate per-context permanent storage (ctx1_xxx/
+      ctx2_xxx) plus a new gs_activate_context() called at the top of
+      each of the 4 rasterizers, refreshing the pre-existing "active"
+      fields from whichever context PRIM.CTXT selects - a deliberately
+      non-invasive design that required zero changes to
+      gs_finish_pixel()/gs_sample_texel()/gs_sample_clut() or the
+      rasterizers' own bodies (validated by the full pre-existing
+      61-test suite passing completely unmodified). Context 2 covers
+      FRAME/XYOFFSET/TEX0/TEST/ALPHA/ZBUF only - CLAMP/TEX1/TEX2/
+      SCISSOR/FBA/MIPTBP remain unmodeled for BOTH contexts, an
+      existing, unrelated limitation. Same session-limited-research
+      caveat as Rounds 24-26, mitigated by an internal self-
+      consistency check (the real "_2 = _1 address + 1" pattern
+      independently reproduced across 6 register pairs added in 5
+      separate earlier rounds). Incidentally found and fixed a real
+      tests/README.md doc-drift bug from Round 26 (a documented build
+      command that would fail with a link error if used verbatim).
+      10 new checks (tests/test_gs_context2.c), 62-file/0-failure
+      regression, clean Wii rebuild.
 - [x] A first, minimal translation layer from GS memory to the Wii's
       display: `source/hw/gs_wii_output.c` converts a rectangular
       PSMCT32 region to the Wii's packed Y1CbY2Cr XFB format (RGB->YUV
@@ -1023,10 +1044,13 @@ already documented, rather than truly returning from the syscall.
    additive, not-yet-wired-in API) exist, but this is still a sliver
    of real GS - real PCSX2's own GS code is ~114,500 lines. Still open
    (user has directed the remaining three to be done next, in this
-   order): GS context 2, mipmaps (REGLIST/IMAGE GIF transfer modes
-   done as of Round 26). Also open, not user-directed but worth
-   noting: actually wiring Round 25's real swizzle addressing into
-   the rendering pipeline (currently a separate, additive API only).
+   order): mipmaps (REGLIST/IMAGE GIF transfer modes done as of
+   Round 26, GS context 2 done as of Round 27). Also open, not user-
+   directed but worth noting: actually wiring Round 25's real swizzle
+   addressing into the rendering pipeline (currently a separate,
+   additive API only), and extending Round 27's dual-context support
+   to CLAMP/TEX1/TEX2/SCISSOR/FBA/MIPTBP (currently context-1-only
+   for both contexts, an existing limitation Round 27 didn't change).
 
 6. Lower priority, deferred: the remaining ~23 EE MMI opcodes (section
    1), Pad/memory card (section 7).

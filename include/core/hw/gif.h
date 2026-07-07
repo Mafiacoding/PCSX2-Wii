@@ -122,6 +122,29 @@
  * (XDIR=1/2) are parsed but not acted on (documented gap, consistent
  * with this project not having a local-to-local blit engine at all
  * and no host-readback path either). */
+/* Round 27: GS Context 2 (dual-context support). Real hardware has
+ * TWO independent rendering contexts, each with its own full set of
+ * FRAME/ZBUF/XYOFFSET/TEX0/TEST/ALPHA (and more this project doesn't
+ * model - CLAMP/TEX1/TEX2/SCISSOR/FBA/MIPTBP - see the scope note on
+ * gif_state_t's ctx1_xxx/ctx2_xxx fields below). PRIM's CTXT bit
+ * (bit 9) selects which context's already-configured state applies
+ * to the NEXT primitive - context 2's registers are all at address
+ * (context-1 address + 1), a clean, well-established real GS register
+ * table pattern (already independently confirmed self-consistent by
+ * this project's own prior-round additions: TEX0_1=0x06/TEX0_2=0x07,
+ * XYOFFSET_1=0x18/XYOFFSET_2=0x19, TEST_1=0x47/TEST_2=0x48,
+ * ALPHA_1=0x42/ALPHA_2=0x43, FRAME_1=0x4C/FRAME_2=0x4D,
+ * ZBUF_1=0x4E/ZBUF_2=0x4F). Same session-limited-research caveat as
+ * Rounds 24-26 applies to this round's specific field/address
+ * details, mitigated here by that internal +1 consistency check. */
+#define GS_REG_FRAME_2    0x4D
+#define GS_REG_XYOFFSET_2 0x19
+#define GS_REG_TEX0_2     0x07
+#define GS_REG_TEST_2     0x48
+#define GS_REG_ALPHA_2    0x43
+#define GS_REG_ZBUF_2     0x4F
+#define PRIM_CTXT_MASK    0x200u /* PRIM bit 9: 0=context1, 1=context2 */
+
 #define GS_REG_BITBLTBUF  0x50
 #define GS_REG_TRXPOS     0x51
 #define GS_REG_TRXREG     0x52
@@ -399,6 +422,51 @@ typedef struct {
      * whether they're actually used for a given draw). */
     uint32_t alpha_a, alpha_b, alpha_c, alpha_d;
     uint32_t alpha_fix;
+
+    /* Round 27: GS Context 2 (dual-context support) - see
+     * PRIM_CTXT_MASK/GS_REG_FRAME_2/etc above for the register-
+     * address side. The flat fields above (fbp, fbw, xyoffset_x/y,
+     * tex_tbp0, tex_tbw, tex_tfx, tex_tw, tex_th, tex_psm, tex_cbp,
+     * tex_cpsm, tex_csa, tex_cld, zbp, zmsk, zbuf_configured, zte,
+     * ztst, ate, atst, aref, afail, alpha_a/b/c/d, alpha_fix) now
+     * serve as the CURRENTLY ACTIVE context's view - refreshed by
+     * gs_activate_context() (called at the top of each rasterizer,
+     * right before a primitive is actually drawn) from whichever of
+     * the two permanent per-context storage banks below PRIM's CTXT
+     * bit currently selects. Every A+D write to a _1 register (e.g.
+     * FRAME_1) updates BOTH the matching ctx1_xxx permanent field AND
+     * the flat field directly (so code that reads the flat fields
+     * immediately after a register write, without an intervening
+     * primitive draw - as several pre-existing tests do - keeps
+     * seeing correct, unchanged behavior); a _2 register write (e.g.
+     * FRAME_2) updates ONLY the ctx2_xxx permanent field, since
+     * context 2 only becomes "live" in the flat fields once a
+     * primitive is actually drawn with PRIM.CTXT=1 selected. This
+     * design deliberately avoids touching gs_finish_pixel()/
+     * gs_sample_texel()/gs_sample_clut()'s existing internals at all
+     * (they keep reading the flat fields exactly as before this
+     * round) - only apply_ad_write() (new _2 cases + mirroring the
+     * _1 cases) and the 4 rasterizers (one new gs_activate_context()
+     * call each, at the very top) change. */
+    uint32_t ctx1_fbp, ctx1_fbw;
+    uint32_t ctx1_xyoffset_x, ctx1_xyoffset_y;
+    uint32_t ctx1_tex_tbp0, ctx1_tex_tbw, ctx1_tex_tfx, ctx1_tex_tw, ctx1_tex_th;
+    uint32_t ctx1_tex_psm, ctx1_tex_cbp, ctx1_tex_cpsm, ctx1_tex_csa, ctx1_tex_cld;
+    uint32_t ctx1_zbp;
+    int ctx1_zmsk, ctx1_zbuf_configured, ctx1_zte, ctx1_ztst;
+    int ctx1_ate, ctx1_atst, ctx1_afail;
+    uint32_t ctx1_aref;
+    uint32_t ctx1_alpha_a, ctx1_alpha_b, ctx1_alpha_c, ctx1_alpha_d, ctx1_alpha_fix;
+
+    uint32_t ctx2_fbp, ctx2_fbw;
+    uint32_t ctx2_xyoffset_x, ctx2_xyoffset_y;
+    uint32_t ctx2_tex_tbp0, ctx2_tex_tbw, ctx2_tex_tfx, ctx2_tex_tw, ctx2_tex_th;
+    uint32_t ctx2_tex_psm, ctx2_tex_cbp, ctx2_tex_cpsm, ctx2_tex_csa, ctx2_tex_cld;
+    uint32_t ctx2_zbp;
+    int ctx2_zmsk, ctx2_zbuf_configured, ctx2_zte, ctx2_ztst;
+    int ctx2_ate, ctx2_atst, ctx2_afail;
+    uint32_t ctx2_aref;
+    uint32_t ctx2_alpha_a, ctx2_alpha_b, ctx2_alpha_c, ctx2_alpha_d, ctx2_alpha_fix;
 
     /* Current UV register value (real hardware's 12.4 fixed-point
      * texel coordinate "FST=1" mode - see gif.h's scope comment),

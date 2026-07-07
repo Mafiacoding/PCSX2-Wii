@@ -616,9 +616,25 @@ the SPU2. Reference: `Dmac.cpp` (583) + `Dmac.h` (570).
       triangles, or triangle strips/fans/textures), GS context 2
       (FRAME_2/XYOFFSET_2), and VU1-sourced GIF traffic (path 1) -
       only the direct EE->GIF path (path 3) is modeled.
-- [ ] VIF0/VIF1 (Vector Interface) - feeds VU0/VU1 with microcode data
-      and unpacks data formats (reference: `Vif.cpp` 418, plus
-      `Vif_Unpack.cpp`, `Vif_Codes.cpp`, `Vif1_Dma.cpp`, `Vif0_Dma.cpp`)
+- [x] VIF0/VIF1 (Vector Interface) - FIRST INCREMENT: real VIFcode
+      tag-stream walking (`source/hw/vif.c`), registered as the sink
+      for `DMA_CHANNEL_VIF0`/`DMA_CHANNEL_VIF1`. Implements NOP/
+      STCYCL/OFFSET/BASE/ITOP/STMOD/MARK (register stores)/FLUSHE/
+      FLUSH/FLUSHA/MSCAL/MSCNT/MSCALF (correct no-ops - no VU
+      microcode interpreter exists)/STMASK/STROW/STCOL (stores)/MPG
+      (data span correctly skipped, counted unsupported - no VU
+      micro-instruction memory)/DIRECT+DIRECTHL (VIF1 only - forwards
+      data straight to `gif_process_quadwords()`, the one command that
+      actually draws pixels this round). NOT implemented: UNPACK
+      (CMD 0x60-0x7F, decodes S/V2/V3/V4 data into VU memory - a
+      substantial feature of its own, `Vif_Unpack.cpp`) - encountering
+      it stops that transfer's processing cleanly rather than
+      misparsing what follows. 24 new checks in `tests/test_vif.c`,
+      47-file/0-failure full regression, clean Wii rebuild. Reference:
+      `Vif.h`, `Vif_Codes.cpp` (VIFcode CMD table, cross-checked live,
+      not guessed). Still open: UNPACK itself, VU0/VU1 data memory to
+      unpack into (see section 5), MSCAL/MSCNT actually executing VU
+      microcode once that exists.
 
 ## 5. VU0 / VU1 (Vector Units)
 
@@ -973,10 +989,13 @@ unblock "the BIOS actually draws something": IOP hardware register
 stubs (INTC/DMA/timers) and/or IOP HLE stubs for the specific
 BIOS-boot-path modules (both are needed before real BIOS code - as
 opposed to hand-written test programs - can get through a real SIF
-handshake), texturing for the triangle rasterizer (Gouraud shading, a
-clock-rate-aware 8:1 EE:IOP scheduler, and wiring a real GIF packet
-through `dma_channel_kick` at boot are all DONE now - see above), and
-VIF0/VIF1 passthrough.
+handshake), and texturing for the triangle rasterizer (Gouraud
+shading, a clock-rate-aware 8:1 EE:IOP scheduler, wiring a real GIF
+packet through `dma_channel_kick` at boot, and a first VIF0/VIF1
+passthrough increment are all DONE now - see above). Beyond texturing:
+VIF's UNPACK format (needs VU0/VU1 data memory to unpack into) and the
+VU microcode interpreter itself (section 5) are the natural next
+VIF/VU-side steps once this project returns to that thread.
 
 Step 7 (real GX-based rendering with textures) is where this stops
 being "a lot of careful work" and becomes genuinely research-scale for

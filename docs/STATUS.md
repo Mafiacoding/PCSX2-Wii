@@ -1477,6 +1477,77 @@ cap being hit instead of a clean mutual halt). Full regression (46
 host-native test files) passes with 0 failures, and the Wii/devkitPPC
 target rebuilds clean with 0 warnings/0 errors.
 
+### VIF0/VIF1 passthrough (first increment)
+
+Direct follow-up to the clock-rate scheduler round above, picking up
+`docs/ROADMAP.md` section 4's last open item: "VIF0/VIF1 (Vector
+Interface) - feeds VU0/VU1 with microcode data and unpacks data
+formats". This is a genuinely large real subsystem (PCSX2's `Vif.cpp`
+418 lines, plus `Vif_Unpack.cpp`, `Vif_Codes.cpp`, `Vif1_Dma.cpp`,
+`Vif0_Dma.cpp`) - this round scopes a first, deliberately narrow
+increment rather than attempting all of it at once, matching this
+project's established pattern (the GIF parser's own first round was
+similarly narrow: PACKED mode only, 4 registers).
+
+New `source/hw/vif.c` / `include/core/hw/vif.h`. A VIF DMA transfer is
+a stream of 32-bit "VIFcode" words interspersed with per-command data
+(NOT the 128-bit-tag-plus-PACKED-rows format GIF uses) - CMD in bits
+24-30, NUM in bits 16-23, IMM in bits 0-15, cross-checked against a
+live fetch of PCSX2's `Vif_Codes.cpp` (the real `vifCmdHandler[]`
+dispatch table) and `Vif.h` (register bitfields), not guessed.
+
+Implemented this round: NOP/STCYCL/OFFSET(VIF1-only)/BASE(VIF1-only)/
+ITOP/STMOD/MARK - trivial register stores (ITOP correctly masks to
+0xFF on VIF0 vs 0x3FF on VIF1, matching real hardware's smaller VU0
+vs larger VU1 memory); FLUSHE/FLUSH(VIF1-only)/FLUSHA(VIF1-only)/
+MSCAL/MSCNT/MSCALF - real, correct no-ops, since this project has no
+VU microcode interpreter to flush or execute against (docs/ROADMAP.md
+section 5 is still open) - "do nothing" is the honest behavior here,
+not a shortcut; STMASK/STROW/STCOL - store their trailing data word(s)
+into mask/row[4]/col[4] registers; MPG - correctly skips its data span
+(NUM-derived word count) so the VIFcode stream stays in sync, counted
+as unsupported since there's no VU micro-instruction memory to write
+into; **DIRECT/DIRECTHL (VIF1-only) - the one command that actually
+produces pixels this round**: forwards its data span verbatim to
+`gif_process_quadwords()`, exactly matching real PCSX2's own
+`_vifCode_Direct` behavior (a real, common pathway - many BIOS/game
+splash screens draw via VIF1 DIRECT rather than raw EE->GIF DMA).
+DIRECT vs DIRECTHL are treated identically (the real difference is a
+GS-FIFO-level "horizontal" nuance irrelevant without a FIFO model -
+PCSX2 itself shares one implementation for both).
+
+Explicitly NOT implemented: UNPACK (CMD 0x60-0x7F) - the format that
+decodes S/V2/V3/V4 component data into VU data memory, a substantial
+feature in its own right (`Vif_Unpack.cpp`) that this project has no
+VU1 data memory to unpack into yet. Encountering UNPACK (or any other
+unrecognized/reserved code) stops processing the REST of that DMA
+transfer's data stream cleanly - counted via `unsupported_cmds_seen`,
+not silently misparsed as garbage VIFcodes - matching this project's
+established pattern for out-of-scope formats (see gif.c's REGLIST/
+IMAGE handling).
+
+Wired into `ee_core_init()`: `vif_init()` alongside `gif_init()`, and
+`dma_set_sink(DMA_CHANNEL_VIF0, vif0_process_quadwords)` /
+`DMA_CHANNEL_VIF1` likewise - VIF0/VIF1 DMA transfers now actually get
+parsed instead of silently discarded (dma.c's existing "no sink
+registered -> data discarded, transfer still runs" fallback, unchanged
+for any channel without a sink).
+
+Tests: `tests/test_vif.c`, 24 checks - NOP/STCYCL/ITOP/OFFSET/BASE/
+STMASK/STROW/STCOL/MPG behavior, VIF1-only commands correctly rejected
+on VIF0 (and accepted on VIF1), UNPACK stopping the stream cleanly
+(proven by placing a would-be-effective marker code right after it and
+confirming it was NOT parsed), and - the key end-to-end proof - a real
+DIRECT command on VIF1 forwarding an actual SPRITE GIF packet through
+to `gif_process_quadwords()`, verified by reading back the drawn
+pixel's color from GS memory (a genuine DMA -> VIF -> GIF -> pixels
+path, not just parser-internal state). Full regression (47 host-native
+test files - the existing EE-core-linking tests all needed
+`source/hw/vif.c` added to their link line too, the same transitive-
+dependency pattern this project has hit before whenever `ee_core.c`
+gains a new hardware-model call) passes with 0 failures, and the
+Wii/devkitPPC target rebuilds clean with 0 warnings/0 errors.
+
 ### Round 14: IOP-side investigation - the EE's SIF-polling steady state is real, and a genuine IOP wild-jump root-caused and hardened against
 
 Direct follow-up to round 13's finding that the EE settles into a

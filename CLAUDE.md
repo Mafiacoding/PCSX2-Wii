@@ -224,6 +224,26 @@ current, up-to-date status.)
   existing consumer) exercises the new ratio automatically via its
   generous slice cap and passes unchanged - no new test file needed.
   46-file/0-failure regression, clean Wii rebuild.
+- **VIF0/VIF1 passthrough (first increment)**: new `source/hw/vif.c`
+  parses real VIFcode tag streams (CMD/NUM/IMM fields, cross-checked
+  against a live fetch of PCSX2's `Vif_Codes.cpp`/`Vif.h`), registered
+  as the DMA sink for `DMA_CHANNEL_VIF0`/`VIF1`. Implements NOP/
+  STCYCL/OFFSET/BASE/ITOP/STMOD/MARK (register stores), FLUSHE/FLUSH/
+  FLUSHA/MSCAL/MSCNT/MSCALF (correct no-ops - no VU microcode
+  interpreter exists yet), STMASK/STROW/STCOL (stores), MPG (data span
+  skipped correctly, counted unsupported), and DIRECT/DIRECTHL
+  (VIF1-only - forwards data straight to `gif_process_quadwords()`,
+  the one command that actually draws pixels this round - a real,
+  common BIOS/game pathway to the GS). UNPACK (0x60-0x7F) is
+  explicitly NOT implemented (needs VU data memory this project
+  doesn't have) - hitting it stops that transfer's processing cleanly
+  rather than misparsing what follows. 24 new checks
+  (`tests/test_vif.c`), including a real DIRECT-forwarded SPRITE
+  packet proven by reading back its drawn pixel color. 47-file/0-
+  failure regression (every existing EE-core-linking test needed
+  `source/hw/vif.c` added to its link line - same transitive-
+  dependency pattern as always when `ee_core.c` gains a new hardware
+  call), clean Wii rebuild.
 
 **devkitPro toolchain**: FULLY FIXED, clean Wii rebuild verified. This
 sandbox's extraction was missing `base_rules`/`base_tools` (fetched
@@ -350,7 +370,7 @@ gcc -I../include -I../source -o test_ee tests/test_ee_core.c ../source/hw/dma.c 
 ./test_ee
 ```
 
-There are 46 test files as of this writing, covering both CPU cores (EE
+There are 47 test files as of this writing, covering both CPU cores (EE
 integer/MMI/FPU/unaligned-access/COP0-CO-format/LQ-SQ/VU0-vector-datapath,
 IOP integer/unaligned/SYSCALL-exception/InstallExceptionHandlers/PC-fetch-
 sanity-guard), every hardware register model (EE DMA + chain-mode transfer

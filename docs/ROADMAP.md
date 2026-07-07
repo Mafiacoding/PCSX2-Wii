@@ -629,6 +629,30 @@ instead of fully emulating the real IOP BIOS ROM.
       With this and the RFE fix above, `Status.IEc` finally has a
       real, observable, end-to-end effect for the first time in this
       project. See docs/STATUS.md's "Round 22" section.
+- [ ] Real ExCB allocation + default-handler registration (Round 29
+      investigation, not yet fixed) - the user chose to pursue this
+      via real BIOS-dump bytes/behavior rather than a synthetic HLE
+      stub. Round 29 live-traced the user's real SCPH-10000 dump
+      instruction-by-instruction and substantially narrowed the root
+      cause: the real exception dispatcher (genuine BIOS code,
+      confirmed via live disassembly, not fabricated) unconditionally
+      dereferences the priority-0 chain without a null check; at the
+      point the known early `ExitCriticalSection` SYSCALL fires,
+      `RAM[0x100]` is still 0 (never allocated). Exhaustive JAL/JALR
+      tracing found ZERO calls to the public `0xB0`/`0xC0` BIOS
+      vectors before this point, ruling out "a game/BIOS caller simply
+      hasn't invoked C(00h)/C(01h)/C(0Ch) yet" as fixable by emulating
+      more instructions - the real allocation+registration must
+      happen via a different, not-yet-traced path. Also discovered
+      (real, not a bug): this project's own real ELF/IRX loader
+      (`iop_elf.c`, task #92) already correctly delivers real,
+      ROM-sourced PCB/TCB size config into part of the same "Table of
+      Tables" region by this point - only the ExCB entry specifically
+      stays unallocated. Next step: trace backward from whichever
+      module load sets the PCB/TCB fields to find its trigger, since
+      that path may also be responsible for (or adjacent to) the real
+      ExCB registration. See docs/STATUS.md's "Round 29" section for
+      the full trace.
 
 ## 3. DMA controller
 

@@ -790,6 +790,30 @@ always ask for/verify the no-disc case explicitly).
   five items from the user's directed sweep this session**, each
   individually committed/pushed/rsynced as its own checkpoint.
 
+- **Round 29 (2026-07-07, same session)**: user asked "ist der GS Port
+  fertig?" then, given a prioritized punch list toward a real BIOS-driven
+  splash screen, chose "Track B" (pursue the real IOP exception-handler-
+  body gap using real bytes/behavior from their own SCPH-10000 dump rather
+  than a synthetic HLE stub). This round is pure diagnostic tracing (no
+  code changes) - single-stepped the real interleaved EE/IOP scheduler
+  against the user's real BIOS, confirmed byte-for-byte via live Capstone
+  disassembly that the real exception dispatcher (genuine BIOS code) does
+  an unconditional, null-check-free dereference of the priority-0 handler
+  chain, and that `RAM[0x100]` (the chain's table address) is still 0 at
+  the exact moment the known early `ExitCriticalSection` SYSCALL fires -
+  independently reproducing and substantially deepening Round 19's
+  account. Exhaustive JAL/JALR tracing (every IOP call from reset to this
+  SYSCALL, ~3.05M instructions) found ZERO calls to the public `0xB0`/
+  `0xC0` BIOS vectors before this point. Also found that this project's
+  own real ELF/IRX loader already delivers real PCB/TCB size config into
+  part of the same table by this point (via `iop_elf.c`'s segment-copy,
+  not a CPU instruction - which is why an earlier instruction-level-only
+  store trace missed it) - only the ExCB entry specifically stays
+  unallocated. See docs/STATUS.md's "Round 29" section for the full
+  trace and docs/ROADMAP.md section 2's new open bullet. Not yet fixed -
+  next step is tracing backward from whichever module load sets PCB/TCB
+  to find its trigger.
+
 ## The mandatory per-change workflow
 
 This project has a strict, consistently-applied ritual for every increment
@@ -1441,6 +1465,24 @@ order" section for the open, not-user-directed items noted there
 (wiring Round 25's swizzle addressing into the pipeline, extending
 Round 27's dual-context and Round 28's mipmap support beyond their
 current scope, and MTBA=1 auto mip addressing).
+
+**Update (Round 29, same session)**: user then asked whether the GS port
+is complete (answer: no - the 5 requested items are done, but real GS is
+~114,500 lines vs. this project's deliberate subset), then asked for a
+prioritized punch list toward a real, BIOS-driven splash screen. Chose
+"Track B": pursue the real IOP exception-handler-body gap (docs/
+ROADMAP.md section 2's newest open bullet) using real bytes/behavior from
+their own dumped SCPH-10000 BIOS, explicitly declining a synthetic HLE
+stub. This round made real, substantiated progress narrowing the root
+cause (see docs/STATUS.md's "Round 29" section) but did NOT reach a fix -
+the next session should resume by tracing backward from whichever module
+load sets the PCB/TCB Table-of-Tables fields (confirmed real, via this
+project's own ELF loader) to find what triggers it, since that path is
+the most promising lead toward the real ExCB allocation+registration
+mechanism. User also has a legally-owned demo DVD dump available for
+future CDVD work, explicitly NOT needed for the current investigation
+(this wall is pure BIOS-kernel bootstrap, before any disc read would
+occur).
 
 ## Reference material
 

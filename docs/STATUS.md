@@ -3212,7 +3212,91 @@ remaining honestly-open piece is the real default handler BODIES
 which this project has never had and is not attempting to synthesize,
 consistent with its established no-fabrication policy.
 
+### Round 29 (2026-07-07): real-BIOS live tracing of the RAM[0x100] gap - root cause substantially narrowed, fix not yet implemented
+
+Direct follow-up to the user's explicit request (after choosing "Track B" -
+fix the real exception-handler-body gap using bytes/behavior from their own
+legally-owned SCPH-10000 dump rather than a synthetic HLE stub) to continue
+investigating before implementing anything. This round is host-native
+tracing only, no code changes to the emulator itself.
+
+**Method**: rather than reason about the mechanism abstractly, this round
+single-stepped the actual interleaved EE/IOP scheduler (`system.c`'s own
+8:1 loop, reimplemented in a throwaway `/tmp/diagNN.c` harness so every IOP
+instruction could be inspected) against the user's real `scph10000.bin`,
+logging every JAL/JALR target and every store to the "Table of Tables"
+region (`RAM[0x100]-RAM[0x158]`, per psx-spx's BIOS RAM Map) from boot
+until the known early-SYSCALL wall (Round 19's finding, reproduced here
+independently: a genuine `ExitCriticalSection` SYSCALL, Cause=SYSCALL,
+EPC=0x8003ECF4).
+
+**Confirmed, byte-for-byte, via live Capstone disassembly of the actually-
+resident RAM** (not assumed from documentation): the real exception
+dispatcher at `0x00000C80`-`0x00000E3C` is genuine, executed BIOS/kernel
+code (not this project's own fabrication) that unconditionally does
+`lw $s3,(0x100)` (table address) `-> lw $s6,($s3)` (priority-0 chain head)
+`-> lw $s1,8($s6)` (first-function pointer) `-> jalr $s1`, with NO null
+check on `$s6` before the final dereference+call. At the moment this
+SYSCALL's exception fires, `RAM[0x100]` is still `0` (never allocated), so
+`$s6 = RAM[0] = 0` and `$s1 = RAM[8] = 0x03400008` - the exact leftover
+"JR $k0" template bytes Rounds 14/19 already identified. This is a precise,
+independently-reproduced confirmation of Round 19's account, now backed by
+live disassembly instead of static reasoning.
+
+**New this round**: exhaustively logging every JAL/JALR the IOP executes
+from reset to this exact SYSCALL (about 3.05 million IOP instructions)
+found exactly 2 calls to the public `0xA0` BIOS vector and ZERO calls to
+`0xB0` or `0xC0` - meaning `C(00h)`/`C(01h)`/`C(0Ch)`
+(EnqueueTimerAndVblankIrqs/EnqueueSyscallHandler/InitDefInt, the functions
+psx-spx documents as populating this exact chain) are never invoked via
+the public vector mechanism before this syscall fires, on this exact real
+BIOS revision's boot order. Also found: the "Table of Tables" region gets
+explicitly zeroed three separate times very early in boot (real ROM
+bootstrap code at `0xbfc021d4`-`0xbfc02290` and `0xbfc4d30c`-`0xbfc4d324`,
+confirmed genuinely executed, not this project's own init), and later
+(sometime before instruction 3,054,820) the PCB/TCB "size" sub-fields
+(`RAM[0x10c]=4`, `RAM[0x114]=0x300` - exactly matching real hardware's
+"1 PCB entry, 4 TCB entries * 0xC0h" convention) get set to real,
+meaningful values with NO corresponding CPU store instruction ever
+executing for those addresses. Traced this last part down to this
+project's own real ELF/IRX loader (`iop_elf.c`'s `iop_mem_write8()` calls
+inside `elf_load_segments()`, called from the module loader's C code, not
+from interpreted IOP instructions) copying an already-loaded real kernel
+module's own DATA segment bytes onto these addresses - i.e. this project's
+existing, real ELF loader (task #92) is ALREADY correctly delivering real,
+ROM-sourced kernel configuration data to part of the Table of Tables; it's
+specifically the ExCB entry (`RAM[0x100]`/`RAM[0x104]`) that stays at zero,
+and specifically the actual runtime allocation-and-registration step
+(computing a real heap address for the ExCB array and calling the real
+kernel equivalent of `SysEnqIntRP` for each default handler) that has not
+executed by the time this SYSCALL fires.
+
+**Not yet resolved**: which exact loaded module/ELF segment is responsible
+for the PCB/TCB values (not pinned down to a specific module name yet -
+`iop_module_loader.c`'s escape-hatch mechanism from Round 15 loads modules
+opportunistically whenever execution jumps to the leftover `0x03400008`
+template bytes, and by instruction 3,054,820 this hasn't happened yet
+either, meaning the PCB/TCB-setting module load must be triggered by some
+OTHER, earlier mechanism this round didn't trace down to its root call
+site), and consequently whether the real ExCB allocation+registration
+would naturally follow once that earlier mechanism is fully understood, or
+whether it requires a genuinely separate fix. This is the concrete next
+step - tracing backward from wherever the PCB/TCB-setting module load
+actually gets triggered, rather than forward from the SYSCALL wall as this
+round did.
+
+**No code changes this round** - purely diagnostic, using disposable
+`/tmp/diagNN.c` harnesses (not committed, matching this project's
+established pattern for host-native investigation tooling) against the
+user's own real BIOS dump (`scph10000.bin`, already present in this
+session's uploads directory, never committed or copied into the repo/
+outputs - same standing rule as every prior round). No regression risk;
+existing 63-test suite and Wii build are unaffected and were not re-run
+this round since nothing in `source/`/`include/` changed.
+
 ## GS Round 23: alpha test + alpha blending (TEST_1/ALPHA_1)
+
+
 
 Per the user's explicit directive to return to the GS and keep pushing
 toward a complete port, this round tackles the next largest

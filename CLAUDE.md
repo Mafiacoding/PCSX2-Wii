@@ -505,6 +505,32 @@ always ask for/verify the no-disc case explicitly).
   a virtual-SD-card deliverable for the user's own local Dolphin setup.
   93-binary/0-failure regression, clean Wii rebuild.
 
+- **Round 17 - first real on-device (Dolphin) BIOS-boot validation;
+  new IOP SYSCALL-exception boundary precisely traced**: user ran the
+  native test menu's BIOS Boot Test against their own real SCPH-10000
+  BIOS in Dolphin (via an `mtools`-built virtual SD image, `sd_v2.raw`
+  - a first `pyfatfs`-built image mounted but its BIOS file was never
+  found by real `libfat`, root cause presumed a `pyfatfs` write-
+  compliance gap, not a project bug; `libfat`'s own source was read to
+  rule out a device-naming mismatch first). Real on-device result: EE
+  reached 16,000,000 instructions (pc=0x8000B8AC), IOP reached
+  2,000,000 (pc=0x001A44EC), neither halted within the test cap - and
+  this matches host-native diagnostics exactly. Deep-dived the IOP's
+  steady state further with `capstone`-disassembled traces: confirmed
+  the EE's SIF-mailbox polling (round 14) is genuinely legitimate real-
+  hardware-shaped code, and found that the IOP, after settling cleanly
+  at pc=0x001A44EC, takes a real MIPS SYSCALL exception at exactly
+  instruction 3,059,999 (deterministic regardless of diagnostic chunk
+  size) whose handling leaves `$ra=0x00100000` (SYSMEM's own load base,
+  not a sane return address) and re-enters SYSMEM's own 17-iteration
+  init loop with an already-underflowed stack pointer
+  (sp=0xFFFFFF40) - likely connected to round 15's already-documented
+  missing module-entry-argument/boot-info gap, now reached via a new
+  path (a real SYSCALL instruction, not the A0/B0/C0 jump-table
+  convention). Not fixed this round - full precise trace is in
+  docs/STATUS.md's "Round 17" section for whoever picks this up next.
+  93/93 regression, clean Wii rebuild.
+
 ## The mandatory per-change workflow
 
 This project has a strict, consistently-applied ritual for every increment

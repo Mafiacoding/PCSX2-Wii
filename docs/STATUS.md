@@ -2589,6 +2589,97 @@ continue to pass (0 failures). Clean devkitPPC/libogc rebuild of
 `boot.dol`, same single pre-existing harmless `strncpy` truncation warning
 in `iop_module_loader.c` as prior rounds (unrelated to this change).
 
+### Round 17 (2026-07-07): first real on-device (Dolphin) BIOS boot validation, and a precisely-traced new IOP SYSCALL-exception boundary
+
+**On-device validation, the headline result**: the user ran the native
+Wii test menu's "BIOS Boot Test" action in a real Dolphin session
+against their own real SCPH-10000 BIOS (via the `sd_v2.raw` virtual SD
+image built this round with `mtools`, after an earlier `pyfatfs`-built
+image proved unreadable by real `libfat` - see below). Result: BIOS
+loaded correctly (`rom_ver=0100JC20000117`), both EE and IOP cores
+initialized and ran interleaved for the full 2,000,000-slice test cap
+without halting - EE reached `instructions_executed=16,000,000`
+(pc=0x8000B8AC) and IOP reached `instructions_executed=2,000,000`
+(pc=0x001A44EC). This is the first time this project has observed the
+real module/IRX loader (round 15) and real VU opcode table (round 15)
+running against the real BIOS on real (Dolphin-emulated) Wii hardware
+rather than only in host-native diagnostics, and it matches host-native
+diagnostics exactly (see below) - strong cross-validation that the Wii
+build and the host-native test harness are behaviorally consistent.
+
+**SD-image tooling note**: the first `sd.raw` (built by writing directly
+into an mkfs.vfat-formatted file via the `pyfatfs` Python library) mounted
+fine in Dolphin but the BIOS file was never found by any of the 3
+candidate filenames - `libfat`'s own source (`fatInit`/`disc.c`) was
+read directly to rule out a device-naming mismatch (Wii's SD slot
+genuinely registers as `"sd"`, confirming `sd:/...` paths were always
+correct) - the real cause was almost certainly a `pyfatfs`-write
+compliance gap, not a project bug. Rebuilt with `mtools` (`mcopy`/`mmd`,
+obtained via `apt-get download` without root, extracted with
+`dpkg-deb -x`) instead, verified byte-for-byte via read-back
+(`md5sum` match), and this image (`sd_v2.raw`) worked correctly on the
+first try.
+
+**New finding - a real IOP SYSCALL exception leads to a dead end**:
+following up on round 14's finding that the EE settles into a
+legitimate SIF-mailbox-polling steady state, this round traced the IOP
+side of that same steady state in detail using host-native diagnostics
+(`/tmp/diag8.c` through `/tmp/diag15.c`, not committed - transient
+`/tmp`-only scratch tools per this project's established practice).
+
+Disassembly (via `capstone`, `pip`-installed) of the EE's steady-state
+loop at `0x80005E58`-`0x80006278` shows it is a real, legitimate
+subroutine: it reads the three real SIF mailbox/flag registers
+(`0xB000F200`=SIF_MSCOM, `0xB000F210`=SIF_SMCOM, `0xB000F230`=SIF_SMFLG),
+each with a genuine settle-then-recheck pattern, then loops
+(`and v0,v0,s0` / `beqz v0,retry`) until a caller-supplied bitmask
+matches - i.e. the EE is correctly, faithfully waiting for the IOP side
+to set specific SIF flag bits. Real hardware would do exactly this.
+
+The IOP side, traced via repeated `system_run_interleaved()` calls at
+fine (10,000-slice) granularity to pinpoint the exact transition,
+reaches a clean, stable, sane state at `pc=0x001A44EC` (`sp=0x801ffdd8`,
+matching the real on-device Dolphin result exactly) and holds it from
+roughly instruction 1,700,000 onward - genuinely idle/polling, not
+stuck. But at **exactly instruction 3,059,999** (fully deterministic -
+reproduced identically whether stepped in 10,000-, 50,000-, or
+2,500,000-instruction chunks, ruling out a chunking artifact), the IOP
+takes a real MIPS **SYSCALL exception** (`Cause=0x00000020`, ExcCode 8;
+`EPC=0x8003ecf4`; `$v0=1` at the time, `$a0=0xFFFFFF98`) - a completely
+normal, real R3000A mechanism real IOP kernel code uses for kernel
+calls (thread/semaphore/etc. requests), distinct from this project's
+existing A0/B0/C0 jump-table BIOS-call convention (task #31).
+
+After that exception, though, control does not end up in a sensible
+syscall handler return: `$ra` is left holding `0x00100000` (suspicious
+- exactly the raw base address SYSMEM was loaded at, not a real return
+address), and the IOP proceeds to (re-)execute what disassembly
+confirms is SYSMEM's own internal 17-iteration array-zeroing init loop
+(`0x00100D94`-`0x00100DBC` - matches round 14's "legitimate bounded
+loop" finding verbatim) - except this time with the stack pointer
+already at `sp=0xFFFFFF40` (a small, ~192-byte underflow past address
+0, i.e. `-0xC0`), consistent with round 15's already-documented "third
+boundary" (module-entry argument/boot-info block not modeled, so a
+downstream stack-size computation goes wrong). From this point on the
+IOP repeatedly re-enters this same narrow loop/init path and never
+progresses further within any tested budget (traced cleanly out to
+95,000,000 slices with no change).
+
+**Working theory, not yet fixed**: this project's IOP SYSCALL exception
+vector/dispatch either has no real handler for this specific syscall
+number, or its handler incorrectly falls through into re-running
+SYSMEM's own init path instead of returning to the caller - likely
+connected to the same missing module-entry-argument gap round 15 called
+out, now manifesting through a different, previously-unreached code
+path (a real SYSCALL, not a raw JALR). Not fixed this round to keep
+scope honest and give the user a checkpoint before deciding how much
+further to dig - full precise trace is above for whoever picks this up
+next (host or a future round).
+
+Regression: 93/93 host-native test binaries pass, clean Wii rebuild.
+No BIOS bytes were added to the repo; all diagnostics above live only
+in `/tmp` scratch files, never committed.
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

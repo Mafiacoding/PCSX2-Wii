@@ -444,6 +444,37 @@ boot (round 10 found the SIF/hardware-status values genuinely differ
 between "disc inserted" and "BIOS only, no disc" real hardware boots -
 always ask for/verify the no-disc case explicitly).
 
+- **Round 15 - the round-14 IOP wall genuinely bypassed via a real
+  module/IRX loader; a real VU opcode table; an SPU2 register
+  scaffold**: user directive was "fix all IOP errors, port the IOP/
+  IRX loader, the VU microcode table, and SPU2 if there's time."
+  Implemented a real ELF32/MIPS IRX loader (`source/hw/iop_elf.c`) and
+  a real ROMDIR/IOPBTCONF-driven module loader with export/import
+  linking (`source/hw/iop_module_loader.c`), reverse-engineered from
+  the user's own real BIOS (never committed - see
+  `include/core/hw/iop_module_loader.h`'s citation trail) and cross-
+  checked against ps2dev/ps2sdk's public `irx.h`. Live-traced against
+  the real BIOS: this genuinely loads and jumps to real SYSMEM's entry
+  point past the round-14 wall for the first time. A SECOND real bug
+  was found and fixed this way: module entries were launched without a
+  valid `$sp`, so SYSMEM's own prologue corrupted its saved `$ra` via
+  a stack write to garbage memory, looping back into the *exact same*
+  original wall - fixed by seeding `$sp` to a documented top-of-RAM
+  value before each module entry. A THIRD, deeper, honestly-documented
+  boundary was found one level in and left for later (module-entry
+  argument registers/boot-info block not modeled, so SYSMEM's own
+  RAM-size read returns 0) - see docs/STATUS.md's "Round 15" section
+  for the full trace. Separately, found and used the original Sony
+  "PS2 Vector Unit Instruction Manual" (PCSX2's own VU opcode tables
+  were never locatable in any fetched source) to implement a real
+  upper/lower VU opcode table (`source/hw/vu_opcodes.h`, replacing the
+  prior control-flow-only no-op decode) - real FMAC arithmetic,
+  accumulator family, integer ALU, load/store, and branches, with 12
+  new targeted correctness tests. Added a real SPU2 register scaffold
+  (`source/hw/iop_spu2.c`) at the real base address with real 16-bit
+  access, time permitting. 54-file/0-failure regression, clean Wii
+  rebuild.
+
 ## The mandatory per-change workflow
 
 This project has a strict, consistently-applied ritual for every increment

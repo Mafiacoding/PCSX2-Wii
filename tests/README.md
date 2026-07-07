@@ -1187,3 +1187,63 @@ convention together with its own GREATER-mode depth test.
 gcc -I../include -I../source -o test_z_buffer tests/test_z_buffer.c ../source/hw/gif.c ../source/hw/gs_mem.c
 ./test_z_buffer
 ```
+
+`test_iop_elf.c` covers task #92: `source/hw/iop_elf.c`, a real
+ELF32/MIPS "IRX" module loader with genuine relocation processing
+(R_MIPS_32/26/HI16/LO16, cross-checked against ps2dev/ps2sdk's public
+`irx.h` and the community "PS2 BIOS in Rust" book - see
+`include/core/hw/iop_elf.h` for the full citation trail). Builds a
+fully synthetic (non-copyrighted) ELF32/MIPS module at runtime via
+`build_synthetic_module()` - no real BIOS bytes appear anywhere in
+this file. 19 checks: successful load with correct entry/load_addr/
+load_end, bss zero-fill for a segment where memsz > filesz, all 4
+relocation types produce byte-exact expected values (manually pre-
+computed), a real export table and a real import table are both
+found with correct names/counts, and a malformed image (bad ELF magic)
+is rejected with a clear error rather than silently accepted.
+
+```sh
+gcc -I../include -I../source -o test_iop_elf tests/test_iop_elf.c ../source/hw/iop_elf.c ../source/core/iop/iop_core.c ../source/hw/iop_hle_bios.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_spu2.c
+./test_iop_elf
+```
+
+`test_vu_micro.c` covers task #87 (control flow) and task #94 (real
+opcode table, this round). See `include/core/hw/vu.h` and
+`source/hw/vu_opcodes.h` for the full scope/citation trail (the
+original Sony VU Instruction Manual). 22 checks total: the original
+control-flow set (E-bit/I-bit/branch-delay-slot mechanism, TPC
+advance, the 65536-instruction safety cap, VU0/VU1 memory separation)
+PLUS 12 new checks added this round validating real arithmetic/
+branch/load-store *results*, not just control flow - real ADD,
+real ADDA-then-MADD proving the accumulator genuinely round-trips,
+real ADDbc lane broadcast, real ADDQ using the Q register, a real
+unconditional branch whose delay-slot instruction executes and whose
+skipped instruction doesn't (with an exact instruction-count check),
+real IADD 16-bit integer arithmetic, and a real SQ/LQ quadword round-
+trip through VU1 data memory. One pre-existing assertion was updated
+(not loosened, see the file's own header comment): an all-zero
+instruction word is no longer "no real opcode" now that real decode
+exists - it's a genuinely matched (if degenerate/no-effect) ADDbc/LQ
+pair.
+
+```sh
+gcc -I../include -I../source -o test_vu_micro tests/test_vu_micro.c ../source/core/ee/ee_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gs_mem.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/sif.c ../source/hw/mch.c ../source/hw/vu.c
+./test_vu_micro
+```
+
+`test_iop_spu2.c` covers task #95 (SPU2 register scaffold, "time
+permitting"). See `include/core/hw/iop_spu2.h` for the honest scope
+note (a register-file scaffold, not audio synthesis - no per-register
+voice/ADSR/volume semantics, no synthesis or DMA pipeline). 10 checks:
+direct unit tests of the scaffold's own read16/write16/read32/write32
+(in-range vs. out-of-range address boundaries, write-then-readback
+persistence, a 32-bit write visible via two adjacent 16-bit reads),
+plus integration tests confirming the scaffold is actually reachable
+through `iop_core.c`'s real `iop_mem_read16`/`write16`/`read32`/
+`write32` (the LH/SH/LW/SW path a real IOP program would use) without
+accidentally swallowing unrelated ordinary IOP RAM addresses.
+
+```sh
+gcc -I../include -I../source -o test_iop_spu2 tests/test_iop_spu2.c ../source/core/iop/iop_core.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
+./test_iop_spu2
+```

@@ -2451,6 +2451,112 @@ Regression: full test suite (29 test files total, including this new
 one) all pass 0 failures. Wii/devkitPPC target rebuilds clean with no
 warnings.
 
+### Round 15 (2026-07-07): the round-14 IOP wall genuinely bypassed via a real module/IRX loader; a real VU opcode table; an SPU2 register scaffold
+
+User directive this round: "fix all IOP errors and port over the IOP
+and IRX loader, and the VU microcode table, if you have time SPU2."
+
+**Real IOP module/IRX loader (tasks #91-93).** The round-14 wall
+(`JALR $s1=0x03400008` at IOP pc~0x00000E08, ~3.05M instructions into
+real BIOS boot) was previously documented as "an honest architectural
+boundary requiring a real IOP module loader" - this round built one.
+Via local, uncommitted analysis of the user's own real SCPH-10000 BIOS
+(never committed, no BIOS bytes in any test fixture - see
+`include/core/hw/iop_module_loader.h`'s citation trail), this project
+reverse-engineered and implemented, for the first time: a real
+ELF32/MIPS "IRX" module loader (`source/hw/iop_elf.c`) with genuine
+relocation processing (R_MIPS_32/26/HI16/LO16, cross-checked against
+ps2dev/ps2sdk's public `irx.h` and the community "PS2 BIOS in Rust"
+book), and a real ROMDIR/IOPBTCONF-driven sequential module loader
+with export/import table linking (`source/hw/iop_module_loader.c`).
+19 new synthetic-fixture unit tests plus the full regression suite
+pass.
+
+Live-traced against the real BIOS, this genuinely: parses all 29 real
+IOPBTCONF module names in order, loads and relocates the real SYSMEM
+module for the first time in this project's history, and redirects
+the interpreter to SYSMEM's real entry point. A **second, real bug**
+was found this way and fixed: SYSMEM's own function prologue (`sw
+$ra, ...($sp)`) was corrupting its own return address because this
+project's module loader never set up a stack pointer before jumping
+into a module's entry - `$sp` held stale/leftover state, so the
+prologue's stack-relative save/restore landed on garbage memory,
+`$ra` came back as 0 instead of this loader's trampoline, and
+execution looped back through address 0 into the *exact same*
+original wall. Fixing this (seeding `$sp` to a documented top-of-RAM
+value before each module's entry) genuinely resolved the recurrence -
+live-traced confirmation that the interpreter now runs real SYSMEM
+kernel code well past the original wall (branch-traced past
+instruction 3,054,850 into previously-never-executed real kernel
+code, versus immediately re-hitting pc=0x00000e0c before the fix).
+
+A **third, deeper boundary** was found and honestly documented rather
+than chased further this round: SYSMEM's own init code reads a value
+via `lw $v0, 0($a0)` (almost certainly a RAM-size/boot-info pointer
+real loadcore would normally pass as an argument) - this project's
+loader doesn't set up module-entry argument registers (only `$ra`/
+`$sp`), so `$a0`=0, the read returns 0, and a subsequent `sll
+$sp,$v0,20` (likely "compute stack pointer from discovered RAM size in
+MB") zeroes `$sp` again. This is a genuine, narrower, well-understood
+scope gap (real loadcore's module-entry calling convention/boot-info
+block isn't modeled) rather than a re-emergence of the original wall -
+left for a future round.
+
+**Real VU upper/lower opcode table (task #94).** Previous rounds
+explicitly could not find PCSX2's own VU opcode dispatch tables in any
+fetched source file, so every VU micro-mode instruction was a logged
+no-op with correct control flow only. This round found and used the
+original Sony "PlayStation 2 Vector Unit Instruction Manual" (a
+primary hardware reference) instead - see `source/hw/vu_opcodes.h` for
+the full bit-field citation trail, including an explicit list of the
+handful of instructions this project deliberately left unimplemented
+because the source document's own tables were internally inconsistent
+for them (an encoding collision between "OPMSUB" and "MULbc.w" in
+particular - resolved in favor of the far more common MULbc, with
+OPMSUB left unimplemented rather than guessed).
+
+`vu_micro_step()` now really decodes and executes: upper FMAC
+arithmetic (ADD/SUB/MUL/MADD/MSUB/MAX/MINI and their broadcast/Q/I
+forms, the ADDA/SUBA/MADDA/MSUBA accumulator family, OPMULA outer
+product, ABS, ITOF/FTOI fixed-point conversion), lower integer ALU
+(IADD/ISUB/IADDI/IAND/IOR), load/store (LQ/SQ/LQI/SQI/LQD/SQD/ILW/ISW/
+ILWR/ISWR/MTIR/MFIR/MOVE/MR32), and branches (B/BAL/JR/JALR/IBEQ/IBNE/
+IBLTZ/IBGTZ/IBLEZ/IBGEZ) with correct delay-slot semantics. A real
+accumulator register (`acc[4]`) was added alongside the existing VF/VI
+register file, and `vi[22]` is now used as the real Q register.
+
+12 new tests validate actual arithmetic/branch/load-store *results*
+(not just control flow) - real ADD, real ADDA-then-MADD proving the
+accumulator genuinely round-trips, real ADDbc lane broadcast, real
+ADDQ using the Q register, a real branch whose delay-slot instruction
+executes and whose skipped instruction doesn't, real IADD, and a real
+SQ/LQ quadword round-trip through VU1 data memory. One existing test
+assertion needed updating (not loosening): an all-zero instruction
+word is no longer "no real opcode" - bits5-2=0 of the upper word is
+the real ADDbc encoding and bits31-25=0 of the lower word is the real
+LQ encoding, both genuinely matched (if degenerate/no-effect)
+instructions now that real decode exists.
+
+**SPU2 register scaffold (task #95, time permitting).** No SPU2 code
+existed at all. Added `source/hw/iop_spu2.c`/`.h`: a real, cited
+register-file scaffold at the real IOP-side base address
+(0x1F900000), correctly modeling SPU2's native 16-bit register
+granularity (wired into `iop_core.c`'s `iop_mem_read16`/`write16`,
+which previously had no MMIO dispatch at all - only RAM/BIOS passthrough)
+plus 32-bit access for any real code that uses LW/SW instead. Honestly
+scoped as a scaffold, not audio: no per-register (voice/ADSR/volume)
+semantics are modeled, only documented as such. 10 new tests (direct
+unit tests plus integration through real IOP LH/SH/LW/SW instructions)
+all pass.
+
+Regression: full test suite (54 test files total, including
+`test_iop_elf.c` and `test_iop_spu2.c`) all pass 0 failures.
+Wii/devkitPPC target rebuilds clean (0 errors; one pre-existing,
+unrelated `strncpy` truncation warning in `iop_module_loader.c` from
+this same round, harmless - the copied ROMDIR name field is always
+exactly 10 bytes and the destination buffer is 11 bytes with an
+explicit trailing NUL set separately).
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

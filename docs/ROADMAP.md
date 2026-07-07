@@ -557,6 +557,22 @@ instead of fully emulating the real IOP BIOS ROM.
       53,592,141 instructions before hitting an expected, already-
       documented gap (COP2/LQ-SQ, section 1) - see docs/STATUS.md's
       "Resolved: InstallExceptionHandlers" section for full detail.
+- [x] Real IOP module/IRX loader (`source/hw/iop_elf.c` +
+      `source/hw/iop_module_loader.c`) - this round replaced the
+      module registry above's "standalone, nothing triggers it" state
+      with a genuinely real loader: real ELF32/MIPS "IRX" parsing with
+      relocation (R_MIPS_32/26/HI16/LO16), and a real ROMDIR/IOPBTCONF
+      -driven sequential boot loader with export/import table linking,
+      reverse-engineered from the user's own real BIOS (never
+      committed) and cross-checked against ps2dev/ps2sdk's public
+      `irx.h` and the community "PS2 BIOS in Rust" book. Live-traced
+      against the real BIOS, this genuinely loads and executes real
+      SYSMEM kernel code past the round-14 wall for the first time -
+      see docs/STATUS.md's "Round 15" section for the full trace,
+      including a second real bug found and fixed (a missing module-
+      entry stack pointer) and a third, deeper, honestly-documented
+      boundary (module-entry argument registers/boot-info block not
+      modeled) that stops this short of a full real boot.
 
 ## 3. DMA controller
 
@@ -679,27 +695,31 @@ these - only the interpreter side is even theoretically portable.
       since real hardware shares one physical VU0 between macro mode
       and micro mode). MPG (`source/hw/vif.c`) now writes real
       microprogram bytes here instead of skipping them.
-- [x] VU microcode interpreter - PARTIAL, real control flow only: TPC
-      advance, the E-bit's genuine one-instruction "delay slot", the
-      I-bit (loads VI[21]/REG_I from the lower word), and the branch
-      delay-slot mechanism (implemented, but nothing sets it yet) are
-      all byte-exact against a live fetch of PCSX2's
-      `VU0microInterp.cpp`. MSCAL/MSCNT/MSCALF (`source/hw/vif.c`) now
-      actually run this interpreter instead of being total no-ops. NOT
-      implemented: any real per-opcode instruction body (FMAC/integer
-      ALU/branches) - despite fetching `VU.h`/`VUmicro.h`/
-      `VUmicro.cpp`/`VUops.h`/`VUops.cpp`/`VUmicroMem.cpp`/
-      `VU1micro.cpp`, this project could not locate PCSX2's actual
-      `VU0_LOWER_OPCODE[128]`/`VU0_UPPER_OPCODE[64]` opcode-number-to-
-      instruction table, and per this project's no-fabrication policy
-      does not guess it - every instruction is fetched and its real
-      flags honored, but its body is a logged no-op
-      (`unimplemented_opcodes_seen`). A genuine, narrower step
-      forward, not a full VU implementation - see `include/core/hw/
-      vu.h`'s header comment for the full citation trail.
+- [x] VU microcode interpreter - real control flow (TPC advance,
+      E-bit delay slot, I-bit, branch delay-slot mechanism, byte-exact
+      against a live fetch of PCSX2's `VU0microInterp.cpp`) PLUS, as
+      of this round, a real per-opcode instruction table -
+      `source/hw/vu_opcodes.h` (found in the original Sony "PS2 Vector
+      Unit Instruction Manual" after PCSX2's own opcode tables
+      couldn't be located in any fetched source file). Real upper
+      FMAC arithmetic (ADD/SUB/MUL/MADD/MSUB/MAX/MINI + broadcast/Q/I
+      forms, ADDA/SUBA/MADDA/MSUBA accumulator family, OPMULA outer
+      product, ABS, ITOF/FTOI), real lower integer ALU (IADD/ISUB/
+      IADDI/IAND/IOR), load/store (LQ/SQ/LQI/SQI/LQD/SQD/ILW/ISW/ILWR/
+      ISWR/MTIR/MFIR/MOVE/MR32), and branches (B/BAL/JR/JALR/IBEQ/
+      IBNE/IBLTZ/IBGTZ/IBLEZ/IBGEZ) are implemented and tested (12 new
+      targeted arithmetic/branch/load-store checks, not just control
+      flow). A real accumulator register (`acc[4]`) was added; `vi[22]`
+      is now the real Q register. Deliberately left unimplemented,
+      per the no-fabrication policy (documented in vu_opcodes.h):
+      OPMSUB (an irreconcilable encoding collision with MULbc.w found
+      in the source manual), CLIPw, the R-register RNG family
+      (RGET/RNEXT/RINIT/RXOR - needs a real LFSR model), the FC*/FS*/
+      FM* MAC/status/clip flag ops, and IADDIU/ISUBIU (the source
+      manual's immediate bit-packing for these two was ambiguous).
 - [ ] VIF-side data unpacking into VU memory (VIF's UNPACK format -
       still needs a verified format reference, separate from the
-      opcode-table gap above)
+      opcode-table work above)
 
 ## 6. GS (Graphics Synthesizer) + Wii output
 
@@ -774,7 +794,18 @@ programmable GPU nor any of those APIs).
 
 - [ ] CDVD - disc/BIOS-boot-media emulation (BIOS checks for a disc
       even when booting to the OSD splash without one)
-- [ ] SPU2 (audio) - not needed for a visual splash screen
+- [x] SPU2 (audio) - PARTIAL, register scaffold only (not needed for a
+      visual splash screen, added this round on a "time permitting"
+      basis alongside the IOP loader/VU opcode-table work).
+      `source/hw/iop_spu2.c` models the real, cited IOP-side base
+      address (0x1F900000) and SPU2's real 16-bit-native register
+      granularity (also 32-bit for LW/SW-based code), wired into
+      `iop_core.c`'s `iop_mem_read16`/`write16`/`read32`/`write32`
+      dispatch (16-bit MMIO dispatch didn't exist there at all before
+      this round - only RAM/BIOS passthrough). No per-register
+      (voice/ADSR/volume) semantics or actual audio synthesis/DMA
+      pipeline are modeled - a real, addressable, persistent register
+      file, not a real sound chip.
 - [ ] Pad/memory card - not needed to reach the splash screen, needed
       for anything past it
 

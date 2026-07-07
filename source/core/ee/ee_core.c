@@ -712,7 +712,7 @@ void vu0_exec_micro(ee_state_t *st, uint32_t start_addr)
     st->vu0_running = 1;
 
     for (uint32_t i = 0; i < VU0_EXEC_STEP_CAP; i++) {
-        int stopped = vu_micro_step(st->vu0_vf, st->cop2_ctrl,
+        int stopped = vu_micro_step(st->vu0_vf, st->cop2_ctrl, st->vu0_acc,
                                      st->vu0_mem, (uint32_t)(sizeof(st->vu0_mem) - 1u),
                                      st->vu0_micro, (uint32_t)(sizeof(st->vu0_micro) - 1u),
                                      &st->cop2_ctrl[26], &st->vu0_branch_delay, &st->vu0_branch_target,

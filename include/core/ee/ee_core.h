@@ -164,6 +164,15 @@ typedef struct {
     uint64_t vu0_instructions_executed;
     uint64_t vu0_unimplemented_opcodes_seen;
 
+    /* VU micro-mode accumulator vector (task #94, real VU opcode
+     * table) - a real, separate 4-lane vector register used by MADD/
+     * MSUB (Fd = ACC (+/-) Fs*Ft) and written by the ADDA/SUBA/MADDA/
+     * MSUBA "accumulate" family - NOT one of the 32 VF registers and
+     * NOT part of the VI/cop2_ctrl file. Raw float bit patterns, same
+     * storage convention as vu0_vf[][]. See source/hw/vu_opcodes.h for
+     * the full citation trail (Sony's VU Users' Manual). */
+    uint32_t vu0_acc[4];
+
     uint8_t *ram;           /* 32MB emulated EE RAM */
     uint32_t ram_size;
 

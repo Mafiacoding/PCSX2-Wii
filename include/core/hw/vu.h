@@ -52,30 +52,32 @@
  *     CTC2 handling). Branches use the same 1-instruction-delay-slot
  *     mechanism as the E-bit (`VU->branch`countdown in `_vu0Exec`).
  *
- * WHAT IS NOT IMPLEMENTED, and why (read before extending): the real
- * per-opcode-number-to-mnemonic mapping (PCSX2's
- * `VU0_LOWER_OPCODE[128]`/`VU0_UPPER_OPCODE[64]` function-pointer
- * tables - a 7-bit lower opcode field `code>>25` and a 6-bit upper
- * opcode field `code&0x3f`) is defined in a PCSX2 source file this
- * project could not locate this round despite fetching `VU.h`,
- * `VUmicro.h`, `VUmicro.cpp`, `VUops.h`, `VUops.cpp` (which implements
- * each instruction's BODY as a `_vuADDx`/`_vuNOP`/etc-style function,
- * but not the index-to-function table itself), `VUmicroMem.cpp`, and
- * `VU1micro.cpp`. Per this project's no-fabrication policy, this file
- * does NOT guess which numeric opcode value corresponds to which real
- * instruction. What IS implemented is everything structural that
- * doesn't depend on that table: real memory sizes, real TPC/branch/
- * E-bit/I-bit control flow (byte-exact against the cited source
- * above), and MPG actually writing real microprogram bytes into real
- * micro-instruction memory (previously these bytes went nowhere - see
- * vif.h's own scope note). Every fetched instruction pair is stepped
- * over correctly (control flow keeps working, TPC advances by 8,
- * E-bit termination fires at the right time) but its actual FMAC/
- * integer-ALU/branch BODY is a logged no-op (`unimplemented_opcodes_seen`)
- * rather than a guessed one. This turns MSCAL/MSCNT/MSCALF from total
- * no-ops (vif.c's prior state) into a genuine fetch-execute-until-E-bit
- * loop over the real uploaded microprogram - a real, narrower, honest
- * step forward, not a full VU implementation.
+ * UPDATE (task #94, this round): a real opcode-number-to-mnemonic
+ * table WAS found and implemented - NOT from PCSX2 source (this
+ * project never located the actual `VU0_LOWER_OPCODE[128]`/
+ * `VU0_UPPER_OPCODE[64]` function-pointer tables in any fetched PCSX2
+ * file), but from the original Sony "PlayStation 2 Vector Unit
+ * Instruction Manual" (a real, primary hardware reference - text-
+ * extracted PDF, publicly available, e.g. lukasz.dk/files/vu-
+ * instruction-manual.pdf). See source/hw/vu_opcodes.h for the full,
+ * per-instruction bit-field citation trail, confidence notes, and the
+ * small number of instructions this project deliberately left
+ * unimplemented because the source document's own table formatting
+ * was internally inconsistent for them (flagged there, not guessed).
+ * `vu_micro_step()` below now really decodes and executes a
+ * substantial subset of real upper (FMAC arithmetic: ADD/SUB/MUL/
+ * MADD/MSUB/MAX/MINI and their bc/Q/I forms, ABS/CLIP/ITOF/FTOI/ADDA/
+ * SUBA/MADDA/OPMULA) and lower (IADD/ISUB/IADDI/IAND/IOR/IADDIU/
+ * ISUBIU, MOVE/MR32/MTIR/MFIR, LQ/SQ/LQI/SQI/LQD/SQD/ILW/ISW/ILWR/
+ * ISWR, B/BAL/JR/JALR/IBEQ/IBNE/IBLTZ/IBGEZ/IBLEZ/IBGTZ, DIV/SQRT/
+ * RSQRT) real instructions - `unimplemented_opcodes_seen` now only
+ * increments for the instruction pairs (or half-pairs) that didn't
+ * match any of these (the R-register RNG family, the FC-, FS-, and FM-family MAC/
+ * status/clip flag ops, and a couple of accumulator-broadcast forms
+ * whose encoding the source manual rendered ambiguously - all
+ * documented in vu_opcodes.h rather than guessed). Real memory sizes,
+ * TPC/branch/E-bit/I-bit control flow, and MPG writes (described
+ * below) are unchanged from the prior round.
  */
 
 #define VU1_MEM_SIZE   0x4000u /* 16KB - PCSX2's VU1_MEMSIZE */
@@ -89,7 +91,14 @@ typedef struct {
                          * VURegFlags enum (VU.h) - e.g. index 21 =
                          * REG_I, used by the I-flag case below - even
                          * though VU1 has no EE-COP2 macro-mode path to
-                         * set most of them. */
+                         * set most of them. Index 22 = REG_Q (the
+                         * scalar float "Q" register used by DIV/SQRT/
+                         * RSQRT and the *Q family of upper opcodes -
+                         * task #94), same enum-index convention. */
+    uint32_t acc[4];    /* the FMAC accumulator vector (task #94) - a
+                         * real, separate 4-lane register used by MADD/
+                         * MSUB/OPMULA/ADDA family - NOT one of VF0-31.
+                         * See vu_opcodes.h for citations. */
     uint8_t  mem[VU1_MEM_SIZE];
     uint8_t  micro[VU1_MICRO_SIZE];
 
@@ -132,7 +141,7 @@ void vu1_exec_micro(uint32_t start_addr);
  * keep running. `vi` must point to an array of at least 32
  * uint32_t (only index 21, REG_I, is ever written by this function -
  * see the header comment's I-flag description). */
-int vu_micro_step(uint32_t vf[32][4], uint32_t *vi,
+int vu_micro_step(uint32_t vf[32][4], uint32_t *vi, uint32_t acc[4],
                    uint8_t *mem, uint32_t mem_mask,
                    uint8_t *micro, uint32_t micro_mask,
                    uint32_t *tpc, uint32_t *branch_delay, uint32_t *branch_target,

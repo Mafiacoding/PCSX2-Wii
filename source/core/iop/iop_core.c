@@ -44,8 +44,10 @@
 #include "core/hw/iop_intc.h"
 #include "core/hw/iop_dma.h"
 #include "core/hw/iop_timers.h"
+#include "core/hw/iop_spu2.h" /* SPU2 register scaffold - task #95 */
 #include "core/hw/iop_hle_bios.h"
 #include "core/hw/iop_hle_modules.h"
+#include "core/hw/iop_module_loader.h" /* real IOP module/IRX loader - task #92 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,6 +84,10 @@ uint8_t iop_mem_read8(iop_state_t *st, uint32_t addr)
 
 uint16_t iop_mem_read16(iop_state_t *st, uint32_t addr)
 {
+    uint16_t spu2_val;
+    if (iop_spu2_mmio_read16(addr, &spu2_val))
+        return spu2_val;
+
     uint8_t *p = iop_mem_ptr(st, addr, 2);
     if (!p) return 0;
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -105,6 +111,9 @@ uint32_t iop_mem_read32(iop_state_t *st, uint32_t addr)
     uint32_t timer_val;
     if (iop_timers_mmio_read32(addr, &timer_val))
         return timer_val;
+    uint32_t spu2_val;
+    if (iop_spu2_mmio_read32(addr, &spu2_val))
+        return spu2_val;
 
     uint8_t *p = iop_mem_ptr(st, addr, 4);
     if (!p) return 0;
@@ -120,6 +129,9 @@ void iop_mem_write8(iop_state_t *st, uint32_t addr, uint8_t val)
 
 void iop_mem_write16(iop_state_t *st, uint32_t addr, uint16_t val)
 {
+    if (iop_spu2_mmio_write16(addr, val))
+        return;
+
     uint8_t *p = iop_mem_ptr(st, addr, 2);
     if (!p) return;
     p[0] = (uint8_t)(val & 0xFF);
@@ -135,6 +147,8 @@ void iop_mem_write32(iop_state_t *st, uint32_t addr, uint32_t val)
     if (iop_dma_mmio_write32(addr, val))
         return;
     if (iop_timers_mmio_write32(addr, val))
+        return;
+    if (iop_spu2_mmio_write32(addr, val))
         return;
 
     uint8_t *p = iop_mem_ptr(st, addr, 4);
@@ -152,8 +166,10 @@ int iop_core_init(const bios_image_t *bios)
     iop_intc_init(); /* IOP interrupt controller register block - see core/hw/iop_intc.h */
     iop_dma_init();  /* IOP DMA controller register block - see core/hw/iop_dma.h */
     iop_timers_init(); /* IOP counter/timer register stub - see core/hw/iop_timers.h */
+    iop_spu2_init(); /* SPU2 register scaffold - task #95, see core/hw/iop_spu2.h */
     iop_hle_bios_init(); /* IOP BIOS syscall trap (A0/B0/C0) - see core/hw/iop_hle_bios.h */
     iop_hle_modules_init(); /* IOP module registry scaffold - see core/hw/iop_hle_modules.h */
+    iop_module_loader_reset(); /* real module/IRX boot sequencer - see core/hw/iop_module_loader.h */
 
     g_iop.ram = memalign(32, IOP_RAM_SIZE);
     if (!g_iop.ram)
@@ -198,6 +214,14 @@ static int iop_step(void)
         return 0;
     }
 
+    /* Real IOP module/IRX boot sequencer trampoline (task #92) -
+     * see core/hw/iop_module_loader.h. Checked right after the A0/
+     * B0/C0 BIOS trap, same "intercept before fetch" convention. */
+    if (iop_module_loader_try_handle(st, pc)) {
+        st->instructions_executed++;
+        return st->halted ? 1 : 0;
+    }
+
     /* Guard against PC escaping into memory this project doesn't
      * model as real, fetchable code (round 14 finding: a live-traced
      * real BIOS boot path executes a genuine JALR $s1 whose target
@@ -224,6 +248,22 @@ static int iop_step(void)
             pc_is_fetchable = (phys + 4 <= st->ram_size);
         }
         if (!pc_is_fetchable) {
+            /* Task #92: before halting, give the real IOP module/
+             * IRX loader (core/hw/iop_module_loader.h) exactly one
+             * chance to take over - this is precisely the round-14
+             * wall it was built to resolve (a real BIOS module-
+             * loading JALR whose target only a real loader would
+             * ever populate). If it can't find what it needs (e.g.
+             * no real BIOS is loaded, as in most synthetic-BIOS
+             * tests), it returns 0 immediately and this falls
+             * through to the original halt below, unchanged. */
+            if (iop_module_loader_boot(st)) {
+#ifdef IOP_MODLOADER_DEBUG
+                fprintf(stderr, "[modloader] boot succeeded, redirected pc=0x%08x at instr=%llu\n", st->pc, (unsigned long long)st->instructions_executed);
+#endif
+                return 0;
+            }
+
             /* Kept short and %lX-formatted (not %X) on purpose: this
              * message is copied into halt_reason[128] by halt()'s
              * strncpy, and uint32_t is a `long` on this project's

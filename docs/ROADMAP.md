@@ -826,311 +826,77 @@ programmable GPU nor any of those APIs).
 - [ ] Pad/memory card - not needed to reach the splash screen, needed
       for anything past it
 
-## Suggested near-term order
+## Suggested near-term order (rewritten Round 18 - the version below this
+point had grown into a ~300-line blow-by-blow history of rounds 1-14
+that duplicated, and had fallen behind, docs/STATUS.md's own per-round
+log. That full history is preserved in STATUS.md; this section is now
+kept short and current on purpose - update it, don't let it regrow into
+a second history log.)
 
-**Update: a real BIOS dump (SCPH-10000, legally owned by this
-project's user) was used for local testing** (never committed - see
-docs/STATUS.md's "First real BIOS boot attempt" section for full
-detail, and data/pcsx2/bios/README.txt). This surfaced a real
-ROMDIR-parsing bug (fixed) and gave two concrete, non-speculative next
-targets by actually running the real BIOS against this project's
-interpreters. **Both of those original targets are now fixed** (EE
-COP0 CO-format instructions RFE/ERET/EI/DI, section 1; IOP SYSCALL
-exception handling + Status.BEV reset fix, section 2) - re-running the
-same diagnostic afterward: the EE now runs the full 5,000,000-
-instruction test slice without halting at all (up from 99,158), and
-the IOP progresses to 3,054,763 instructions (up from 3,054,721)
-before hitting a NEW halt point: an unimplemented SPECIAL `funct 0x3F`
-at `pc=0x00000068`.
+**Where things stand after Round 18**: both CPU cores run real,
+substantial stretches of the actual SCPH-10000 BIOS (verified both in
+host-native diagnostics and, as of Round 17, in a real Dolphin session
+on the actual Wii .dol). Neither core has halted/crashed in the
+traditional sense in a long time - both reach genuine steady states.
+The EE legitimately polls real SIF mailbox/flag registers waiting for
+the IOP (Round 17's disassembly-confirmed finding). The IOP, after
+Round 18's boot-info fix, cleanly reaches what disassembly confirms is
+a real BIOS panic/halt loop - almost certainly because a real IOP
+kernel SYSCALL dispatch table has never been implemented.
 
-**That new IOP halt has now been investigated AND fixed** (see
-docs/STATUS.md's "Investigating the new IOP halt" and "Resolved:
-InstallExceptionHandlers" sections for the full trail). It was never
-a missing-opcode gap (`funct 0x3F` isn't a real R3000A instruction).
-The real cause: `C(07h)` (`InstallExceptionHandlers`, per the public
-psx-spx community reference, https://psx-spx.consoledev.net/kernelbios/
-- now used as a citable source, distinct from disassembling the
-copyrighted BIOS binary) is a real BIOS function whose job is to write
-a well-known 16-byte trampoline into RAM at the hardware exception
-vector (address 0x80) - this project's generic HLE stub was silently
-no-op'ing that call instead. Fixed in `source/hw/iop_hle_bios.c`: this
-one specific function number now locates the real 16-byte template
-inside the actual loaded BIOS ROM (a distinctive byte signature - only
-the jump-target immediate varies by revision, found via scan rather
-than hardcoded) and installs it for real; every other function number
-is unaffected. Unit tested (`tests/test_iop_hle_exception_install.c`,
-9/9 checks).
+**Next concrete tasks, roughly in dependency order:**
 
-**Result**: dramatic further progress on the IOP - it no longer halts
-at all, re-tested out to 100,000,000 instructions, still running, same
-27 real HLE calls as before. The EE's picture needed a correction,
-though: it was initially reported as reaching 53,592,141 instructions
-before an expected COP2/LQ-SQ-shaped halt - but implementing LQ/SQ
-(now done, see section 1) didn't move the halt point AT ALL, which
-led to properly investigating it (docs/STATUS.md's "LQ/SQ implemented"
-section has the full trace). The real finding: the EE only executes
-about 99,262 REAL instructions before a `JALR` sends it to an address
-beyond the emulated 32MB EE RAM; because unmapped memory safely reads
-as zero (a real NOP), the CPU doesn't crash or halt - it marches
-forward in a straight line for 53+ million steps until it happens to
-reach the hardware register window and finally decodes a live register
-value as an invalid opcode. So "53 million instructions" was never
-real boot progress; the actual, honest number is closer to 99,262.
-This is now the single most important EE investigation target - NOT
-yet solved, unlike the two IOP fixes above, but a second investigation
-round (see docs/STATUS.md's "EE JALR investigation, round 2") pinned
-the mechanism down at the byte/instruction level using a purpose-built
-tracing harness (instruction ring buffer + full RAM shadow-diff): the
-`$s3=*(0x100)`, `$s6=*($s3+0)`, `$s1=*($s6+8)`, `JALR $ra,$s1` chain is
-confirmed exact via the real decoded instructions; `RAM[0x100]` is
-confirmed written by NO instruction across the whole ~99,261-instruction
-run; and - the new finding - `RAM[0]`/`RAM[8]` are NOT simply
-zero-by-default, they resolve through a real exception-vector-trampoline
-scratch buffer this same boot code builds (at ~instruction 84,143,
-mirroring the IOP's own InstallExceptionHandlers convention
-independently on the EE side), actually jumps to and executes (confirmed:
-pc really does reach address 4 and execute the installed bytes as
-code), and then only partially cleans up (bytes 0-3 get re-zeroed
-afterward, bytes 4-11 are leftover). So the eventual bad JALR target
-(`0x03400008`) is the raw encoding of that leftover JR instruction
-word, misread as a function pointer through a chain that was meant to
-reach a different, legitimately-populated structure - not a
-"zero-decodes-as-NOP" coincidence like the earlier LQ/SQ finding.
-Root cause of why `RAM[0x100]` itself is never populated remains
-genuinely unresolved. A third round tested both hypotheses directly:
-DMA is ruled out (every DMA channel register is still completely zero
-at the point of the fatal JALR - nothing has been kicked), and the
-"missed guard" idea is ruled out for the immediate window (the ~90
-instructions between the trampoline landing and the fatal JALR contain
-zero branch/jump-and-link opcodes - pure straight-line code, nothing to
-misjudge). The most plausible remaining explanation is a real
-hardware pre-boot RAM-population step (before the first CPU
-instruction even runs) that this project's boot model has no
-equivalent of - but there is no citable public reference for this,
-unlike psx-spx/ps2tek elsewhere in this project, so no fix is being
-applied rather than fabricate BIOS-internal behavior. See
-docs/STATUS.md's "round 3" section for the full reasoning and the two
-honest paths forward (a real COP0 TLB/exception system as its own
-feature, or accepting this as a documented limitation for now). A
-fourth round used the real BIOS dump itself as ground truth (the user's
-own legal dump - disassembling it is not fabrication): this killed the
-EE-SYSCALL-exception hypothesis outright (SYSCALL fires zero times in
-150K instructions), confirmed the interpreter never actually halts
-after the bad JALR (it wanders through zeroed memory for 3M+ more
-instructions, `RAM[0x100]` staying zero throughout), and chased down
-what looked like a strong lead - an apparent copy loop whose `LW`/`SW`
-instructions read back as zero - only to resolve it as an ordinary,
-expected heap-allocator initialization pattern (a real BIOS routine at
-`pc=0xBFC4D30C` zeroing one word per 16 bytes across low RAM, ordinary
-free-list-header clearing, not a bug). See docs/STATUS.md's "round 4"
-section for the full trace.
+1. **Real IOP kernel SYSCALL dispatch table** (section 2, new bullet
+   this round) - the immediate next wall. This is a different, larger
+   mechanism than the existing A0/B0/C0 jump-table HLE
+   (`iop_hle_bios.c`): real IOP kernel calls go through the actual
+   `SYSCALL` instruction with a request number, and a real kernel would
+   dispatch ThreadMan/heap/semaphore/etc. calls from a real table. No
+   verified reference for this table's exact layout has been found yet
+   in this project - this is genuinely the next research task, not just
+   an implementation task.
 
-**Round 5 found and fixed the actual root cause.** The user connected a
-real, working PCSX2 instance to live-trace their own BIOS dump and
-captured what this project never had: ground truth for what real
-hardware does. `RAM[0x100]` really does hold a nonzero, valid vector
-(`0x08004469`) on real hardware, written by a real ROM-resident
-vector-install routine at `pc=0xBFC00C54-0xBFC00CB4` - which this
-project's interpreter never reaches at all. The reason: this project's
-`ee_core_init()` never set COP0 register 15 (PRId), leaving it at 0.
-The real BIOS's instruction #0 is `MFC0 $k0,$15`, and instruction #3 is
-a branch on a CPU-revision check (`SLTI $at,$k0,89`/`BNE`) that sends
-boot down one of two completely different paths depending on this
-register. With PRId=0 this project took the wrong path from the third
-instruction of the entire boot sequence onward and never rejoined the
-real vector-install code. **Fixed**: `cop0[15] = 0x00002e20`, ported
-directly from PCSX2's own `R5900.cpp` (not guessed - the same constant
-real PCSX2 uses). Verified as a real fix, not another false-progress
-trap: a ROM-coverage re-trace confirms the EE now takes the correct
-branch and runs through code it never reached before. The EE now halts
-cleanly, honestly, and much later - at `pc=0xBFC0086C`, on `TLBWI`
-(a real COP0 TLB instruction this project has always documented as
-unimplemented) - not on the old JALR-to-out-of-range bug, which no
-longer occurs at all with this fix in place. See docs/STATUS.md's
-"round 5" section for the full trace, including the live PCSX2 data
-that made finding this possible.
+2. **CDVD (disc) stub** (section 7) - even a diskless BIOS-only boot
+   polls CDVD status registers; nothing at all is modeled for this yet.
+   Likely needed before the EE's own boot path can proceed much further,
+   independent of the IOP-side work above.
 
-**Update (round 6): the COP0 TLB is now implemented** -
-`TLBR`/`TLBWI`/`TLBWR`/`TLBP` plus real KUSEG address translation via
-a 48-entry `tlb[]`, ported from PCSX2's own `COP0.cpp`/`R5900.h`
-(`tests/test_ee_cop0_tlb.c`, 9/9 checks). Continuing the same trace
-past this fix also turned up and fixed three more real gaps: the
-kseg0 ROM mirror (`0x9FC00000+`) wasn't recognized as ROM; the MIPS
-"Branch Likely" family (`BEQL`/`BNEL`/`BLEZL`/`BGTZL`/`BLTZL`/`BGEZL`/
-`BLTZALL`/`BGEZALL`) was entirely missing; and `LWC1`/`SWC1` were
-entirely missing. See docs/STATUS.md's "round 6" section for the full
-trace and a note on a pre-existing test (`test_ee_unaligned.c`) whose
-own premise (an unmapped raw KUSEG address) had to be corrected once
-KUSEG started requiring a real TLB entry, same as real hardware.
+3. **COP2 (VU0 macro mode) wiring** (section 5) - VU0's vector datapath
+   and microcode interpreter both exist (Round 13/14), but VU0 running
+   as a COP2 coprocessor attached to the EE's own instruction stream
+   (QMFC2/QMTC2/CFC2/CTC2 and macro-mode vector ops issued directly by
+   EE code, as opposed to VU1's separate microprogram execution) is not
+   wired up. Real BIOS boot code very likely uses VU0 macro mode for
+   the splash screen's transform/lighting math.
 
-With all four fixes in place, real-BIOS boot progresses further but
-still diverges - at instruction #158-159, into a genuine **TLB miss**:
-the BIOS sets up `$sp = 0x70003eb0`, which falls just outside the one
-TLB entry (`tlb[0]`) the boot path installs before that point. This is
-not a translation bug (confirmed via the passing test suite) - it's an
-honestly-reached wall pointing at the next real blocker: this project
-has no MIPS exception delivery at all (no Cause/EPC/Status handling,
-no vectoring to the BIOS's own exception vectors), which is
-presumably what real hardware relies on here to install the missing
-TLB entry on demand (a TLB Refill exception).
+4. **VIF UNPACK** (section 5/4) - needed to get real vertex/texture data
+   from EE RAM into VU memory at all; still needs a verified format
+   reference (flagged, not attempted, in multiple prior rounds).
 
-**Update (round 7): real exception delivery is now implemented** -
-`ee_raise_exception()`/`ee_raise_tlb_exception()`, ported from PCSX2's
-`cpuException()`/`cpuTlbMiss()` in `R5900.cpp`: Cause/EPC/Status.EXL
-updates, Status.BEV-dependent vectoring (ROM vs. RAM base), correct
-Cause.BD/EPC bookkeeping for faults inside a branch-delay slot (which
-needed real delay-slot tracking added too - see docs/STATUS.md's
-"round 7"), and a nested-exception path matching real hardware's rule
-of freezing EPC and forcing the general vector. Tested in
-`tests/test_ee_exceptions.c` (16 checks) plus an updated
-`tests/test_ee_cop0_tlb.c` KUSEG-miss case (rewritten to check the real
-exception fires correctly, replacing its old "reads as 0" assumption).
+5. **GS coverage breadth** (section 6) - primitives (flat/Gouraud
+   triangles, textured sprites, Z-test) exist, but this is still a
+   sliver of real GS - real PCSX2's own GS code is ~114,500 lines. Revisit
+   once real EE/IOP code is actually driving the pipeline (no urgency
+   before then - there's nothing to render yet).
 
-Verified as real, dramatic progress against the actual SCPH-10000
-BIOS: a 20-million-instruction run now executes 97.62% real
-(non-zero-decoded) instructions, compared to 0.0008% (151 out of 20
-million) before this fix - and the code being executed in the range
-the trace spends most of its time in was confirmed by disassembly to
-be genuine MIPS exception-handler prologue (a full GPR context save
-followed by saving EPC/Cause), not zero-decoded filler.
+6. Lower priority, deferred: the remaining ~23 EE MMI opcodes (section
+   1), Pad/memory card (section 7).
 
-**New wall**: exactly two exceptions fire in a 50-million-instruction
-run (the original TLB miss, then an immediate nested fault when the
-handler's own register-save routine touches a different unmapped
-KUSEG page) - after that, Status.EXL never clears (no ERET) and the EE
-just keeps running real code in that same handler-prologue region
-without resolving, for tens of millions of instructions. This looks
-architecturally like a missing "wired" TLB entry situation (real MIPS
-kernels reserve a few TLB entries, via `COP0.Wired`, specifically so
-kernel/handler code and its own scratch memory can never TLB-miss while
-already servicing a miss) - this project doesn't implement `Wired` at
-all, and/or the real boot path may install more `TLBWI` entries by this
-point than this project's trace has executed so far.
-
-**Update (round 8): both root causes found and fixed via a second live
-PCSX2 trace** (same PCSX2-MCP bridge as round 5). The "wired TLB entry"
-guess above was superseded by a more precise finding: the faulting
-address (`$sp=0x70003FC0`) falls inside the R5900's real Scratchpad RAM
-(SPR) - a fixed 16KB window (`0x70000000-0x70003FFF`) that hardware
-bypasses the TLB for *entirely*, confirmed both by the live trace and
-PCSX2's own source (`pcsx2/Memory.cpp`'s "scratch pad" comment,
-`pcsx2/MemoryTypes.h`'s 16KB `Ps2MemSize::Scratch`, `pcsx2/COP0.cpp`'s
-`isSPR()`-gated direct-buffer mapping). Fixed by intercepting this fixed
-range in `ee_mem_ptr()` before any TLB lookup, routing to a dedicated
-`scratch[]` buffer. A second wall immediately followed once that loop
-resolved: COP0 Count never advanced (see the checkbox above) - fixed by
-incrementing it once per instruction.
-
-With both fixes, an 800-million-instruction run against the real
-SCPH-10000 BIOS raises zero exceptions (down from 2-then-stuck-forever)
-and reaches a genuinely new region: `pc=0xBFC0092C`, a real `j $`
-(`J 0xBFC00928`) self-loop, immediately preceded by a `Compare=1` timer
-setup a few instructions earlier. This is a real, intentional
-"wait for interrupt" idle pattern - real hardware escapes it via an
-actual interrupt (very plausibly the Timer/Compare-match interrupt this
-setup is meant to trigger), which this project's EE core has never
-raised at all.
-
-**Update (round 9): EE Timer (Count==Compare) interrupt delivery
-implemented and tested** - a real ExcCode 0/Int exception through the
-same `ee_raise_exception()` path round 7 built, gated exactly like
-PCSX2's own `cpuTestTIMRInts()`/`_cpuTestTIMR()`
-(Status.IE/EIE/IM7/EXL/ERL). Cause.IP7 latches via Count>=Compare, not
-exact equality - a live real-BIOS instruction sequence
-(`MTC0 Count,0` then, two instructions later, `MTC0 Compare,1`) proved
-exact equality would silently miss the match, since Count already
-overshoots past 1 before Compare is even written. 32 host-native
-checks pass, including that exact overshoot scenario reproduced
-verbatim. Re-verifying against the real SCPH-10000 BIOS found a more
-precise new wall, though: Cause.IP7 now latches correctly (confirmed
-directly), but `Status.IE` is never set anywhere in the boot path this
-project's interpreter takes before reaching the idle loop - a targeted
-trace confirmed zero `EI` instructions execute in the first 5 million
-steps. So a maskable Count/Compare interrupt isn't (at least not
-via this code path) what actually escapes this loop; something else -
-a wrong earlier branch, a different interrupt source, or an
-unexplored code path through the surrounding `JAL`/`JALR` calls - is
-the real next question. See docs/STATUS.md's "round 9" section for
-the full trace, evidence, and open hypotheses.
-
-The
-IOP has no known halt point left
-to chase at all right now; COP2/VU0 remains unstarted and unproven
-against real BIOS code, since the EE hasn't legitimately run far
-enough to demonstrate needing it yet.
-
-1. IOP CPU core skeleton (this is "just" another MIPS interpreter,
-   well-scoped, and unblocks everything downstream of SIF) - DONE
-2. Minimal SIF + DMA register stubs (enough for EE/IOP handshake, not
-   full chain-mode DMA) - DONE: both the EE-side special-cased
-   registers and the IOP-side flat mirror exist and are wired into
-   their respective cores.
-3. Interleaved EE/IOP execution + a real, working mailbox handshake -
-   DONE (`source/core/system.c`, `tests/test_system_handshake.c`) -
-   this was the actual missing piece that made SIF register stubs
-   meaningful; see section 1 for full detail. NOT yet a real protocol
-   - it's proven with a hand-written toy handshake, not the actual
-   BIOS/PCSX2 SIF DMA protocol (`Sif0.cpp`/`Sif1.cpp`).
-4. IOP HLE stubs for the specific modules the BIOS boot path calls -
-   PARTIAL, further along again: the IOP has register stubs for its
-   interrupt controller, DMA controller, and timers (section 2), a
-   BIOS syscall trap for the classic A0/B0/C0 call convention
-   (`source/hw/iop_hle_bios.c`) that now implements ~17 real A0-table
-   function numbers for real (ABS/LABS, STRCAT/STRNCAT/STRCMP/STRNCMP/
-   STRCPY/STRNCPY/STRLEN, BCOPY/BZERO, MEMCPY/MEMSET/MEMMOVE, INITHEAP,
-   FLUSHCACHE, EXIT/_EXIT) against the psx-spx public reference (the
-   same reference already used for InstallExceptionHandlers), plus a
-   module registry scaffold (`source/hw/iop_hle_modules.c`) - see
-   section 2 for exact scope and the important caveat that none of
-   this is a port of PCSX2's actual, much more involved `IopBios.cpp`
-   (which depends on a real, working BIOS ROM this project doesn't
-   have and can't fake convincingly). The verified-reference gap that
-   used to block ALL per-function behavior is now closed for the pure-
-   computation subset of the A0 table; what's still missing is
-   anything touching files/devices, heap allocation, threads/events,
-   CD-ROM/memory-card functions, or - the actual round-14 wall - real
-   IOP module/IRX loading (a genuine `JALR $ra,$s1` into an address
-   only a real module loader would populate). A live PCSX2-MCP trace
-   against the user's real SCPH-10000 BIOS this round confirmed the
-   real, full list of 16 IOP modules a working boot loads
-   (`System_Memory_Manager`, `Module_Manager`, `Exception_Manager`,
-   `Interrupt_Manager`, `ssbus_service`, `dmacman`, `Timer_Manager`,
-   `System_C_lib`, `Heap_lib`, `Multi_Thread_Manager`,
-   `Vblank_service`, `IO/File_Manager`, `Moldule_File_loader`,
-   `ROM_file_driver`, `Stdio`, `IOP_SIF_manager`) - a concrete
-   reference point for whenever this project attempts real module
-   loading, still not attempted itself this round (needs a verified
-   IRX/SIF-RPC protocol reference this project doesn't have). This
-   remains the crux of why "just get the BIOS splash to render"
-   stays hard even with all the hardware register plumbing in place.
-5. GIF/VIF passthrough - DONE for PACKED-mode GIF + SPRITE
-   rasterization (see section 4 above); VIF0/VIF1 itself is still
-   open
-6. GS register block + local memory - DONE (section 6)
-7. Minimal rasterizer for whatever primitive types the splash actually
-   uses, output to Wii GX framebuffer - PARTIAL: SPRITE and now
-   flat-shaded TRIANGLE/TRIANGLE_STRIP/TRIANGLE_FAN work via a
-   direct-to-XFB pixel blit (not real GX; edge-function scanline fill,
-   single color per triangle, no Gouraud/texturing/Z-test - see
-   `include/core/hw/gif.h`'s scope comment), textures still open, and
-   this whole path is still not driven by real BIOS/EE code since IOP
-   HLE isn't wired up yet
-
-Remaining near-term candidates, roughly in order of how directly they
-unblock "the BIOS actually draws something": IOP hardware register
-stubs (INTC/DMA/timers) and/or IOP HLE stubs for the specific
-BIOS-boot-path modules (both are needed before real BIOS code - as
-opposed to hand-written test programs - can get through a real SIF
-handshake). (Gouraud shading, a clock-rate-aware 8:1 EE:IOP scheduler,
-wiring a real GIF packet through `dma_channel_kick` at boot, a first
-VIF0/VIF1 passthrough increment, and texturing for the triangle
-rasterizer, VU0/VU1 micro-instruction memory + microcode interpreter
-control flow, and perspective-correct/SPRITE texturing are all DONE
-now - see above.) Beyond that: VIF's UNPACK format (needs a verified
-format reference) and a real per-opcode VU instruction table (section
-5's remaining honest gap) are the natural next VIF/VU-side steps once
-this project returns to those threads.
-
-Step 7 (real GX-based rendering with textures) is where this stops
-being "a lot of careful work" and becomes genuinely research-scale for
-a solo project - see the GS line count above.
+**Honest distance-to-splash-screen assessment (Round 18)**: this
+project has now spent many rounds (see STATUS.md in full) each finding
+and fixing one real, concrete, well-evidenced bug or gap - and each fix
+has reliably uncovered a NEW wall a bit further in, never yet reaching
+a natural end-of-boot condition. That pattern is likely to continue:
+item 1 above (a full kernel syscall table) is itself a substantial,
+multi-round undertaking on the scale of the module loader work (Round
+15), and there is no guarantee it's the LAST such wall before the
+splash screen - CDVD and COP2/VIF work (items 2-4) are independent
+prerequisites likely to surface their own walls once reached. A
+grounded estimate: this is more "several more focused rounds of
+real investigation-and-fix work, each on the scale of Round 15/18"
+than "one or two more fixes." Nobody should read the current EE/IOP
+steady states as "almost there" - they're real, verified progress, but
+a real PS2 BIOS boot sequence is an extremely long, precisely
+sequenced process, and this project is still resolving its early
+kernel-initialization phase, well before the point real hardware would
+start issuing GS draw calls for the splash logo itself.

@@ -1021,6 +1021,130 @@ if new code re-introduces the naive version:
   through the existing `ee_mem_read`/`ee_mem_write` chokepoint (which
   already has this guard) rather than reimplementing raw pointer access.
 
+## Session-resume checklist (for a fresh Claude/Cowork sandbox)
+
+Each Cowork session runs in an isolated sandbox with nothing persisted
+from prior sessions except: this GitHub repo (clone fresh each time),
+and whatever files the user has separately uploaded (the devkitPro
+toolchain archives and the user's own real BIOS dump - see below).
+Everything below is the exact, tested recipe this project has used
+repeatedly across many "fresh sandbox" session starts.
+
+**1. Clone the repo:**
+```sh
+git clone https://github.com/Mafiacoding/PCSX2-Wii.git /tmp/pcsx2-wii-git
+cd /tmp/pcsx2-wii-git
+```
+Do not `rm -rf` and recreate this directory casually if it already has
+a `.git` - that destroys local history (harmless, since GitHub has it,
+but wastes a round-trip). Always work out of a real `git clone`, never
+just a plain file copy of the outputs mirror (which has no `.git` at
+all - it's a deliberately git-free rsync target, see the workflow
+section below).
+
+**2. devkitPPC/libogc toolchain**: the user has previously uploaded
+`devkitPPC-r32-linux-debian-stretch.tar.gz` and (if the vendored
+`elf2dol` fallback is needed) `MinGW-powerpc-eabi-13.1.0.zip` and
+`libogc-1.8.18.tar.bz2` - check the session's uploads directory first;
+if they're there, extract them (paths below are what prior sessions
+used, adjust as needed):
+```sh
+mkdir -p /tmp/dkp_root
+tar xf <uploaded devkitPPC tarball> -C /tmp/dkp_root --strip-components=<N>  # inspect the tarball's top-level dir name first
+# libogc similarly extracted under /tmp/dkp_root/libogc
+export DEVKITPRO=/tmp/dkp_root
+export DEVKITPPC=/tmp/dkp_root/devkitPPC
+export PATH=$DEVKITPPC/bin:$PATH
+```
+If the user hasn't uploaded these in the current session, ask them to
+re-upload (they're large, ~200-230MB each, not something to fetch from
+the open internet given licensing).
+
+**3. The recurring `libmpfr.so.4` gap**: devkitPPC's `cc1` often fails
+with `error while loading shared libraries: libmpfr.so.4`. Fix (once
+per session): extract a `libmpfr.so.4`-named library into a scratch dir
+and export `LD_LIBRARY_PATH` to include it before every `make`:
+```sh
+export LD_LIBRARY_PATH=/tmp/mpfr_extract/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+```
+(A Debian `libmpfr4` package works; `apt-get download libmpfr4` +
+`dpkg-deb -x` into `/tmp/mpfr_extract` needs no root and has worked
+repeatedly in this sandbox.)
+
+**4. Build**: `make TARGET=boot` from the repo root produces `boot.dol`
+directly (plain `make` names the output after the containing
+directory instead, e.g. `pcsx2-wii-git.dol` if the clone dir is named
+that - either works, `TARGET=boot` is just more predictable across
+differently-named clone directories).
+
+**5. Regression tests**: a maintained list of every host-native test's
+exact `gcc` build command lives in `tests/README.md`. A prior session
+also built a flat, ready-to-run command list at one point
+(`/tmp/reg_cmds_core2.txt` in that session's sandbox - NOT part of the
+repo, won't exist in a fresh sandbox; regenerate from `tests/README.md`
+if wanted, or just build+run each `tests/test_*.c` per its documented
+command). As of Round 18 there are 93 passing host-native test
+binaries, 0 failures.
+
+**6. GitHub push**: this sandbox has no stored git credentials.
+Ask the user for a fresh Personal Access Token each time a push is
+needed (do not ask them to paste it more than once per session's
+remaining lifetime - reuse it from the conversation for subsequent
+pushes in the SAME session). Use it only transiently:
+```sh
+git remote set-url origin "https://<PAT>@github.com/Mafiacoding/PCSX2-Wii.git"
+git push origin main
+git remote set-url origin "https://github.com/Mafiacoding/PCSX2-Wii.git"   # strip it back out immediately
+```
+Never write the PAT to any file on disk (including scratch `/tmp`
+files) - keep it in-memory/in-conversation only, per this project's
+standing security rule.
+
+**7. The user's real BIOS (SCPH-10000)**: for any diagnostic work
+against real BIOS behavior (as opposed to synthetic test fixtures),
+the user's own real, legally-owned BIOS dump is available in the
+session's uploads directory (as `scph10000.bin` and/or
+`scph10000.zip`, ~4MB, `rom_ver=0100JC20000117`). **Absolute, standing
+rule, unchanged across every round**: this file (and any bytes derived
+from it) must NEVER be committed to git, NEVER pushed to GitHub, and
+NEVER copied into the outputs/rsync mirror. Use it only via `/tmp`-only
+scratch diagnostic programs (see the many `/tmp/diagN.c` throwaway
+tools referenced in docs/STATUS.md's Round 15-18 sections for the
+established pattern) - copy it to a `/tmp` path, never into the repo
+clone directory.
+
+**8. Outputs/rsync mirror**: the user-visible deliverable copy lives
+in the session's `outputs` folder (mounted, persists for the user
+after the session ends - NOT the same as the git clone). Sync the repo
+clone into it with (verified, working command from Round 15 onward):
+```sh
+rsync -a --delete --exclude '.git' --exclude 'test_*' \
+      --include 'tests/test_*.c' --exclude '/build/' \
+      /tmp/pcsx2-wii-git/ "$OUT/pcsx2-wii/"
+# rsync's include/exclude ORDER means the 3 test_*.c source files
+# still get excluded by the earlier --exclude 'test_*' rule (basename
+# match, first-match-wins) - work around it by re-copying them directly:
+for f in tests/test_iop_elf.c tests/test_iop_spu2.c tests/test_vu_micro.c; do
+  cp "/tmp/pcsx2-wii-git/$f" "$OUT/pcsx2-wii/$f"
+done
+```
+Files already written to the outputs folder cannot be deleted/renamed
+by Claude - stray old `.dol`/`.elf` files with mismatched names
+sitting there from earlier rounds are harmless and expected; verify
+with `diff -rq --exclude='.git' --exclude='build' --exclude='data'`
+that nothing else differs, and confirm `find "$OUT" -iname '*.bin'`
+turns up nothing (the BIOS-never-shared rule, self-checked every
+round).
+
+**9. Where to look first when resuming**: read this file's "Current
+frontier" section above (kept as a running per-round log) and
+docs/ROADMAP.md's "Suggested near-term order" section (kept short and
+current, not a history log - docs/STATUS.md has the full history) for
+the actual next task. As of Round 18, that's a real IOP kernel SYSCALL
+dispatch table - see ROADMAP.md section 2's new bullet and
+docs/STATUS.md's "Round 17"/"Round 18" sections for the full trace
+that motivates it.
+
 ## Reference material
 
 `README.md` names the exact upstream PCSX2 commit/branch used as the

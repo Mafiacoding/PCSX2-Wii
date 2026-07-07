@@ -105,6 +105,9 @@
  * against a live fetch of PCSX2's GS/GSRegs.h GIF_A_D_REG enum. */
 #define GS_REG_TEST_1     0x47
 #define GS_REG_ZBUF_1     0x4E
+/* ALPHA_1 (Round 23: alpha blending) - cross-checked against a live
+ * research pass over PCSX2's GS/GSRegs.h GIF_A_D_REG enum. */
+#define GS_REG_ALPHA_1    0x42
 
 /* POINT/LINE/LINE_STRIP (task: "GS coverage breadth", item 5) -
  * cross-checked against a live fetch of PCSX2's GS/GSRegs.h `enum
@@ -132,14 +135,27 @@
  * PCSX2's own GS/GSRegs.h GIFRegPRIM bitfield (PRIM:3,IIP:1,TME:1,
  * FGE:1,ABE:1,AA1:1,FST:1,... - FST is the 7th field, bit offset 8). */
 #define PRIM_FST_MASK 0x100u
+/* PRIM bit 6 (ABE) - real GIFRegPRIM bitfield: PRIM:3,IIP:1,TME:1,
+ * FGE:1,ABE:1,AA1:1,FST:1,CTXT:1,FIX:1 (cross-checked against
+ * PCSX2's GS/GSRegs.h). Gates real alpha blending (Round 23, see
+ * ALPHA_1 below) - matches this file's existing bit-position-
+ * comment style for IIP/TME/FST above. */
+#define PRIM_ABE_MASK 0x40u
 
-/* GIFRegTEST bitfield (task #89) - cross-checked against PCSX2's
- * GS/GSRegs.h GIFRegTEST: ATE:1,ATST:3,AREF:8,AFAIL:2,DATE:1,DATM:1,
- * ZTE:1,ZTST:2 (all in word0; word1 unused). Only ZTE (bit 16) and
- * ZTST (bits 17-18) are modeled - alpha test (ATE/ATST/AREF/AFAIL)
- * and the destination-alpha bits (DATE/DATM) are not implemented
- * (no alpha blending exists in this project yet - see gif.h's
- * top-of-file scope comment). */
+/* GIFRegTEST bitfield (task #89, extended Round 23) - cross-checked
+ * against PCSX2's GS/GSRegs.h GIFRegTEST: ATE:1,ATST:3,AREF:8,
+ * AFAIL:2,DATE:1,DATM:1,ZTE:1,ZTST:2 (all in word0; word1 unused).
+ * ATE/ATST/AREF/AFAIL (real alpha test) are now modeled (Round 23) -
+ * see gs_finish_pixel() in gif.c. DATE/DATM (destination-alpha test,
+ * a real but distinct/rarer GS feature used for certain stencil-like
+ * tricks) remain unmodeled - a deliberate, separate, still-open gap. */
+#define TEST_ATE_MASK    0x1u
+#define TEST_ATST_SHIFT  1u
+#define TEST_ATST_MASK   0x7u
+#define TEST_AREF_SHIFT  4u
+#define TEST_AREF_MASK   0xFFu
+#define TEST_AFAIL_SHIFT 12u
+#define TEST_AFAIL_MASK  0x3u
 #define TEST_ZTE_MASK   0x10000u
 #define TEST_ZTST_SHIFT 17u
 #define TEST_ZTST_MASK  0x3u
@@ -153,6 +169,62 @@
 #define GS_ZTST_ALWAYS  1u
 #define GS_ZTST_GEQUAL  2u
 #define GS_ZTST_GREATER 3u
+
+/* GS_ATST enum (Round 23) - cross-checked against PCSX2's GS/GSRegs.h
+ * GS_ATST: real, literal per-fragment alpha-value compare modes
+ * against the 8-bit AREF reference value. */
+#define GS_ATST_NEVER    0u
+#define GS_ATST_ALWAYS   1u
+#define GS_ATST_LESS     2u
+#define GS_ATST_LEQUAL   3u
+#define GS_ATST_EQUAL    4u
+#define GS_ATST_GEQUAL   5u
+#define GS_ATST_GREATER  6u
+#define GS_ATST_NOTEQUAL 7u
+
+/* GS_AFAIL enum (Round 23) - cross-checked against PCSX2's GS/
+ * GSRegs.h GS_AFAIL: what happens to a fragment that FAILS the
+ * alpha test above. KEEP discards the fragment entirely (no color,
+ * no Z write); FB_ONLY still writes color but suppresses the Z
+ * write; ZB_ONLY still writes Z but suppresses the color write;
+ * RGB_ONLY writes RGB but preserves the framebuffer's OLD alpha byte
+ * (real hardware detail: on a genuine 32-bit-alpha target, which is
+ * the only format this project's simplified gs_mem models anyway -
+ * see gs_mem.h - so the real "downgrade to FB_ONLY for non-32bit
+ * formats" special case PCSX2 documents never applies here). */
+#define GS_AFAIL_KEEP     0u
+#define GS_AFAIL_FB_ONLY  1u
+#define GS_AFAIL_ZB_ONLY  2u
+#define GS_AFAIL_RGB_ONLY 3u
+
+/* GIFRegALPHA bitfield (Round 23) - cross-checked against PCSX2's
+ * GS/GSRegs.h GIFRegALPHA: A:2,B:2,C:2,D:2 (word0 low byte), FIX:8
+ * (word0's top byte, bits 32-39 of the 64-bit register - i.e. byte 4
+ * of the 8-byte register). A/B/D select a COLOR input for the blend
+ * equation (0=Cs source/fragment color, 1=Cd destination/framebuffer
+ * color, 2=black/zero); C selects the blend COEFFICIENT (0=As source
+ * alpha, 1=Ad destination alpha, 2=Af, the fixed FIX value). Real
+ * blend equation (see gs_finish_pixel() in gif.c): Color = ((A-B)*C)
+ * >>7 + D - a plain truncating shift, no rounding bias, cross-checked
+ * against PCSX2's GSDrawScanline.cpp AlphaBlend path. The written
+ * alpha channel is always the fragment's own source alpha (As) -
+ * blending only ever affects RGB on real hardware. */
+#define ALPHA_A_SHIFT 0u
+#define ALPHA_B_SHIFT 2u
+#define ALPHA_C_SHIFT 4u
+#define ALPHA_D_SHIFT 6u
+#define ALPHA_ABCD_MASK 0x3u
+/* FIX occupies bits 32-39 of the 64-bit register, i.e. the LOW byte
+ * of word1 (this project's "data_hi" 32-bit half in apply_ad_write) -
+ * extracted as `data_hi & ALPHA_FIX_MASK` directly, no shift needed
+ * (see apply_ad_write's GS_REG_ALPHA_1 case in gif.c). */
+#define ALPHA_FIX_MASK  0xFFu
+#define GS_ALPHA_CS 0u
+#define GS_ALPHA_CD 1u
+#define GS_ALPHA_ZERO 2u
+#define GS_ALPHA_AS 0u
+#define GS_ALPHA_AD 1u
+#define GS_ALPHA_AFIX 2u
 
 /* TEX0's TFX field (2 bits) - cross-checked against PCSX2's own
  * GS/GSRegs.h GS_TFX enum. HIGHLIGHT/HIGHLIGHT2 are simplified to
@@ -214,6 +286,22 @@ typedef struct {
     int zbuf_configured;
     int zte;
     int ztst;
+
+    /* Real alpha test (Round 23) - TEST_1's ATE/ATST/AREF/AFAIL
+     * fields, see TEST_ATE_MASK/etc and GS_ATST_xxx && GS_AFAIL_xxx constants above. */
+    int ate;
+    int atst;
+    uint32_t aref;
+    int afail;
+
+    /* Real alpha blending (Round 23) - ALPHA_1's A/B/C/D/FIX fields,
+     * see ALPHA_*_SHIFT/GS_ALPHA_* above. Gated at draw time by
+     * PRIM's own ABE bit (PRIM_ABE_MASK), matching real hardware
+     * (the ALPHA register's values are latched independently of
+     * whether blending is currently enabled - only PRIM.ABE decides
+     * whether they're actually used for a given draw). */
+    uint32_t alpha_a, alpha_b, alpha_c, alpha_d;
+    uint32_t alpha_fix;
 
     /* Current UV register value (real hardware's 12.4 fixed-point
      * texel coordinate "FST=1" mode - see gif.h's scope comment),
@@ -312,6 +400,7 @@ typedef struct {
     uint64_t points_drawn;  /* task: "GS coverage breadth" */
     uint64_t unsupported_prims_seen;
     uint64_t pixels_ztest_failed; /* task #89 - counts fragments rejected by the Z test, for test visibility */
+    uint64_t pixels_atest_failed; /* Round 23 - counts fragments rejected by the alpha test, for test visibility */
 } gif_state_t;
 
 gif_state_t *gif_get_state(void);

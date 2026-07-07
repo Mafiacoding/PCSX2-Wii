@@ -845,6 +845,24 @@ programmable GPU nor any of those APIs).
       draw that never configures a Z buffer behaves exactly as before
       this round. 20 new checks (`tests/test_z_buffer.c`), 52-file/
       0-failure regression, clean Wii rebuild.
+- [x] Alpha test + alpha blending (Round 23) - real `TEST_1` (`ATE`/
+      `ATST`/`AREF`/`AFAIL`) and `ALPHA_1` (`A`/`B`/`C`/`D`/`FIX`)
+      registers, cross-checked against PCSX2's GS/GSRegs.h and
+      GSDrawScanline.cpp via a dedicated research pass. All 8 `ATST`
+      compare modes and all 4 `AFAIL` outcomes (including `RGB_ONLY`'s
+      old-alpha-byte preservation) implemented; blending gated by
+      `PRIM`'s new `PRIM_ABE_MASK` bit, real truncating-divide blend
+      equation `((A-B)*C)>>7+D` (no rounding bias - a real, if less
+      strongly cited, hardware quirk), coefficients intentionally NOT
+      clamped to [0,1] (real "boosted" blend results), final color
+      clamped to [0,255] (COLCLAMP=1 default only). A new shared
+      `gs_finish_pixel()` helper centralizes this logic across all 4
+      rasterizers. 13 new checks (`tests/test_gs_alpha.c`), 57-file/
+      0-failure regression, clean Wii rebuild. See docs/STATUS.md's
+      "GS Round 23" section for full detail and citations. Still open:
+      COLCLAMP=0's wrap-instead-of-clamp mode, and DATE/DATM
+      (destination-alpha test, a separate mechanism from the alpha
+      test above) remain unmodeled.
 - [x] A first, minimal translation layer from GS memory to the Wii's
       display: `source/hw/gs_wii_output.c` converts a rectangular
       PSMCT32 region to the Wii's packed Y1CbY2Cr XFB format (RGB->YUV
@@ -942,14 +960,14 @@ already documented, rather than truly returning from the syscall.
    docs/STATUS.md's "Round 20" for the full detail.
 
 5. **GS coverage breadth** (section 6) - primitives (flat/Gouraud
-   triangles, textured sprites, Z-test, and - Round 21 - POINT/LINE/
-   LINE_STRIP) exist, but this is still a sliver of real GS - real
-   PCSX2's own GS code is ~114,500 lines. Still open: REGLIST/IMAGE
-   GIF transfer modes, alpha blending/test, CLUT/paletted textures,
-   real block-swizzled addressing, GS context 2, mipmaps, and more.
-   Revisit further once real EE/IOP code is actually driving the
-   pipeline (no urgency before then - there's nothing real to render
-   yet).
+   triangles, textured sprites, Z-test, POINT/LINE/LINE_STRIP - Round
+   21, and - Round 23 - alpha test/blending) exist, but this is still
+   a sliver of real GS - real PCSX2's own GS code is ~114,500 lines.
+   Still open: REGLIST/IMAGE GIF transfer modes, CLUT/paletted
+   textures, real block-swizzled addressing, GS context 2, mipmaps,
+   and more. Revisit further once real EE/IOP code is actually driving
+   the pipeline (no urgency before then - there's nothing real to
+   render yet).
 
 6. Lower priority, deferred: the remaining ~23 EE MMI opcodes (section
    1), Pad/memory card (section 7).

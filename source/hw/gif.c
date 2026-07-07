@@ -64,6 +64,139 @@ static inline float u32_to_float(uint32_t v)
     return f;
 }
 
+/* Round 23: real alpha test (TEST_1's ATE/ATST/AREF/AFAIL) and real
+ * alpha blending (ALPHA_1, gated by PRIM's ABE bit) - see gif.h's
+ * TEST_xxx, GS_ATST_xxx, GS_AFAIL_xxx, ALPHA_xxx, and GS_ALPHA_xxx field comments for
+ * the full citation trail (PCSX2's GS/GSRegs.h + GSDrawScanline.cpp,
+ * cross-checked via a dedicated research pass this round).
+ *
+ * Centralizes what was previously 4 near-identical inline "write
+ * color, maybe write Z" tail blocks - one per rasterizer (triangle/
+ * sprite/point/line) - into a single shared helper. This is a
+ * deliberate, modest deviation from this file's established pattern
+ * of duplicating the (much smaller) Z-test block identically in each
+ * rasterizer: alpha test + blending is substantially more logic, and
+ * the alpha unit's behavior is identical regardless of which
+ * primitive produced the fragment (real hardware doesn't have 4
+ * separate alpha units either) - keeping 4 independent copies in
+ * sync here would be a real, avoidable maintenance risk.
+ *
+ * `frag_color` is the fragment's fully shaded/textured color (what
+ * every rasterizer previously wrote directly via gs_mem_write_psmct32).
+ * `z_write_allowed` is the caller's existing zbuf_configured/zmsk
+ * gate (unchanged from before this round) - this function may
+ * additionally suppress it (AFAIL) but never re-enables a Z write the
+ * caller didn't already allow. */
+static void gs_finish_pixel(int32_t xx, int32_t yy, uint32_t frag_color, uint32_t frag_z, int z_write_allowed)
+{
+    uint32_t frag_r = rgba_channel(frag_color, 0);
+    uint32_t frag_g = rgba_channel(frag_color, 8);
+    uint32_t frag_b = rgba_channel(frag_color, 16);
+    uint32_t frag_a = rgba_channel(frag_color, 24);
+
+    int color_write = 1;
+    int z_write = z_write_allowed;
+    int alpha_test_failed = 0;
+
+    if (g_gif.ate) {
+        int fail;
+        switch (g_gif.atst) {
+        case GS_ATST_NEVER:    fail = 1; break;
+        case GS_ATST_ALWAYS:   fail = 0; break;
+        case GS_ATST_LESS:     fail = (frag_a >= g_gif.aref); break;
+        case GS_ATST_LEQUAL:   fail = (frag_a >  g_gif.aref); break;
+        case GS_ATST_EQUAL:    fail = (frag_a != g_gif.aref); break;
+        case GS_ATST_GEQUAL:   fail = (frag_a <  g_gif.aref); break;
+        case GS_ATST_GREATER:  fail = (frag_a <= g_gif.aref); break;
+        case GS_ATST_NOTEQUAL: fail = (frag_a == g_gif.aref); break;
+        default: fail = 0; break;
+        }
+        if (fail) {
+            alpha_test_failed = 1;
+            g_gif.pixels_atest_failed++;
+            switch (g_gif.afail) {
+            case GS_AFAIL_KEEP:     color_write = 0; z_write = 0; break;
+            case GS_AFAIL_FB_ONLY:  z_write = 0; break; /* color still writes, Z suppressed */
+            case GS_AFAIL_ZB_ONLY:  color_write = 0; break; /* Z still writes (if allowed), color suppressed */
+            case GS_AFAIL_RGB_ONLY: z_write = 0; break; /* RGB still writes, alpha preserved below, Z suppressed */
+            default: break;
+            }
+        }
+    }
+
+    if (!color_write && !z_write)
+        return;
+
+    if (color_write) {
+        uint32_t out_r = frag_r, out_g = frag_g, out_b = frag_b, out_a = frag_a;
+
+        if (g_gif.prim & PRIM_ABE_MASK) {
+            /* Real alpha blending - RGB channels only; the written
+             * alpha is always the fragment's own source alpha (As),
+             * matching real GS hardware (see gif.h's ALPHA field
+             * comment). */
+            uint32_t dst = gs_mem_read_psmct32(g_gif.fbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy);
+            uint32_t dst_r = rgba_channel(dst, 0),  dst_g = rgba_channel(dst, 8);
+            uint32_t dst_b = rgba_channel(dst, 16), dst_a = rgba_channel(dst, 24);
+
+            uint32_t coeff;
+            switch (g_gif.alpha_c) {
+            case GS_ALPHA_AS: coeff = frag_a; break;
+            case GS_ALPHA_AD: coeff = dst_a;  break;
+            default:          coeff = g_gif.alpha_fix; break; /* Af */
+            }
+
+            int32_t r_a = (g_gif.alpha_a == GS_ALPHA_CS) ? (int32_t)out_r : (g_gif.alpha_a == GS_ALPHA_CD) ? (int32_t)dst_r : 0;
+            int32_t r_b = (g_gif.alpha_b == GS_ALPHA_CS) ? (int32_t)out_r : (g_gif.alpha_b == GS_ALPHA_CD) ? (int32_t)dst_r : 0;
+            int32_t r_d = (g_gif.alpha_d == GS_ALPHA_CS) ? (int32_t)out_r : (g_gif.alpha_d == GS_ALPHA_CD) ? (int32_t)dst_r : 0;
+            int32_t g_a = (g_gif.alpha_a == GS_ALPHA_CS) ? (int32_t)out_g : (g_gif.alpha_a == GS_ALPHA_CD) ? (int32_t)dst_g : 0;
+            int32_t g_b = (g_gif.alpha_b == GS_ALPHA_CS) ? (int32_t)out_g : (g_gif.alpha_b == GS_ALPHA_CD) ? (int32_t)dst_g : 0;
+            int32_t g_d = (g_gif.alpha_d == GS_ALPHA_CS) ? (int32_t)out_g : (g_gif.alpha_d == GS_ALPHA_CD) ? (int32_t)dst_g : 0;
+            int32_t b_a = (g_gif.alpha_a == GS_ALPHA_CS) ? (int32_t)out_b : (g_gif.alpha_a == GS_ALPHA_CD) ? (int32_t)dst_b : 0;
+            int32_t b_b = (g_gif.alpha_b == GS_ALPHA_CS) ? (int32_t)out_b : (g_gif.alpha_b == GS_ALPHA_CD) ? (int32_t)dst_b : 0;
+            int32_t b_d = (g_gif.alpha_d == GS_ALPHA_CS) ? (int32_t)out_b : (g_gif.alpha_d == GS_ALPHA_CD) ? (int32_t)dst_b : 0;
+
+            /* Real GS blend equation: Color = ((A-B)*C)>>7 + D - a
+             * plain truncating shift, no rounding bias (cross-checked
+             * against PCSX2's GSDrawScanline.cpp AlphaBlend path).
+             * The coefficient is deliberately NOT clamped to [0,1] -
+             * real hardware allows results >1.0x ("boosted" colors)
+             * when coeff > 128, a genuine, documented hardware
+             * behavior some games rely on. The FINAL result IS
+             * clamped to [0,255] here (COLCLAMP=1, the default and
+             * overwhelmingly common real config) - COLCLAMP=0's real
+             * "wrap instead of clamp" alternative is a known,
+             * deliberately un-modeled gap, same honest-simplification
+             * pattern used elsewhere in this file. */
+            int32_t r = ((r_a - r_b) * (int32_t)coeff) / 128 + r_d;
+            int32_t g = ((g_a - g_b) * (int32_t)coeff) / 128 + g_d;
+            int32_t b = ((b_a - b_b) * (int32_t)coeff) / 128 + b_d;
+            out_r = (uint32_t)(r < 0 ? 0 : (r > 255 ? 255 : r));
+            out_g = (uint32_t)(g < 0 ? 0 : (g > 255 ? 255 : g));
+            out_b = (uint32_t)(b < 0 ? 0 : (b > 255 ? 255 : b));
+        }
+
+        if (alpha_test_failed && g_gif.afail == GS_AFAIL_RGB_ONLY) {
+            /* Real AFAIL=RGB_ONLY-on-fail: RGB channels still write,
+             * but the alpha channel keeps its OLD framebuffer value
+             * (exact real-hardware behavior for a genuine 32-bit-
+             * alpha target - this project's gs_mem is PSMCT32-only,
+             * so PCSX2's documented "downgrade to FB_ONLY for non-
+             * 32bit formats" special case never applies here). Only
+             * reached when the alpha test actually failed - a passing
+             * fragment always writes its own real alpha normally. */
+            uint32_t existing = gs_mem_read_psmct32(g_gif.fbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy);
+            out_a = rgba_channel(existing, 24);
+        }
+
+        gs_mem_write_psmct32(g_gif.fbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy, rgba_pack(out_r, out_g, out_b, out_a));
+    }
+
+    if (z_write) {
+        gs_mem_write_psmct32(g_gif.zbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy, frag_z);
+    }
+}
+
 static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t x2, int32_t y2,
                                 uint32_t c0, uint32_t c1, uint32_t c2,
                                 int32_t u0, int32_t v0, int32_t u1, int32_t v1, int32_t u2, int32_t v2,
@@ -241,14 +374,13 @@ static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, i
                         out = rgba_pack(r, g, b, a);
                     }
                 }
-                gs_mem_write_psmct32(g_gif.fbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy, out);
-                if (g_gif.zbuf_configured && !g_gif.zmsk) {
-                    /* ZMSK (real ZBUF register bit): 1 = Z writes
-                     * disabled for this draw, matching real
-                     * hardware exactly (color can still be written
-                     * while Z stays untouched). */
-                    gs_mem_write_psmct32(g_gif.zbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy, frag_z);
-                }
+                /* ZMSK (real ZBUF register bit): 1 = Z writes
+                 * disabled for this draw, matching real hardware
+                 * exactly (color can still be written while Z stays
+                 * untouched). Round 23: alpha test + blending now
+                 * happen inside gs_finish_pixel() - see its comment
+                 * above. */
+                gs_finish_pixel(xx, yy, out, frag_z, g_gif.zbuf_configured && !g_gif.zmsk);
             }
         }
     }
@@ -373,10 +505,7 @@ static void rasterize_sprite(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
                     out = rgba_pack(r, g, b, a);
                 }
             }
-            gs_mem_write_psmct32(g_gif.fbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy, out);
-            if (g_gif.zbuf_configured && !g_gif.zmsk) {
-                gs_mem_write_psmct32(g_gif.zbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy, frag_z);
-            }
+            gs_finish_pixel(xx, yy, out, frag_z, g_gif.zbuf_configured && !g_gif.zmsk);
         }
     }
     g_gif.sprites_drawn++;
@@ -408,9 +537,7 @@ static void rasterize_point(int32_t x, int32_t y, uint32_t rgba, uint32_t z)
         return;
     }
 
-    gs_mem_write_psmct32(g_gif.fbp, g_gif.fbw, (uint32_t)x, (uint32_t)y, rgba);
-    if (g_gif.zbuf_configured && !g_gif.zmsk)
-        gs_mem_write_psmct32(g_gif.zbp, g_gif.fbw, (uint32_t)x, (uint32_t)y, z);
+    gs_finish_pixel(x, y, rgba, z, g_gif.zbuf_configured && !g_gif.zmsk);
     g_gif.points_drawn++;
 }
 
@@ -493,9 +620,7 @@ static void rasterize_line(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
                     if (a > 255) a = 255;
                     out = rgba_pack(r, g, b, a);
                 }
-                gs_mem_write_psmct32(g_gif.fbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy, out);
-                if (g_gif.zbuf_configured && !g_gif.zmsk)
-                    gs_mem_write_psmct32(g_gif.zbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy, frag_z);
+                gs_finish_pixel(xx, yy, out, frag_z, g_gif.zbuf_configured && !g_gif.zmsk);
             }
         }
 
@@ -807,13 +932,33 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
     } break;
     case GS_REG_TEST_1: {
         /* GIFRegTEST bitfield cross-checked against PCSX2's own
-         * GS/GSRegs.h (see TEST_ZTE_MASK/TEST_ZTST_* in gif.h) -
-         * only ZTE (bit 16) and ZTST (bits 17-18) are modeled;
-         * alpha test (ATE/ATST/AREF/AFAIL) and DATE/DATM are not
-         * implemented (no alpha blending exists in this project -
-         * see gif.h's top-of-file scope comment). */
+         * GS/GSRegs.h (see TEST_ZTE_MASK, TEST_ZTST_xxx, TEST_ATE_MASK,
+         * etc in gif.h). Round 23 adds real ATE/ATST/AREF/AFAIL
+         * (alpha test) - see gs_finish_pixel() below. DATE/DATM
+         * (destination-alpha test) remain unmodeled, a separate,
+         * still-open gap. */
         g_gif.zte = (data_lo & TEST_ZTE_MASK) ? 1 : 0;
         g_gif.ztst = (int)((data_lo >> TEST_ZTST_SHIFT) & TEST_ZTST_MASK);
+        g_gif.ate = (data_lo & TEST_ATE_MASK) ? 1 : 0;
+        g_gif.atst = (int)((data_lo >> TEST_ATST_SHIFT) & TEST_ATST_MASK);
+        g_gif.aref = (data_lo >> TEST_AREF_SHIFT) & TEST_AREF_MASK;
+        g_gif.afail = (int)((data_lo >> TEST_AFAIL_SHIFT) & TEST_AFAIL_MASK);
+    } break;
+    case GS_REG_ALPHA_1: {
+        /* GIFRegALPHA bitfield (Round 23) - see ALPHA_*_SHIFT/
+         * GS_ALPHA_* in gif.h. A/B/C/D live in word0 (data_lo)'s low
+         * byte. FIX is bits 32-39 of the 64-bit register - i.e. the
+         * LOW byte of word1 (data_hi), since data_lo/data_hi split
+         * the 64-bit A+D value at the 32-bit word boundary the same
+         * way every other A+D register in this file already does
+         * (confirmed against this same function's GS_REG_ZBUF_1 case
+         * just above: ZBP comes from data_lo, ZMSK - a word1 field -
+         * comes from data_hi). */
+        g_gif.alpha_a = (data_lo >> ALPHA_A_SHIFT) & ALPHA_ABCD_MASK;
+        g_gif.alpha_b = (data_lo >> ALPHA_B_SHIFT) & ALPHA_ABCD_MASK;
+        g_gif.alpha_c = (data_lo >> ALPHA_C_SHIFT) & ALPHA_ABCD_MASK;
+        g_gif.alpha_d = (data_lo >> ALPHA_D_SHIFT) & ALPHA_ABCD_MASK;
+        g_gif.alpha_fix = data_hi & ALPHA_FIX_MASK;
     } break;
     default:
         break; /* unhandled register - ignored, not an error */

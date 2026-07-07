@@ -666,6 +666,34 @@ always ask for/verify the no-disc case explicitly).
   being synthesized). See docs/STATUS.md's "Round 22" section for the
   full trace.
 
+- **GS Round 23 (same session, continued)**: per the user's explicit
+  "go back to GS, implement the complete port" directive, implemented
+  the GS alpha unit - alpha test (`TEST_1`'s `ATE`/`ATST`/`AREF`/
+  `AFAIL`) and alpha blending (`ALPHA_1`'s `A`/`B`/`C`/`D`/`FIX`, gated
+  by a new `PRIM_ABE_MASK` bit), cross-checked against PCSX2's own
+  GS/GSRegs.h and GSDrawScanline.cpp via a dedicated research
+  subagent pass. All 8 `ATST` compare modes and all 4 `AFAIL` outcomes
+  implemented (including `RGB_ONLY`'s old-alpha-byte preservation);
+  the real blend equation `((A-B)*C)>>7+D` truncates rather than
+  rounds and does NOT clamp its coefficient to [0,1] (real hardware
+  allows "boosted" results) - only the final per-channel color is
+  clamped to [0,255]. A new shared `gs_finish_pixel()` helper
+  centralizes this logic across all 4 rasterizers (triangle/sprite/
+  point/line), a deliberate, documented deviation from this file's
+  established "duplicate the small block" pattern, justified by the
+  new logic's size and primitive-independence. Two bugs found and
+  fixed along the way: `FIX` was initially read from the wrong word
+  (`data_lo` instead of `data_hi`'s low byte - caught by cross-
+  checking against `ZBUF_1`'s own word0/word1 convention), and two
+  more instances of this project's recurring literal-`_*/`-in-a-
+  comment block-comment-termination bug (see below). 13 new checks in
+  `tests/test_gs_alpha.c` (56->57 test binaries), full regression
+  0-failure, clean Wii rebuild. See docs/STATUS.md's "GS Round 23"
+  section for the full trace and citations, and ROADMAP.md section 6
+  for the updated remaining-gaps list (CLUT/paletted textures, real
+  block-swizzled addressing, REGLIST/IMAGE transfer modes, GS context
+  2, mipmaps).
+
 ## The mandatory per-change workflow
 
 This project has a strict, consistently-applied ritual for every increment
@@ -1241,7 +1269,7 @@ rsync -a --delete --exclude '.git' --exclude 'test_*' \
 # rsync's include/exclude ORDER means the 3 test_*.c source files
 # still get excluded by the earlier --exclude 'test_*' rule (basename
 # match, first-match-wins) - work around it by re-copying them directly:
-for f in tests/test_iop_elf.c tests/test_iop_spu2.c tests/test_vu_micro.c tests/test_gif_line.c tests/test_iop_rfe.c tests/test_iop_hw_interrupt.c tests/test_iop_excb.c; do
+for f in tests/test_iop_elf.c tests/test_iop_spu2.c tests/test_vu_micro.c tests/test_gif_line.c tests/test_iop_rfe.c tests/test_iop_hw_interrupt.c tests/test_iop_excb.c tests/test_gs_alpha.c; do
   cp "/tmp/pcsx2-wii-git/$f" "$OUT/pcsx2-wii/$f"
 done
 ```
@@ -1280,6 +1308,17 @@ project has never had a reference for and correctly does not
 fabricate). The next session should feel free to resume GS/CDVD/COP2
 work, or pick a new priority with the user, now that this directive's
 scope is exhausted.
+
+**Update (GS Round 23, same session)**: the user then explicitly
+redirected back to GS with "go back to GS and implement the complete
+port." Round 23 implemented the GS alpha unit (TEST_1 alpha test +
+ALPHA_1 blending, gated by PRIM's ABE bit) against real, cited
+PCSX2-source semantics - see "Current frontier" above and
+docs/STATUS.md's "GS Round 23" section. Per ROADMAP.md section 6, the
+remaining open GS gaps are: CLUT/paletted textures, real
+block-swizzled addressing, REGLIST/IMAGE GIF transfer modes, GS
+context 2 (dual-context), and mipmaps - any of these is a reasonable
+next increment if "complete GS port" work continues.
 
 ## Reference material
 

@@ -3212,6 +3212,150 @@ remaining honestly-open piece is the real default handler BODIES
 which this project has never had and is not attempting to synthesize,
 consistent with its established no-fabrication policy.
 
+## GS Round 23: alpha test + alpha blending (TEST_1/ALPHA_1)
+
+Per the user's explicit directive to return to the GS and keep pushing
+toward a complete port, this round tackles the next largest
+documented GS gap (ROADMAP.md section 6): the GS alpha unit - the
+per-pixel alpha test (`TEST_1`'s `ATE`/`ATST`/`AREF`/`AFAIL` fields)
+and alpha blending (`ALPHA_1`, gated by `PRIM`'s `ABE` bit). Both are
+real, load-bearing parts of the GS's per-fragment pipeline on actual
+hardware, used pervasively for transparency, particle effects, and
+alpha-cutout rendering in real PS2 titles - not a cosmetic add-on.
+
+**Research.** A dedicated research subagent was dispatched to pull the
+exact bit layouts and semantics from PCSX2's own source
+(`GS/GSRegs.h` for the register bitfields, `GSDrawScanline.cpp` for
+the alpha-test and blend-equation logic), returning a well-cited
+report. One detail - that the real blend equation truncates rather
+than rounds (`((A-B)*C)>>7 + D` with no `+0.5`-equivalent bias) - was
+sourced from a PCSX2 developer forum post rather than primary source
+and is flagged as such here for the same reason; it is a
+well-established, widely-repeated hardware quirk (real GS hardware
+famously does NOT round its blend math, unlike a "naive" software
+renderer would), not a fabrication, but the citation trail is weaker
+than the register-layout facts pulled directly from GSRegs.h.
+
+**TEST_1 (`include/core/hw/gif.h`, `source/hw/gif.c`).** Real bit
+layout: `ATE`:1 (bit0, alpha-test enable), `ATST`:3 (bits1-3, compare
+function), `AREF`:8 (bits4-11, reference value), `AFAIL`:2 (bits12-13,
+fail action). `ATST` values: `NEVER`=0, `ALWAYS`=1, `LESS`=2,
+`LEQUAL`=3, `EQUAL`=4, `GEQUAL`=5, `GREATER`=6, `NOTEQUAL`=7 - compares
+the fragment's own alpha byte against `AREF`. `AFAIL` values:
+`KEEP`=0 (both color and Z writes are discarded on failure), `FB_ONLY`
+=1 (color still writes, Z write is suppressed), `ZB_ONLY`=2 (Z still
+writes if otherwise allowed, color write is suppressed), `RGB_ONLY`=3
+(RGB channels still write, but the alpha BYTE is preserved from the
+framebuffer's OLD value rather than the fragment's - Z write
+suppressed). This project's `gs_mem` is PSMCT32-only, so the real
+hardware's "RGB_ONLY downgrades to FB_ONLY on non-32-bit formats"
+special case never applies here and is not modeled (there is nothing
+for it to downgrade from).
+
+**ALPHA_1.** Real bit layout: `A`/`B`/`C`/`D` are each 2 bits (word0
+bits 0-1/2-3/4-5/6-7), `FIX` is 8 bits - but NOT in word0; it lives in
+word1 (`data_hi`)'s low byte (bits 32-39 of the 64-bit register). This
+was gotten wrong on the first pass (see Errors below) and fixed by
+cross-checking against the adjacent, already-correct `ZBUF_1` case's
+established word0/word1 convention. `A`/`B`/`D` select a COLOR input:
+0=`Cs` (the fragment's own source color), 1=`Cd` (the current
+framebuffer/destination color), 2=constant zero (black). `C` selects a
+COEFFICIENT: 0=`As` (source alpha), 1=`Ad` (destination/framebuffer
+alpha), 2=`Af` (the fixed `FIX` value). The blend equation is
+`Color = ((A-B)*C)>>7 + D` - a plain truncating integer divide by 128
+with NO rounding bias (see the citation caveat above), and the
+coefficient is NOT clamped to [0,1] - real hardware allows FIX or
+alpha values above 128/255 to produce "boosted", intentionally
+over-saturated blend results, which this implementation preserves
+(only the FINAL per-channel result is clamped to [0,255], modeling
+COLCLAMP=1, the hardware default; COLCLAMP=0's wrap-instead-of-clamp
+alternate mode is a documented, deliberate non-goal - no title this
+project targets is known to rely on it). The written alpha channel of
+a blended fragment is ALWAYS the fragment's own source alpha -
+blending only ever touches RGB, never the alpha channel itself, per
+real hardware behavior.
+
+A new `PRIM_ABE_MASK` (bit 6 of the `PRIM` register) was added
+alongside the pre-existing `PRIM_TME`/`PRIM_IIP`/etc. bits - blending
+is a real per-primitive-draw toggle on actual hardware (`ABE`), not
+something that runs unconditionally just because `ALPHA_1` happens to
+be configured; a test in this round explicitly proves `ALPHA_1` being
+configured has zero effect when `ABE`=0.
+
+**`gs_finish_pixel()` (new shared helper, `source/hw/gif.c`).** All 4
+rasterizers (triangle/sprite/point/line) previously each inlined their
+own small "write color, maybe write Z" tail block - a deliberate,
+established pattern in this file for the tiny Z-test logic. The alpha
+unit's logic (test + blend + the AFAIL-mode color/Z suppression
+interactions) is substantially larger and behaves identically
+regardless of which primitive produced the fragment, so this round
+introduces a single shared `gs_finish_pixel(x, y, frag_color, frag_z,
+z_write_allowed)` function, called from all 4 rasterizers in place of
+their old inline tails. This is a deliberate, documented deviation
+from the "duplicate the small block" pattern, justified by the size
+and shared-behavior of the new logic - not a whim.
+
+**Errors found and fixed this round:**
+- The `FIX` field was first read from `data_lo >> 24` (assuming it
+  lived in word0's top byte). Cross-checking against `ZBUF_1`'s own
+  word0/word1 convention (`ZBP` from `data_lo`, `ZMSK` from `data_hi`)
+  revealed `FIX` is actually `data_hi`'s low byte - fixed to
+  `data_hi & ALPHA_FIX_MASK` with no shift needed, and the header
+  comment/constants updated to match (a now-inapplicable
+  `ALPHA_FIX_SHIFT=32u` constant was removed rather than left as dead,
+  misleading documentation).
+- Two more instances of this project's recurring C block-comment
+  gotcha (a literal `_*/`` substring inside doc-comment prose like
+  `TEST_ATE_MASK/etc and GS_ATST_xxx/GS_AFAIL_xxx` prematurely closing
+  the comment) were hit in `gif.h` and `gif.c` - diagnosed via
+  `gcc -fsyntax-only` plus `grep -n '[A-Za-z0-9_]\*/'` and fixed by
+  rephrasing to avoid the pattern, consistent with how this same bug
+  was handled earlier in the project.
+- `tests/test_gs_alpha.c` itself had two test-construction bugs, not
+  implementation bugs: two of its manually-built GIF packets (the
+  `AFAIL_FB_ONLY` and `PRIM.ABE=0` gating checks) hardcoded a stale
+  NLOOP count (6) left over from an earlier draft, undercounting the
+  real number of A+D register writes in those packets (8 and 7
+  respectively) - the GIF parser silently stopped consuming registers
+  partway through the packet as a result. Fixed by recomputing NLOOP
+  to match the actual register count in each packet.
+- A pre-existing, environment-specific gap (not caused by this round)
+  was hit while re-running the full regression suite in this sandbox:
+  every test linking `source/hw/vu.c` failed to link with `undefined
+  reference to fmaxf/fminf/sqrtf` unless `-lm` was added to the
+  command line, even though `tests/README.md`'s documented commands
+  don't include it. This is a property of this sandbox's default
+  linker behavior (libm isn't implicitly linked here the way it may be
+  on other systems) rather than a documentation bug to fix - every
+  README command is otherwise correct and was verified to build and
+  pass once `-lm` was appended for local verification purposes.
+
+**Testing (`tests/test_gs_alpha.c`, 13 checks).** `ATST_NEVER`
+discards every fragment (framebuffer untouched, failed-fragment
+counter increments); `ATST_GEQUAL` passing vs failing cases against a
+specific `AREF`; all 4 `AFAIL` modes exercised individually
+(`KEEP`/`FB_ONLY`/`ZB_ONLY` semantics, plus `RGB_ONLY`'s old-alpha-byte
+preservation); a hand-computed 50% alpha blend
+(`A`=`Cs`,`B`=`Cd`,`C`=`Af`,`D`=`Cd`,`FIX`=64) of an opaque red
+fragment over an opaque blue background, verified channel-by-channel
+against the real truncating-divide arithmetic (R=127, not 127.5;
+B=128, not 127 - truncation direction differs per operand sign); and
+the `PRIM.ABE`=0 gating check described above.
+
+Regression: 57 host-native test binaries (was 56, +`test_gs_alpha.c`),
+0 failures (`-lm` appended locally per the sandbox note above). Clean
+Wii/devkitPPC rebuild, same single pre-existing harmless `strncpy`
+warning as every prior round.
+
+**Net result for GS Round 23**: the GS alpha unit (test + blend) is
+now implemented against real, cited hardware semantics, with its own
+dedicated regression test and zero regressions elsewhere. Per
+ROADMAP.md section 6, the remaining known GS gaps are: CLUT/paletted
+textures (PSMT8/4), real block-swizzled addressing (this project uses
+simplified linear addressing throughout), REGLIST/IMAGE transfer
+modes (only PACKED mode is implemented in the GIF parser), GS context
+2 (dual-context - only context 1 is modeled), and mipmaps.
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

@@ -198,6 +198,69 @@ static void halt(const char *reason)
     strncpy(g_iop.halt_reason, reason, sizeof(g_iop.halt_reason) - 1);
 }
 
+/* Real IOP hardware-interrupt bit position, per the public psx-spx
+ * reference (https://psx-spx.consoledev.net/interrupts/, "COP0
+ * Interrupt Handling" / "PSX specific COP0 Notes" - explicitly noted
+ * on that same page as applying to the PS2 IOP too: "The PS2's IOP
+ * has the same interrupt controller as the PS1 but with more
+ * channels"). Unlike the EE's 8 independent Cause.IP0-IP7 lines (see
+ * ee_core.c's EE_CAUSE_IP7), the real IOP/PS1 architecture routes
+ * EVERY peripheral IRQ (VBLANK, DMA, timers, etc - all of I_STAT/
+ * I_MASK) through this ONE single CPU interrupt line, bit 10 of both
+ * Cause (IP2) and Status (IM2): "If one or more interrupts are
+ * requested and enabled, ie. if (I_STAT AND I_MASK)=nonzero, then
+ * cop0r13.bit10 gets set, and when cop0r12.bit10 and cop0r12.bit0 are
+ * set, too, then the interrupt gets executed." Also unlike the EE's
+ * timer interrupt (Cause.IP7, a real sticky software-cleared latch),
+ * this line is explicitly documented as NON-latching: "cop0r13.bit10
+ * is NOT a latch, ie. it gets automatically cleared as soon as
+ * (I_STAT AND I_MASK)=zero" - so this project recomputes it fresh
+ * every step rather than latching it once and waiting for software to
+ * clear it. */
+#define IOP_CAUSE_IP2  0x400u
+#define IOP_STATUS_IM2 0x400u
+
+/* Round 22 (see docs/STATUS.md): confirmed, while investigating why
+ * Status.IEc never has any observable effect, that this check simply
+ * didn't exist anywhere in this file - iop_intc.c's own scope comment
+ * already flagged it ("NOT modeled: actually raising a CPU interrupt/
+ * exception in iop_core.c when I_STAT & I_MASK becomes nonzero").
+ * Implements exactly the two-step real hardware behavior quoted in
+ * the comment above: first, Cause.IP2 mirrors (I_STAT & I_MASK) live,
+ * non-latching; second, if Cause.IP2 AND Status.IM2 AND Status.IEc
+ * (bit 0) are all set, a real Interrupt exception (Cause.ExcCode=0)
+ * is raised, vectored exactly like the existing SYSCALL case (Status.
+ * BEV-dependent vector, same KU/IE mode-stack push formula). Same
+ * documented simplification as SYSCALL: this project's IOP
+ * interpreter doesn't track branch-delay-slot state at all, so EPC is
+ * always set to the next not-yet-executed instruction's own address,
+ * never this_pc-4/Cause.BD - a real interrupt landing exactly on a
+ * branch's delay slot is not modeled, same honest gap already
+ * documented for SYSCALL. */
+static void iop_check_hw_interrupt(iop_state_t *st, uint32_t next_pc)
+{
+    iop_intc_state_t *intc = iop_intc_get_state();
+
+    if (intc->istat & intc->imask)
+        st->cop0[13] |= IOP_CAUSE_IP2;
+    else
+        st->cop0[13] &= ~IOP_CAUSE_IP2;
+
+    if (!(st->cop0[13] & IOP_CAUSE_IP2))
+        return;
+    if (!(st->cop0[12] & IOP_STATUS_IM2))
+        return;
+    if (!(st->cop0[12] & 0x1u)) /* Status.IEc */
+        return;
+
+    st->cop0[13] = (st->cop0[13] & ~0x7Fu); /* Cause.ExcCode = 0 (Interrupt) */
+    st->cop0[14] = next_pc; /* EPC */
+    uint32_t vector = (st->cop0[12] & 0x400000u) ? 0xBFC00180u : 0x80000080u; /* Status.BEV */
+    st->cop0[12] = (st->cop0[12] & ~0x3Fu) | ((st->cop0[12] & 0x0Fu) << 2); /* Status stack push */
+    st->pc = vector;
+    st->next_pc = vector + 4u;
+}
+
 static int iop_step(void)
 {
     iop_state_t *st = &g_iop;
@@ -529,6 +592,17 @@ static int iop_step(void)
 #undef LINK
 
     st->gpr[0] = 0;
+
+    /* Round 22: real hardware-interrupt delivery, checked at the end
+     * of every real (non-HLE-trap) instruction step - see
+     * iop_check_hw_interrupt()'s own comment above for the full
+     * citation trail. Uses st->pc (already advanced to the next
+     * not-yet-executed instruction by this function's own prologue,
+     * and possibly redirected by a branch/jump this same step) as
+     * EPC, matching this project's existing SYSCALL exception's
+     * "no delay-slot tracking" simplification. */
+    iop_check_hw_interrupt(st, st->pc);
+
     st->instructions_executed++;
     return 0;
 }

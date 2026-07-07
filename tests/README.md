@@ -1296,3 +1296,25 @@ the "unimplemented" halt default).
 gcc -I../include -I../source -o test_iop_rfe tests/test_iop_rfe.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
 ./test_iop_rfe
 ```
+
+`test_iop_hw_interrupt.c` covers Round 22's real hardware-interrupt
+delivery fix - see `docs/STATUS.md`'s "Round 22" section for the full
+citation trail (psx-spx's interrupts page, explicitly confirmed to
+apply to the PS2 IOP: every peripheral IRQ routes through ONE single
+CPU line, Cause.bit10/IP2, non-latching, gated by Status.bit10/IM2 and
+Status.bit0/IEc). 8 checks across two scenarios: (1) a real program
+that raises a pending `I_STAT` bit via `iop_intc_raise()` (simulating
+a peripheral), then writes `I_MASK` through an actual `SW` instruction
+- proving the interrupt correctly preempts the very next instruction
+the instant the enabling write makes `(I_STAT & I_MASK)` nonzero
+(EPC, two never-executed marker instructions, Cause.ExcCode/IP2, and
+the exact post-push `Status` value are all checked bit-for-bit); (2) a
+second program proving NO interrupt fires when `Status.IEc` is 0, even
+with `I_STAT & I_MASK` already nonzero from the very start - the
+marker instruction executes normally and the instruction count before
+the (expected, unrelated) halt is exact.
+
+```sh
+gcc -I../include -I../source -o test_iop_hw_interrupt tests/test_iop_hw_interrupt.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
+./test_iop_hw_interrupt
+```

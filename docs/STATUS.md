@@ -3088,6 +3088,52 @@ currently a dead bit with no observable behavioral effect regardless
 of its value, which is itself a real, separate, well-defined next
 target for this same sweep.
 
+**Update, same session**: gap (b) above (real hardware-interrupt
+delivery) is now also fixed. Cited from the public psx-spx reference
+(https://psx-spx.consoledev.net/interrupts/, whose "PS2 IOP interrupts"
+subsection explicitly confirms it applies here: "The PS2's IOP has the
+same interrupt controller as the PS1 but with more channels"): unlike
+the EE's 8 independent Cause.IP0-IP7 lines, the real IOP/PS1
+architecture routes EVERY peripheral IRQ (all of I_STAT/I_MASK)
+through ONE single CPU interrupt line - Cause.bit10 (IP2), which
+mirrors "(I_STAT AND I_MASK)=nonzero" LIVE and NON-latching (quoting
+the source directly: "cop0r13.bit10 is NOT a latch, ie. it gets
+automatically cleared as soon as (I_STAT AND I_MASK)=zero" - a real,
+documented difference from the EE's sticky IP7 timer latch). The
+interrupt is actually taken once Cause.bit10, Status.bit10 (IM2), and
+Status.bit0 (IEc) are all set, vectored exactly like the existing
+SYSCALL exception (same BEV-dependent vector, same KU/IE mode-stack
+push formula) - and, per this project's existing documented
+simplification for SYSCALL, EPC always points at the next not-yet-
+executed instruction (no branch-delay-slot/Cause.BD tracking for the
+IOP, consistent with the rest of this file).
+
+New function `iop_check_hw_interrupt()` in `iop_core.c`, called at the
+end of every real (non-HLE-trap) instruction step. `tests/
+test_iop_hw_interrupt.c` (8 checks): a real program that writes I_MASK
+via an actual `SW` instruction (not just the direct `iop_intc_raise()`
+test hook) after a peripheral has already raised a pending `I_STAT`
+bit, proving the interrupt correctly preempts the very next
+instruction the instant the enabling write makes `(I_STAT & I_MASK)`
+nonzero - EPC, the two never-executed marker instructions, Cause.
+ExcCode/IP2, and the exact post-push `Status` value are all checked
+bit-for-bit. A second case proves NO interrupt fires when `Status.IEc`
+is 0, even with `I_STAT & I_MASK` already nonzero from the start -
+the marker instruction executes normally and the expected instruction
+count is exact.
+
+Regression: 55 host-native test binaries (was 54, +`test_iop_hw_interrupt.c`),
+0 failures. Clean Wii/devkitPPC rebuild, same single pre-existing
+harmless `strncpy` warning as every prior round.
+
+With this, `Status.IEc` finally has a real, observable, end-to-end
+effect for the first time in this project: RFE can restore it (fixed
+earlier this round) AND the interpreter now actually checks it before
+delivering a hardware interrupt. The only concretely open IOP item
+left from this sweep is the `RAM[0x100]` exception-chain default-
+handler behavior itself (needs the deeper psx-spx Priority-Chains/
+ExCB structure-layout sections, not yet retrieved in full).
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

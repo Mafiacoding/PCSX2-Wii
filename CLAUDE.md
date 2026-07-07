@@ -619,10 +619,25 @@ always ask for/verify the no-disc case explicitly).
   remains a dead bit with no observable effect until that's wired up.
   Partial psx-spx research recovered the real `RAM[0x100]` "Table of
   Tables"/ExCB layout but not yet the deeper structure sections needed
-  to implement a cited default-fallback handler. See docs/STATUS.md's
-  "Round 22" section for the full trace; ROADMAP.md section 2 now has
-  two remaining open bullets (RAM[0x100] default behavior, hardware-
-  interrupt delivery) plus the completed RFE fix.
+  to implement a cited default-fallback handler.
+  **Same round, continued**: that hardware-interrupt gap was then also
+  fixed. Cited from psx-spx's interrupts page (explicitly confirmed to
+  apply to the PS2 IOP): every peripheral IRQ routes through ONE
+  single CPU line, Cause.bit10 (IP2, non-latching), taken once
+  Cause.bit10, Status.bit10 (IM2), and Status.bit0 (IEc) are all set -
+  vectored exactly like the existing SYSCALL exception. New
+  `iop_check_hw_interrupt()` in `iop_core.c`. 8 new checks in `tests/
+  test_iop_hw_interrupt.c` (54->55 test binaries): a real `SW` to
+  I_MASK correctly preempts the very next instruction the instant
+  `(I_STAT & I_MASK)` goes nonzero, and `IEc=0` correctly blocks
+  delivery even with `I_STAT & I_MASK` already nonzero. Full
+  regression still 0-failure, clean Wii rebuild. `Status.IEc` now has
+  a real, observable, end-to-end effect for the first time in this
+  project (RFE can restore it, and the interpreter now checks it).
+  See docs/STATUS.md's "Round 22" section for the full trace.
+  ROADMAP.md section 2's only remaining open IOP bullet after this
+  round is the `RAM[0x100]` exception-chain default-handler behavior
+  itself.
 
 ## The mandatory per-change workflow
 
@@ -1199,7 +1214,7 @@ rsync -a --delete --exclude '.git' --exclude 'test_*' \
 # rsync's include/exclude ORDER means the 3 test_*.c source files
 # still get excluded by the earlier --exclude 'test_*' rule (basename
 # match, first-match-wins) - work around it by re-copying them directly:
-for f in tests/test_iop_elf.c tests/test_iop_spu2.c tests/test_vu_micro.c tests/test_gif_line.c tests/test_iop_rfe.c; do
+for f in tests/test_iop_elf.c tests/test_iop_spu2.c tests/test_vu_micro.c tests/test_gif_line.c tests/test_iop_rfe.c tests/test_iop_hw_interrupt.c; do
   cp "/tmp/pcsx2-wii-git/$f" "$OUT/pcsx2-wii/$f"
 done
 ```
@@ -1218,21 +1233,23 @@ current, not a history log - docs/STATUS.md has the full history) for
 the actual next task. As of Round 22, the user has explicitly overridden
 the prior "1, 4, then 5" ordering with a broader standing directive:
 **handle ALL IOP problems first, before any other task (including GS)
-resumes.** ROADMAP.md section 2 currently has two open bullets under
-this directive: (a) real exception-handler-chain default-fallback
-behavior at `RAM[0x100]` (partial psx-spx research recovered in Round
-22 - the Table-of-Tables/ExCB pointer-pair layout, but not yet the
-deeper Priority-Chains/ExCB structure sections needed for a fully
-cited implementation), and (b) real hardware-interrupt delivery in the
-IOP interpreter (I_STAT & I_MASK -> exception, gated by Status.IEc -
-newly relevant now that Round 22's RFE fix makes IEc restorable).
-Round 22 itself fixed a third, real, previously-undocumented gap (RFE
-was completely unimplemented) found via direct code inspection rather
-than re-reading prior round narratives - a reminder that this sweep
-should keep reading the actual code, not just the docs, since more
-undocumented gaps may still be hiding. Do NOT resume GS/CDVD/COP2 work
-until this IOP sweep is genuinely exhausted, per the user's explicit
-instruction.
+resumes.** Round 22 fixed two real, previously-undocumented gaps found
+via direct code inspection (not just re-reading prior round
+narratives - a reminder to keep reading the actual code during this
+sweep, since more undocumented gaps may still be hiding): RFE was
+completely unimplemented, and no hardware-interrupt delivery existed
+in the IOP interpreter at all. `Status.IEc` now has a real, observable
+effect for the first time in this project. ROADMAP.md section 2's only
+remaining open IOP bullet is the real exception-handler-chain default-
+fallback behavior at `RAM[0x100]` - partial psx-spx research recovered
+the Table-of-Tables/ExCB pointer-pair layout, but the deeper Priority-
+Chains/ExCB structure-layout sections needed for a fully cited
+implementation still haven't been retrieved (the psx-spx kernelbios
+page is large enough that one fetch didn't cover it - see the earlier
+"Optional Next Step" note in this session's own history for how to
+approach re-fetching it, e.g. via a dedicated subagent or targeted
+grep of a saved fetch). Do NOT resume GS/CDVD/COP2 work until this IOP
+sweep is genuinely exhausted, per the user's explicit instruction.
 
 ## Reference material
 

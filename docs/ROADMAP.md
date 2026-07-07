@@ -621,19 +621,22 @@ instead of fully emulating the real IOP BIOS ROM.
       docs/STATUS.md's "Round 19" and "Round 22" sections for the full
       trace. Substantial, well-defined scope for a future round; not
       attempted yet.
-- [ ] Real hardware-interrupt delivery in the IOP interpreter (I_STAT
+- [x] Real hardware-interrupt delivery in the IOP interpreter (I_STAT
       & I_MASK -> a real Cause.ExcCode=0 "Interrupt" exception, gated
-      by Status.IEc) - confirmed, in Round 22, to be a genuine, still-
-      open gap: `iop_intc.c`'s own scope comment already flagged this
-      ("NOT modeled: actually raising a CPU interrupt/exception in
-      iop_core.c when I_STAT & I_MASK becomes nonzero"), and Round 22's
-      RFE fix makes this the direct reason `Status.IEc` remains a dead
-      bit with no observable behavioral effect regardless of its
-      value - nothing in `iop_step()` currently reads it. Needs a
-      citable reference for the exact Cause.IP bit(s) real hardware
-      wires the INTC through (PCSX2's `Hw.h`/`R3000A.cpp` are the
-      established citation sources elsewhere in this section) before
-      implementing, per this project's no-fabrication policy.
+      by Status.IEc) - implemented in Round 22, same session as the
+      RFE fix above. Cited from psx-spx's interrupts page (explicitly
+      confirmed to apply to the PS2 IOP): every peripheral IRQ routes
+      through ONE single CPU line, Cause.bit10 (IP2, non-latching -
+      mirrors `I_STAT & I_MASK` live), taken once Cause.bit10,
+      Status.bit10 (IM2), and Status.bit0 (IEc) are all set. New
+      `iop_check_hw_interrupt()` in `iop_core.c`, called at the end of
+      every real instruction step. Unit tested in `tests/
+      test_iop_hw_interrupt.c` (8/8 checks - a real `SW` to I_MASK
+      correctly preempts the very next instruction; `IEc=0` correctly
+      blocks delivery even with `I_STAT & I_MASK` already nonzero).
+      With this and the RFE fix above, `Status.IEc` finally has a
+      real, observable, end-to-end effect for the first time in this
+      project. See docs/STATUS.md's "Round 22" section.
 
 ## 3. DMA controller
 

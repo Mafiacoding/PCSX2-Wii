@@ -1156,3 +1156,34 @@ value), proving the guard doesn't break legitimate control flow.
 gcc -I../include -I../source -o test_iop_pc_guard tests/test_iop_pc_guard.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c
 ./test_iop_pc_guard
 ```
+
+`test_z_buffer.c` covers task #89 (task 6): the Z-buffer / depth-test
+implementation added to `source/hw/gif.c` - real `ZBUF_1`/`TEST_1` A+D
+registers (`GIFRegZBUF`'s ZBP/ZMSK, `GIFRegTEST`'s ZTE/ZTST, cross-
+checked against PCSX2's GS/GSRegs.h), genuine per-vertex Z (from
+XYZ2's real Z word), barycentric Z interpolation for triangles, flat
+"second-vertex" Z for SPRITE, and the 4 real `GS_ZTST` compare modes
+(NEVER/ALWAYS/GEQUAL/GREATER). IMPORTANT: unlike every other test in
+this project, this file builds genuine PACKED-mode GIF packets by hand
+for its XYZ2 vertices (GIFTag + a dedicated XYZ2-only loop, X in word0/
+Y in word1/Z in word2) instead of using the A+D convention every other
+test/demo uses - this project's pre-existing A+D XYZ2 convention
+(baked into every other test and main.c before this round) has no room
+left for a real Z value, an honestly-scoped gap explained in
+`include/core/hw/gif.h`'s `tri_z` field comment. 20 checks: ZBUF_1/
+TEST_1 register parsing; a centroid-based proof (task #88's technique,
+reapplied to Z) that 3 distinct per-vertex Z values genuinely
+interpolate rather than default to a constant; GEQUAL rejecting a
+farther fragment and accepting a nearer-or-equal one against a
+previously-stored Z; NEVER rejecting unconditionally; ZMSK leaving
+color writable while the Z buffer itself stays untouched (independently
+re-confirmed by testing against the stale stored Z afterward); the
+`zbuf_configured` safety gate (this project's own concept, not real
+hardware) proving a Z buffer that's never configured behaves exactly
+as it did before this round; and SPRITE's flat "completing vertex" Z
+convention together with its own GREATER-mode depth test.
+
+```sh
+gcc -I../include -I../source -o test_z_buffer tests/test_z_buffer.c ../source/hw/gif.c ../source/hw/gs_mem.c
+./test_z_buffer
+```

@@ -1693,6 +1693,82 @@ explicitly set `PRIM_FST_MASK` (UV mode) - needed since FST now has
 real meaning and those tests never touch ST/Q, matching what they
 always actually intended.
 
+### Z-buffer / depth test for triangles and SPRITE (task #89, task 6)
+
+Real ZBUF_1 (0x4E) and TEST_1 (0x47) A+D registers implemented in
+`source/hw/gif.c`, cross-checked against a live fetch of PCSX2's
+`GS/GSRegs.h`: `GIFRegZBUF` (`ZBP:9, PSM:6, ZMSK:1` - PSM ignored,
+matching this project's PSMCT32-only simplification; real hardware's
+ZBUF register notably has NO separate width field, so this project
+reuses FBW for Z-buffer addressing too, exactly like real hardware
+does) and `GIFRegTEST` (`ZTE:1, ZTST:2` modeled; ATE/ATST/AREF/AFAIL/
+DATE/DATM are not - no alpha test/blending exists in this project).
+`GS_ZTST`'s 4 real compare modes (NEVER/ALWAYS/GEQUAL/GREATER) gate
+both the color write and the Z-buffer write (ZMSK-respecting) per
+pixel in `rasterize_triangle()`/`rasterize_sprite()`.
+
+Z itself comes from XYZ2's real Z word - this took real investigation,
+not a guess. A live fetch of PCSX2's `GS/GSRegs.h` shows the genuine
+PACKED-mode `GIFPackedXYZ2` layout is X in word0, Y in word1, Z as the
+ENTIRE word2 (a real 32-bit value) - previously read into a local `w2`
+variable in `process_one_packet()`'s PACKED loop but discarded. Wiring
+it through was a one-line change (`apply_xyz2(w0, w1, w2)`) with zero
+regression risk, since no existing test in this codebase had ever
+exercised the genuine PACKED-mode XYZ2 register path - every existing
+test/demo (main.c included) uses A+D-mode XYZ2 instead. That turned
+out to matter: real hardware's A+D-mode `GIFRegXYZ` register is only
+64 bits total (X:16 and Y:16 packed together into ONE word, Z:32 alone
+in the other), but this project's pre-existing A+D XYZ2 convention -
+already baked into every single test file and main.c before this round
+- puts X in the ENTIRE first word and Y in the ENTIRE second word,
+leaving no room for Z at all. Reconciling that would mean rewriting
+every existing test's packet-construction helper and main.c's demo,
+well outside this task's scope, so it's called out as an honest,
+explicit gap instead: Z only flows through for genuine PACKED-mode
+XYZ2 writes (Z=0 for A+D-mode XYZ2, harmless since Z-buffer access is
+fully gated behind this round's own safety flag regardless - see
+below). The new `tests/test_z_buffer.c` builds real PACKED-mode GIF
+packets by hand (GIFTag + a dedicated XYZ2-only loop) specifically to
+supply genuine, distinct per-vertex Z values, the same way
+`tests/test_vif.c` already hand-builds packets for its own purposes.
+
+Z interpolation for triangles is plain barycentric (screen-space-
+linear, the same weighting already used for Gouraud color) - real
+hardware's Z has already gone through the perspective transform by the
+time it reaches the rasterizer, so unlike S/T it needs no 1/Q
+correction, well-known real GS behavior. Verified with the same
+centroid technique task #88 introduced: a triangle's centroid always
+has barycentric weights of exactly (1/3, 1/3, 1/3), so 3 distinct
+per-vertex Z values (0, 300, 600) must average to exactly 300 at the
+centroid if interpolation is genuinely happening - confirmed. SPRITE
+gets a single flat Z from its second (completing) vertex, extending
+this file's already-established "flat shading uses the last vertex"
+convention (previously applied to color) to Z as well - noted as an
+extension of that real, already-cited convention rather than a fresh,
+independently-verified claim specific to Z.
+
+This round's own safety mechanism, `zbuf_configured` (not a real
+hardware concept), stays false until an explicit ZBUF_1 write happens,
+so any pre-existing draw that never configures a Z buffer - which is
+every one of the 51 tests that existed before this round, plus
+main.c's demo - behaves byte-for-byte exactly as it did before this
+round. Without this gate, ZBUF's real default value (ZBP=0) would
+silently alias the color framebuffer's own default address (FBP=0) and
+corrupt it the first time any triangle drew. A dedicated regression
+test (`tests/test_z_buffer.c`'s "No ZBUF configured" case) proves this
+explicitly: two overlapping draws with wildly different Z values still
+overwrite each other unconditionally, exactly like pre-#89 behavior.
+
+20 new checks (`tests/test_z_buffer.c`), covering ZBUF_1/TEST_1
+register parsing, genuine per-vertex Z interpolation (the centroid
+proof), GEQUAL/GREATER/NEVER/ALWAYS depth-test semantics, ZMSK
+(color written but Z buffer left untouched, independently confirmed by
+re-testing against the stale stored Z), the zbuf_configured safety
+gate, and SPRITE's flat "second vertex" Z convention together with its
+own depth test. Full regression (52 host-native test files, up from
+51) passes with 0 failures, and the Wii/devkitPPC target rebuilds
+clean with 0 warnings/0 errors.
+
 ### VU0/VU1 micro-instruction memory + microcode interpreter control flow (task #87)
 
 Direct continuation of the user's "mach 1 3 4 6 komplett" instruction

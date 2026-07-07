@@ -16,9 +16,11 @@
  *     not implemented.
  *   - Registers handled: PRIM, RGBAQ, XYZ2, UV, TEX0_1, and A+D
  *     (address+data) writes to PRIM/RGBAQ/XYZ2/UV/TEX0_1/FRAME_1/
- *     XYOFFSET_1. Everything else (alpha blending, Z-buffer, CLAMP/
- *     TEST/scissor beyond basic XY offset, contexts 2, CLUT/paletted
- *     textures, mipmaps, ...) is ignored.
+ *     XYOFFSET_1/ZBUF_1/TEST_1 (ZBUF_1/TEST_1 added task #89 - real
+ *     Z-buffer storage + depth test for triangles/SPRITE, see
+ *     rasterize_triangle()/rasterize_sprite()). Everything else
+ *     (alpha blending/test, CLAMP/scissor beyond basic XY offset,
+ *     contexts 2, CLUT/paletted textures, mipmaps, ...) is ignored.
  *   - Primitive types: SPRITE (a filled, flat-color or - as of task
  *     #88 - texture-mapped axis-aligned rectangle from 2 vertices,
  *     always flat-shaded like real hardware; see gif.c's
@@ -83,6 +85,10 @@
 #define GS_REG_TEX0_1     0x06
 #define GS_REG_FRAME_1    0x4C
 #define GS_REG_XYOFFSET_1 0x18
+/* Z-buffer/depth-test registers (task #89) - cross-checked
+ * against a live fetch of PCSX2's GS/GSRegs.h GIF_A_D_REG enum. */
+#define GS_REG_TEST_1     0x47
+#define GS_REG_ZBUF_1     0x4E
 
 #define PRIM_TYPE_TRIANGLE       3
 #define PRIM_TYPE_TRIANGLE_STRIP 4
@@ -102,6 +108,27 @@
  * PCSX2's own GS/GSRegs.h GIFRegPRIM bitfield (PRIM:3,IIP:1,TME:1,
  * FGE:1,ABE:1,AA1:1,FST:1,... - FST is the 7th field, bit offset 8). */
 #define PRIM_FST_MASK 0x100u
+
+/* GIFRegTEST bitfield (task #89) - cross-checked against PCSX2's
+ * GS/GSRegs.h GIFRegTEST: ATE:1,ATST:3,AREF:8,AFAIL:2,DATE:1,DATM:1,
+ * ZTE:1,ZTST:2 (all in word0; word1 unused). Only ZTE (bit 16) and
+ * ZTST (bits 17-18) are modeled - alpha test (ATE/ATST/AREF/AFAIL)
+ * and the destination-alpha bits (DATE/DATM) are not implemented
+ * (no alpha blending exists in this project yet - see gif.h's
+ * top-of-file scope comment). */
+#define TEST_ZTE_MASK   0x10000u
+#define TEST_ZTST_SHIFT 17u
+#define TEST_ZTST_MASK  0x3u
+
+/* GS_ZTST enum - cross-checked against PCSX2's GS/GSRegs.h GS_ZTST
+ * (real, literal hardware semantics: NEVER = every fragment fails,
+ * ALWAYS = every fragment passes regardless of Z, GEQUAL/GREATER =
+ * compare the new fragment's Z against the value already stored in
+ * the Z buffer). */
+#define GS_ZTST_NEVER   0u
+#define GS_ZTST_ALWAYS  1u
+#define GS_ZTST_GEQUAL  2u
+#define GS_ZTST_GREATER 3u
 
 /* TEX0's TFX field (2 bits) - cross-checked against PCSX2's own
  * GS/GSRegs.h GS_TFX enum. HIGHLIGHT/HIGHLIGHT2 are simplified to
@@ -142,6 +169,28 @@ typedef struct {
      * (FST=1) doesn't need these, since UV is already in texel units. */
     uint32_t tex_tw, tex_th;
 
+    /* Z-buffer / depth-test state (task #89). zbp is the Z buffer's
+     * base pointer, in OUR gs_mem bp convention (see gs_mem.h) - real
+     * hardware's ZBUF register (GIFRegZBUF: ZBP:9, PSM:6, ZMSK:1) has
+     * NO separate width field, matching this model, which reuses fbw
+     * for Z-buffer addressing too. zbuf_configured is this project's
+     * OWN safety gate (not a real hardware concept): it stays 0 until
+     * an explicit ZBUF_1 A+D write happens, so that pre-existing tests/
+     * demos that never configure a Z buffer keep drawing exactly as
+     * before (zbp defaults to 0, same as fbp's own default - without
+     * this gate, an unconfigured Z buffer would silently alias and
+     * corrupt the color buffer). zte/ztst mirror TEST_1's real ZTE/
+     * ZTST fields (see TEST_ZTE_MASK/TEST_ZTST_* above). PSM/CLUT-
+     * equivalent Z formats (PSMZ32/24/16) are not modeled - Z is
+     * always stored as a plain 32-bit word via gs_mem's existing
+     * PSMCT32-shaped helpers, matching gs_mem.h's own documented
+     * linear-addressing simplification. */
+    uint32_t zbp;
+    int zmsk;
+    int zbuf_configured;
+    int zte;
+    int ztst;
+
     /* Current UV register value (real hardware's 12.4 fixed-point
      * texel coordinate "FST=1" mode - see gif.h's scope comment),
      * already converted to integer texels exactly like XYZ2's own
@@ -166,6 +215,9 @@ typedef struct {
      * can interpolate between the two corners. */
     int32_t v0u, v0v;
     float v0s, v0t, v0q;
+    /* SPRITE's first-vertex Z (task #89) - see tri_z's comment
+     * below for the same A+D-vs-PACKED scope caveat. */
+    uint32_t v0z;
 
     /* Triangle vertex accumulation (TRIANGLE/TRIANGLE_STRIP/
      * TRIANGLE_FAN, prim types 3/4/5). tri_vseq counts vertices
@@ -189,11 +241,33 @@ typedef struct {
      * rasterize_triangle() picks UV (affine) or ST+Q (perspective-
      * correct) interpolation based on PRIM's real FST bit. */
     float tri_s[3], tri_t[3], tri_q[3];
+    /* Per-vertex Z (task #89), from XYZ2's real Z word. IMPORTANT
+     * scope caveat: this project's existing A+D-mode XYZ2 handling
+     * (apply_ad_write's GS_REG_XYZ2 case - the ONLY path every
+     * existing test/demo in this codebase uses) packs X into the
+     * ENTIRE first 32-bit word and Y into the ENTIRE second 32-bit
+     * word - a convention already baked into every existing test
+     * file before this round, which leaves no room for Z (real
+     * hardware's actual GIFRegXYZ A+D layout is X:16,Y:16 packed
+     * together in ONE word, Z:32 alone in the other - cross-checked
+     * against PCSX2's GS/GSRegs.h - but changing this project's
+     * established A+D convention now would require touching every
+     * existing test file and main.c's demo, well outside this task's
+     * scope). Z therefore only flows through for the genuine PACKED-
+     * mode XYZ2 path (GIFPackedXYZ2: X in word0, Y in word1, Z in
+     * word2 - a real, correctly-cross-checked, and previously-
+     * completely-unused-by-any-test layout), which is what the new
+     * tests/test_z_buffer.c uses. A+D-mode XYZ2 draws get Z=0
+     * (harmless: Z-buffer reads/writes stay fully gated behind
+     * zbuf_configured, so pre-existing A+D-only tests are completely
+     * unaffected either way). */
+    uint32_t tri_z[3];
 
     uint64_t quadwords_seen;
     uint64_t sprites_drawn;
     uint64_t triangles_drawn;
     uint64_t unsupported_prims_seen;
+    uint64_t pixels_ztest_failed; /* task #89 - counts fragments rejected by the Z test, for test visibility */
 } gif_state_t;
 
 gif_state_t *gif_get_state(void);

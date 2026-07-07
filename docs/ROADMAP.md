@@ -731,6 +731,23 @@ programmable GPU nor any of those APIs).
       "FST=1" and perspective-correct ST+Q "FST=0" coordinates, no
       CLAMP/wrap modeling), all via the GIF parser (`source/hw/gif.c`).
       Lines/points are still open.
+- [x] Z-buffer / depth test (task #89, task 6) - real ZBUF_1/TEST_1
+      A+D registers (`GIFRegZBUF`'s ZBP/PSM/ZMSK, `GIFRegTEST`'s ZTE/
+      ZTST, cross-checked against PCSX2's GS/GSRegs.h), a genuine per-
+      vertex Z value (from XYZ2's real Z word - only reachable via the
+      PACKED-mode XYZ2 path; this project's pre-existing A+D XYZ2
+      convention has no room left for Z, an honestly-scoped gap - see
+      `include/core/hw/gif.h`'s `tri_z` field comment), barycentric
+      (screen-space-linear, matching real hardware) Z interpolation
+      for triangles and flat "second-vertex" Z for SPRITE, and the 4
+      real `GS_ZTST` compare modes (NEVER/ALWAYS/GEQUAL/GREATER) gating
+      both the color write and the (ZMSK-respecting) Z-buffer write.
+      Z is stored as a plain 32-bit word via `gs_mem`'s existing
+      PSMCT32-shaped helpers (no PSMZ32/24/16 format modeling). Gated
+      behind this project's own `zbuf_configured` safety flag so any
+      draw that never configures a Z buffer behaves exactly as before
+      this round. 20 new checks (`tests/test_z_buffer.c`), 52-file/
+      0-failure regression, clean Wii rebuild.
 - [x] A first, minimal translation layer from GS memory to the Wii's
       display: `source/hw/gs_wii_output.c` converts a rectangular
       PSMCT32 region to the Wii's packed Y1CbY2Cr XFB format (RGB->YUV

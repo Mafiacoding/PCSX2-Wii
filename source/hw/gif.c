@@ -63,7 +63,8 @@ static inline float u32_to_float(uint32_t v)
 static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t x2, int32_t y2,
                                 uint32_t c0, uint32_t c1, uint32_t c2,
                                 int32_t u0, int32_t v0, int32_t u1, int32_t v1, int32_t u2, int32_t v2,
-                                float s0, float t0, float q0, float s1, float t1, float q1, float s2, float t2, float q2)
+                                float s0, float t0, float q0, float s1, float t1, float q1, float s2, float t2, float q2,
+                                uint32_t z0, uint32_t z1, uint32_t z2)
 {
     int32_t minx = x0, maxx = x0, miny = y0, maxy = y0;
     if (x1 < minx) minx = x1;
@@ -118,6 +119,35 @@ static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, i
                 double b0 = (double)w0 * inv_area;
                 double b1 = (double)w1 * inv_area;
                 double b2 = (double)w2 * inv_area;
+
+                /* Z-buffer / depth test (task #89). Z is genuinely
+                 * screen-space-linear on real GS hardware (unlike
+                 * S/T - Z has already gone through the perspective
+                 * projection by the time it reaches the rasterizer,
+                 * so it interpolates the same plain barycentric way
+                 * as Gouraud color, no 1/Q correction needed - well-
+                 * known real-hardware behavior, not specific to this
+                 * project). Gated behind zbuf_configured (this
+                 * project's own safety gate - see gif.h) so draws
+                 * that never configured a Z buffer behave exactly as
+                 * before this round. */
+                double zf = b0 * (double)z0 + b1 * (double)z1 + b2 * (double)z2;
+                uint32_t frag_z = (zf < 0.0) ? 0u : (uint32_t)(zf + 0.5);
+                int z_pass = 1;
+                if (g_gif.zbuf_configured && g_gif.zte) {
+                    uint32_t stored_z = gs_mem_read_psmct32(g_gif.zbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy);
+                    switch (g_gif.ztst) {
+                    case GS_ZTST_NEVER:   z_pass = 0; break;
+                    case GS_ZTST_ALWAYS:  z_pass = 1; break;
+                    case GS_ZTST_GEQUAL:  z_pass = (frag_z >= stored_z); break;
+                    case GS_ZTST_GREATER: z_pass = (frag_z >  stored_z); break;
+                    default: z_pass = 1; break;
+                    }
+                }
+                if (!z_pass) {
+                    g_gif.pixels_ztest_failed++;
+                    continue;
+                }
 
                 uint32_t shaded_r, shaded_g, shaded_b, shaded_a;
                 if (!gouraud) {
@@ -208,6 +238,13 @@ static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, i
                     }
                 }
                 gs_mem_write_psmct32(g_gif.fbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy, out);
+                if (g_gif.zbuf_configured && !g_gif.zmsk) {
+                    /* ZMSK (real ZBUF register bit): 1 = Z writes
+                     * disabled for this draw, matching real
+                     * hardware exactly (color can still be written
+                     * while Z stays untouched). */
+                    gs_mem_write_psmct32(g_gif.zbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy, frag_z);
+                }
             }
         }
     }
@@ -235,9 +272,24 @@ static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, i
  * hardware would still interpolate more precisely. */
 static void rasterize_sprite(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
                               int32_t u0, int32_t v0, int32_t u1, int32_t v1,
-                              float s0, float t0, float q0, float s1, float t1, float q1)
+                              float s0, float t0, float q0, float s1, float t1, float q1,
+                              uint32_t z0, uint32_t z1)
 {
     int textured = (g_gif.prim & PRIM_TME_MASK) != 0;
+    /* Z (task #89): real hardware treats SPRITE Z the same way it
+     * treats SPRITE color - a single flat value for the whole
+     * primitive, taken from the second (completing) vertex,
+     * mirroring this file's already-established "flat shading
+     * uses the LAST vertex" convention (see rasterize_triangle()'s
+     * flat_r/g/b/a). Unlike that color convention, this specific
+     * SPRITE-Z-uses-second-vertex detail was not independently
+     * re-verified against its own separate citation this round -
+     * it is an extension of the same real, already-cited flat-
+     * primitive convention, not a fresh guess. z0 is accepted for
+     * signature symmetry with the other per-corner parameters but
+     * is intentionally unused. */
+    (void)z0;
+    uint32_t frag_z = z1;
 
     /* Resolve each corner's texture coordinate into texel space
      * BEFORE the min/max reordering below, so the X/Y->U/V
@@ -272,6 +324,26 @@ static void rasterize_sprite(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
         for (int32_t xx = sx0; xx < sx1; xx++) {
             if (xx < 0) continue;
 
+            /* Z-buffer / depth test (task #89) - see
+             * rasterize_triangle()'s identical logic for the full
+             * comment; SPRITE just uses the flat frag_z computed
+             * above instead of a per-pixel barycentric one. */
+            int z_pass = 1;
+            if (g_gif.zbuf_configured && g_gif.zte) {
+                uint32_t stored_z = gs_mem_read_psmct32(g_gif.zbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy);
+                switch (g_gif.ztst) {
+                case GS_ZTST_NEVER:   z_pass = 0; break;
+                case GS_ZTST_ALWAYS:  z_pass = 1; break;
+                case GS_ZTST_GEQUAL:  z_pass = (frag_z >= stored_z); break;
+                case GS_ZTST_GREATER: z_pass = (frag_z >  stored_z); break;
+                default: z_pass = 1; break;
+                }
+            }
+            if (!z_pass) {
+                g_gif.pixels_ztest_failed++;
+                continue;
+            }
+
             uint32_t out;
             if (!textured) {
                 out = g_gif.rgba;
@@ -298,19 +370,28 @@ static void rasterize_sprite(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
                 }
             }
             gs_mem_write_psmct32(g_gif.fbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy, out);
+            if (g_gif.zbuf_configured && !g_gif.zmsk) {
+                gs_mem_write_psmct32(g_gif.zbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy, frag_z);
+            }
         }
     }
     g_gif.sprites_drawn++;
 }
 
-static void apply_xyz2(uint32_t word0, uint32_t word1)
+static void apply_xyz2(uint32_t word0, uint32_t word1, uint32_t word2)
 {
     /* PACKED XYZ2 layout (GS/GSRegs.h-compatible bit positions): X in
      * bits 0-15 of word0, Y in bits 0-15 of word1 (both 12.4
-     * fixed-point, offset-relative). Z and the ADC/context bits exist
-     * in the other two words of the qword but aren't used here. */
+     * fixed-point, offset-relative). Z (task #89) is the ENTIRE
+     * word2 - a real, full 32-bit value, cross-checked against
+     * PCSX2's GS/GSRegs.h GIFPackedXYZ2 layout. The ADC/context bit
+     * (word3) still isn't used. IMPORTANT: word2 is only ever a real
+     * Z value when apply_xyz2() is reached via the genuine PACKED-
+     * mode path - the A+D-mode call site passes 0 here instead (see
+     * gif.h's tri_z field comment for why). */
     int32_t raw_x = (int32_t)(word0 & 0xFFFFu);
     int32_t raw_y = (int32_t)(word1 & 0xFFFFu);
+    uint32_t raw_z = word2;
 
     int32_t x = (raw_x - (int32_t)g_gif.xyoffset_x) >> 4;
     int32_t y = (raw_y - (int32_t)g_gif.xyoffset_y) >> 4;
@@ -332,13 +413,15 @@ static void apply_xyz2(uint32_t word0, uint32_t word1)
             g_gif.tri_s[slot] = g_gif.cur_s;
             g_gif.tri_t[slot] = g_gif.cur_t;
             g_gif.tri_q[slot] = g_gif.cur_q;
+            g_gif.tri_z[slot] = raw_z;
             if (g_gif.tri_vseq % 3 == 0)
                 rasterize_triangle(g_gif.tri_x[0], g_gif.tri_y[0], g_gif.tri_x[1], g_gif.tri_y[1], g_gif.tri_x[2], g_gif.tri_y[2],
                                     g_gif.tri_rgba[0], g_gif.tri_rgba[1], g_gif.tri_rgba[2],
                                     g_gif.tri_u[0], g_gif.tri_v[0], g_gif.tri_u[1], g_gif.tri_v[1], g_gif.tri_u[2], g_gif.tri_v[2],
                                     g_gif.tri_s[0], g_gif.tri_t[0], g_gif.tri_q[0],
                                     g_gif.tri_s[1], g_gif.tri_t[1], g_gif.tri_q[1],
-                                    g_gif.tri_s[2], g_gif.tri_t[2], g_gif.tri_q[2]);
+                                    g_gif.tri_s[2], g_gif.tri_t[2], g_gif.tri_q[2],
+                                    g_gif.tri_z[0], g_gif.tri_z[1], g_gif.tri_z[2]);
         } else if (ptype == PRIM_TYPE_TRIANGLE_STRIP) {
             /* TRIANGLE_STRIP: each new vertex (from the 3rd onward)
              * forms a triangle with the previous 2 - a rolling
@@ -346,19 +429,23 @@ static void apply_xyz2(uint32_t word0, uint32_t word1)
             g_gif.tri_x[0] = g_gif.tri_x[1]; g_gif.tri_y[0] = g_gif.tri_y[1]; g_gif.tri_rgba[0] = g_gif.tri_rgba[1];
             g_gif.tri_u[0] = g_gif.tri_u[1]; g_gif.tri_v[0] = g_gif.tri_v[1];
             g_gif.tri_s[0] = g_gif.tri_s[1]; g_gif.tri_t[0] = g_gif.tri_t[1]; g_gif.tri_q[0] = g_gif.tri_q[1];
+            g_gif.tri_z[0] = g_gif.tri_z[1];
             g_gif.tri_x[1] = g_gif.tri_x[2]; g_gif.tri_y[1] = g_gif.tri_y[2]; g_gif.tri_rgba[1] = g_gif.tri_rgba[2];
             g_gif.tri_u[1] = g_gif.tri_u[2]; g_gif.tri_v[1] = g_gif.tri_v[2];
             g_gif.tri_s[1] = g_gif.tri_s[2]; g_gif.tri_t[1] = g_gif.tri_t[2]; g_gif.tri_q[1] = g_gif.tri_q[2];
+            g_gif.tri_z[1] = g_gif.tri_z[2];
             g_gif.tri_x[2] = x; g_gif.tri_y[2] = y; g_gif.tri_rgba[2] = g_gif.rgba;
             g_gif.tri_u[2] = g_gif.cur_u; g_gif.tri_v[2] = g_gif.cur_v;
             g_gif.tri_s[2] = g_gif.cur_s; g_gif.tri_t[2] = g_gif.cur_t; g_gif.tri_q[2] = g_gif.cur_q;
+            g_gif.tri_z[2] = raw_z;
             if (g_gif.tri_vseq >= 3)
                 rasterize_triangle(g_gif.tri_x[0], g_gif.tri_y[0], g_gif.tri_x[1], g_gif.tri_y[1], g_gif.tri_x[2], g_gif.tri_y[2],
                                     g_gif.tri_rgba[0], g_gif.tri_rgba[1], g_gif.tri_rgba[2],
                                     g_gif.tri_u[0], g_gif.tri_v[0], g_gif.tri_u[1], g_gif.tri_v[1], g_gif.tri_u[2], g_gif.tri_v[2],
                                     g_gif.tri_s[0], g_gif.tri_t[0], g_gif.tri_q[0],
                                     g_gif.tri_s[1], g_gif.tri_t[1], g_gif.tri_q[1],
-                                    g_gif.tri_s[2], g_gif.tri_t[2], g_gif.tri_q[2]);
+                                    g_gif.tri_s[2], g_gif.tri_t[2], g_gif.tri_q[2],
+                                    g_gif.tri_z[0], g_gif.tri_z[1], g_gif.tri_z[2]);
         } else { /* PRIM_TYPE_TRIANGLE_FAN */
             /* TRIANGLE_FAN: the first vertex is a fixed anchor
              * (slot 0, never overwritten); each new vertex forms a
@@ -367,23 +454,28 @@ static void apply_xyz2(uint32_t word0, uint32_t word1)
                 g_gif.tri_x[0] = x; g_gif.tri_y[0] = y; g_gif.tri_rgba[0] = g_gif.rgba;
                 g_gif.tri_u[0] = g_gif.cur_u; g_gif.tri_v[0] = g_gif.cur_v;
                 g_gif.tri_s[0] = g_gif.cur_s; g_gif.tri_t[0] = g_gif.cur_t; g_gif.tri_q[0] = g_gif.cur_q;
+                g_gif.tri_z[0] = raw_z;
                 g_gif.tri_x[1] = x; g_gif.tri_y[1] = y; g_gif.tri_rgba[1] = g_gif.rgba; /* also seed "previous" so vseq==2 has something to pair with */
                 g_gif.tri_u[1] = g_gif.cur_u; g_gif.tri_v[1] = g_gif.cur_v;
                 g_gif.tri_s[1] = g_gif.cur_s; g_gif.tri_t[1] = g_gif.cur_t; g_gif.tri_q[1] = g_gif.cur_q;
+                g_gif.tri_z[1] = raw_z;
             } else {
                 g_gif.tri_x[2] = x; g_gif.tri_y[2] = y; g_gif.tri_rgba[2] = g_gif.rgba;
                 g_gif.tri_u[2] = g_gif.cur_u; g_gif.tri_v[2] = g_gif.cur_v;
                 g_gif.tri_s[2] = g_gif.cur_s; g_gif.tri_t[2] = g_gif.cur_t; g_gif.tri_q[2] = g_gif.cur_q;
+                g_gif.tri_z[2] = raw_z;
                 if (g_gif.tri_vseq >= 3)
                     rasterize_triangle(g_gif.tri_x[0], g_gif.tri_y[0], g_gif.tri_x[1], g_gif.tri_y[1], g_gif.tri_x[2], g_gif.tri_y[2],
                                         g_gif.tri_rgba[0], g_gif.tri_rgba[1], g_gif.tri_rgba[2],
                                         g_gif.tri_u[0], g_gif.tri_v[0], g_gif.tri_u[1], g_gif.tri_v[1], g_gif.tri_u[2], g_gif.tri_v[2],
                                         g_gif.tri_s[0], g_gif.tri_t[0], g_gif.tri_q[0],
                                         g_gif.tri_s[1], g_gif.tri_t[1], g_gif.tri_q[1],
-                                        g_gif.tri_s[2], g_gif.tri_t[2], g_gif.tri_q[2]);
+                                        g_gif.tri_s[2], g_gif.tri_t[2], g_gif.tri_q[2],
+                                        g_gif.tri_z[0], g_gif.tri_z[1], g_gif.tri_z[2]);
                 g_gif.tri_x[1] = g_gif.tri_x[2]; g_gif.tri_y[1] = g_gif.tri_y[2]; g_gif.tri_rgba[1] = g_gif.tri_rgba[2];
                 g_gif.tri_u[1] = g_gif.tri_u[2]; g_gif.tri_v[1] = g_gif.tri_v[2];
                 g_gif.tri_s[1] = g_gif.tri_s[2]; g_gif.tri_t[1] = g_gif.tri_t[2]; g_gif.tri_q[1] = g_gif.tri_q[2];
+                g_gif.tri_z[1] = g_gif.tri_z[2];
             }
         }
         return;
@@ -397,6 +489,7 @@ static void apply_xyz2(uint32_t word0, uint32_t word1)
         g_gif.v0s = g_gif.cur_s;
         g_gif.v0t = g_gif.cur_t;
         g_gif.v0q = g_gif.cur_q;
+        g_gif.v0z = raw_z;
         g_gif.has_vertex0 = 1;
         return;
     }
@@ -406,7 +499,8 @@ static void apply_xyz2(uint32_t word0, uint32_t word1)
     if (ptype == PRIM_TYPE_SPRITE) {
         rasterize_sprite(g_gif.v0x, g_gif.v0y, x, y,
                           g_gif.v0u, g_gif.v0v, g_gif.cur_u, g_gif.cur_v,
-                          g_gif.v0s, g_gif.v0t, g_gif.v0q, g_gif.cur_s, g_gif.cur_t, g_gif.cur_q);
+                          g_gif.v0s, g_gif.v0t, g_gif.v0q, g_gif.cur_s, g_gif.cur_t, g_gif.cur_q,
+                          g_gif.v0z, raw_z);
     } else {
         g_gif.unsupported_prims_seen++;
     }
@@ -455,7 +549,12 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
         g_gif.cur_q = u32_to_float(data_hi);
     } break;
     case GS_REG_XYZ2:
-        apply_xyz2(data_lo, data_hi);
+        /* A+D mode: Z is not available under this project's
+         * established A+D XYZ2 convention (word0=X-only,
+         * word1=Y-only - see gif.h's tri_z field comment for the
+         * full explanation and why it isn't changed here) - pass
+         * 0 for Z. */
+        apply_xyz2(data_lo, data_hi, 0u);
         break;
     case GS_REG_FRAME_1: {
         /* FBP: bits 0-8, FBW: bits 9-14 (units of 64px - real hardware
@@ -516,6 +615,35 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
          * normalized ST+Q coordinates into texel space. */
         g_gif.tex_tw = (data_lo >> 26) & 0xFu;
         g_gif.tex_th = ((data_lo >> 30) & 0x3u) | ((data_hi & 0x3u) << 2);
+    } break;
+    case GS_REG_ZBUF_1: {
+        /* GIFRegZBUF bitfield cross-checked against PCSX2's own
+         * GS/GSRegs.h: word0 = ZBP(9):pad(15):PSM(6):pad(2);
+         * word1 = ZMSK(1):pad(31). PSM is ignored (real Z formats
+         * are PSMZ32/24/16 - this project stores Z as a plain
+         * 32-bit word via gs_mem's existing PSMCT32-shaped helpers,
+         * matching gs_mem.h's documented linear-addressing
+         * simplification). ZBP is used directly as OUR gs_mem bp
+         * convention, exactly like FRAME_1's FBP above. Real
+         * hardware's ZBUF register has NO separate width field - Z
+         * buffer addressing reuses the context's FBW, matching
+         * this project's choice to pass g_gif.fbw to the Z-buffer
+         * gs_mem_read/write_psmct32() calls in rasterize_triangle()/
+         * rasterize_sprite(). zbuf_configured is this project's own
+         * safety gate - see gif.h's field comment. */
+        g_gif.zbp = data_lo & 0x1FFu;
+        g_gif.zmsk = (int)(data_hi & 0x1u);
+        g_gif.zbuf_configured = 1;
+    } break;
+    case GS_REG_TEST_1: {
+        /* GIFRegTEST bitfield cross-checked against PCSX2's own
+         * GS/GSRegs.h (see TEST_ZTE_MASK/TEST_ZTST_* in gif.h) -
+         * only ZTE (bit 16) and ZTST (bits 17-18) are modeled;
+         * alpha test (ATE/ATST/AREF/AFAIL) and DATE/DATM are not
+         * implemented (no alpha blending exists in this project -
+         * see gif.h's top-of-file scope comment). */
+        g_gif.zte = (data_lo & TEST_ZTE_MASK) ? 1 : 0;
+        g_gif.ztst = (int)((data_lo >> TEST_ZTST_SHIFT) & TEST_ZTST_MASK);
     } break;
     default:
         break; /* unhandled register - ignored, not an error */
@@ -581,14 +709,14 @@ static uint32_t process_one_packet(const uint8_t *p, uint32_t len)
             uint32_t w1 = rd_le32(q + 4);
             uint32_t w2 = rd_le32(q + 8);
             uint32_t w3 = rd_le32(q + 12);
-            (void)w3; /* word 4 of the qword (Z/ADC bits for XYZ2, etc.) - not used in this simplified model */
+            (void)w3; /* word 4 of the qword (XYZ2's ADC/context bit, etc.) - not used in this simplified model. w2 (Z, for XYZ2) IS used as of task #89 - see the GIF_REG_XYZ2 case below. */
 
             uint32_t reg_code = regs_nibble(tag_w2, tag_w3, reg);
 
             switch (reg_code) {
             case GIF_REG_PRIM:  g_gif.prim = w0; reset_tri_vseq(); break;
             case GIF_REG_RGBAQ: apply_rgbaq(w0, w1, w2); break;
-            case GIF_REG_XYZ2:  apply_xyz2(w0, w1); break;
+            case GIF_REG_XYZ2:  apply_xyz2(w0, w1, w2); break; /* w2 = real Z (task #89) */
             case GIF_REG_AD:    apply_ad_write(w2 & 0xFFu, w0, w1); break; /* A+D: DATA in words 0-1, ADDR in word2's low byte */
             case GIF_REG_NOP:   default: break;
             }

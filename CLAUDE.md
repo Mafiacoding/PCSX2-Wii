@@ -357,6 +357,39 @@ current, up-to-date status.)
   meaningful default rather than an ignored bit). 51-file/0-failure
   regression, clean Wii rebuild.
 
+- **Z-buffer / depth test for triangles + SPRITE** (task #89, task
+  6, and the last of the user's requested "1 3 4 6 komplett" set):
+  real ZBUF_1/TEST_1 A+D registers (`GIFRegZBUF`'s ZBP/ZMSK,
+  `GIFRegTEST`'s ZTE/ZTST, live-fetched from PCSX2's GS/GSRegs.h) plus
+  the 4 real `GS_ZTST` compare modes (NEVER/ALWAYS/GEQUAL/GREATER).
+  Getting real per-vertex Z required investigation: PACKED-mode
+  `GIFPackedXYZ2` genuinely has Z as its own full word (word2,
+  previously read into a local var and discarded) - a real, zero-
+  regression-risk path since no prior test in this codebase ever used
+  PACKED-mode XYZ2. But real hardware's A+D-mode XYZ2 register is
+  only 64 bits total (X:16+Y:16 packed together, Z:32 in the other
+  word) - this project's PRE-EXISTING A+D XYZ2 convention (already
+  baked into every other test file and main.c before this round: X
+  gets the whole first word, Y the whole second) leaves no room for Z
+  at all. Rather than rewrite every existing test/demo, this is an
+  explicit, honestly-scoped gap: Z only flows through genuine PACKED-
+  mode XYZ2 (Z=0 via A+D, harmless since Z-buffer access stays fully
+  gated - see below). New `tests/test_z_buffer.c` hand-builds real
+  PACKED-mode packets for its vertices, same style as
+  `tests/test_vif.c`. Z interpolates barycentrically for triangles
+  (screen-space-linear, no 1/Q correction needed - real hardware
+  behavior, verified via task #88's centroid trick reapplied: 3
+  distinct per-vertex Z values average to the exact expected centroid
+  value) and uses a flat "second/completing vertex" Z for SPRITE
+  (extending this file's existing "flat shading uses the last vertex"
+  convention to Z). A new, project-own `zbuf_configured` safety gate
+  (not a real hardware concept) keeps every pre-existing test/demo
+  that never configures a Z buffer behaving byte-for-byte exactly as
+  before this round - without it, ZBUF's real default (ZBP=0) would
+  silently alias and corrupt the color framebuffer's own default
+  address. 20 new checks, 52-file/0-failure regression, clean Wii
+  rebuild.
+
 **devkitPro toolchain**:
 
 **devkitPro toolchain**: FULLY FIXED, clean Wii rebuild verified. This
@@ -484,7 +517,7 @@ gcc -I../include -I../source -o test_ee tests/test_ee_core.c ../source/hw/dma.c 
 ./test_ee
 ```
 
-There are 51 test files as of this writing, covering both CPU cores (EE
+There are 52 test files as of this writing, covering both CPU cores (EE
 integer/MMI/FPU/unaligned-access/COP0-CO-format/LQ-SQ/VU0-vector-datapath,
 IOP integer/unaligned/SYSCALL-exception/InstallExceptionHandlers/PC-fetch-
 sanity-guard), every hardware register model (EE DMA + chain-mode transfer

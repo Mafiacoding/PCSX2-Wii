@@ -905,6 +905,21 @@ programmable GPU nor any of those APIs).
       table were subtly wrong. 10 new checks (tests/test_gs_swizzle.c),
       60-file/0-failure regression (all 59 prior tests unmodified and
       still passing, since this is purely additive), clean Wii rebuild.
+- [x] REGLIST/IMAGE GIF transfer modes (Round 26) - previously ANY
+      non-PACKED GIF tag was byte-skipped with zero interpretation.
+      REGLIST now parses real 2-registers-per-qword packing, routing
+      every register through the existing apply_ad_write() (also
+      fixed a real byte-accounting bug in the process: REGLIST's data
+      span is ceil(NLOOP*NREG/2) qwords, not NLOOP as the old
+      fallback assumed - would have desynced the GIF stream on any
+      real REGLIST packet). IMAGE mode implements host-to-local
+      (XDIR=0) transfers into a PSMCT32 destination, driven by real
+      BITBLTBUF/TRXPOS/TRXREG/TRXDIR registers - local-to-host/local-
+      to-local are parsed but not acted on (documented gap, no
+      readback path or blit engine exists). Same session-limited-
+      research caveat as Rounds 24-25 applies to the register field
+      layouts. 15 new checks (tests/test_gs_reglist_image.c),
+      61-file/0-failure regression, clean Wii rebuild.
 - [x] A first, minimal translation layer from GS memory to the Wii's
       display: `source/hw/gs_wii_output.c` converts a rectangular
       PSMCT32 region to the Wii's packed Y1CbY2Cr XFB format (RGB->YUV
@@ -1008,10 +1023,10 @@ already documented, rather than truly returning from the syscall.
    additive, not-yet-wired-in API) exist, but this is still a sliver
    of real GS - real PCSX2's own GS code is ~114,500 lines. Still open
    (user has directed the remaining three to be done next, in this
-   order): REGLIST/IMAGE GIF transfer modes, GS context 2, mipmaps.
-   Also open, not user-directed but worth noting: actually wiring
-   Round 25's real swizzle addressing into the rendering pipeline
-   (currently a separate, additive API only).
+   order): GS context 2, mipmaps (REGLIST/IMAGE GIF transfer modes
+   done as of Round 26). Also open, not user-directed but worth
+   noting: actually wiring Round 25's real swizzle addressing into
+   the rendering pipeline (currently a separate, additive API only).
 
 6. Lower priority, deferred: the remaining ~23 EE MMI opcodes (section
    1), Pad/memory card (section 7).

@@ -737,6 +737,22 @@ always ask for/verify the no-disc case explicitly).
   tests literally unmodified, since this is purely additive), clean
   Wii rebuild. See docs/STATUS.md's "GS Round 25" section.
 
+- **GS Round 26 (same session, continued)**: REGLIST and IMAGE GIF
+  transfer modes - previously ANY non-PACKED GIF tag was byte-skipped
+  with zero interpretation. REGLIST now parses real 2-registers-per-
+  qword packing, routing every register through the existing
+  apply_ad_write(); also fixed a real byte-accounting bug found along
+  the way (the old fallback assumed REGLIST's data span equaled NLOOP
+  qwords, same as IMAGE - actually ceil(NLOOP*NREG/2), which would
+  have desynced the GIF stream on any real REGLIST packet). IMAGE
+  mode implements host-to-local (XDIR=0) PSMCT32 transfers driven by
+  real BITBLTBUF/TRXPOS/TRXREG/TRXDIR registers - local-to-host/
+  local-to-local parsed but not acted on (documented gap). Same
+  session-limited-research caveat as Rounds 24-25 applies. 15 new
+  checks (`tests/test_gs_reglist_image.c`, 60->61 test binaries),
+  full regression 0-failure, clean Wii rebuild. See docs/STATUS.md's
+  "GS Round 26" section.
+
 ## The mandatory per-change workflow
 
 This project has a strict, consistently-applied ritual for every increment
@@ -1312,7 +1328,7 @@ rsync -a --delete --exclude '.git' --exclude 'test_*' \
 # rsync's include/exclude ORDER means the 3 test_*.c source files
 # still get excluded by the earlier --exclude 'test_*' rule (basename
 # match, first-match-wins) - work around it by re-copying them directly:
-for f in tests/test_iop_elf.c tests/test_iop_spu2.c tests/test_vu_micro.c tests/test_gif_line.c tests/test_iop_rfe.c tests/test_iop_hw_interrupt.c tests/test_iop_excb.c tests/test_gs_alpha.c tests/test_gs_clut.c tests/test_gs_swizzle.c; do
+for f in tests/test_iop_elf.c tests/test_iop_spu2.c tests/test_vu_micro.c tests/test_gif_line.c tests/test_iop_rfe.c tests/test_iop_hw_interrupt.c tests/test_iop_excb.c tests/test_gs_alpha.c tests/test_gs_clut.c tests/test_gs_swizzle.c tests/test_gs_reglist_image.c; do
   cp "/tmp/pcsx2-wii-git/$f" "$OUT/pcsx2-wii/$f"
 done
 ```
@@ -1373,9 +1389,9 @@ so a session cutoff mid-sweep never risks losing already-finished
 work. Round 24 (CLUT/paletted textures) is the first of these five and
 is complete, committed, and pushed - see "Current frontier" above.
 Round 25 (real block-swizzled addressing, additive API) is the
-second and is also complete/committed/pushed. Remaining, in the
-user's stated order: REGLIST/IMAGE transfer modes, GS context 2,
-mipmaps.
+second and is also complete/committed/pushed. Round 26 (REGLIST/IMAGE
+transfer modes) is the third and is also complete/committed/pushed.
+Remaining, in the user's stated order: GS context 2, mipmaps.
 
 ## Reference material
 

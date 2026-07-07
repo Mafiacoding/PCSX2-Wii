@@ -109,6 +109,29 @@
  * research pass over PCSX2's GS/GSRegs.h GIF_A_D_REG enum. */
 #define GS_REG_ALPHA_1    0x42
 
+/* Round 26: BITBLTBUF/TRXPOS/TRXREG/TRXDIR - the real GS registers
+ * that configure and trigger a host<->local (or local<->local)
+ * memory transfer, whose actual pixel payload arrives as an IMAGE-
+ * mode GIF packet (or is read out that way, for local-to-host). Real
+ * addresses (well-known, standard GS register set - this round's
+ * research pass again hit a session limit, see docs/STATUS.md's "GS
+ * Round 26" section for the citation-honesty note, same caveat as
+ * Rounds 24-25). Only host-to-local (XDIR=0) transfers into a
+ * PSMCT32 destination are actually implemented - see gif.c's IMAGE-
+ * mode handling for the full scope; local-to-host/local-to-local
+ * (XDIR=1/2) are parsed but not acted on (documented gap, consistent
+ * with this project not having a local-to-local blit engine at all
+ * and no host-readback path either). */
+#define GS_REG_BITBLTBUF  0x50
+#define GS_REG_TRXPOS     0x51
+#define GS_REG_TRXREG     0x52
+#define GS_REG_TRXDIR     0x53
+
+#define TRXDIR_HOST_TO_LOCAL  0u
+#define TRXDIR_LOCAL_TO_HOST  1u
+#define TRXDIR_LOCAL_TO_LOCAL 2u
+#define TRXDIR_OFF            3u
+
 /* POINT/LINE/LINE_STRIP (task: "GS coverage breadth", item 5) -
  * cross-checked against a live fetch of PCSX2's GS/GSRegs.h `enum
  * GS_PRIM` (GS_POINTLIST=0, GS_LINELIST=1, GS_LINESTRIP=2,
@@ -321,6 +344,23 @@ typedef struct {
      * timing/behavior). */
     uint32_t tex_psm;
     uint32_t tex_cbp, tex_cpsm, tex_csa, tex_cld;
+
+    /* Round 26: host-to-local IMAGE transfer state (BITBLTBUF/
+     * TRXPOS/TRXREG/TRXDIR - see their definitions above for the
+     * scope). trx_active becomes true only when TRXDIR is written
+     * with XDIR=0 (host-to-local) AND the destination PSM is PSMCT32
+     * (the only format this project's gs_mem actually stores) -
+     * anything else leaves trx_active false, so a subsequent IMAGE-
+     * mode packet's data is safely skipped (byte-accounted, not
+     * interpreted) rather than misinterpreted. trx_cur_x/trx_cur_y
+     * are the transfer's progress cursor, relative to (dsax,dsay),
+     * reset to (0,0) each time TRXDIR triggers a new transfer. */
+    uint32_t trx_dbp, trx_dbw, trx_dpsm;
+    uint32_t trx_dsax, trx_dsay;
+    uint32_t trx_rrw, trx_rrh;
+    uint32_t trx_xdir;
+    int trx_active;
+    uint32_t trx_cur_x, trx_cur_y;
 
     /* Z-buffer / depth-test state (task #89). zbp is the Z buffer's
      * base pointer, in OUR gs_mem bp convention (see gs_mem.h) - real

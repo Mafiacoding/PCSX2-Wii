@@ -3546,6 +3546,96 @@ to real-hardware-valid ranges - a nontrivial follow-up task, explicitly
 left open rather than rushed. Per the user's stated order, remaining:
 REGLIST/IMAGE transfer modes, GS context 2, mipmaps.
 
+## GS Round 26: REGLIST and IMAGE GIF transfer modes
+
+Third of five items in the user's directed sweep (after Round 24's
+CLUT and Round 25's block-swizzle addressing), this round implements
+the two GIF transfer modes that were previously entirely unimplemented
+- any non-PACKED GIF tag was simply byte-skipped without any
+interpretation at all.
+
+**REGLIST mode (FLG=1).** Real hardware packs TWO plain 64-bit
+register values per 128-bit qword (register A in words 0-1, register
+B in words 2-3), looping NLOOP times through the tag's NREG-register
+REGS descriptor - the exact same REGS/NREG tag fields PACKED mode
+already uses, just interpreted as a flat stream of 64-bit values
+instead of PACKED's per-register 128-bit expanded encodings. Every
+register in a REGLIST stream is now routed through the existing
+`apply_ad_write()` function uniformly: it already implements the
+correct "natural" 64-bit encoding REGLIST uses for PRIM/RGBAQ/XYZ2/
+TEX0_1/FRAME_1/ZBUF_1/TEST_1/ALPHA_1/etc (the same encoding A+D writes
+already use in PACKED mode) - reusing it is both more complete than a
+narrower duplicate switch and, more importantly, already tested. This
+does mean REGLIST-mode XYZ2 writes inherit this project's existing,
+already-documented A+D XYZ2 simplification (no real Z value - see
+`apply_ad_write`'s own `GS_REG_XYZ2` case) - a consistent, not a new,
+limitation. Total registers = NLOOP*NREG; total qwords consumed =
+ceil(total/2) (the previous, pre-Round-26 fallback code incorrectly
+assumed REGLIST's byte span equaled NLOOP qwords, same as IMAGE mode -
+a real bug that would have desynced the GIF stream on any actual
+REGLIST packet; fixed as part of this round, verified by a dedicated
+odd-register-count test proving the packet immediately following a
+REGLIST packet still parses correctly).
+
+**IMAGE mode (FLG=2/3).** Confirmed real semantics: a completely raw
+pixel-data dump, sized as exactly NLOOP qwords (this part of the
+pre-existing fallback code was already correct - IMAGE's byte
+accounting didn't need fixing, only its data INTERPRETATION did),
+governed by 4 registers configured via ordinary PACKED-mode A+D writes
+beforehand: `BITBLTBUF` (SBP/SBW/SPSM source and DBP/DBW/DPSM
+destination fields - only the destination fields are acted on),
+`TRXPOS` (SSAX/SSAY source and DSAX/DSAY destination position - only
+destination acted on), `TRXREG` (RRW/RRH transfer rectangle
+width/height), and `TRXDIR` (XDIR - writing this register is what
+actually TRIGGERS the transfer on real hardware, resetting the
+progress cursor to the rectangle's start). This round implements
+host-to-local (XDIR=0) transfers into a PSMCT32 destination only -
+local-to-host (readback) and local-to-local (in-VRAM blit) are parsed
+(all 4 registers' fields are extracted) but not acted on, a documented
+gap consistent with this project having no host-readback path and no
+local-to-local blit engine at all. When a transfer is active, each
+IMAGE-mode qword's 4 words are written as 4 raw PSMCT32 pixels in
+raster order into the destination rectangle (wrapping at RRW, stopping
+- and auto-deactivating - once RRH rows are filled, matching real
+hardware's rectangle-bounded transfer behavior). When no transfer is
+active (unsupported direction, non-PSMCT32 destination, or simply no
+prior TRXDIR trigger), IMAGE data is safely byte-skipped exactly as
+before this round - not interpreted, but the stream stays in sync.
+
+**Citation-honesty note (same pattern as Rounds 24-25).** This round's
+dedicated research-subagent dispatch again hit this session's own
+usage/session limit before it could run. The GIFTag FLG/NREG bit
+positions, REGLIST's 2-registers-per-qword packing, and the
+BITBLTBUF/TRXPOS/TRXREG/TRXDIR register layouts are implemented from
+established, well-published PS2 GS knowledge rather than a freshly-
+verified primary-source citation this round - flagged explicitly in
+`gif.h`'s register-definition comments.
+
+**Testing (`tests/test_gs_reglist_image.c`, 15 checks).** REGLIST with
+an even register count (2 registers, 1 qword) verifying both
+registers land correctly; REGLIST with an odd count (3 registers, 2
+qwords, the second qword's upper half being real-hardware padding)
+verifying all 3 registers apply correctly AND that a packet
+immediately following still parses correctly (the stream-desync bug
+mentioned above, now fixed); a full host-to-local IMAGE transfer (3x2
+pixel rectangle) verifying every pixel lands at its correct
+destination coordinate, including wrapping at the RRW boundary and
+auto-deactivation once the rectangle is filled; and an IMAGE packet
+with no prior TRXDIR trigger, verifying gs_mem is left completely
+untouched while the stream still stays in sync for the packet after.
+
+Regression: 61 host-native test binaries (was 60,
++`tests/test_gs_reglist_image.c`), 0 failures - all 60 prior tests
+pass unmodified. Clean Wii/devkitPPC rebuild, same single
+pre-existing harmless `strncpy` warning as every prior round.
+
+**Net result for GS Round 26**: REGLIST and IMAGE transfer modes are
+implemented against real (if this-round-session-limited) GS hardware
+semantics, including host-to-local texture/framebuffer data upload -
+previously any such transfer would have been silently dropped with no
+interpretation at all. Per the user's stated order, remaining: GS
+context 2, mipmaps.
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

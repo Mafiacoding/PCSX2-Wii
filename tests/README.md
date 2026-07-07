@@ -1410,3 +1410,28 @@ disagree at a non-degenerate coordinate (not accidentally aliased).
 gcc -I../include -I../source -o test_gs_swizzle tests/test_gs_swizzle.c ../source/hw/gs_mem.c
 ./test_gs_swizzle
 ```
+
+`test_gs_reglist_image.c` covers GS Round 26: REGLIST and IMAGE GIF
+transfer modes, previously entirely unimplemented (any non-PACKED tag
+was byte-skipped with zero interpretation). See
+`include/core/hw/gif.h`'s `GS_REG_BITBLTBUF`/`TRXPOS`/`TRXREG`/
+`TRXDIR` comments and `source/hw/gif.c`'s `process_one_packet()`
+REGLIST/IMAGE branches for the full scope and this round's citation-
+honesty note (live source-fetch research hit a session limit again
+this round, same caveat as Rounds 24-25). 15 checks: REGLIST with an
+even register count (2 registers, 1 qword) verifying both land
+correctly; REGLIST with an odd count (3 registers, 2 qwords, second
+qword's upper half being real padding) verifying all 3 registers
+apply AND that the packet immediately following still parses
+correctly (a real byte-accounting bug found and fixed this round -
+the old fallback wrongly assumed REGLIST's span equaled NLOOP qwords);
+a full host-to-local IMAGE transfer (3x2 pixel rectangle) verifying
+every pixel lands correctly including RRW-boundary wrapping and
+auto-deactivation once the rectangle fills; and an IMAGE packet with
+no prior TRXDIR trigger, verifying gs_mem stays untouched while the
+stream stays in sync for the packet after.
+
+```sh
+gcc -I../include -I../source -o test_gs_reglist_image tests/test_gs_reglist_image.c ../source/hw/gif.c ../source/hw/gs_mem.c
+./test_gs_reglist_image
+```

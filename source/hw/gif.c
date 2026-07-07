@@ -1047,6 +1047,53 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
         g_gif.alpha_d = (data_lo >> ALPHA_D_SHIFT) & ALPHA_ABCD_MASK;
         g_gif.alpha_fix = data_hi & ALPHA_FIX_MASK;
     } break;
+    case GS_REG_BITBLTBUF: {
+        /* GIFRegBITBLTBUF (Round 26): word0 = SBP:14(0-13),
+         * SBW:6(16-21), SPSM:6(22-27); word1 = DBP:14(0-13),
+         * DBW:6(16-21), DPSM:6(22-27). Only the destination fields
+         * matter for the host-to-local path this project implements
+         * - source fields are parsed for completeness/documentation
+         * but unused (no local-to-host/local-to-local support - see
+         * this register's header comment). DBP/DBW used directly as
+         * this project's own gs_mem bp/bw convention, exactly like
+         * FRAME_1/TEX0_1/ZBUF_1 elsewhere. */
+        g_gif.trx_dbp = data_hi & 0x3FFFu;
+        uint32_t dbw_field = (data_hi >> 16) & 0x3Fu;
+        g_gif.trx_dbw = dbw_field * 64u;
+        if (g_gif.trx_dbw == 0) g_gif.trx_dbw = 640;
+        g_gif.trx_dpsm = (data_hi >> 22) & 0x3Fu;
+    } break;
+    case GS_REG_TRXPOS: {
+        /* GIFRegTRXPOS: word0 = SSAX:11(0-10), SSAY:11(16-26);
+         * word1 = DSAX:11(0-10), DSAY:11(16-26). Only DSAX/DSAY
+         * matter here (destination start position) - source position
+         * is parsed but unused, same scope note as BITBLTBUF. */
+        g_gif.trx_dsax = data_hi & 0x7FFu;
+        g_gif.trx_dsay = (data_hi >> 16) & 0x7FFu;
+    } break;
+    case GS_REG_TRXREG:
+        /* GIFRegTRXREG: word0 = RRW:12(0-11), RRH:12(16-27) - the
+         * transfer rectangle's width/height in pixels. word1 unused. */
+        g_gif.trx_rrw = data_lo & 0xFFFu;
+        g_gif.trx_rrh = (data_lo >> 16) & 0xFFFu;
+        break;
+    case GS_REG_TRXDIR: {
+        /* GIFRegTRXDIR: word0 = XDIR:2(0-1). Writing this register is
+         * what actually TRIGGERS the transfer on real hardware -
+         * resets the progress cursor to (0,0) relative to DSAX/DSAY.
+         * trx_active is only set for XDIR=host-to-local AND a
+         * PSMCT32 destination (the only format this project's gs_mem
+         * can actually store) - anything else (an unsupported
+         * direction, or a non-PSMCT32 destination format) leaves
+         * trx_active false, so a subsequent IMAGE packet's data is
+         * safely byte-skipped rather than misinterpreted (see
+         * process_one_packet's IMAGE-mode handling below). */
+        g_gif.trx_xdir = data_lo & 0x3u;
+        g_gif.trx_cur_x = 0;
+        g_gif.trx_cur_y = 0;
+        g_gif.trx_active = (g_gif.trx_xdir == TRXDIR_HOST_TO_LOCAL) &&
+                            (g_gif.trx_dpsm == TEX_PSM_PSMCT32);
+    } break;
     default:
         break; /* unhandled register - ignored, not an error */
     }
@@ -1088,16 +1135,94 @@ static uint32_t process_one_packet(const uint8_t *p, uint32_t len)
 
     uint32_t consumed = 16;
 
-    if (flg != 0 /* PACKED */ || nreg == 0) {
-        /* REGLIST/IMAGE mode or a degenerate tag - not implemented.
-         * Best effort: skip the data this tag claims (nloop qwords
-         * for IMAGE mode; for REGLIST it'd normally be
-         * nloop*nreg/2 qwords, but we don't parse it) so a stream
-         * with a mix of supported/unsupported packets doesn't get
-         * permanently desynced. */
+    /* Round 26: REGLIST mode (FLG=1). Real hardware packs TWO plain
+     * 64-bit register values per 128-bit qword (register A in words
+     * 0-1, register B in words 2-3), looping NLOOP times through the
+     * tag's NREG-register REGS descriptor - exactly the same REGS/
+     * NREG tag fields PACKED mode uses, just interpreted as a flat
+     * stream of 64-bit values instead of PACKED's per-register
+     * 128-bit expanded encodings. Total registers = NLOOP*NREG; total
+     * qwords = ceil(total/2) (the last qword's upper half is unused
+     * padding when the total is odd - real hardware behavior).
+     *
+     * Every register in the stream is routed through apply_ad_write()
+     * uniformly: it already implements the exact "natural" 64-bit
+     * encoding REGLIST uses for PRIM/RGBAQ/XYZ2/TEX0_1/FRAME_1/ZBUF_1/
+     * TEST_1/ALPHA_1/etc (the same encoding A+D writes use in PACKED
+     * mode) - reusing it here is both more complete than duplicating
+     * PACKED's own narrower inline switch and, more importantly,
+     * already tested. Note this inherits this project's existing,
+     * already-documented A+D XYZ2 simplification (no real Z - see
+     * apply_ad_write's own GS_REG_XYZ2 case) for REGLIST-mode XYZ2
+     * writes too - a consistent, not a new, limitation. */
+    if (flg == 1 /* REGLIST */ && nreg != 0) {
+        uint32_t total_regs = nloop * nreg;
+        for (uint32_t i = 0; i < total_regs; i++) {
+            uint32_t qword_idx = i / 2;
+            uint32_t half = i % 2;
+            uint32_t qoff = consumed + qword_idx * 16u;
+            if (qoff + 16 > len) {
+                /* Incomplete - report only what's fully consumed so
+                 * far (whole qwords), same policy as PACKED mode. */
+                return consumed + qword_idx * 16u;
+            }
+            const uint8_t *q = p + qoff;
+            uint32_t lo = half == 0 ? rd_le32(q + 0) : rd_le32(q + 8);
+            uint32_t hi = half == 0 ? rd_le32(q + 4) : rd_le32(q + 12);
+            uint32_t reg_code = regs_nibble(tag_w2, tag_w3, i % nreg);
+            apply_ad_write(reg_code, lo, hi);
+        }
+        uint32_t total_qwords = (total_regs + 1u) / 2u; /* ceil(total/2) */
+        g_gif.quadwords_seen += total_qwords; /* one count per whole qword actually consumed, matching PACKED's per-qword accounting */
+        return consumed + total_qwords * 16u;
+    }
+
+    if (flg == 2 || flg == 3 /* IMAGE (3 is the reserved/disabled variant, treated the same) */ || nreg == 0) {
+        /* IMAGE mode: NLOOP qwords of completely raw pixel data - no
+         * register interpretation, no REGS descriptor involved at
+         * all (byte accounting was already correct before this
+         * round: IMAGE's data size really is exactly NLOOP qwords).
+         * Round 26 adds REAL pixel writing when a host-to-local
+         * PSMCT32 transfer is active (g_gif.trx_active, set by a
+         * prior TRXDIR write - see apply_ad_write's GS_REG_TRXDIR
+         * case) - each qword holds exactly 4 raw PSMCT32 pixels,
+         * consumed in raster order and written via the destination
+         * rectangle's (trx_dbp,trx_dbw) at (trx_dsax+cur_x,
+         * trx_dsay+cur_y), wrapping at trx_rrw and stopping once
+         * trx_rrh rows are filled (matching real hardware's
+         * rectangle-bounded transfer). Anything trx_active doesn't
+         * cover (unsupported XDIR, non-PSMCT32 destination, or a
+         * degenerate nreg==0 tag with flg=0/PACKED that isn't really
+         * IMAGE data at all) falls back to the pre-existing safe
+         * byte-skip - not interpreted, but the stream stays in sync. */
         uint32_t skip_qwords = nloop;
         uint32_t skip_bytes = skip_qwords * 16u;
         if (consumed + skip_bytes > len) return consumed; /* not enough data yet */
+
+        if ((flg == 2 || flg == 3) && g_gif.trx_active) {
+            for (uint32_t i = 0; i < nloop && g_gif.trx_active; i++) {
+                const uint8_t *q = p + consumed + i * 16u;
+                uint32_t px[4];
+                px[0] = rd_le32(q + 0);
+                px[1] = rd_le32(q + 4);
+                px[2] = rd_le32(q + 8);
+                px[3] = rd_le32(q + 12);
+                for (int k = 0; k < 4 && g_gif.trx_active; k++) {
+                    gs_mem_write_psmct32(g_gif.trx_dbp, g_gif.trx_dbw,
+                                          g_gif.trx_dsax + g_gif.trx_cur_x,
+                                          g_gif.trx_dsay + g_gif.trx_cur_y,
+                                          px[k]);
+                    g_gif.trx_cur_x++;
+                    if (g_gif.trx_cur_x >= g_gif.trx_rrw) {
+                        g_gif.trx_cur_x = 0;
+                        g_gif.trx_cur_y++;
+                        if (g_gif.trx_cur_y >= g_gif.trx_rrh)
+                            g_gif.trx_active = 0; /* transfer complete - a new TRXDIR write is required to start another */
+                    }
+                }
+            }
+        }
+
         return consumed + skip_bytes;
     }
 

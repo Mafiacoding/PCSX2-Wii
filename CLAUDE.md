@@ -531,6 +531,24 @@ always ask for/verify the no-disc case explicitly).
   docs/STATUS.md's "Round 17" section for whoever picks this up next.
   93/93 regression, clean Wii rebuild.
 
+- **Round 18 - module-entry boot-info gap fixed for real**: fixed
+  round 15/17's documented stack-pointer-underflow gap by setting $a0
+  to a real 2MB-RAM boot-info word before every module entry jump (see
+  `iop_module_loader.c`'s `BOOT_INFO_RAM_MB`) - SYSMEM's own real,
+  disassembled `lw v0,(a0); sll sp,v0,0x14` now computes a sane stack
+  pointer instead of collapsing to 0. Verified the underflow had been
+  silently overwriting the real exception-vector trampoline at address
+  0x80 (installed by task #42's InstallExceptionHandlers), which is why
+  a later, perfectly normal SYSCALL exception used to vector into
+  garbage. Fixed, the IOP now reaches a new resting state at
+  pc=0x101270-0x101288 that disassembles as a genuine, deliberately-
+  authored real BIOS panic loop (write error code 2 to address 0, spin
+  forever) - most likely because this project has never implemented a
+  real IOP kernel SYSCALL dispatch table (distinct from the existing
+  A0/B0/C0 jump-table mechanism). Flagged as the next concrete target
+  in ROADMAP.md, not attempted this round. 93/93 regression unchanged,
+  clean Wii rebuild.
+
 ## The mandatory per-change workflow
 
 This project has a strict, consistently-applied ritual for every increment

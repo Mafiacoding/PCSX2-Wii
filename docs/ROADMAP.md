@@ -570,9 +570,26 @@ instead of fully emulating the real IOP BIOS ROM.
       SYSMEM kernel code past the round-14 wall for the first time -
       see docs/STATUS.md's "Round 15" section for the full trace,
       including a second real bug found and fixed (a missing module-
-      entry stack pointer) and a third, deeper, honestly-documented
-      boundary (module-entry argument registers/boot-info block not
-      modeled) that stops this short of a full real boot.
+      entry stack pointer). A third, deeper boundary (module-entry
+      argument registers/boot-info block not modeled) was found the
+      same round and **fixed in Round 18** - $a0 now points at a real
+      2MB-RAM boot-info word, matching SYSMEM's own disassembled
+      `lw v0,(a0); sll sp,v0,0x14` stack-pointer computation. Round 18
+      also found and traced a knock-on consequence of the pre-fix bug
+      (the bogus near-zero stack pointer had been silently overwriting
+      the real exception-vector trampoline at address 0x80) - see
+      docs/STATUS.md's "Round 18" section.
+- [ ] Real IOP kernel SYSCALL dispatch table - Round 18 found that,
+      with the boot-info fix above, the IOP now runs cleanly through a
+      real SYSCALL exception into what disassembly shows is a genuine
+      BIOS panic/halt loop (write error code 2 to address 0, spin
+      forever) - most likely because this project has never modeled
+      the real IOP kernel's SYSCALL-number-driven dispatch table
+      (ThreadMan/semaphores/etc., distinct from the existing, separate
+      A0/B0/C0 jump-table BIOS-call mechanism in `iop_hle_bios.c`).
+      This is the next concrete boundary standing between this project
+      and a real IOP boot completing - substantial, well-defined scope
+      for a future round; not attempted yet.
 
 ## 3. DMA controller
 

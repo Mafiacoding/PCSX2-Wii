@@ -2680,6 +2680,71 @@ Regression: 93/93 host-native test binaries pass, clean Wii rebuild.
 No BIOS bytes were added to the repo; all diagnostics above live only
 in `/tmp` scratch files, never committed.
 
+### Round 18 (2026-07-07): the module-entry boot-info gap fixed for real - stack corruption resolved, a new (likely legitimate) real BIOS panic loop reached
+
+Direct fix for round 17's precisely-traced finding and round 15's
+originally-deferred "third boundary". Disassembly of the real, loaded
+SYSMEM module's own entry code (cited in round 17) showed it reads a
+word through $a0 and left-shifts it by 20 bits to compute its initial
+stack pointer (`lw v0,(a0); sll sp,v0,0x14`) - i.e. it expects $a0 to
+point at a word giving the number of megabytes of IOP RAM. This
+project's module loader (`iop_module_loader.c`) never set $a0 before
+jumping to a module's entry point (only $ra/$sp, from round 15), so
+`*a0` read whatever was at IOP RAM address 0 (0), collapsing SYSMEM's
+own computed stack pointer to 0.
+
+**Fix**: both jump sites in `iop_module_loader.c`
+(`iop_module_loader_boot()` and `iop_module_loader_try_handle()`) now
+allocate a small word via the existing bump allocator, write the real,
+hardware-invariant constant `2` (PS2 IOP RAM is always exactly 2MB,
+unlike the EE side - not a guess) into it, and set `$a0` to its
+address before every module entry jump. See
+`source/hw/iop_module_loader.c`'s new `BOOT_INFO_RAM_MB` comment for
+the full citation and reasoning.
+
+**Verified via host-native diagnostics** (`/tmp/diag17.c`-
+`/tmp/diag19.c`, transient, not committed): before the fix, the IOP's
+stack pointer walked down through and past IOP RAM address 0 (ending
+up at `sp=0xFFFFFF40`, a ~192-byte underflow) as a direct consequence
+of the bogus zero-derived initial SP, and - critically - this
+underflow silently overwrote the real, dump-specific exception-vector
+trampoline `InstallExceptionHandlers` (task #42) had correctly written
+to address `0x80`, so a later, completely normal SYSCALL exception
+(instruction 3,059,999, fully deterministic) vectored into garbage
+instead of the real handler. After the fix, the same SYSCALL fires at
+the same instruction count, but the stack pointer stays sane throughout
+(`sp≈0x001FFFxx`, matching this project's own `INITIAL_SP` convention),
+and the real exception-vector trampoline survives intact.
+
+**New resting state reached**: with the corruption gone, the IOP now
+runs the real exception handler through to a different code region
+(`0x00101270`-`0x00101288`), which disassembly shows is:
+```
+lui  v1, 0x8000
+addiu v0, zero, 2
+sb   v0, (v1)      ; store byte 2 to address 0x80000000 (IOP kseg0 -> RAM addr 0)
+j    0x101270      ; unconditional infinite loop
+```
+This reads as a genuine, deliberately-authored real BIOS panic/halt
+loop (write an error code to a well-known low address, then spin
+forever) rather than an emulation artifact - the interpreter is no
+longer wandering through corrupted memory, it's executing real,
+sensible-looking kernel code that appears to detect some other still-
+missing condition (most plausibly: this project has never implemented
+a real IOP kernel SYSCALL dispatch table - only the separate, PS1-
+legacy-style A0/B0/C0 jump-table BIOS calls - so whatever the real
+exception handler tries to do with this SYSCALL's request number likely
+fails, and the real BIOS code correctly, safely halts). Not
+investigated further this round to keep scope honest; flagged in
+ROADMAP.md as the next concrete target (a real IOP kernel syscall
+table is a substantial, well-defined next feature, distinct from the
+existing A0/B0/C0 mechanism).
+
+Regression: 93/93 host-native tests still pass unchanged (this fix only
+touches module-entry argument setup, not any tested opcode behavior).
+Clean Wii/devkitPPC rebuild, same single pre-existing harmless
+`strncpy` truncation warning as prior rounds.
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

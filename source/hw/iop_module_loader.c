@@ -42,6 +42,38 @@
 #define INITIAL_SP (IOP_RAM_SIZE_CONST - 0x100u)
 #define IOP_RAM_SIZE_CONST 0x00200000u
 
+/* Module-entry $a0 argument (task #92's documented "third boundary",
+ * closed this round). Disassembly of the real, loaded SYSMEM module's
+ * own init code (docs/STATUS.md's "Round 17" section) shows, at the
+ * very start of its entry function:
+ *     lw   v0, (a0)
+ *     sll  sp, v0, 0x14        -- sp = (*a0) * 0x100000
+ *     addiu sp, sp, -0x40
+ * i.e. SYSMEM expects a0 to point at a single word giving the number
+ * of MEGABYTES of IOP RAM, which it left-shifts by 20 (multiply by
+ * 0x100000) to compute a top-of-RAM initial stack pointer. Before this
+ * round, this project's loader left a0 = 0, so *a0 read whatever
+ * happened to be at IOP RAM address 0 (typically 0), collapsing sp to
+ * 0 - which this round traced all the way through to a genuine,
+ * previously-mysterious failure mode: as the (wrongly near-zero) sp
+ * gets used for ordinary stack-relative pushes by later code, it
+ * walks down through and past low RAM addresses, including address
+ * 0x80 - the hardware-mandated general exception vector
+ * (iop_hle_bios.c's EXC_VECTOR_ADDR) - silently overwriting the real,
+ * dump-specific exception trampoline InstallExceptionHandlers had
+ * correctly installed there. Any later exception (a real SYSCALL, in
+ * the traced case) then vectors through 0x80 into garbage instead of
+ * the real handler.
+ *
+ * Real PS2 IOP hardware invariantly has exactly 2MB of RAM across
+ * every consumer model (unlike the EE side, this is not configurable)
+ * - the same constant this file already uses as IOP_RAM_SIZE_CONST.
+ * So this is not a guess at unknown/variable hardware behavior; it is
+ * supplying the one value real hardware could ever supply here, given
+ * the real, disassembled shift-by-20 computation cited above. Backed
+ * by that citation, not fabricated further. */
+#define BOOT_INFO_RAM_MB 2u
+
 typedef struct {
     char name[10 + 1];
     uint32_t payload_off;
@@ -68,6 +100,7 @@ static struct {
 
     uint32_t bump_next;
     uint32_t trampoline_addr;
+    uint32_t boot_info_addr; /* see BOOT_INFO_RAM_MB's comment below */
 
     export_registry_entry_t exports[EXPORT_REGISTRY_MAX];
     int export_count;
@@ -302,12 +335,16 @@ int iop_module_loader_boot(iop_state_t *st)
      * address unexpectedly. */
     iop_mem_write32(st, g.trampoline_addr, 0x08000000u | ((g.trampoline_addr >> 2) & 0x03FFFFFFu));
 
+    g.boot_info_addr = bump_alloc(4);
+    iop_mem_write32(st, g.boot_info_addr, BOOT_INFO_RAM_MB);
+
     g.modlist_index = 0;
     while (g.modlist_index < g.modlist_count) {
         uint32_t entry = load_and_link_one(st, g.modlist[g.modlist_index]);
         if (entry != 0) {
             st->gpr[31] = g.trampoline_addr;
             st->gpr[29] = INITIAL_SP; /* $sp - see INITIAL_SP's comment above */
+            st->gpr[4]  = g.boot_info_addr; /* $a0 - see BOOT_INFO_RAM_MB's comment above */
             st->pc = entry;
             st->next_pc = entry + 4;
             g.booted_ok = 1;
@@ -330,6 +367,7 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
         if (entry != 0) {
             st->gpr[31] = g.trampoline_addr;
             st->gpr[29] = INITIAL_SP; /* $sp - see INITIAL_SP's comment above */
+            st->gpr[4]  = g.boot_info_addr; /* $a0 - see BOOT_INFO_RAM_MB's comment above */
             st->pc = entry;
             st->next_pc = entry + 4;
             return 1;

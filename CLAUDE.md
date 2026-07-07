@@ -717,6 +717,26 @@ always ask for/verify the no-disc case explicitly).
   available, to strengthen this citation trail. See docs/STATUS.md's
   "GS Round 24" section for the full detail.
 
+- **GS Round 25 (same session, continued)**: real PSMCT32 page/block-
+  swizzled addressing, added as a NEW, ADDITIVE API
+  (`gs_mem_swizzle_addr32()` + read/write wrappers) alongside the
+  pre-existing simplified-linear `gs_mem` functions - deliberately
+  NOT wired into the rendering pipeline this round, since doing so
+  would require auditing/migrating every existing GS test's `bp`/`bw`
+  picks (many use arbitrary large values like 5000/10200 that are
+  only valid under linear addressing) to real-hardware-valid ranges -
+  a substantially larger, separate undertaking left explicitly open.
+  Real page (64x32px)/block (8x8px, 32/page, real 8x4 block-index
+  grid) addressing is modeled; within-block column interleave is not
+  (row-major instead) - an honest partial step. Same session-limited-
+  research caveat as Round 24 applies to the block table itself,
+  mitigated by a structural no-collision test property (all 2048
+  pixels of a page map to distinct addresses) that would likely catch
+  a subtly-wrong table. 10 new checks (`tests/test_gs_swizzle.c`,
+  59->60 test binaries), full regression 0-failure (all 59 prior
+  tests literally unmodified, since this is purely additive), clean
+  Wii rebuild. See docs/STATUS.md's "GS Round 25" section.
+
 ## The mandatory per-change workflow
 
 This project has a strict, consistently-applied ritual for every increment
@@ -1292,7 +1312,7 @@ rsync -a --delete --exclude '.git' --exclude 'test_*' \
 # rsync's include/exclude ORDER means the 3 test_*.c source files
 # still get excluded by the earlier --exclude 'test_*' rule (basename
 # match, first-match-wins) - work around it by re-copying them directly:
-for f in tests/test_iop_elf.c tests/test_iop_spu2.c tests/test_vu_micro.c tests/test_gif_line.c tests/test_iop_rfe.c tests/test_iop_hw_interrupt.c tests/test_iop_excb.c tests/test_gs_alpha.c tests/test_gs_clut.c; do
+for f in tests/test_iop_elf.c tests/test_iop_spu2.c tests/test_vu_micro.c tests/test_gif_line.c tests/test_iop_rfe.c tests/test_iop_hw_interrupt.c tests/test_iop_excb.c tests/test_gs_alpha.c tests/test_gs_clut.c tests/test_gs_swizzle.c; do
   cp "/tmp/pcsx2-wii-git/$f" "$OUT/pcsx2-wii/$f"
 done
 ```
@@ -1352,8 +1372,10 @@ limits - meaning: commit+push after EACH increment individually
 so a session cutoff mid-sweep never risks losing already-finished
 work. Round 24 (CLUT/paletted textures) is the first of these five and
 is complete, committed, and pushed - see "Current frontier" above.
-Remaining, in the user's stated order: real block-swizzled addressing,
-REGLIST/IMAGE transfer modes, GS context 2, mipmaps.
+Round 25 (real block-swizzled addressing, additive API) is the
+second and is also complete/committed/pushed. Remaining, in the
+user's stated order: REGLIST/IMAGE transfer modes, GS context 2,
+mipmaps.
 
 ## Reference material
 

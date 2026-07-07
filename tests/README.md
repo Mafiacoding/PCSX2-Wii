@@ -1385,3 +1385,28 @@ engaged.
 gcc -I../include -I../source -o test_gs_clut tests/test_gs_clut.c
 ./test_gs_clut
 ```
+
+`test_gs_swizzle.c` covers GS Round 25: real PSMCT32 page/block-
+swizzled addressing (`gs_mem_swizzle_addr32()` and its read/write
+wrappers), added as a separate, additive API alongside the
+pre-existing simplified-linear `gs_mem` functions - see
+`include/core/hw/gs_mem.h`'s extended comment for why this isn't a
+drop-in replacement of the pipeline's addressing (existing tests'
+`bp` picks aren't valid real-hardware pointers under real addressing)
+and `source/hw/gs_mem.c` for the real page/block table and this
+round's citation-honesty note (live source-fetch research hit a
+session limit again this round - mitigated by a structural no-
+collision test property below). 10 checks: hand-derived known-value
+checks against the documented 8x4 block-index table (pixels (0,0),
+(8,0), (0,8), and the page's last pixel (63,31) all land at their
+expected byte offsets); `bp` behaving as a real page unit (+8192
+bytes between `bp=0`/`bp=1`); a 2-page-wide buffer's second page and
+second row landing at correct offsets; a no-collision property across
+a full page's 2048 pixels; a full-page write/read round-trip; and a
+check that the new function and the pre-existing linear one genuinely
+disagree at a non-degenerate coordinate (not accidentally aliased).
+
+```sh
+gcc -I../include -I../source -o test_gs_swizzle tests/test_gs_swizzle.c ../source/hw/gs_mem.c
+./test_gs_swizzle
+```

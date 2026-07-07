@@ -252,6 +252,26 @@ gcc -I../include -I../source -o test_vif tests/test_vif.c
 ./test_vif
 ```
 
+`test_gif_texture.c` covers texturing for the triangle rasterizer
+(task #85): PRIM's TME bit and TEX0's TBP0/TBW/TFX fields. Since this
+project has no texture-upload path yet, "textures" are just
+pre-existing GS memory content, filled directly via
+`gs_mem_write_psmct32()` before the test packet runs. 10 checks: DECAL
+fully replaces the vertex color with the texture sample; MODULATE's
+exact per-channel blend math against hand-computed expected values
+(including an intentionally-truncating case); real per-pixel UV
+interpolation across a 3-texel gradient texture, sampled exactly at
+each vertex's own screen coordinate (where the barycentric weights are
+exactly 1/0/0 by construction - a merely-nearby sample point can snap
+to the wrong texel under nearest-neighbor sampling, unlike Gouraud
+color's continuous blend); and a TME=0 regression proving flat-shaded
+triangles are unaffected by the new texturing code path.
+
+```sh
+gcc -I../include -I../source -o test_gif_texture tests/test_gif_texture.c
+./test_gif_texture
+```
+
 Note: as ee_core.c has grown more hw/ dependencies (dma.c, gs.c,
 gif.c, gs_mem.c, and now sif.c since sif_init()/sif_mmio_read32/
 write32 are wired into ee_core_init() and the memory bus), tests that

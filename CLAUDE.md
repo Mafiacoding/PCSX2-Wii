@@ -244,6 +244,24 @@ current, up-to-date status.)
   `source/hw/vif.c` added to its link line - same transitive-
   dependency pattern as always when `ee_core.c` gains a new hardware
   call), clean Wii rebuild.
+- **Texturing for the triangle rasterizer** (task #85): PRIM's real
+  TME bit and TEX0's TBP0/TBW/TFX fields (cross-checked against
+  PCSX2's own `GS/GSRegs.h`) now drive real texture mapping on
+  TRIANGLE/TRIANGLE_STRIP/TRIANGLE_FAN. Nearest-neighbor PSMCT32
+  sampling, UV-only "FST=1" coordinates (no ST+Q perspective-correct
+  path), DECAL and MODULATE TFX modes (HIGHLIGHT/HIGHLIGHT2 simplified
+  to behave like MODULATE), no CLAMP/wrap modeling. Texture-coordinate
+  interpolation reuses the same barycentric weights as Gouraud color
+  (real hardware always interpolates UV when texturing is on,
+  independent of IIP). 10 new checks (`tests/test_gif_texture.c`):
+  DECAL replacing vertex color entirely, MODULATE's exact per-channel
+  blend math verified against hand-computed values, real per-pixel UV
+  interpolation across a gradient texture (sampled exactly at each
+  vertex's own coordinate, where barycentric weights are exact - a
+  merely-nearby sample point can snap to the wrong texel under
+  nearest-neighbor sampling, unlike Gouraud's continuous color blend),
+  and a TME=0 regression check. 48-file/0-failure regression, clean
+  Wii rebuild.
 
 **devkitPro toolchain**: FULLY FIXED, clean Wii rebuild verified. This
 sandbox's extraction was missing `base_rules`/`base_tools` (fetched
@@ -370,7 +388,7 @@ gcc -I../include -I../source -o test_ee tests/test_ee_core.c ../source/hw/dma.c 
 ./test_ee
 ```
 
-There are 47 test files as of this writing, covering both CPU cores (EE
+There are 48 test files as of this writing, covering both CPU cores (EE
 integer/MMI/FPU/unaligned-access/COP0-CO-format/LQ-SQ/VU0-vector-datapath,
 IOP integer/unaligned/SYSCALL-exception/InstallExceptionHandlers/PC-fetch-
 sanity-guard), every hardware register model (EE DMA + chain-mode transfer

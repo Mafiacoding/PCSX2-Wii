@@ -635,6 +635,19 @@ the SPU2. Reference: `Dmac.cpp` (583) + `Dmac.h` (570).
       not guessed). Still open: UNPACK itself, VU0/VU1 data memory to
       unpack into (see section 5), MSCAL/MSCNT actually executing VU
       microcode once that exists.
+- [x] Texturing for the triangle rasterizer (task #85) - PRIM's real
+      TME bit and TEX0's TBP0/TBW/TFX fields (cross-checked against
+      PCSX2's own `GS/GSRegs.h`) now drive real texture mapping on
+      TRIANGLE/TRIANGLE_STRIP/TRIANGLE_FAN. Nearest-neighbor PSMCT32
+      sampling, UV-only "FST=1" coordinates (no ST+Q perspective-
+      correct path), DECAL and MODULATE TFX modes (HIGHLIGHT/
+      HIGHLIGHT2 simplified to behave like MODULATE), no CLAMP/wrap
+      modeling. Texture-coordinate interpolation reuses the same
+      barycentric weights as Gouraud color, since real hardware
+      interpolates UV whenever texturing is on regardless of the IIP
+      bit. 10 new checks in `tests/test_gif_texture.c`, 48-file/0-
+      failure full regression, clean Wii rebuild. SPRITE texturing and
+      perspective-correct coordinates remain open.
 
 ## 5. VU0 / VU1 (Vector Units)
 
@@ -672,11 +685,13 @@ programmable GPU nor any of those APIs).
       `tests/test_gs_mem.c`. Real swizzle addressing is still open -
       needed before texture sampling or certain blit tricks would
       work correctly.
-- [x] Primitive rasterization - SPRITE (filled axis-aligned
-      rectangles) only, via the GIF parser above (`source/hw/gif.c`
-      calling `gs_mem_write_psmct32`). Triangles/lines/strips/fans
-      and textured primitives are still open - a real BIOS splash
-      likely needs at least triangles and textures too.
+- [x] Primitive rasterization - SPRITE (filled, untextured, flat-
+      color axis-aligned rectangles) and TRIANGLE/TRIANGLE_STRIP/
+      TRIANGLE_FAN (flat, Gouraud-shaded, and now texture-mapped -
+      DECAL/MODULATE TFX modes, nearest-neighbor PSMCT32 sampling, UV-
+      only "FST=1" coordinates, no CLAMP/perspective-correction), all
+      via the GIF parser (`source/hw/gif.c`). Lines/points and
+      perspective-correct (ST+Q) texture coordinates are still open.
 - [x] A first, minimal translation layer from GS memory to the Wii's
       display: `source/hw/gs_wii_output.c` converts a rectangular
       PSMCT32 region to the Wii's packed Y1CbY2Cr XFB format (RGB->YUV
@@ -989,13 +1004,14 @@ unblock "the BIOS actually draws something": IOP hardware register
 stubs (INTC/DMA/timers) and/or IOP HLE stubs for the specific
 BIOS-boot-path modules (both are needed before real BIOS code - as
 opposed to hand-written test programs - can get through a real SIF
-handshake), and texturing for the triangle rasterizer (Gouraud
-shading, a clock-rate-aware 8:1 EE:IOP scheduler, wiring a real GIF
-packet through `dma_channel_kick` at boot, and a first VIF0/VIF1
-passthrough increment are all DONE now - see above). Beyond texturing:
-VIF's UNPACK format (needs VU0/VU1 data memory to unpack into) and the
-VU microcode interpreter itself (section 5) are the natural next
-VIF/VU-side steps once this project returns to that thread.
+handshake). (Gouraud shading, a clock-rate-aware 8:1 EE:IOP scheduler,
+wiring a real GIF packet through `dma_channel_kick` at boot, a first
+VIF0/VIF1 passthrough increment, and texturing for the triangle
+rasterizer are all DONE now - see above.) Beyond that: VIF's UNPACK
+format (needs VU0/VU1 data memory to unpack into), the VU microcode
+interpreter itself (section 5), and perspective-correct (ST+Q) texture
+coordinates are the natural next VIF/VU/GS-side steps once this
+project returns to those threads.
 
 Step 7 (real GX-based rendering with textures) is where this stops
 being "a lot of careful work" and becomes genuinely research-scale for

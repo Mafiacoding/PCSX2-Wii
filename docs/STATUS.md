@@ -1548,6 +1548,71 @@ dependency pattern this project has hit before whenever `ee_core.c`
 gains a new hardware-model call) passes with 0 failures, and the
 Wii/devkitPPC target rebuilds clean with 0 warnings/0 errors.
 
+### GS: texturing for the triangle rasterizer (task #85)
+
+Direct follow-up to the VIF0/VIF1 round above, closing out the last
+open item from the "remaining near-term candidates" list: texturing
+for TRIANGLE/TRIANGLE_STRIP/TRIANGLE_FAN, driven by PRIM's real TME
+bit (bit 4) and TEX0's TBP0/TBW/TFX fields - both cross-checked
+against PCSX2's own `GS/GSRegs.h` (`GIFRegPRIM`, `GIFRegTEX0`
+bitfields), not guessed.
+
+Added to `gif_state_t`: `tex_tbp0`/`tex_tbw`/`tex_tfx` (decoded from a
+new TEX0_1 A+D register handler - TBP0/TBW used directly as OUR
+gs_mem "bp"/"bw" convention, exactly like FRAME_1's FBP/FBW already
+work, not a claim of matching real hardware's block-swizzled
+addressing), `cur_u`/`cur_v` (from a new UV A+D register handler - a
+12.4 fixed-point texel coordinate, same `>>4` conversion as XYZ2's
+screen coordinates), and `tri_u`/`tri_v[3]` (a per-vertex rolling
+buffer mirroring `tri_rgba`'s exact rolling/anchor logic across all 3
+triangle vertex-accumulation modes).
+
+`rasterize_triangle()` now takes 6 more parameters (u0,v0,u1,v1,u2,v2)
+and, when PRIM's TME bit is set, interpolates the texture coordinate
+per pixel using the SAME barycentric weights already computed for
+Gouraud color (on real hardware, texture-coordinate interpolation
+always happens when texturing is on, independent of the IIP
+color-shading bit - this project's implementation now reflects that:
+the weights are computed once and used for both purposes as needed).
+Samples GS memory (nearest-neighbor, PSMCT32 only) at the interpolated
+texel, then combines with the shaded (flat or Gouraud) color per
+TEX0's TFX field: DECAL replaces the color entirely with the texture
+sample; MODULATE (and, simplified, HIGHLIGHT/HIGHLIGHT2 too - an
+honest, noted simplification, since this project doesn't model the
+real highlight modes' extra specular-like term) blends via the
+standard GS formula, `(tex*color)/128` per channel, clamped to 255.
+
+Honest simplifications, all noted in `gif.h`'s scope comment: texture
+coordinates come from UV only (real hardware's "FST=1" mode) - the
+ST+Q floating-point perspective-correct path (FST=0) is NOT supported;
+no CLAMP register modeling at all (no wrap/clamp/region modes -
+negative interpolated coordinates are simply clamped to 0 as a
+defensive measure, not real repeat/clamp semantics); interpolation
+itself is plain affine (screen-space), not the real GS's perspective-
+corrected (1/Q) interpolation, matching this project's existing
+Gouraud-shading simplification. SPRITE is NOT texture-mapped (out of
+scope this round, matching Gouraud's own triangle-only scope from the
+previous round).
+
+Tests: `tests/test_gif_texture.c`, 10 checks. Since this project has no
+texture-upload path yet (no TRXDIR/BITBLTBUF), textures are simply
+pre-existing GS memory content, filled directly via
+`gs_mem_write_psmct32()` - exactly how the framebuffer itself already
+works. Covers: DECAL replacing a red vertex color with a solid blue
+texture entirely; MODULATE's exact per-channel blend math verified
+against hand-computed expected values (a 200/100/50/255 texture times
+a 128/64/32/128 vertex color, checked channel-by-channel including an
+intentionally-truncating case); real per-pixel UV interpolation across
+a 3-texel horizontal-gradient texture, sampled exactly at each
+triangle vertex's own coordinate (where the barycentric weights are
+exactly 1/0/0 by construction, avoiding nearest-neighbor's discrete-
+snapping ambiguity that a merely-nearby sample point would have,
+unlike Gouraud color's continuous blending); and a TME=0 regression
+proving flat-shaded triangles are completely unaffected by the new
+texturing code path. Full regression (48 host-native test files)
+passes with 0 failures, and the Wii/devkitPPC target rebuilds clean
+with 0 warnings/0 errors.
+
 ### Round 14: IOP-side investigation - the EE's SIF-polling steady state is real, and a genuine IOP wild-jump root-caused and hardened against
 
 Direct follow-up to round 13's finding that the EE settles into a

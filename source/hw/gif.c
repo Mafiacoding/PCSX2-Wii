@@ -49,7 +49,8 @@ static inline uint32_t rgba_pack(uint32_t r, uint32_t g, uint32_t b, uint32_t a)
 }
 
 static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t x2, int32_t y2,
-                                uint32_t c0, uint32_t c1, uint32_t c2)
+                                uint32_t c0, uint32_t c1, uint32_t c2,
+                                int32_t u0, int32_t v0, int32_t u1, int32_t v1, int32_t u2, int32_t v2)
 {
     int32_t minx = x0, maxx = x0, miny = y0, maxy = y0;
     if (x1 < minx) minx = x1;
@@ -69,6 +70,7 @@ static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, i
     if (area == 0) return;
 
     int gouraud = (g_gif.prim & PRIM_IIP_MASK) != 0;
+    int textured = (g_gif.prim & PRIM_TME_MASK) != 0;
     /* Flat shading uses the LAST vertex's color on real hardware
      * (matches this rasterizer's pre-Gouraud behavior, which always
      * used whichever RGBAQ was active when the triangle completed -
@@ -90,19 +92,24 @@ static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, i
              * guaranteed consistent. */
             if ((area > 0 && w0 >= 0 && w1 >= 0 && w2 >= 0) ||
                 (area < 0 && w0 <= 0 && w1 <= 0 && w2 <= 0)) {
-                uint32_t out;
+                /* Barycentric weights (w0 corresponds to the vertex
+                 * OPPOSITE it, i.e. weights c0 by w0 etc - standard
+                 * edge-function barycentric convention). Used for
+                 * BOTH Gouraud color interpolation and (when TME is
+                 * set) texture-coordinate interpolation - on real
+                 * hardware texture coordinates always interpolate per
+                 * pixel when texturing is on, independent of the IIP
+                 * (color-shading) bit. Plain affine (screen-space)
+                 * interpolation, NOT the real GS's perspective-
+                 * corrected (1/Q) one - see gif.h's scope comment. */
+                double b0 = (double)w0 * inv_area;
+                double b1 = (double)w1 * inv_area;
+                double b2 = (double)w2 * inv_area;
+
+                uint32_t shaded_r, shaded_g, shaded_b, shaded_a;
                 if (!gouraud) {
-                    out = rgba_pack(flat_r, flat_g, flat_b, flat_a);
+                    shaded_r = flat_r; shaded_g = flat_g; shaded_b = flat_b; shaded_a = flat_a;
                 } else {
-                    /* Barycentric weights (w0 corresponds to the
-                     * vertex OPPOSITE it, i.e. weights c0 by w0 etc -
-                     * standard edge-function barycentric convention).
-                     * Plain affine (screen-space) interpolation, NOT
-                     * the real GS's perspective-corrected (1/Q) one -
-                     * see gif.h's scope comment. */
-                    double b0 = (double)w0 * inv_area;
-                    double b1 = (double)w1 * inv_area;
-                    double b2 = (double)w2 * inv_area;
                     uint32_t r = (uint32_t)(b0 * rgba_channel(c0, 0)  + b1 * rgba_channel(c1, 0)  + b2 * rgba_channel(c2, 0)  + 0.5);
                     uint32_t g = (uint32_t)(b0 * rgba_channel(c0, 8)  + b1 * rgba_channel(c1, 8)  + b2 * rgba_channel(c2, 8)  + 0.5);
                     uint32_t b = (uint32_t)(b0 * rgba_channel(c0, 16) + b1 * rgba_channel(c1, 16) + b2 * rgba_channel(c2, 16) + 0.5);
@@ -111,7 +118,43 @@ static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, i
                     if (g > 255) g = 255;
                     if (b > 255) b = 255;
                     if (a > 255) a = 255;
-                    out = rgba_pack(r, g, b, a);
+                    shaded_r = r; shaded_g = g; shaded_b = b; shaded_a = a;
+                }
+
+                uint32_t out;
+                if (!textured) {
+                    out = rgba_pack(shaded_r, shaded_g, shaded_b, shaded_a);
+                } else {
+                    double tu = b0 * (double)u0 + b1 * (double)u1 + b2 * (double)u2;
+                    double tv = b0 * (double)v0 + b1 * (double)v1 + b2 * (double)v2;
+                    /* No CLAMP register modeling (wrap/clamp/region) -
+                     * negative coordinates are simply clamped to 0, a
+                     * defensive simplification, not real repeat/clamp
+                     * semantics (see gif.h's scope comment). Out-of-
+                     * range coordinates on the high side are left to
+                     * gs_mem_read_psmct32()'s own bounds check, which
+                     * safely returns 0 rather than reading garbage. */
+                    int32_t tex_x = (tu < 0.0) ? 0 : (int32_t)(tu + 0.5);
+                    int32_t tex_y = (tv < 0.0) ? 0 : (int32_t)(tv + 0.5);
+                    uint32_t texel = gs_mem_read_psmct32(g_gif.tex_tbp0, g_gif.tex_tbw,
+                                                          (uint32_t)tex_x, (uint32_t)tex_y);
+                    if (g_gif.tex_tfx == TEX_TFX_DECAL) {
+                        out = texel;
+                    } else {
+                        /* MODULATE (and, simplified, HIGHLIGHT/
+                         * HIGHLIGHT2 too - see gif.h): standard GS
+                         * modulate formula, (tex*color)/128 per
+                         * channel, clamped to 255. */
+                        uint32_t r = (rgba_channel(texel, 0)  * shaded_r) / 128u;
+                        uint32_t g = (rgba_channel(texel, 8)  * shaded_g) / 128u;
+                        uint32_t b = (rgba_channel(texel, 16) * shaded_b) / 128u;
+                        uint32_t a = (rgba_channel(texel, 24) * shaded_a) / 128u;
+                        if (r > 255) r = 255;
+                        if (g > 255) g = 255;
+                        if (b > 255) b = 255;
+                        if (a > 255) a = 255;
+                        out = rgba_pack(r, g, b, a);
+                    }
                 }
                 gs_mem_write_psmct32(g_gif.fbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy, out);
             }
@@ -144,32 +187,44 @@ static void apply_xyz2(uint32_t word0, uint32_t word1)
             g_gif.tri_x[slot] = x;
             g_gif.tri_y[slot] = y;
             g_gif.tri_rgba[slot] = g_gif.rgba;
+            g_gif.tri_u[slot] = g_gif.cur_u;
+            g_gif.tri_v[slot] = g_gif.cur_v;
             if (g_gif.tri_vseq % 3 == 0)
                 rasterize_triangle(g_gif.tri_x[0], g_gif.tri_y[0], g_gif.tri_x[1], g_gif.tri_y[1], g_gif.tri_x[2], g_gif.tri_y[2],
-                                    g_gif.tri_rgba[0], g_gif.tri_rgba[1], g_gif.tri_rgba[2]);
+                                    g_gif.tri_rgba[0], g_gif.tri_rgba[1], g_gif.tri_rgba[2],
+                                    g_gif.tri_u[0], g_gif.tri_v[0], g_gif.tri_u[1], g_gif.tri_v[1], g_gif.tri_u[2], g_gif.tri_v[2]);
         } else if (ptype == PRIM_TYPE_TRIANGLE_STRIP) {
             /* TRIANGLE_STRIP: each new vertex (from the 3rd onward)
              * forms a triangle with the previous 2 - a rolling
              * 3-slot window. */
             g_gif.tri_x[0] = g_gif.tri_x[1]; g_gif.tri_y[0] = g_gif.tri_y[1]; g_gif.tri_rgba[0] = g_gif.tri_rgba[1];
+            g_gif.tri_u[0] = g_gif.tri_u[1]; g_gif.tri_v[0] = g_gif.tri_v[1];
             g_gif.tri_x[1] = g_gif.tri_x[2]; g_gif.tri_y[1] = g_gif.tri_y[2]; g_gif.tri_rgba[1] = g_gif.tri_rgba[2];
+            g_gif.tri_u[1] = g_gif.tri_u[2]; g_gif.tri_v[1] = g_gif.tri_v[2];
             g_gif.tri_x[2] = x; g_gif.tri_y[2] = y; g_gif.tri_rgba[2] = g_gif.rgba;
+            g_gif.tri_u[2] = g_gif.cur_u; g_gif.tri_v[2] = g_gif.cur_v;
             if (g_gif.tri_vseq >= 3)
                 rasterize_triangle(g_gif.tri_x[0], g_gif.tri_y[0], g_gif.tri_x[1], g_gif.tri_y[1], g_gif.tri_x[2], g_gif.tri_y[2],
-                                    g_gif.tri_rgba[0], g_gif.tri_rgba[1], g_gif.tri_rgba[2]);
+                                    g_gif.tri_rgba[0], g_gif.tri_rgba[1], g_gif.tri_rgba[2],
+                                    g_gif.tri_u[0], g_gif.tri_v[0], g_gif.tri_u[1], g_gif.tri_v[1], g_gif.tri_u[2], g_gif.tri_v[2]);
         } else { /* PRIM_TYPE_TRIANGLE_FAN */
             /* TRIANGLE_FAN: the first vertex is a fixed anchor
              * (slot 0, never overwritten); each new vertex forms a
              * triangle with the anchor and the previous vertex. */
             if (g_gif.tri_vseq == 1) {
                 g_gif.tri_x[0] = x; g_gif.tri_y[0] = y; g_gif.tri_rgba[0] = g_gif.rgba;
+                g_gif.tri_u[0] = g_gif.cur_u; g_gif.tri_v[0] = g_gif.cur_v;
                 g_gif.tri_x[1] = x; g_gif.tri_y[1] = y; g_gif.tri_rgba[1] = g_gif.rgba; /* also seed "previous" so vseq==2 has something to pair with */
+                g_gif.tri_u[1] = g_gif.cur_u; g_gif.tri_v[1] = g_gif.cur_v;
             } else {
                 g_gif.tri_x[2] = x; g_gif.tri_y[2] = y; g_gif.tri_rgba[2] = g_gif.rgba;
+                g_gif.tri_u[2] = g_gif.cur_u; g_gif.tri_v[2] = g_gif.cur_v;
                 if (g_gif.tri_vseq >= 3)
                     rasterize_triangle(g_gif.tri_x[0], g_gif.tri_y[0], g_gif.tri_x[1], g_gif.tri_y[1], g_gif.tri_x[2], g_gif.tri_y[2],
-                                        g_gif.tri_rgba[0], g_gif.tri_rgba[1], g_gif.tri_rgba[2]);
+                                        g_gif.tri_rgba[0], g_gif.tri_rgba[1], g_gif.tri_rgba[2],
+                                        g_gif.tri_u[0], g_gif.tri_v[0], g_gif.tri_u[1], g_gif.tri_v[1], g_gif.tri_u[2], g_gif.tri_v[2]);
                 g_gif.tri_x[1] = g_gif.tri_x[2]; g_gif.tri_y[1] = g_gif.tri_y[2]; g_gif.tri_rgba[1] = g_gif.tri_rgba[2];
+                g_gif.tri_u[1] = g_gif.tri_u[2]; g_gif.tri_v[1] = g_gif.tri_v[2];
             }
         }
         return;
@@ -261,6 +316,33 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
         g_gif.xyoffset_x = data_lo & 0xFFFFu;
         g_gif.xyoffset_y = data_hi & 0xFFFFu;
         break;
+    case GS_REG_UV:
+        /* Real hardware: 12.4 fixed-point texel coordinates (this
+         * project's "FST=1" assumption - see gif.h's scope comment) -
+         * same >>4 conversion as XYZ2's screen coordinates, no
+         * XYOFFSET-equivalent subtraction (UV addresses texture
+         * memory directly, not screen space). */
+        g_gif.cur_u = (int32_t)(data_lo & 0xFFFFu) >> 4;
+        g_gif.cur_v = (int32_t)((data_lo >> 16) & 0xFFFFu) >> 4;
+        break;
+    case GS_REG_TEX0_1: {
+        /* TEX0 bitfield cross-checked against PCSX2's own
+         * GS/GSRegs.h GIFRegTEX0: word0 = TBP0(14):TBW(6):PSM(6):
+         * TW(4):pad(2); word1 = pad(2):TCC(1):TFX(2):CBP(14):CPSM(4):
+         * CSM(1):CSA(5):CLD(3). Only TBP0/TBW/TFX are modeled here
+         * (PSM/TW/TH/CLUT fields ignored - PSMCT32 always assumed,
+         * matching gs_mem's existing format limitation). TBP0/TBW are
+         * used directly as OUR gs_mem bp/bw convention, exactly like
+         * FRAME_1's FBP/FBW above - not a claim of matching real
+         * hardware block-swizzled addressing (see gs_mem.h). */
+        uint32_t tbp0 = data_lo & 0x3FFFu;
+        uint32_t tbw_field = (data_lo >> 14) & 0x3Fu;
+        uint32_t tfx = (data_hi >> 3) & 0x3u;
+        g_gif.tex_tbp0 = tbp0;
+        g_gif.tex_tbw = tbw_field * 64u;
+        if (g_gif.tex_tbw == 0) g_gif.tex_tbw = 640; /* guard against a zero TBW making every texel alias, same as FRAME_1's FBW guard */
+        g_gif.tex_tfx = tfx;
+    } break;
     default:
         break; /* unhandled register - ignored, not an error */
     }

@@ -1458,3 +1458,35 @@ into or gets clobbered by the other.
 gcc -I../include -I../source -o test_gs_context2 tests/test_gs_context2.c
 ./test_gs_context2
 ```
+
+## test_gs_mipmap.c (GS Round 28)
+
+Tests TEX1/MIPTBP1/MIPTBP2 register parsing and SPRITE-only,
+per-primitive mipmap LOD selection (real hardware also mipmaps
+TRIANGLE - not implemented here, a documented gap). See
+`include/core/hw/gif.h`'s `GS_REG_TEX1_1`/`MIPTBP1_1`/`MIPTBP2_1`/
+`GS_MMIN_MIPMAP_THRESHOLD` comments and `source/hw/gif.c`'s
+`rasterize_sprite()` mip-level-selection block for the full design
+and this round's citation-honesty note (live source-fetch research
+hit a session limit again this round, sourced from established
+knowledge rather than a fresh citation trail, same caveat as Rounds
+24-27). Scope: context 1 only, SPRITE only, per-primitive (not
+per-pixel) nearest-single-level selection (no trilinear blending),
+MTBA=1 auto-addressing falls back to level 0 (documented gap).
+
+25 checks: TEX1 field round-trip including a negative (sign-extended)
+K value; MIPTBP1/MIPTBP2's 6 mip levels' TBP/TBW round-trip including
+the two fields that straddle the word0/word1 boundary; computed LOD
+(LCM=0) selecting the correct level from a texture/screen size ratio
+and actually sampling that level's distinct buffer; MXL clamping a
+computed LOD down to the configured maximum; magnification (texture
+smaller than screen) always using the base level; MMIN below the
+mipmap threshold disabling mipmapping entirely; fixed LOD (LCM=1)
+overriding the computed formula via K; MTBA=1 safely falling back to
+the base level; and a regression check that an unconfigured TEX1
+(MXL=0 default) behaves exactly as before this round.
+
+```sh
+gcc -I../include -I../source -o test_gs_mipmap tests/test_gs_mipmap.c -lm
+./test_gs_mipmap
+```

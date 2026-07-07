@@ -941,6 +941,38 @@ programmable GPU nor any of those APIs).
       command that would fail with a link error if used verbatim).
       10 new checks (tests/test_gs_context2.c), 62-file/0-failure
       regression, clean Wii rebuild.
+- [x] Mipmap support (Round 28) - TEX1_1 (LCM/MXL/MMAG/MMIN/MTBA/L/K)
+      and MIPTBP1_1/MIPTBP2_1 (per-level TBP/TBW for levels 1-6,
+      modeled as a sequential 64-bit bitfield with no word-alignment
+      padding) now parsed. SPRITE rasterizer performs per-primitive
+      (not per-pixel) nearest-single-level LOD selection: LCM=0 uses
+      a computed log2(texture-size/screen-size) ratio, LCM=1 uses a
+      fixed K value; either way the result is clamped to MXL and
+      falls back to level 0 whenever MMIN is below the "mipmapping
+      enabled" threshold, the texture is being magnified rather than
+      minified, or MTBA=1 (auto address calculation - documented,
+      unimplemented gap, degrades safely to level 0 rather than
+      misbehaving). Scoped to context 1 only and SPRITE only - real
+      hardware also mipmaps TRIANGLE, and per-pixel/trilinear
+      filtering is not modeled; both are documented gaps, not silent
+      omissions. Implemented as a save/override/restore of
+      tex_tbp0/tex_tbw around rasterize_sprite()'s pixel loop, so
+      every other read site (gs_sample_texel, gs_sample_clut, the
+      other 3 rasterizers) is untouched by design - same
+      deliberately-non-invasive pattern as Round 27's dual-context
+      work. Same session-limited-research caveat as Rounds 24-27
+      (live source-fetch research hit this session's own usage limit
+      again this round; the TEX1/MIPTBP bit layouts are sourced from
+      established knowledge rather than a fresh citation trail). 25
+      new checks (tests/test_gs_mipmap.c: TEX1/MIPTBP field
+      round-trip including a negative sign-extended K and the two
+      TBP fields that straddle the word0/word1 boundary; computed-LOD
+      selection actually sampling a distinct mip buffer; MXL
+      clamping; magnification always using the base level; MMIN
+      below threshold disabling mipmapping; fixed-LOD K overriding
+      the computed formula; MTBA=1's safe fallback; and a
+      no-TEX1-configured regression check), 63-file/0-failure full
+      regression, clean Wii rebuild.
 - [x] A first, minimal translation layer from GS memory to the Wii's
       display: `source/hw/gs_wii_output.c` converts a rectangular
       PSMCT32 region to the Wii's packed Y1CbY2Cr XFB format (RGB->YUV
@@ -1040,17 +1072,22 @@ already documented, rather than truly returning from the syscall.
 5. **GS coverage breadth** (section 6) - primitives (flat/Gouraud
    triangles, textured sprites, Z-test, POINT/LINE/LINE_STRIP - Round
    21, alpha test/blending - Round 23, CLUT/paletted textures - Round
-   24, and - Round 25 - real block-swizzled addressing as an
-   additive, not-yet-wired-in API) exist, but this is still a sliver
-   of real GS - real PCSX2's own GS code is ~114,500 lines. Still open
-   (user has directed the remaining three to be done next, in this
-   order): mipmaps (REGLIST/IMAGE GIF transfer modes done as of
-   Round 26, GS context 2 done as of Round 27). Also open, not user-
-   directed but worth noting: actually wiring Round 25's real swizzle
+   24, real block-swizzled addressing - Round 25, REGLIST/IMAGE GIF
+   transfer modes - Round 26, GS context 2 - Round 27, mipmaps -
+   Round 28) exist, but this is still a sliver of real GS - real
+   PCSX2's own GS code is ~114,500 lines. All five items the user
+   directed for this session (CLUT, block-swizzled addressing,
+   REGLIST/IMAGE, GS context 2, mipmaps) are now DONE, each
+   individually committed/pushed/rsynced as its own checkpoint. Open,
+   not user-directed: actually wiring Round 25's real swizzle
    addressing into the rendering pipeline (currently a separate,
-   additive API only), and extending Round 27's dual-context support
-   to CLAMP/TEX1/TEX2/SCISSOR/FBA/MIPTBP (currently context-1-only
-   for both contexts, an existing limitation Round 27 didn't change).
+   additive API only); extending Round 27's dual-context support to
+   CLAMP/TEX1/TEX2/SCISSOR/FBA/MIPTBP (currently context-1-only for
+   both contexts); extending Round 28's mipmap support to TRIANGLE
+   (currently SPRITE-only) and to per-pixel/trilinear filtering
+   (currently per-primitive, nearest-single-level); and implementing
+   MTBA=1 auto mip-address calculation (currently falls back to
+   level 0).
 
 6. Lower priority, deferred: the remaining ~23 EE MMI opcodes (section
    1), Pad/memory card (section 7).

@@ -3728,6 +3728,104 @@ target buffer/alpha behavior), implemented without touching any of
 the existing per-pixel rendering logic. Per the user's stated order,
 remaining: mipmaps.
 
+## GS Round 28: Mipmap support
+
+Fifth and last item in the user's directed sweep ("Clut, Block
+Swizzled Adressing, Reglist/Image Modi, GS Context 2, Mipmaps sofort
+fertig") - this round implements TEX1/MIPTBP1/MIPTBP2 register
+parsing and SPRITE-only per-primitive mip-level selection.
+
+**Registers.** `TEX1_1` (0x14): LCM (bit0, 0=computed LOD/1=fixed
+LOD), MXL (bits2-4, max mip level), MMAG (bit9, magnification filter,
+parsed but unused - this project has no filtering model at all, even
+for the base level), MMIN (bits10-12, minification filter; values
+>= `GS_MMIN_MIPMAP_THRESHOLD` (2) mean "some form of mipmapping",
+values below mean LINEAR/NEAREST with no mipmapping), MTBA (bit14,
+automatic mip address calculation - unimplemented, documented gap),
+L (word1 bits0-1, parsed but unused), K (word1 bits2-13, signed
+12-bit, 1/16-unit LOD bias/fixed-LOD value - sign-extended from the
+field's own top bit since C's `>>` on an already-masked positive int
+doesn't sign-extend on its own). `MIPTBP1_1`/`MIPTBP2_1` (0x34/0x36)
+hold TBP/TBW for mip levels 1-3 and 4-6 respectively, modeled (same
+approach as every other multi-field GS register this project parses)
+as a plain sequential 64-bit bitfield with no word-alignment padding
+between fields - TBP2 and TBP5 both straddle the word0/word1 boundary
+and are decoded with the identical cross-word bit-splitting technique
+already used for TEX0's TW/TH field several rounds ago.
+
+**LOD selection (`rasterize_sprite()` only - real hardware also
+mipmaps TRIANGLE, a documented gap here).** Implemented as a
+save/override/restore around the existing pixel loop, so every other
+texture-sampling read site (`gs_sample_texel()`, `gs_sample_clut()`,
+the other 3 rasterizers) needed zero changes - the same
+deliberately-non-invasive pattern Round 27 used for dual-context
+support. Before the pixel loop: if TME is set, MXL > 0, MMIN is at or
+above the mipmap threshold, and MTBA is 0, compute a level: LCM=1
+uses `K/16.0` rounded to the nearest integer (K may be negative, per
+the sign-extension above, though this round's own tests only exercise
+non-negative K); LCM=0 computes
+`ratio = max(tex_w/screen_w, tex_h/screen_h)` and takes
+`floor(log2(ratio))` when `ratio > 1` (magnification, ratio <= 1,
+always yields level 0 - no mip level is ever selected when the
+texture is being enlarged, matching real hardware). Either way the
+result is clamped to `[0, MXL]`. A non-zero level temporarily
+overrides `tex_tbp0`/`tex_tbw` from `tex_mip_tbp[level-1]`/
+`tex_mip_tbw[level-1]` for the duration of the pixel loop, restored
+unconditionally at the end of the function (including the MTBA=1/
+MMIN-too-low/magnification paths, which simply never touch the saved
+values in the first place).
+
+**Citation-honesty note (same pattern as Rounds 24-27).** This
+round's dedicated research-subagent dispatch again hit this session's
+own usage/session limit before it could run. TEX1's exact bit
+positions and the MIPTBP1/MIPTBP2 sequential-bitfield layout are
+implemented from established PS2 GS knowledge rather than a
+freshly-verified primary-source citation, consistent with every prior
+round this session.
+
+**Testing (`tests/test_gs_mipmap.c`, 25 checks).** TEX1 field
+round-trip including a deliberately negative K value, verifying the
+12-bit sign-extension is correct; MIPTBP1/MIPTBP2's all 6 mip levels'
+TBP/TBW round-trip, including the two fields (level 2, level 5) that
+straddle the word0/word1 boundary; a 64x64 texture drawn into an 8x8
+screen rectangle (minification ratio 8, log2(8)=3) under LCM=0
+actually samples mip level 3's distinctly-colored buffer rather than
+the base level's, proving the computed-LOD path genuinely changes
+which buffer gets read, not just which number gets computed; the same
+setup with MXL=1 clamps the computed level 3 down to level 1 and
+samples THAT buffer; a texture drawn larger than its source
+(magnification) always uses the base level regardless of mipmap
+configuration; MMIN below the mipmap threshold disables mipmapping
+even with a large minification ratio and MXL configured; LCM=1 with
+K=32 (2.0) samples level 2 at a screen size that would have computed
+a different level under LCM=0, proving K genuinely overrides the
+computed formula rather than just being parsed and ignored; MTBA=1
+safely falls back to the base level rather than misbehaving with an
+unimplemented auto-address calculation; and a final regression check
+that a SPRITE draw with no TEX1 configured at all (MXL defaults to 0
+from `gif_init()`'s zero-init) behaves exactly as it did before this
+round.
+
+Regression: 63 host-native test binaries (was 62,
++`tests/test_gs_mipmap.c`), 0 failures - all 62 prior tests pass
+completely unmodified. Clean Wii/devkitPPC rebuild (`make TARGET=boot`
+under devkitPPC r32/libogc via `/tmp/dkp_root`, with the recurring
+`libmpfr.so.4` `LD_LIBRARY_PATH` workaround from `/tmp/mpfr_extract`
+- an environment quirk of this sandbox, not a project bug), 0
+warnings/errors beyond the same single pre-existing harmless
+`strncpy` warning every prior round has also seen.
+
+**Net result for GS Round 28**: SPRITE primitives now sample from the
+correct mip level based on either a computed texture/screen size
+ratio or a fixed LOD bias, with documented, safely-degrading gaps for
+TRIANGLE mipmapping, per-pixel/trilinear filtering, and MTBA=1 auto
+addressing. This completes all five items from the user's directed
+sweep this session (CLUT/paletted textures - Round 24, real
+block-swizzled addressing - Round 25, REGLIST/IMAGE GIF transfer
+modes - Round 26, GS Context 2 - Round 27, mipmaps - Round 28), each
+individually committed, pushed, and rsynced as its own checkpoint per
+the user's explicit session-limit/checkpoint request.
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

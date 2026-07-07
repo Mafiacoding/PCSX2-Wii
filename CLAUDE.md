@@ -770,6 +770,26 @@ always ask for/verify the no-disc case explicitly).
   regression 0-failure, clean Wii rebuild. See docs/STATUS.md's "GS
   Round 27" section.
 
+- **GS Round 28 (same session, continued)**: Mipmap support - the
+  fifth and last item of the user's directed sweep. New TEX1_1/
+  MIPTBP1_1/MIPTBP2_1 registers (LCM/MXL/MMAG/MMIN/MTBA/L/K, and
+  per-level TBP/TBW for mip levels 1-6). `rasterize_sprite()` (SPRITE
+  only - TRIANGLE mipmapping is a documented gap) performs
+  per-primitive nearest-single-level LOD selection: LCM=0 computes
+  `floor(log2(texture-size/screen-size))`, LCM=1 uses a fixed K value,
+  either way clamped to MXL and falling back to level 0 whenever MMIN
+  is below the mipmap threshold, the draw is a magnification, or
+  MTBA=1 (auto address calculation - unimplemented, safely degrades
+  to level 0). Implemented as a save/override/restore of tex_tbp0/
+  tex_tbw around the existing pixel loop - zero changes to
+  gs_sample_texel()/gs_sample_clut()/the other 3 rasterizers, same
+  non-invasive pattern as Round 27. Same session-limited-research
+  caveat as Rounds 24-27. 25 new checks (`tests/test_gs_mipmap.c`,
+  62->63 test binaries), full regression 0-failure, clean Wii rebuild.
+  See docs/STATUS.md's "GS Round 28" section. **This completes all
+  five items from the user's directed sweep this session**, each
+  individually committed/pushed/rsynced as its own checkpoint.
+
 ## The mandatory per-change workflow
 
 This project has a strict, consistently-applied ritual for every increment
@@ -1345,7 +1365,7 @@ rsync -a --delete --exclude '.git' --exclude 'test_*' \
 # rsync's include/exclude ORDER means the 3 test_*.c source files
 # still get excluded by the earlier --exclude 'test_*' rule (basename
 # match, first-match-wins) - work around it by re-copying them directly:
-for f in tests/test_iop_elf.c tests/test_iop_spu2.c tests/test_vu_micro.c tests/test_gif_line.c tests/test_iop_rfe.c tests/test_iop_hw_interrupt.c tests/test_iop_excb.c tests/test_gs_alpha.c tests/test_gs_clut.c tests/test_gs_swizzle.c tests/test_gs_reglist_image.c tests/test_gs_context2.c; do
+for f in tests/test_iop_elf.c tests/test_iop_spu2.c tests/test_vu_micro.c tests/test_gif_line.c tests/test_iop_rfe.c tests/test_iop_hw_interrupt.c tests/test_iop_excb.c tests/test_gs_alpha.c tests/test_gs_clut.c tests/test_gs_swizzle.c tests/test_gs_reglist_image.c tests/test_gs_context2.c tests/test_gs_mipmap.c; do
   cp "/tmp/pcsx2-wii-git/$f" "$OUT/pcsx2-wii/$f"
 done
 ```
@@ -1409,7 +1429,18 @@ Round 25 (real block-swizzled addressing, additive API) is the
 second and is also complete/committed/pushed. Round 26 (REGLIST/IMAGE
 transfer modes) is the third and is also complete/committed/pushed.
 Round 27 (GS context 2) is the fourth and is also complete/committed/
-pushed. Remaining, in the user's stated order: mipmaps.
+pushed. Round 28 (mipmaps) is the fifth and last, and is also
+complete/committed/pushed - see "Current frontier" above and
+docs/STATUS.md's "GS Round 28" section. **All five items from the
+user's directed sweep are now done**, each individually checkpointed
+(committed + pushed + rsynced to outputs) as it finished, satisfying
+the user's explicit session-limit/checkpoint request. The next
+session should feel free to resume GS/CDVD/COP2 work, or pick a new
+priority with the user - see docs/ROADMAP.md's "Suggested near-term
+order" section for the open, not-user-directed items noted there
+(wiring Round 25's swizzle addressing into the pipeline, extending
+Round 27's dual-context and Round 28's mipmap support beyond their
+current scope, and MTBA=1 auto mip addressing).
 
 ## Reference material
 

@@ -145,6 +145,34 @@
 #define GS_REG_ZBUF_2     0x4F
 #define PRIM_CTXT_MASK    0x200u /* PRIM bit 9: 0=context1, 1=context2 */
 
+/* Round 28: mipmaps - TEX1 (LOD calculation params) and MIPTBP1/
+ * MIPTBP2 (per-level texture base pointers, levels 1-6). Real
+ * addresses (well-known GS register set, same session-limited-
+ * research caveat as Rounds 24-27 - see docs/STATUS.md's "GS Round
+ * 28" section). Scoped to context 1 only this round (matches the
+ * "CLAMP/TEX1/TEX2/SCISSOR/FBA/MIPTBP unmodeled for either context"
+ * gap Round 27 explicitly left open - this round closes part of it
+ * for context 1; context 2 mipmap support remains a documented,
+ * explicit future increment, consistent with Round 27's own scope
+ * note). */
+#define GS_REG_TEX1_1     0x14
+#define GS_REG_MIPTBP1_1  0x34
+#define GS_REG_MIPTBP2_1  0x36
+
+/* TEX1's MMIN field (3 bits) - real hardware distinguishes several
+ * NEAREST/LINEAR x MIPMAP_NEAREST/MIPMAP_LINEAR combinations (values
+ * 0-5); this project does not implement trilinear/bilinear filtering
+ * at all (nearest-neighbor sampling only, an existing, established
+ * limitation - see gif.h's top-of-file scope comment), so the only
+ * distinction this round actually needs is "mipmapping engaged or
+ * not": MMIN 0-1 = no mipmap (real values NEAREST/LINEAR), MMIN 2-5 =
+ * mipmap engaged (some NEAREST_MIPMAP_x/LINEAR_MIPMAP_x combination -
+ * this round does not distinguish between them further, since single-
+ * level nearest selection is used regardless of which one is set, a
+ * deliberate simplification consistent with not modeling trilinear
+ * blending). */
+#define GS_MMIN_MIPMAP_THRESHOLD 2u /* MMIN >= this value means "mipmapping is engaged" */
+
 #define GS_REG_BITBLTBUF  0x50
 #define GS_REG_TRXPOS     0x51
 #define GS_REG_TRXREG     0x52
@@ -467,6 +495,34 @@ typedef struct {
     int ctx2_ate, ctx2_atst, ctx2_afail;
     uint32_t ctx2_aref;
     uint32_t ctx2_alpha_a, ctx2_alpha_b, ctx2_alpha_c, ctx2_alpha_d, ctx2_alpha_fix;
+
+    /* Round 28: mipmaps (TEX1 + MIPTBP1/MIPTBP2), context 1 only -
+     * see GS_REG_TEX1_1/MIPTBP1_1/MIPTBP2_1's header comment for the
+     * scope note. TEX1's fields: tex1_lcm (LOD Calculation Method:
+     * 0=computed from texture/screen size ratio, 1=fixed from K),
+     * tex1_mxl (Max LOD level, 0-6), tex1_mmag/tex1_mmin (real filter
+     * mode fields - only tex1_mmin is actually used, to decide
+     * whether mipmapping is engaged at all, per
+     * GS_MMIN_MIPMAP_THRESHOLD's comment), tex1_mtba (Mipmap Texture
+     * Base Auto - only MTBA=0, explicit MIPTBP1/2 lookup, is
+     * implemented; MTBA=1's automatic per-level address formula is a
+     * documented, unimplemented gap - falls back to level 0 always),
+     * tex1_l (parsed and stored but NOT applied to the LOD formula
+     * this round - a documented, explicit simplification, not a
+     * fabricated formula detail), tex1_k (signed 12-bit LOD bias,
+     * 1/16 units - applied when tex1_lcm=1). tex_mip_tbp/tex_mip_tbw
+     * hold levels 1-6's base pointer/width (index 0 = level 1, index
+     * 5 = level 6), parsed from MIPTBP1_1 (levels 1-3) and
+     * MIPTBP2_1 (levels 4-6) - level 0 itself continues to use the
+     * existing tex_tbp0/tex_tbw fields, unchanged. */
+    int tex1_lcm;
+    uint32_t tex1_mxl;
+    int tex1_mmag;
+    uint32_t tex1_mmin;
+    int tex1_mtba;
+    uint32_t tex1_l;
+    int32_t tex1_k;
+    uint32_t tex_mip_tbp[6], tex_mip_tbw[6];
 
     /* Current UV register value (real hardware's 12.4 fixed-point
      * texel coordinate "FST=1" mode - see gif.h's scope comment),

@@ -5,6 +5,7 @@
 #include "core/hw/gif.h"
 #include "core/hw/gs_mem.h"
 #include <string.h>
+#include <math.h> /* Round 28: log2() for mipmap LOD selection - see rasterize_sprite()'s mip-level logic */
 
 static gif_state_t g_gif;
 
@@ -612,6 +613,54 @@ static void rasterize_sprite(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
     if (sx1 < sx0) { int32_t t = sx0; sx0 = sx1; sx1 = t; }
     if (sy1 < sy0) { int32_t t = sy0; sy0 = sy1; sy1 = t; }
 
+    /* Round 28: mipmaps - SPRITE-only, per-PRIMITIVE (not per-pixel)
+     * LOD selection. See gif.h's GS_REG_TEX1_1/MIPTBP1_1/MIPTBP2_1
+     * comment and gif_state_t's tex1_xxx/tex_mip_tbp/tex_mip_tbw
+     * field comments for the full scope: only MTBA=0 (explicit
+     * MIPTBP lookup) is implemented; a single nearest mip level is
+     * selected once for the WHOLE sprite (not varied per-pixel, and
+     * not trilinear-blended between adjacent levels) - a deliberate,
+     * honest simplification consistent with this project's existing
+     * nearest-neighbor-only texture sampling (no bilinear/trilinear
+     * filtering anywhere in this codebase). If a non-zero level is
+     * selected, tex_tbp0/tex_tbw are temporarily overridden for the
+     * duration of this draw and restored before returning - the same
+     * save/override/restore spirit as gs_activate_context(), just
+     * scoped to a single function instead of persisted in gif_state_t. */
+    uint32_t saved_mip_tbp0 = g_gif.tex_tbp0;
+    uint32_t saved_mip_tbw = g_gif.tex_tbw;
+    if (textured && g_gif.tex1_mxl > 0 && g_gif.tex1_mmin >= GS_MMIN_MIPMAP_THRESHOLD && !g_gif.tex1_mtba) {
+        uint32_t lod = 0;
+        if (g_gif.tex1_lcm) {
+            /* Fixed LOD from K (signed, 1/16 units) - L is parsed but
+             * deliberately not applied this round (see tex1_l's field
+             * comment). */
+            double k = (double)g_gif.tex1_k / 16.0;
+            lod = (k <= 0.0) ? 0u : (uint32_t)(k + 0.5);
+        } else {
+            /* Computed from the ratio of texture size to this
+             * sprite's own screen-space size - minification only
+             * (ratio > 1.0); magnification (ratio <= 1.0) always
+             * uses level 0, matching real hardware's own "never
+             * upsample past the base level" behavior. */
+            int32_t screen_w = sx1 - sx0, screen_h = sy1 - sy0;
+            double tex_w = (double)(1u << g_gif.tex_tw);
+            double tex_h = (double)(1u << g_gif.tex_th);
+            double ratio_w = (screen_w > 0) ? tex_w / (double)screen_w : 1.0;
+            double ratio_h = (screen_h > 0) ? tex_h / (double)screen_h : 1.0;
+            double ratio = (ratio_w > ratio_h) ? ratio_w : ratio_h;
+            if (ratio > 1.0) {
+                double lod_f = log2(ratio);
+                lod = (lod_f < 0.0) ? 0u : (uint32_t)lod_f; /* floor, since lod_f >= 0 here */
+            }
+        }
+        if (lod > g_gif.tex1_mxl) lod = g_gif.tex1_mxl;
+        if (lod > 0) {
+            g_gif.tex_tbp0 = g_gif.tex_mip_tbp[lod - 1];
+            g_gif.tex_tbw = g_gif.tex_mip_tbw[lod - 1];
+        }
+    }
+
     double x_span = (double)(x1 - x0);
     double y_span = (double)(y1 - y0);
 
@@ -671,6 +720,12 @@ static void rasterize_sprite(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
         }
     }
     g_gif.sprites_drawn++;
+
+    /* Round 28: restore tex_tbp0/tex_tbw in case a mip level other
+     * than the base was temporarily selected above - keeps this
+     * override strictly local to this single draw call. */
+    g_gif.tex_tbp0 = saved_mip_tbp0;
+    g_gif.tex_tbw = saved_mip_tbw;
 }
 
 /* POINT rasterizer (task: "GS coverage breadth"). Real hardware
@@ -1216,6 +1271,59 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
         g_gif.ctx2_alpha_c = (data_lo >> ALPHA_C_SHIFT) & ALPHA_ABCD_MASK;
         g_gif.ctx2_alpha_d = (data_lo >> ALPHA_D_SHIFT) & ALPHA_ABCD_MASK;
         g_gif.ctx2_alpha_fix = data_hi & ALPHA_FIX_MASK;
+    } break;
+    case GS_REG_TEX1_1: {
+        /* GIFRegTEX1 (Round 28) - real bit layout, moderate
+         * confidence (same session-limited-research caveat as this
+         * round's other new registers - see docs/STATUS.md's "GS
+         * Round 28" section): word0 = LCM:1(bit0), MXL:3(bits2-4),
+         * MMAG:1(bit9), MMIN:3(bits10-12), MTBA:1(bit14); word1 =
+         * L:2(bits0-1), K:12(bits2-13, signed, 1/16 units). */
+        g_gif.tex1_lcm = (data_lo & 0x1u) ? 1 : 0;
+        g_gif.tex1_mxl = (data_lo >> 2) & 0x7u;
+        g_gif.tex1_mmag = (data_lo & 0x200u) ? 1 : 0;
+        g_gif.tex1_mmin = (data_lo >> 10) & 0x7u;
+        g_gif.tex1_mtba = (data_lo & 0x4000u) ? 1 : 0;
+        g_gif.tex1_l = data_hi & 0x3u;
+        {
+            /* K is signed 12 bits (bits 2-13 of word1) - sign-extend
+             * from bit 11 (the field's own top bit). */
+            int32_t k_raw = (int32_t)((data_hi >> 2) & 0xFFFu);
+            if (k_raw & 0x800) k_raw -= 0x1000; /* sign-extend a 12-bit value */
+            g_gif.tex1_k = k_raw;
+        }
+    } break;
+    case GS_REG_MIPTBP1_1: {
+        /* GIFRegMIPTBP1 (Round 28) - modeled as a plain sequential
+         * 64-bit bitfield (TBP1:14, TBW1:6, TBP2:14, TBW2:6, TBP3:14,
+         * TBW3:6, spare:4 = 64 bits total, no word-alignment padding
+         * between fields) - moderate confidence, same citation-
+         * honesty note as TEX1_1 above. TBP2/TBP3 straddle the
+         * word0/word1 boundary, decoded with the same cross-word
+         * technique this project already uses for TEX0's TW/TH
+         * field (see that case's own comment, several rounds ago). */
+        g_gif.tex_mip_tbp[0] = data_lo & 0x3FFFu;             /* TBP1: bits 0-13 */
+        g_gif.tex_mip_tbw[0] = ((data_lo >> 14) & 0x3Fu) * 64u; /* TBW1: bits 14-19 */
+        if (g_gif.tex_mip_tbw[0] == 0) g_gif.tex_mip_tbw[0] = 640;
+        g_gif.tex_mip_tbp[1] = ((data_lo >> 20) & 0xFFFu) | ((data_hi & 0x3u) << 12); /* TBP2: bits 20-33 */
+        g_gif.tex_mip_tbw[1] = (((data_hi >> 2) & 0x3Fu)) * 64u; /* TBW2: bits 34-39 */
+        if (g_gif.tex_mip_tbw[1] == 0) g_gif.tex_mip_tbw[1] = 640;
+        g_gif.tex_mip_tbp[2] = (data_hi >> 8) & 0x3FFFu;      /* TBP3: bits 40-53 */
+        g_gif.tex_mip_tbw[2] = ((data_hi >> 22) & 0x3Fu) * 64u; /* TBW3: bits 54-59 */
+        if (g_gif.tex_mip_tbw[2] == 0) g_gif.tex_mip_tbw[2] = 640;
+    } break;
+    case GS_REG_MIPTBP2_1: {
+        /* GIFRegMIPTBP2 - identical layout to MIPTBP1 above, for
+         * levels 4/5/6 instead of 1/2/3. */
+        g_gif.tex_mip_tbp[3] = data_lo & 0x3FFFu;
+        g_gif.tex_mip_tbw[3] = ((data_lo >> 14) & 0x3Fu) * 64u;
+        if (g_gif.tex_mip_tbw[3] == 0) g_gif.tex_mip_tbw[3] = 640;
+        g_gif.tex_mip_tbp[4] = ((data_lo >> 20) & 0xFFFu) | ((data_hi & 0x3u) << 12);
+        g_gif.tex_mip_tbw[4] = (((data_hi >> 2) & 0x3Fu)) * 64u;
+        if (g_gif.tex_mip_tbw[4] == 0) g_gif.tex_mip_tbw[4] = 640;
+        g_gif.tex_mip_tbp[5] = (data_hi >> 8) & 0x3FFFu;
+        g_gif.tex_mip_tbw[5] = ((data_hi >> 22) & 0x3Fu) * 64u;
+        if (g_gif.tex_mip_tbw[5] == 0) g_gif.tex_mip_tbw[5] = 640;
     } break;
     case GS_REG_BITBLTBUF: {
         /* GIFRegBITBLTBUF (Round 26): word0 = SBP:14(0-13),

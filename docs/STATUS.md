@@ -2996,6 +2996,98 @@ Regression: 53 host-native test binaries (was 52), 0 failures across
 all of them. Clean Wii/devkitPPC rebuild, same single pre-existing
 harmless `strncpy` truncation warning as prior rounds.
 
+### Round 22 (2026-07-07): user directive - "handle ALL IOP problems before anything else"; first fix found: real RFE was never implemented
+
+The user explicitly broadened scope past Round 19's narrow "fix the
+RAM[0x100] handler chain + Status.IEc" framing to "take care of ALL
+IOP problems first, before other tasks are tackled" (verbatim, in
+German). This round starts that sweep with an inventory pass and one
+concrete, confirmed, real fix.
+
+**Inventory** (cross-referencing `docs/ROADMAP.md` section 2's IOP
+bullets, this file's IOP-related round history, and `CLAUDE.md`'s
+frontier notes): section 2 has exactly one remaining unchecked bullet
+- the Round 19 "real exception-handler-chain default behavior at
+`RAM[0x100]`" item, itself bundling two sub-questions: (a) what real
+IOP kernel init does at `RAM[0x100]` before any handler is registered,
+and (b) why `Status.IEc` never becomes 1. Direct code inspection while
+starting on (b) surfaced a THIRD, previously undocumented, concrete
+bug described below - found by reading `iop_core.c`'s COP0 dispatch
+directly rather than only re-reading prior round narratives.
+
+**Bug found: RFE (Restore From Exception) was completely
+unimplemented.** `iop_core.c`'s COP0 sub-dispatch (`case 0x10: switch
+(rs)`) only ever handled `rs=0x00` (MFC0) and `rs=0x04` (MTC0) - any
+CO-format op (`rs` with bit `0x10` set, which is how real hardware
+encodes RFE/TLBR/TLBWI/etc, selected further by the low-6-bit `funct`
+field) fell through to the "unimplemented COP0 sub-opcode" halt path.
+This matters directly to the Status.IEc question: every real MIPS I
+exception handler ends in RFE before returning via `JR`, to restore
+the pre-exception KU/IE mode stack (and re-enable interrupts if they
+were enabled beforehand) - a handler that actually ran to completion
+and tried to return would have hit this exact halt, silently masking
+any forward progress the RAM[0x100]-chain fix (still pending) might
+otherwise unlock. Put another way: fixing RAM[0x100] alone, without
+this fix, would likely have just moved the wall from "jump to garbage"
+to "halt on RFE" - both dead ends, but for different reasons, and the
+RFE one would have been confusing to re-diagnose from scratch later.
+
+**Fix**: added `case 0x10` (CO-format) under the COP0 dispatch, with
+`funct==0x10` (RFE) implemented per PCSX2's own `R3000A.cpp`
+`psxException()` RFE case: `Status = (Status & ~0xF) | ((Status &
+0x3C) >> 2)` - shifting the "previous"/"old" KU/IE bit-pairs down into
+"current"/"previous" (bits 4-5, the "old" pair, are left untouched),
+the exact mirror of the exception-entry push this project already
+implements (`(Status & 0x0F) << 2` into bits 2-5, clearing bits 0-1).
+No TLB-family CO-format ops (TLBR/TLBWI/TLBWR/TLBP) were added - the
+IOP's R3000A has no MMU/TLB (unlike the EE), so these aren't
+applicable here and any other `funct` value under `rs=0x10` correctly
+still halts with a descriptive, distinct message
+("unimplemented COP0 CO-format op") rather than being silently
+guessed at.
+
+**Verification**: `tests/test_iop_rfe.c` (3 checks) hand-derives and
+confirms one full exception-entry-then-RFE round trip bit-for-bit: an
+initial `Status` low-6 value of `0b000101` (chosen to make every bit
+position distinguishable) becomes `0b010100` after the existing
+SYSCALL push, then `0b010101` after the new RFE - exactly matching a
+hand-traced application of the real formula, not just "doesn't crash".
+Also confirms RFE correctly leaves `Cause` untouched (only `Status` is
+architecturally affected) and that execution actually continues past
+the RFE instruction to a following `BREAK` (proving the CO-format path
+no longer falls into the halt default).
+
+Regression: 54 host-native test binaries (was 53, +`test_iop_rfe.c`),
+0 failures across all of them. Clean Wii/devkitPPC rebuild, same
+single pre-existing harmless `strncpy` truncation warning as prior
+rounds (`iop_module_loader.c`, unrelated to this change).
+
+**Still open, same round's remaining scope** (per the user's "ALL IOP
+problems" directive, not yet done): (a) RAM[0x100] exception-chain
+default-handler behavior itself - partial research recovered from
+psx-spx's kernelbios page confirms the real BIOS RAM layout has
+`RAM[0x100]` as the start of an 8-entry "Table of Tables", whose FIRST
+entry (`RAM[0x100]`/`RAM[0x104]`) is literally documented as "ExCB
+Exception Chain Entrypoints (addr=var, size=4*08h)" - i.e. a real
+BIOS's kernel init writes a pointer+size pair here describing WHERE
+the 4 real exception-chain-root entries live (typically inside the
+E000h-2000h "Kernel Memory" region allocated via a real `B(00h)`
+kernel-memory-init call) and how many there are; a fully-cited,
+implementable default-fallback behavior for the specific case where
+this project's boot path reaches the dispatcher before any real
+handler is registered still needs the deeper "Priority Chains"/"ExCB"
+structure-layout sections of that same document, which did not fit in
+one fetch and have not yet been retrieved in full. (b) Status.IEc: RFE
+existing now means an eventual real handler CAN restore it correctly,
+but nothing in this project's IOP interpreter step loop currently
+checks Status.IEc to decide whether to take a pending hardware
+interrupt at all (`iop_intc.c`'s own scope comment already flagged
+this: "NOT modeled: actually raising a CPU interrupt/exception in
+iop_core.c when I_STAT & I_MASK becomes nonzero") - meaning IEc is
+currently a dead bit with no observable behavioral effect regardless
+of its value, which is itself a real, separate, well-defined next
+target for this same sweep.
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

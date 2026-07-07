@@ -1273,3 +1273,26 @@ accidentally swallowing unrelated ordinary IOP RAM addresses.
 gcc -I../include -I../source -o test_iop_spu2 tests/test_iop_spu2.c ../source/core/iop/iop_core.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
 ./test_iop_spu2
 ```
+
+`test_iop_rfe.c` covers Round 22's RFE (Restore From Exception, COP0
+CO-format funct=0x10) fix - a genuine, previously-undocumented gap
+found while starting the user-directed "all IOP problems" sweep:
+`iop_core.c`'s COP0 dispatch only ever handled MFC0/MTC0, so any real
+exception handler that tried to RFE-then-return would have hit an
+"unimplemented COP0 sub-opcode" halt. See `docs/STATUS.md`'s "Round
+22" section for the full citation trail (ported from PCSX2's
+`R3000A.cpp` `psxException()` RFE case). 3 checks, hand-derived
+bit-for-bit: an initial `Status` low-6 value chosen so every bit
+position is distinguishable (`0b000101`) becomes `0b010100` after the
+existing SYSCALL exception-entry push, then `0b010101` after the new
+RFE - exactly matching a hand-traced application of the real formula
+`Status = (Status & ~0xF) | ((Status & 0x3C) >> 2)`. Also confirms
+`Cause` is untouched by RFE (only `Status` is architecturally
+affected) and that execution actually continues past RFE to a
+following `BREAK` (proving the CO-format path no longer falls into
+the "unimplemented" halt default).
+
+```sh
+gcc -I../include -I../source -o test_iop_rfe tests/test_iop_rfe.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
+./test_iop_rfe
+```

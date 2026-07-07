@@ -579,6 +579,16 @@ instead of fully emulating the real IOP BIOS ROM.
       (the bogus near-zero stack pointer had been silently overwriting
       the real exception-vector trampoline at address 0x80) - see
       docs/STATUS.md's "Round 18" section.
+- [x] Real R3000A RFE (Restore From Exception, COP0 CO-format
+      funct=0x10) - found and fixed in Round 22 while starting the
+      user-directed "all IOP problems" sweep: the COP0 dispatch only
+      ever handled MFC0/MTC0, so any real exception handler that
+      tried to RFE-then-return would have hit an "unimplemented COP0
+      sub-opcode" halt. Implemented per PCSX2's `R3000A.cpp`
+      `psxException()`: `Status = (Status & ~0xF) | ((Status & 0x3C)
+      >> 2)`. Unit tested in `tests/test_iop_rfe.c` (3/3 checks,
+      hand-verified bit-for-bit through a full exception-entry-then-
+      RFE round trip). See docs/STATUS.md's "Round 22" section.
 - [ ] Real exception-handler-chain default behavior at `RAM[0x100]`
       - Round 18's "SYSCALL dispatch table" framing was corrected in
       Round 19: precise tracing (real `a0=2` right before the trap)
@@ -592,16 +602,38 @@ instead of fully emulating the real IOP BIOS ROM.
       point in boot, so the lookup finds stale template bytes and
       falls through to the same "load SYSMEM" escape hatch Round 15
       already documented, rather than really returning from the
-      syscall. Two well-defined, not-yet-attempted next targets:
+      syscall. Round 22 (docs/STATUS.md) recovered a partial, citable
+      reference (psx-spx's kernelbios page): `RAM[0x100]` is the start
+      of an 8-entry "Table of Tables", whose first entry documents
+      `RAM[0x100]`/`RAM[0x104]` as "ExCB Exception Chain Entrypoints
+      (addr=var, size=4*08h)" - a pointer+size pair to 4 real
+      exception-chain-root entries, typically living in the E000h+
+      Kernel Memory region. The deeper "Priority Chains"/"ExCB"
+      structure-layout sections needed to implement a fully-cited
+      default-fallback behavior didn't fit in one fetch and still need
+      retrieval. Two well-defined next targets remain:
       (a) research + implement what real IOP kernel init does at
-      `RAM[0x100]` before any handler is registered (needs a citable
-      reference, not a guess), and (b) figure out why `Status.IEc`
-      (global interrupt enable) never gets set to 1 anywhere in the
-      traced execution - either a missing "enable interrupts" step
-      this project doesn't yet reach, or confirmation real hardware
-      keeps interrupts masked here too. See docs/STATUS.md's "Round 19"
-      section for the full trace. Substantial, well-defined scope for
-      a future round; not attempted yet.
+      `RAM[0x100]` before any handler is registered (needs the fuller
+      citable reference, not a guess), and (b) wire up real hardware-
+      interrupt delivery in the IOP interpreter (see the new bullet
+      below) so that `Status.IEc` - now correctly restorable via RFE,
+      per the fix above - actually has an observable effect. See
+      docs/STATUS.md's "Round 19" and "Round 22" sections for the full
+      trace. Substantial, well-defined scope for a future round; not
+      attempted yet.
+- [ ] Real hardware-interrupt delivery in the IOP interpreter (I_STAT
+      & I_MASK -> a real Cause.ExcCode=0 "Interrupt" exception, gated
+      by Status.IEc) - confirmed, in Round 22, to be a genuine, still-
+      open gap: `iop_intc.c`'s own scope comment already flagged this
+      ("NOT modeled: actually raising a CPU interrupt/exception in
+      iop_core.c when I_STAT & I_MASK becomes nonzero"), and Round 22's
+      RFE fix makes this the direct reason `Status.IEc` remains a dead
+      bit with no observable behavioral effect regardless of its
+      value - nothing in `iop_step()` currently reads it. Needs a
+      citable reference for the exact Cause.IP bit(s) real hardware
+      wires the INTC through (PCSX2's `Hw.h`/`R3000A.cpp` are the
+      established citation sources elsewhere in this section) before
+      implementing, per this project's no-fabrication policy.
 
 ## 3. DMA controller
 

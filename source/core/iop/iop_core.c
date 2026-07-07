@@ -429,6 +429,44 @@ static int iop_step(void)
         switch (rs) {
         case 0x00: /* MFC0 */ if (rt) GPR(rt) = st->cop0[rd]; break;
         case 0x04: /* MTC0 */ st->cop0[rd] = rt32; break;
+        case 0x10: /* CO-format (bit 25 set, rs=0x10, rest of rs
+             * field zero in the real encoding) - real R3000A/R5900
+             * "cofun" ops selected by the low 6 bits (funct). Only
+             * RFE (funct=0x10) is real R3000A architecture (no TLB
+             * on the IOP, unlike the EE, so TLBR/TLBWI/TLBWR/TLBP
+             * are not applicable here and are correctly left
+             * unimplemented). This was a genuine, confirmed gap
+             * found while investigating why Status.IEc never
+             * becomes 1 (see docs/STATUS.md "Round 22"): every real
+             * MIPS I exception handler ends in RFE to restore the
+             * pre-exception KU/IE mode stack (and re-enable
+             * interrupts if they were enabled beforehand) before
+             * returning via JR - without this, any real handler
+             * that actually completes and returns would have hit
+             * this same "unimplemented COP0 sub-opcode" halt below,
+             * silently masking whatever the real RAM[0x100] handler
+             * chain does after being fixed. Ported from PCSX2's
+             * R3000A.cpp psxException()'s RFE case:
+             * `Status = (Status & ~0xF) | ((Status & 0x3C) >> 2)`
+             * - shifts the 2-bit-pair KU/IE "previous" and "old"
+             * fields down into "current"/"previous", leaving the
+             * top "old" pair (bits 4-5) untouched, mirroring the
+             * exception-entry push this project already implements
+             * (`(cop0[12] & 0x0F) << 2` into bits 2-5, clearing 0-1). */
+            switch (funct) {
+            case 0x10: /* RFE */
+                st->cop0[12] = (st->cop0[12] & ~0x0Fu) | ((st->cop0[12] & 0x3Cu) >> 2);
+                break;
+            default:
+            {
+                char buf[96];
+                snprintf(buf, sizeof(buf), "unimplemented COP0 CO-format op (funct=0x%02X, pc=0x%08X)",
+                         (unsigned int)funct, (unsigned int)this_pc);
+                halt(buf);
+                return 1;
+            }
+            }
+            break;
         default:
         {
             char buf[96];

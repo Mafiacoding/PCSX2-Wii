@@ -13,6 +13,7 @@ static int failures = 0;
 } while (0)
 
 static void wle32(uint8_t *p, uint32_t v) { p[0]=v&0xFF;p[1]=(v>>8)&0xFF;p[2]=(v>>16)&0xFF;p[3]=(v>>24)&0xFF; }
+static uint32_t vif_rd_le32(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24); }
 
 static uint32_t enc_vifcode(uint32_t cmd, uint32_t num, uint32_t imm)
 {
@@ -29,7 +30,11 @@ static uint32_t enc_vifcode(uint32_t cmd, uint32_t num, uint32_t imm)
 #define VIF_CMD_STCOL    0x31
 #define VIF_CMD_MPG      0x4A
 #define VIF_CMD_DIRECT   0x50
-#define VIF_CMD_UNPACK_V4_32 0x6C
+#define VIF_CMD_UNPACK_S_32   0x60
+#define VIF_CMD_UNPACK_V2_16  0x65
+#define VIF_CMD_UNPACK_V3_8   0x6A
+#define VIF_CMD_UNPACK_V4_32  0x6C
+#define VIF_CMD_UNPACK_V4_5   0x6F
 
 int main(void)
 {
@@ -202,18 +207,218 @@ int main(void)
         CHECK(v0->direct_qwords_forwarded == 0, "DIRECT on VIF0: nothing forwarded to the GIF parser");
     }
 
-    {
+    /* --- UNPACK (task: "VIF UNPACK") --- */
+
+    { /* V4-32, no mask, 1 vector: straightforward 4-component write to VU1 mem @ addr 0 */
+        vif_init();
+        uint8_t buf[16 * 2];
+        memset(buf, 0, sizeof(buf));
+        wle32(buf + 0,  enc_vifcode(VIF_CMD_UNPACK_V4_32, 1, 0));
+        wle32(buf + 4,  0x11111111u);
+        wle32(buf + 8,  0x22222222u);
+        wle32(buf + 12, 0x33333333u);
+        wle32(buf + 16, 0x44444444u);
+        wle32(buf + 20, enc_vifcode(VIF_CMD_ITOP, 0, 0x3FFu));
+        vif1_process_quadwords(DMA_CHANNEL_VIF1, buf, sizeof(buf) / 16);
+        vif_state_t *v1 = vif1_get_state();
+        CHECK(v1->unsupported_cmds_seen == 0, "UNPACK V4-32: real, implemented code - not counted as unsupported");
+        CHECK(v1->unpack_vectors_written == 1, "UNPACK V4-32: exactly 1 vector written");
+        vu1_state_t *vu1 = vu1_get_state();
+        uint32_t x = vif_rd_le32(vu1->mem + 0), y = vif_rd_le32(vu1->mem + 4);
+        uint32_t z = vif_rd_le32(vu1->mem + 8), w = vif_rd_le32(vu1->mem + 12);
+        CHECK(x == 0x11111111u && y == 0x22222222u && z == 0x33333333u && w == 0x44444444u,
+              "UNPACK V4-32: all 4 lanes written correctly to VU1 mem address 0");
+        CHECK(v1->itops == 0x3FFu, "UNPACK V4-32: parsing correctly resumed right after the 4 data words");
+    }
+
+    { /* S-32 broadcast: one source value written to all 4 lanes */
         vif_init();
         uint8_t buf[16];
-        wle32(buf + 0, enc_vifcode(VIF_CMD_UNPACK_V4_32, 1, 0));
-        wle32(buf + 4, enc_vifcode(VIF_CMD_ITOP, 0, 0x3FFu));
-        wle32(buf + 8, enc_vifcode(VIF_CMD_ITOP, 0, 0x3FFu));
+        wle32(buf + 0, enc_vifcode(VIF_CMD_UNPACK_S_32, 1, 0));
+        wle32(buf + 4, 0xCAFEBABEu);
+        wle32(buf + 8, enc_vifcode(VIF_CMD_NOP, 0, 0));
+        wle32(buf + 12, enc_vifcode(VIF_CMD_NOP, 0, 0));
+        vif1_process_quadwords(DMA_CHANNEL_VIF1, buf, 1);
+        vu1_state_t *vu1 = vu1_get_state();
+        int ok = 1;
+        for (int lane = 0; lane < 4; lane++)
+            if (vif_rd_le32(vu1->mem + lane * 4) != 0xCAFEBABEu) ok = 0;
+        CHECK(ok, "UNPACK S-32: single source value broadcast to all 4 lanes");
+    }
+
+    { /* V2-16 signed vs unsigned (USN bit) + the real X=v0,Y=v1,Z=v0,W=v1 repeat */
+        vif_init();
+        uint8_t buf[16];
+        memset(buf, 0, sizeof(buf));
+        /* USN=0 (signed, bit14=0): 0x8000 must sign-extend to 0xFFFF8000 */
+        wle32(buf + 0, enc_vifcode(VIF_CMD_UNPACK_V2_16, 1, 0));
+        buf[4] = 0x00; buf[5] = 0x80; /* v0 = 0x8000 */
+        buf[6] = 0x34; buf[7] = 0x12; /* v1 = 0x1234 */
+        vif1_process_quadwords(DMA_CHANNEL_VIF1, buf, 1);
+        vu1_state_t *vu1 = vu1_get_state();
+        uint32_t x = vif_rd_le32(vu1->mem + 0), y = vif_rd_le32(vu1->mem + 4);
+        uint32_t z = vif_rd_le32(vu1->mem + 8), w = vif_rd_le32(vu1->mem + 12);
+        CHECK(x == 0xFFFF8000u, "UNPACK V2-16 signed (USN=0): 0x8000 sign-extends to 0xFFFF8000");
+        CHECK(y == 0x00001234u, "UNPACK V2-16 signed (USN=0): 0x1234 stays positive");
+        CHECK(z == x && w == y, "UNPACK V2-16: real hardware repeats the pair (Z=v0, W=v1)");
+
+        vif_init();
+        memset(buf, 0, sizeof(buf));
+        /* USN=1 (unsigned, bit14=1): 0x8000 must zero-extend to 0x00008000 */
+        wle32(buf + 0, enc_vifcode(VIF_CMD_UNPACK_V2_16, 1, 0) | (1u << 14));
+        buf[4] = 0x00; buf[5] = 0x80;
+        buf[6] = 0x34; buf[7] = 0x12;
+        vif1_process_quadwords(DMA_CHANNEL_VIF1, buf, 1);
+        vu1 = vu1_get_state();
+        x = vif_rd_le32(vu1->mem + 0);
+        CHECK(x == 0x00008000u, "UNPACK V2-16 unsigned (USN=1): 0x8000 zero-extends to 0x00008000");
+    }
+
+    { /* V3-8: real hardware reads a 4th (W) component 1 byte past the
+       * real 3-byte vector - confirmed straight from PCSX2's own
+       * Vif_Unpack.cpp comment/UNPACK_V4 reuse for V3. */
+        vif_init();
+        uint8_t buf[16];
+        memset(buf, 0, sizeof(buf));
+        wle32(buf + 0, enc_vifcode(VIF_CMD_UNPACK_V3_8, 1, 0));
+        buf[4] = 0x10; buf[5] = 0x20; buf[6] = 0x30; /* the real 3-component vector */
+        buf[7] = 0x40; /* 1 byte past it - real hardware reads this into W */
+        vif1_process_quadwords(DMA_CHANNEL_VIF1, buf, 1);
+        vu1_state_t *vu1 = vu1_get_state();
+        uint32_t x = vif_rd_le32(vu1->mem + 0), y = vif_rd_le32(vu1->mem + 4);
+        uint32_t z = vif_rd_le32(vu1->mem + 8), w = vif_rd_le32(vu1->mem + 12);
+        CHECK(x == 0x10u && y == 0x20u && z == 0x30u, "UNPACK V3-8: the real 3 components land in X/Y/Z");
+        CHECK(w == 0x40u, "UNPACK V3-8: W reads 1 byte past the real vector, matching real hardware's documented quirk");
+    }
+
+    { /* V4-5: fixed real bit-shift decode of a packed 16-bit value */
+        vif_init();
+        uint8_t buf[16];
+        memset(buf, 0, sizeof(buf));
+        wle32(buf + 0, enc_vifcode(VIF_CMD_UNPACK_V4_5, 1, 0));
+        /* raw=0x8421: X=(raw&0x1F)<<3, Y=(raw&0x3E0)>>2, Z=(raw&0x7C00)>>7, W=(raw&0x8000)>>8 */
+        uint32_t raw = 0x8421u;
+        buf[4] = (uint8_t)(raw & 0xFFu); buf[5] = (uint8_t)((raw >> 8) & 0xFFu);
+        vif1_process_quadwords(DMA_CHANNEL_VIF1, buf, 1);
+        vu1_state_t *vu1 = vu1_get_state();
+        uint32_t x = vif_rd_le32(vu1->mem + 0), y = vif_rd_le32(vu1->mem + 4);
+        uint32_t z = vif_rd_le32(vu1->mem + 8), w = vif_rd_le32(vu1->mem + 12);
+        CHECK(x == ((raw & 0x001Fu) << 3), "UNPACK V4-5: X decoded via the real bit-shift formula");
+        CHECK(y == ((raw & 0x03E0u) >> 2), "UNPACK V4-5: Y decoded via the real bit-shift formula");
+        CHECK(z == ((raw & 0x7C00u) >> 7), "UNPACK V4-5: Z decoded via the real bit-shift formula");
+        CHECK(w == ((raw & 0x8000u) >> 8), "UNPACK V4-5: W decoded via the real bit-shift formula");
+    }
+
+    { /* STMASK-driven per-lane masking: Data/MaskRow/MaskCol/Write-Protect */
+        vif_init();
+        vif_state_t *v1 = vif1_get_state();
+        v1->row[0] = 0x1000u; v1->row[1] = 0x2000u; v1->row[2] = 0x3000u; v1->row[3] = 0x4000u;
+        v1->col[0] = 0x5000u;
+        /* mask (2 bits/lane, cycle-pos 0 = bits 0-7): X=0(Data) Y=1(MaskRow) Z=2(MaskCol) W=3(WriteProtect) */
+        v1->mask = 0x000000E4u; /* 0b11_10_01_00 = W:3,Z:2,Y:1,X:0 */
+
+        vu1_state_t *vu1 = vu1_get_state();
+        memset(vu1->mem, 0xFFu, 16); /* so Write-Protect leaving it untouched is verifiable */
+
+        uint8_t buf[16 * 2];
+        memset(buf, 0, sizeof(buf));
+        wle32(buf + 0,  enc_vifcode(VIF_CMD_UNPACK_V4_32, 1, 0) | (1u << 28)); /* M bit (0x10) set */
+        wle32(buf + 4,  0xAAAAAAAAu); wle32(buf + 8, 0xBBBBBBBBu);
+        wle32(buf + 12, 0xCCCCCCCCu); wle32(buf + 16, 0xDDDDDDDDu);
+        vif1_process_quadwords(DMA_CHANNEL_VIF1, buf, sizeof(buf) / 16);
+
+        uint32_t x = vif_rd_le32(vu1->mem + 0), y = vif_rd_le32(vu1->mem + 4);
+        uint32_t z = vif_rd_le32(vu1->mem + 8), w = vif_rd_le32(vu1->mem + 12);
+        CHECK(x == 0xAAAAAAAAu, "UNPACK masking: n=0 (Data) writes the real unpacked value");
+        CHECK(y == 0x2000u, "UNPACK masking: n=1 (MaskRow) writes row[1] instead of the source data");
+        CHECK(z == 0x5000u, "UNPACK masking: n=2 (MaskCol) writes col[0] (cycle position 0) instead of the source data");
+        CHECK(w == 0xFFFFFFFFu, "UNPACK masking: n=3 (Write-Protect) leaves VU mem completely untouched");
+    }
+
+    { /* STMOD mode 2 (add row, then store the sum back into row) */
+        vif_init();
+        vif_state_t *v1 = vif1_get_state();
+        v1->cycle_cl = 1; v1->cycle_wl = 1; /* 1 real value per address, no skip/fill - isolates the STMOD concern */
+        v1->mode = 2;
+        v1->row[0] = 100u;
+        uint8_t buf[16 * 2];
+        memset(buf, 0, sizeof(buf));
+        wle32(buf + 0, enc_vifcode(VIF_CMD_UNPACK_S_32, 2, 0));
+        wle32(buf + 4, 5u);
+        wle32(buf + 8, 7u);
+        vif1_process_quadwords(DMA_CHANNEL_VIF1, buf, sizeof(buf) / 16);
+        vu1_state_t *vu1 = vu1_get_state();
+        uint32_t v0 = vif_rd_le32(vu1->mem + 0);
+        uint32_t v1out = vif_rd_le32(vu1->mem + 16);
+        CHECK(v0 == 105u, "UNPACK STMOD mode 2: first vector = data(5) + row[0](100) = 105");
+        CHECK(v1out == 112u, "UNPACK STMOD mode 2: second vector = data(7) + the UPDATED row[0](105) = 112");
+        CHECK(v1->row[0] == 112u, "UNPACK STMOD mode 2: row[0] ends at 112 - updated again by the 2nd vector's own accumulate");
+    }
+
+    { /* STCYCL skip-write mode (CL > WL): WL real values written per block, then CL-WL addresses skipped */
+        vif_init();
+        vif_state_t *v1 = vif1_get_state();
+        v1->cycle_cl = 4; v1->cycle_wl = 2; /* write 2, skip 2, per 4-address block */
+        uint8_t buf[16 * 4];
+        memset(buf, 0, sizeof(buf));
+        wle32(buf + 0, enc_vifcode(VIF_CMD_UNPACK_S_32, 4, 0));
+        for (int i = 0; i < 4; i++) wle32(buf + 4 + i * 4, 0x1000u + (uint32_t)i);
+        vif1_process_quadwords(DMA_CHANNEL_VIF1, buf, sizeof(buf) / 16);
+        vu1_state_t *vu1 = vu1_get_state();
+        uint32_t a0 = vif_rd_le32(vu1->mem + 0 * 16);
+        uint32_t a1 = vif_rd_le32(vu1->mem + 1 * 16);
+        uint32_t a2 = vif_rd_le32(vu1->mem + 2 * 16); /* skipped - should be untouched (0) */
+        uint32_t a3 = vif_rd_le32(vu1->mem + 3 * 16); /* skipped - should be untouched (0) */
+        uint32_t a4 = vif_rd_le32(vu1->mem + 4 * 16); /* next block's 1st write */
+        CHECK(a0 == 0x1000u && a1 == 0x1001u, "UNPACK skip-write (CL=4,WL=2): the first 2 real values land at addresses 0-1");
+        CHECK(a2 == 0u && a3 == 0u, "UNPACK skip-write (CL=4,WL=2): addresses 2-3 are skipped (left untouched)");
+        CHECK(a4 == 0x1002u, "UNPACK skip-write (CL=4,WL=2): the 3rd real value starts the NEXT 4-address block at address 4");
+    }
+
+    { /* STCYCL fill mode (WL > CL): CL real reads per block, with the
+       * LAST real read repeating for the remaining (WL-CL) addresses.
+       * Traced by hand against PCSX2's real _nVifUnpackLoop timing
+       * (read happens BEFORE the post-increment advance check, so the
+       * very first slot of a fresh block reads the not-yet-advanced
+       * pointer, the pointer then advances once per real slot, and
+       * only the FINAL real slot's position gets genuinely repeated
+       * for the trailing fill slots): for CL=2,WL=4,NUM=4 the real,
+       * verified sequence is [src(P0), src(P0+G), src(P0+2G),
+       * src(P0+2G)] - i.e. 2 fresh reads (matching CL=2), then the
+       * 2nd fresh read's value (NOT the 1st) repeats for the 1
+       * remaining fill slot. */
+        vif_init();
+        vif_state_t *v1 = vif1_get_state();
+        v1->cycle_cl = 2; v1->cycle_wl = 4;
+        uint8_t buf[16 * 2];
+        memset(buf, 0, sizeof(buf));
+        wle32(buf + 0, enc_vifcode(VIF_CMD_UNPACK_S_32, 4, 0));
+        wle32(buf + 4, 0x1111u);  /* src(P0) */
+        wle32(buf + 8, 0x2222u);  /* src(P0+G) */
+        wle32(buf + 12, 0x3333u); /* src(P0+2G) */
+        vif1_process_quadwords(DMA_CHANNEL_VIF1, buf, sizeof(buf) / 16);
+        vu1_state_t *vu1 = vu1_get_state();
+        uint32_t a0 = vif_rd_le32(vu1->mem + 0 * 16);
+        uint32_t a1 = vif_rd_le32(vu1->mem + 1 * 16);
+        uint32_t a2 = vif_rd_le32(vu1->mem + 2 * 16);
+        uint32_t a3 = vif_rd_le32(vu1->mem + 3 * 16);
+        CHECK(a0 == 0x1111u && a1 == 0x2222u, "UNPACK fill-write (CL=2,WL=4): the 2 real reads land at slots 0-1");
+        CHECK(a2 == 0x3333u, "UNPACK fill-write (CL=2,WL=4): slot 2 is a 3rd real read (real hardware's advance-then-read timing), not a repeat of slot 0/1");
+        CHECK(a3 == 0x3333u, "UNPACK fill-write (CL=2,WL=4): slot 3 (the true fill slot) repeats slot 2's value");
+    }
+
+    { /* Reserved VN/VL combination (e.g. S-5, CMD 0x63) - must stop cleanly, matching this project's own "stop rather than guess" philosophy */
+        vif_init();
+        uint8_t buf[16];
+        wle32(buf + 0,  0x63u << 24); /* VN=0(S), VL=3 - reserved/invalid, gsize==0 in VIF_UNPACK_SIZE */
+        wle32(buf + 4,  enc_vifcode(VIF_CMD_ITOP, 0, 0x3FFu));
+        wle32(buf + 8,  enc_vifcode(VIF_CMD_ITOP, 0, 0x3FFu));
         wle32(buf + 12, enc_vifcode(VIF_CMD_ITOP, 0, 0x3FFu));
         vif1_process_quadwords(DMA_CHANNEL_VIF1, buf, 1);
         vif_state_t *v1 = vif1_get_state();
-        CHECK(v1->unsupported_cmds_seen == 1, "UNPACK: counted as unsupported");
-        CHECK(v1->codes_processed == 1, "UNPACK: processing stopped immediately - nothing after it was parsed as a code");
-        CHECK(v1->itops == 0, "UNPACK: the words right after it were NOT misparsed as ITOP codes");
+        CHECK(v1->unsupported_cmds_seen == 1, "UNPACK reserved VN/VL (S-5): counted as unsupported");
+        CHECK(v1->codes_processed == 1, "UNPACK reserved VN/VL: processing stopped immediately");
+        CHECK(v1->itops == 0, "UNPACK reserved VN/VL: the words right after it were NOT misparsed as ITOP codes");
     }
 
     printf("\n%d check(s) failed\n", failures);

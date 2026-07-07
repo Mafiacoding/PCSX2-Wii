@@ -41,6 +41,14 @@ void vu1_micro_write32(uint32_t addr, uint32_t value)
     vu_wr_le32(g_vu1.micro + off, value);
 }
 
+/* VU1 local DATA memory (g_vu1.mem, distinct from micro[] above) -
+ * called from vif.c's VIF1 UNPACK handling (task: "VIF UNPACK"). */
+void vu1_mem_write32(uint32_t addr, uint32_t value)
+{
+    uint32_t off = addr & (VU1_MEM_SIZE - 1u);
+    vu_wr_le32(g_vu1.mem + off, value);
+}
+
 /* raw-bits <-> float helpers (VF lanes are stored as raw bit
  * patterns throughout this project, matching ee_core.c's own
  * convention) */

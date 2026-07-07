@@ -53,6 +53,226 @@ static inline uint32_t vif_rd_le32(const uint8_t *p)
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+/* Real, cited: PCSX2's Vif_Unpack.cpp `nVifT[16]` table (fetched
+ * directly from github.com/PCSX2/pcsx2, master) - "Number of bytes of
+ * data in the source stream needed for each vector. [equivalent to
+ * ((32 >> VL) * (VN+1)) / 8]". Index = VN*4+VL (VN: 0=S,1=V2,2=V3,
+ * 3=V4; VL: 0=32-bit,1=16-bit,2=8-bit,3=5-bit/reserved). The three
+ * VL==3 slots for S/V2/V3 (indices 3,7,11) don't exist on real
+ * hardware - 0 marks them reserved/invalid, matched in vif_unpack(). */
+static const uint8_t VIF_UNPACK_SIZE[16] = {
+    4, 2, 1, 0,  /* S-32,  S-16,  S-8,  ---- */
+    8, 4, 2, 0,  /* V2-32, V2-16, V2-8, ---- */
+    12, 6, 3, 0, /* V3-32, V3-16, V3-8, ---- */
+    16, 8, 4, 2  /* V4-32, V4-16, V4-8, V4-5 */
+};
+
+/* Bounds-checked little-endian read of 'width' (1/2/4) bytes at
+ * absolute byte offset 'byte_off' within 'data' (which is
+ * total_bytes long). Returns 0 if the read would run past the end of
+ * the buffer this project actually has - a safety guard of this
+ * project's own, NOT a real hardware behavior (real hardware would
+ * read whatever real DMA data follows; see vif.h's "NOT implemented"
+ * note on partial/split UNPACK transfers). */
+static inline uint32_t vif_rd_bytes_le(const uint8_t *data, uint32_t total_bytes, uint32_t byte_off, uint32_t width)
+{
+    if (byte_off + width > total_bytes)
+        return 0;
+    uint32_t v = 0;
+    for (uint32_t i = 0; i < width; i++)
+        v |= ((uint32_t)data[byte_off + i]) << (8u * i);
+    return v;
+}
+
+/* Sign/zero-extends a raw 1/2/4-byte component to a full 32-bit value
+ * per the UNPACK VIFcode's USN bit (0=signed,1=unsigned) - 32-bit
+ * components are always used as-is (matches PCSX2's UnpackFuncSet
+ * always using the plain u32 variant for the 32-bit-wide case
+ * regardless of USN). */
+static inline uint32_t vif_extend(uint32_t raw, uint32_t width, int usn)
+{
+    if (width == 4u)
+        return raw;
+    if (width == 2u) {
+        if (usn)
+            return raw & 0xFFFFu;
+        return (uint32_t)(int32_t)(int16_t)(raw & 0xFFFFu);
+    }
+    /* width == 1 */
+    if (usn)
+        return raw & 0xFFu;
+    return (uint32_t)(int32_t)(int8_t)(raw & 0xFFu);
+}
+
+/* Writes one lane (0=x,1=y,2=z,3=w) of one unpacked vector into VU0/
+ * VU1 data memory at byte address dest_addr+lane*4, applying the real
+ * per-lane mask (Data/MaskRow/MaskCol/Write-Protect) and STMOD mode
+ * (0=none,1=add row,2=add+store row,3=store row raw) logic - ported
+ * directly from PCSX2's Vif_Unpack.cpp `writeXYZW()` (the 2-bits-per-
+ * lane-per-cycle-position `mask` register layout, and the exact
+ * `setVifRow()` read-modify-write semantics for modes 2/3). block_pos
+ * is the vector's 0-based position within the current STCYCL block
+ * (clamped to 0-3 for indexing, matching writeXYZW's own
+ * switch(vif.cl){case 0,1,2,default} / std::min(vif.cl,3) grouping). */
+static void vif_unpack_write_lane(vif_state_t *vif, uint32_t dest_addr, int lane, uint32_t data, int mode, int mask_enable, uint32_t block_pos)
+{
+    uint32_t bp = block_pos > 3u ? 3u : block_pos;
+    uint32_t n = 0;
+    if (mask_enable)
+        n = (vif->mask >> (bp * 8u + (uint32_t)lane * 2u)) & 0x3u;
+
+    uint32_t out;
+    switch (n) {
+    case 0: /* Data */
+        switch (mode) {
+        case 1: out = data + vif->row[lane]; break;
+        case 2: out = vif->row[lane] + data; vif->row[lane] = out; break;
+        case 3: out = data; vif->row[lane] = data; break;
+        default: out = data; break;
+        }
+        break;
+    case 1: /* MaskRow */
+        out = vif->row[lane];
+        break;
+    case 2: /* MaskCol */
+        out = vif->col[bp];
+        break;
+    default: /* 3: Write Protect - real hardware leaves VU mem untouched */
+        return;
+    }
+
+    if (vif->is_vif1)
+        vu1_mem_write32(dest_addr + (uint32_t)lane * 4u, out);
+    else
+        vu0_mem_write32(ee_core_get_state(), dest_addr + (uint32_t)lane * 4u, out);
+}
+
+/* UNPACK (CMD 0x60-0x7F) - see vif.h's header comment for the full
+ * scope/citation trail. Returns 1 on success (having advanced *pos
+ * past the consumed payload words), 0 if this is a reserved VN/VL
+ * combination (stops the caller from processing the rest of the
+ * stream, same "stop rather than guess" philosophy as every other
+ * out-of-scope code in this file). */
+static int vif_unpack(vif_state_t *vif, uint32_t code, uint32_t cmd, const uint8_t *data, uint32_t total_words, uint32_t *pos)
+{
+    uint32_t total_bytes = total_words * 4u;
+    uint32_t imm = code & 0xFFFFu;
+    uint32_t vn = (cmd >> 2) & 0x3u; /* 0=S,1=V2,2=V3,3=V4 */
+    uint32_t vl = cmd & 0x3u;        /* 0=32,1=16,2=8,3=5(V4 only) */
+    int mask_enable = (cmd & 0x10u) != 0;
+    uint32_t gsize = VIF_UNPACK_SIZE[vn * 4u + vl];
+
+    if (gsize == 0u) {
+        vif->unsupported_cmds_seen++;
+        return 0;
+    }
+
+    int usn = (int)((code >> 14) & 0x1u);
+    int flg = (int)((code >> 15) & 0x1u);
+
+    uint32_t addr_mask = vif->is_vif1 ? 0x3FFu : 0xFFu;
+    uint32_t addr_bits = imm & addr_mask;
+    if (vif->is_vif1 && flg)
+        addr_bits = (addr_bits + vif->tops) & 0x3FFu;
+    uint32_t base_addr = addr_bits << 4; /* qword index -> byte offset */
+
+    uint32_t num = (code >> 16) & 0xFFu;
+    if (num == 0u)
+        num = 256u;
+
+    uint32_t cl_eff = vif->cycle_cl;
+    uint32_t wl_eff = vif->cycle_wl ? vif->cycle_wl : 256u;
+    int is_fill = (cl_eff < wl_eff);
+    int32_t skip_bytes = ((int32_t)cl_eff - (int32_t)wl_eff) * 16;
+
+    /* vl==3 only occurs for V4 (V4-5); its "component width" is a
+     * single 16-bit raw read, handled as a special case below rather
+     * than through the generic per-lane read path. */
+    uint32_t component_width = (vl == 0u) ? 4u : (vl == 1u) ? 2u : (vl == 2u) ? 1u : 2u;
+
+    uint32_t addr_cursor = base_addr;
+    uint32_t block_pos = 0;
+    uint32_t src_cursor = (*pos) * 4u;
+    uint32_t start_byte = src_cursor;
+    /* Tracks the furthest byte offset actually dereferenced by any
+     * iteration (including V3's real "reads 1 component past its own
+     * gsize" quirk, and fill-mode's repeat iterations which re-read
+     * an already-covered position without extending this). This -
+     * NOT how far src_cursor itself moved - is what determines how
+     * many words of the stream this UNPACK consumed, since (a) in
+     * fill mode src_cursor stops advancing once the last real chunk
+     * is reached even though that chunk's own bytes are still real,
+     * consumed data, and (b) a trailing partial iteration whose
+     * cursor advanced in anticipation of a read that never actually
+     * happened (num ran out) must NOT be counted. */
+    uint32_t max_read_end = start_byte;
+
+    /* V4-5 forces STMOD mode to 0 - see vif.h's citation. */
+    int mode = (vn == 3u && vl == 3u) ? 0 : (int)vif->mode;
+
+    for (uint32_t v = 0; v < num; v++) {
+        uint32_t lane_val[4];
+        uint32_t read_span;
+
+        if (vn == 3u && vl == 3u) { /* V4-5 */
+            uint32_t raw = vif_rd_bytes_le(data, total_bytes, src_cursor, 2u);
+            lane_val[0] = (raw & 0x001Fu) << 3;
+            lane_val[1] = (raw & 0x03E0u) >> 2;
+            lane_val[2] = (raw & 0x7C00u) >> 7;
+            lane_val[3] = (raw & 0x8000u) >> 8;
+            read_span = 2u;
+        } else if (vn == 0u) { /* S - broadcast to all 4 lanes */
+            uint32_t d = vif_extend(vif_rd_bytes_le(data, total_bytes, src_cursor, component_width), component_width, usn);
+            lane_val[0] = lane_val[1] = lane_val[2] = lane_val[3] = d;
+            read_span = component_width;
+        } else if (vn == 1u) { /* V2 - real hardware repeats the pair: X=v0,Y=v1,Z=v0,W=v1 */
+            uint32_t v0 = vif_extend(vif_rd_bytes_le(data, total_bytes, src_cursor + 0u * component_width, component_width), component_width, usn);
+            uint32_t v1 = vif_extend(vif_rd_bytes_le(data, total_bytes, src_cursor + 1u * component_width, component_width), component_width, usn);
+            lane_val[0] = v0; lane_val[1] = v1; lane_val[2] = v0; lane_val[3] = v1;
+            read_span = 2u * component_width;
+        } else { /* V3 (reuses V4's 4-component read - real hardware
+                  * quirk, see citation above) or V4: both dereference
+                  * 4 full components, even though V3's OWN gsize is
+                  * only 3 components wide. */
+            for (int lane = 0; lane < 4; lane++)
+                lane_val[lane] = vif_extend(vif_rd_bytes_le(data, total_bytes, src_cursor + (uint32_t)lane * component_width, component_width), component_width, usn);
+            read_span = 4u * component_width;
+        }
+
+        uint32_t this_end = src_cursor + read_span;
+        if (this_end > max_read_end)
+            max_read_end = this_end;
+
+        for (int lane = 0; lane < 4; lane++)
+            vif_unpack_write_lane(vif, addr_cursor, lane, lane_val[lane], mode, mask_enable, block_pos);
+        vif->unpack_vectors_written++;
+
+        addr_cursor += 16u;
+        block_pos++;
+
+        if (is_fill) {
+            if (block_pos <= cl_eff)
+                src_cursor += gsize;
+            else if (block_pos == wl_eff)
+                block_pos = 0;
+        } else {
+            src_cursor += gsize;
+            if (block_pos >= wl_eff) {
+                addr_cursor = (uint32_t)((int32_t)addr_cursor + skip_bytes);
+                block_pos = 0;
+            }
+        }
+    }
+
+    uint32_t consumed_bytes = max_read_end - start_byte;
+    uint32_t consumed_words = (consumed_bytes + 3u) / 4u;
+    uint32_t avail_words = total_words - (*pos);
+    if (consumed_words > avail_words)
+        consumed_words = avail_words;
+    *pos += consumed_words;
+    return 1;
+}
+
 /* Walks a stream of VIFcode words (interspersed with per-command data
  * words), starting at 'data' (qwc*16 bytes = qwc*4 32-bit words).
  * Returns when the stream is exhausted OR an unsupported command
@@ -74,6 +294,15 @@ static void vif_process(vif_state_t *vif, const uint8_t *data, uint32_t qwc)
 
         uint32_t cmd = (code >> 24) & 0x7Fu;
         uint32_t imm = code & 0xFFFFu;
+
+        if ((cmd & 0x60u) == 0x60u) {
+            /* UNPACK (0x60-0x7F) - see vif.h/vif_unpack() for the
+             * full scope. vif_unpack() advances pos itself past
+             * whatever payload it consumed. */
+            if (!vif_unpack(vif, code, cmd, data, total_words, &pos))
+                return;
+            continue;
+        }
 
         switch (cmd) {
         case VIF_CMD_NOP:
@@ -229,9 +458,9 @@ static void vif_process(vif_state_t *vif, const uint8_t *data, uint32_t qwc)
         } break;
 
         default:
-            /* UNPACK (0x60-0x7F) or any other unrecognized/reserved
-             * code - see vif.h's scope comment. Stop here rather than
-             * guess a skip length. */
+            /* Any other unrecognized/reserved code - see vif.h's
+             * scope comment. Stop here rather than guess a skip
+             * length. */
             vif->unsupported_cmds_seen++;
             return;
         }

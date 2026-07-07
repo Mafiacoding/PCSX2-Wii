@@ -700,6 +700,21 @@ void vu0_micro_write32(ee_state_t *st, uint32_t addr, uint32_t value)
     st->vu0_micro[off + 3] = (uint8_t)(value >> 24);
 }
 
+/* VU0 local DATA memory (vu0_mem, distinct from vu0_micro above) -
+ * called from vif.c's VIF0 UNPACK handling (task: "VIF UNPACK"). Byte
+ * writes; a single 32-bit lane write is the natural unit UNPACK's
+ * real per-lane masking (Data/MaskRow/MaskCol/WriteProtect) operates
+ * on - see vif.c's vif_unpack() for the real, cited per-lane logic
+ * this feeds. */
+void vu0_mem_write32(ee_state_t *st, uint32_t addr, uint32_t value)
+{
+    uint32_t off = addr & (sizeof(st->vu0_mem) - 1u);
+    st->vu0_mem[off]     = (uint8_t)value;
+    st->vu0_mem[off + 1] = (uint8_t)(value >> 8);
+    st->vu0_mem[off + 2] = (uint8_t)(value >> 16);
+    st->vu0_mem[off + 3] = (uint8_t)(value >> 24);
+}
+
 #define VU0_EXEC_STEP_CAP 65536u /* this project's own safety cap - see vu.c's identical VU1 cap */
 
 void vu0_exec_micro(ee_state_t *st, uint32_t start_addr)

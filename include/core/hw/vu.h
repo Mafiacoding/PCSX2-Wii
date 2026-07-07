@@ -120,6 +120,10 @@ vu1_state_t *vu1_get_state(void);
  * VU1's micro[] (real hardware wraps via the VU1_PROGSIZE-1 mask). */
 void vu1_micro_write32(uint32_t addr, uint32_t value);
 
+/* VU1 local DATA memory (see vu.c for the full comment) - called from
+ * vif.c's VIF1 UNPACK handling. */
+void vu1_mem_write32(uint32_t addr, uint32_t value);
+
 /* Called from vif.c's MSCAL/MSCNT/MSCALF handling: runs VU1's
  * microprogram starting at instruction-pair index `start_addr` (the
  * real MSCAL/MSCNT IMM field value - byte offset = start_addr*8, per

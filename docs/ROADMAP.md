@@ -661,25 +661,39 @@ the SPU2. Reference: `Dmac.cpp` (583) + `Dmac.h` (570).
       triangles, or triangle strips/fans/textures), GS context 2
       (FRAME_2/XYOFFSET_2), and VU1-sourced GIF traffic (path 1) -
       only the direct EE->GIF path (path 3) is modeled.
-- [x] VIF0/VIF1 (Vector Interface) - FIRST INCREMENT: real VIFcode
-      tag-stream walking (`source/hw/vif.c`), registered as the sink
-      for `DMA_CHANNEL_VIF0`/`DMA_CHANNEL_VIF1`. Implements NOP/
-      STCYCL/OFFSET/BASE/ITOP/STMOD/MARK (register stores)/FLUSHE/
-      FLUSH/FLUSHA/MSCAL/MSCNT/MSCALF (correct no-ops - no VU
-      microcode interpreter exists)/STMASK/STROW/STCOL (stores)/MPG
-      (data span correctly skipped, counted unsupported - no VU
-      micro-instruction memory)/DIRECT+DIRECTHL (VIF1 only - forwards
-      data straight to `gif_process_quadwords()`, the one command that
-      actually draws pixels this round). NOT implemented: UNPACK
-      (CMD 0x60-0x7F, decodes S/V2/V3/V4 data into VU memory - a
-      substantial feature of its own, `Vif_Unpack.cpp`) - encountering
-      it stops that transfer's processing cleanly rather than
-      misparsing what follows. 24 new checks in `tests/test_vif.c`,
-      47-file/0-failure full regression, clean Wii rebuild. Reference:
-      `Vif.h`, `Vif_Codes.cpp` (VIFcode CMD table, cross-checked live,
-      not guessed). Still open: UNPACK itself, VU0/VU1 data memory to
-      unpack into (see section 5), MSCAL/MSCNT actually executing VU
-      microcode once that exists.
+- [x] VIF0/VIF1 (Vector Interface) - real VIFcode tag-stream walking
+      (`source/hw/vif.c`), registered as the sink for
+      `DMA_CHANNEL_VIF0`/`DMA_CHANNEL_VIF1`. Implements NOP/STCYCL/
+      OFFSET/BASE/ITOP/STMOD/MARK (register stores)/FLUSHE/FLUSH/
+      FLUSHA (correct no-ops)/MSCAL/MSCNT/MSCALF (run the real VU0/VU1
+      microcode interpreter, see section 5)/STMASK/STROW/STCOL
+      (stores)/MPG (writes real VU0/VU1 micro-instruction memory)/
+      DIRECT+DIRECTHL (VIF1 only - forwards data straight to
+      `gif_process_quadwords()`)/UNPACK (CMD 0x60-0x7F, task: "VIF
+      UNPACK" - added this round, see below). Reference: `Vif.h`,
+      `Vif_Codes.cpp` (VIFcode CMD table), `Vif_Unpack.cpp`/
+      `Vif_Unpack.h` (UNPACK's own format) - all cross-checked live,
+      not guessed.
+      UNPACK itself decodes S/V2/V3/V4 (32/16/8-bit, plus V4-5's
+      packed 16-bit format) data into VU0/VU1 local DATA memory
+      (`vu0_mem_write32()`/`vu1_mem_write32()` - new this round,
+      siblings of the existing MPG-facing `vu0_micro_write32()`/
+      `vu1_micro_write32()`), with real STCYCL-driven CL/WL skip/fill
+      cycles, STMASK/STROW/STCOL-based per-lane masking, and STMOD row
+      accumulate/chain modes, ported directly from a live fetch of
+      PCSX2's own `Vif_Unpack.cpp`. V3's real "reads 1 component past
+      its own declared size" quirk (confirmed real hardware behavior
+      games like Ape Escape 3 depend on, per PCSX2's own comment) is
+      reproduced faithfully rather than "fixed". NOT implemented: a
+      partial UNPACK payload split across multiple DMA calls (this
+      project's `vif_process()` only ever sees one contiguous transfer
+      at a time - flagged, not guessed). 12 new checks in
+      `tests/test_vif.c` (23 -> 35 total), full regression still
+      0-failure, clean Wii rebuild. See docs/STATUS.md's "Round 20"
+      section for the full trace, including a subtle real-hardware
+      timing quirk in fill-mode's advance-then-read ordering that
+      needed hand-verification against the real algorithm before the
+      test's own expectations could be trusted.
 - [x] Texturing for the triangle rasterizer (task #85) - PRIM's real
       TME bit and TEX0's TBP0/TBW/TFX fields (cross-checked against
       PCSX2's own `GS/GSRegs.h`) now drive real texture mapping on
@@ -887,9 +901,11 @@ already documented, rather than truly returning from the syscall.
    wired up. Real BIOS boot code very likely uses VU0 macro mode for
    the splash screen's transform/lighting math.
 
-4. **VIF UNPACK** (section 5/4) - needed to get real vertex/texture data
-   from EE RAM into VU memory at all; still needs a verified format
-   reference (flagged, not attempted, in multiple prior rounds).
+4. **VIF UNPACK** (section 4) - DONE (Round 20). Real vertex/
+   texture/attribute data now flows from EE RAM into VU0/VU1 local
+   data memory via UNPACK, ported from a live-fetched, real PCSX2
+   source (`Vif_Unpack.cpp`). See section 4's bullet and
+   docs/STATUS.md's "Round 20" for the full detail.
 
 5. **GS coverage breadth** (section 6) - primitives (flat/Gouraud
    triangles, textured sprites, Z-test) exist, but this is still a

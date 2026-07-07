@@ -567,6 +567,19 @@ always ask for/verify the no-disc case explicitly).
   source changes, 93/93 regression unaffected. See docs/STATUS.md's
   "Round 19" section for the full trace; ROADMAP.md's item 1 wording
   corrected to match.
+- **Round 20 - VIF UNPACK implemented (user's "1, 4, then 5" item 4)**:
+  real UNPACK (VIFcode 0x60-0x7F) ported directly from a live fetch of
+  PCSX2's own `Vif_Unpack.cpp`/`Vif_Unpack.h` - S/V2/V3/V4(-5) data
+  decode, STCYCL CL/WL skip/fill cycles, STMASK/STROW/STCOL masking,
+  STMOD row modes, all into new VU0/VU1 local DATA memory write paths
+  (`vu0_mem_write32()`/`vu1_mem_write32()`, siblings of the existing
+  MPG-facing micro-instruction-memory writers). V3's real "reads 1
+  component past its own size" hardware quirk (PCSX2 cites Ape Escape
+  3 depending on it) is reproduced faithfully. 12 new checks in
+  tests/test_vif.c (23->35), full regression still 0-failure, clean
+  Wii rebuild. See docs/STATUS.md's "Round 20" section for the full
+  citation trail and a subtle fill-mode timing quirk that needed
+  hand-verification before the test's own expectations were trustable.
 
 ## The mandatory per-change workflow
 
@@ -1159,12 +1172,14 @@ round).
 frontier" section above (kept as a running per-round log) and
 docs/ROADMAP.md's "Suggested near-term order" section (kept short and
 current, not a history log - docs/STATUS.md has the full history) for
-the actual next task. As of Round 19, that's the real exception-
-handler-chain default-fallback behavior at RAM[0x100] plus the
-Status.IEc-never-enabled gap (corrected from Round 18's original
-"SYSCALL dispatch table" framing) - see ROADMAP.md section 2's bullet
-and docs/STATUS.md's "Round 17"/"Round 18"/"Round 19" sections for the
-full trace that motivates it.
+the actual next task. As of Round 20, VIF UNPACK (item 4) is done;
+the still-open IOP-side item is the real exception-handler-chain
+default-fallback behavior at RAM[0x100] plus the Status.IEc-never-
+enabled gap (corrected from Round 18's original "SYSCALL dispatch
+table" framing) - see ROADMAP.md section 2's bullet and
+docs/STATUS.md's "Round 17"/"Round 18"/"Round 19" sections for the
+full trace that motivates it. Per the user's "1, 4, then 5" ordering,
+item 5 (GS coverage breadth) is next.
 
 ## Reference material
 

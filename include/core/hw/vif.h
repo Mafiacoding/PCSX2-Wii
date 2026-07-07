@@ -70,18 +70,48 @@
  *   model with no FIFO - both are treated identically here, which is
  *   what PCSX2 itself effectively does too (shared implementation).
  *
- * Explicitly NOT implemented: UNPACK (CMD 0x60-0x7F) - the format
- * that decodes S/V2/V3/V4 data (32/16/8/5-bit component variants,
- * with STCYCL-controlled skip-write cycles and STMASK/STROW/STCOL-
- * based masking) into VU data memory. This is a substantial format in
- * its own right (`Vif_Unpack.cpp`) and this project has no VU data
- * memory to unpack INTO for VU1 (VU0 has some vector-datapath state
- * from round 13, but VU1 has nothing yet). Encountering an UNPACK
- * code (or any other unrecognized/reserved code) stops processing
- * the REST of that DMA transfer's data stream cleanly - counted via
- * unsupported_cmds_seen, not silently misparsed as garbage VIFcodes -
- * matching this project's established pattern for out-of-scope
- * formats (see gif.c's REGLIST/IMAGE handling).
+ * UNPACK (CMD 0x60-0x7F) - now implemented (this round). This decodes
+ * S/V2/V3/V4 data (32/16/8-bit component variants, plus V4-5's packed
+ * 16-bit format) into VU0/VU1 local DATA memory (`vu0_mem_write32()`/
+ * `vu1_mem_write32()` - VU0's/VU1's data memory now both exist, see
+ * `include/core/hw/vu.h` and `include/core/ee/ee_core.h`). Ported
+ * directly from a live fetch of PCSX2's own `Vif_Unpack.cpp`/
+ * `Vif_Unpack.h` (github.com/PCSX2/pcsx2, master) - NOT guessed - see
+ * `vif.c`'s `vif_unpack()` for the full per-line citation trail. Real
+ * behavior implemented:
+ *   - CMD bits: bits 5-6 = 0b11 (signals UNPACK), bit 4 = M (mask
+ *     enable), bits 0-3 = VN*4+VL (VN: 0=S,1=V2,2=V3,3=V4; VL:
+ *     0=32-bit,1=16-bit,2=8-bit,3=5-bit, V4 only). Per-format source
+ *     byte size from PCSX2's own `nVifT[16]` table, reproduced
+ *     verbatim as `VIF_UNPACK_SIZE[16]` in vif.c.
+ *   - IMM field reinterpreted for UNPACK: bits 0-9 = VU mem address
+ *     (qwords), bit 14 = USN (0=signed/1=unsigned source components),
+ *     bit 15 = FLG (VIF1 only - address relative to TOPS).
+ *   - S: one component, broadcast to all 4 lanes. V2: two components,
+ *     written X=v0,Y=v1,Z=v0,W=v1 (real hardware repeats the pair,
+ *     confirmed from PCSX2's `UNPACK_V2`). V3: reuses the V4 read
+ *     logic - the W lane reads one component-width PAST the real
+ *     3-component data (typically into the next vector's first
+ *     component) and gets overwritten by the next unpack - a real,
+ *     cited hardware quirk games depend on (PCSX2's own comment names
+ *     Ape Escape 3), not a bug here. V4-5: a single 16-bit read
+ *     decoded via the exact real bit-shift formula from
+ *     `UNPACK_V4_5`, MODE forced to 0 (real hardware: "V4_5 unpacks
+ *     do not support the MODE register").
+ *   - STCYCL-controlled CL/WL skip-write/fill-write cycles (real
+ *     "isFill"/"skipSize" logic from `_nVifUnpackLoop`), STMASK/
+ *     STROW/STCOL-based per-lane masking (Data/MaskRow/MaskCol/
+ *     Write-Protect, real 2-bits-per-lane-per-cycle-position `mask`
+ *     register layout from `writeXYZW`), and STMOD-driven row
+ *     accumulate/chain modes (modes 0-3, real `writeXYZW` switch).
+ *
+ * NOT implemented: a partial UNPACK payload split across multiple DMA
+ * calls (real hardware/PCSX2 buffer this via `nVifStruct::buffer` -
+ * this project's `vif_process()` only ever sees one contiguous
+ * transfer at a time and assumes the full UNPACK payload is present
+ * in it, silently truncating early via the existing bounds-checked
+ * reads if it isn't - flagged here, not guessed at, matching this
+ * project's established pattern for narrow first increments).
  */
 
 typedef struct {
@@ -102,7 +132,8 @@ typedef struct {
 
     uint64_t codes_processed;
     uint64_t direct_qwords_forwarded; /* via DIRECT/DIRECTHL */
-    uint64_t unsupported_cmds_seen;    /* UNPACK, MPG, or a VIF1-only cmd issued to VIF0 */
+    uint64_t unpack_vectors_written;   /* real vectors written to VU mem via UNPACK */
+    uint64_t unsupported_cmds_seen;    /* reserved VN/VL combo, or a VIF1-only cmd issued to VIF0 */
 } vif_state_t;
 
 void vif_init(void);

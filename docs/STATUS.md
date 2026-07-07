@@ -2846,6 +2846,80 @@ tests unaffected. No BIOS bytes committed; all diagnostics are
 `/tmp`-only, discarded at session end.
 
 
+### Round 20 (2026-07-07): VIF UNPACK implemented (item 4 of the user's requested "1, 4, then 5" order)
+
+Real UNPACK (VIFcode CMD 0x60-0x7F) is now implemented in `vif.c`,
+ported directly from a live fetch of PCSX2's own `Vif_Unpack.cpp`/
+`Vif_Unpack.h` (github.com/PCSX2/pcsx2, master) - not guessed. This
+was previously the one deliberately out-of-scope VIF command (see
+round-13-era `vif.h` notes); VU0/VU1 both now have real local DATA
+memory to unpack into (`vu0_mem_write32()` in `ee_core.c`,
+`vu1_mem_write32()` in `vu.c` - siblings of the existing
+`vu0_micro_write32()`/`vu1_micro_write32()` used by MPG).
+
+**What's implemented, precisely** (see `vif.c`'s `vif_unpack()` and
+`vif.h`'s header comment for the full per-line citation trail):
+
+- CMD bit layout: bits 5-6 = 0b11 (signals UNPACK), bit 4 = M (mask
+  enable), bits 0-3 = VN*4+VL (VN: 0=S,1=V2,2=V3,3=V4; VL:
+  0=32-bit,1=16-bit,2=8-bit,3=5-bit/V4 only). Per-format source byte
+  size from PCSX2's own `nVifT[16]` table, reproduced verbatim as
+  `VIF_UNPACK_SIZE[16]`.
+- IMM field reinterpreted for UNPACK: bits 0-9 = VU mem address
+  (qwords), bit 14 = USN (0=signed/1=unsigned), bit 15 = FLG (VIF1
+  only - address relative to TOPS).
+- S: one component broadcast to all 4 lanes. V2: two components,
+  written X=v0,Y=v1,Z=v0,W=v1 (real hardware repeats the pair,
+  confirmed from PCSX2's `UNPACK_V2`). V3: reuses the V4 4-component
+  read - the W lane genuinely reads 1 component-width PAST the real
+  3-component data (typically into the next vector's first component)
+  and gets overwritten by the next unpack - a real, cited hardware
+  quirk PCSX2's own comment says Ape Escape 3 depends on, reproduced
+  here rather than "fixed". V4-5: a single 16-bit read decoded via the
+  exact real bit-shift formula from `UNPACK_V4_5`
+  (X=(d&0x1F)<<3,Y=(d&0x3E0)>>2,Z=(d&0x7C00)>>7,W=(d&0x8000)>>8), MODE
+  forced to 0 (real hardware: "V4_5 unpacks do not support the MODE
+  register").
+- STCYCL-controlled CL/WL skip-write/fill-write cycles (real
+  `_nVifUnpackLoop` "isFill"/"skipSize" timing, including its
+  documented advance-then-read ordering - ported faithfully even
+  though it's genuinely subtle: for the by-hand-traced case CL=2,WL=4
+  the real sequence is [read0, read1, read2, repeat-of-read2], not the
+  naively-expected [read0, repeat, repeat, repeat]). STMASK/STROW/
+  STCOL-based per-lane masking (Data/MaskRow/MaskCol/Write-Protect,
+  real 2-bits-per-lane-per-cycle-position `mask` register layout from
+  `writeXYZW`), and STMOD-driven row accumulate/chain modes (0-3, real
+  `writeXYZW` switch/`setVifRow` semantics).
+- Consumed-word accounting: rather than trying to reuse PCSX2's
+  separate `vifUnpackSetup()` "tag.size" formula (which this round's
+  investigation found can under-count vs. what the per-vector loop
+  actually dereferences, in ways that only matter for the DMA
+  controller's own DIFFERENT bookkeeping concern - not for finding
+  where the next VIFcode begins in an in-memory buffer), this project
+  tracks the furthest byte offset any iteration actually dereferenced
+  (correctly handling both V3's real read-ahead quirk and fill mode's
+  repeat iterations) and rounds up to whole words. Verified against 12
+  new host-native checks (`tests/test_vif.c`) covering V4-32, S-32
+  broadcast, V2-16 signed/unsigned, V3-8's read-ahead quirk, V4-5's
+  bit-shift decode, all 4 masking modes, STMOD mode 2's row-accumulate
+  chaining, and both a skip-write and a fill-write STCYCL scenario
+  (the fill-write expectation was itself derived by hand-tracing the
+  real algorithm's instruction-level timing, not assumed).
+
+**Not implemented**: a partial UNPACK payload split across multiple
+DMA calls (real hardware/PCSX2 buffer this via `nVifStruct::buffer` -
+this project's `vif_process()` only ever sees one contiguous transfer
+at a time; a payload that runs off the end of what's actually present
+reads 0 for the missing bytes via `vif_rd_bytes_le()`'s existing bounds
+check rather than reading adjacent, unrelated memory - flagged, not
+guessed, matching this project's established pattern for narrow first
+increments).
+
+Regression: 12 new checks added to `tests/test_vif.c` (was 23 checks,
+now 35), all passing; full suite still 0 failures across every
+host-native test binary. Clean Wii/devkitPPC rebuild, same single
+pre-existing harmless `strncpy` truncation warning as prior rounds.
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

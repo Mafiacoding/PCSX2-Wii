@@ -580,6 +580,22 @@ always ask for/verify the no-disc case explicitly).
   Wii rebuild. See docs/STATUS.md's "Round 20" section for the full
   citation trail and a subtle fill-mode timing quirk that needed
   hand-verification before the test's own expectations were trustable.
+- **Round 21 - POINT/LINE/LINE_STRIP rasterization (user's "1, 4,
+  then 5" item 5)**: real GS POINT (type 0) and LINE/LINE_STRIP (types
+  1/2) rasterization added to `source/hw/gif.c`, closing the "Lines/
+  points are still open" gap flagged since the original GIF/VIF work.
+  Ported from a live fetch of PCSX2's own `GS/GSRegs.h`/`GSState.cpp`/
+  `GS/Renderers/SW/GSRasterizer.cpp`/`GSDrawScanline.cpp` - real
+  per-pixel DDA line rasterization (major-axis walk, linear color/Z
+  step), flat-shading's real "last vertex" convention, full Gouraud
+  support for LINE, no texture mapping (real hardware doesn't support
+  it for POINT/LINE either). 17 new checks in tests/test_gif_line.c
+  (52->53 test binaries), full regression still 0-failure, clean Wii
+  rebuild. Two real test-construction bugs found and fixed while
+  writing the test (a GIFtag NLOOP/loop-count mismatch, and a ZBUF_1
+  ZBP value that exceeded its real 9-bit field width) - both
+  documented in tests/README.md. See docs/STATUS.md's "Round 21"
+  section for the full trace.
 
 ## The mandatory per-change workflow
 
@@ -1172,14 +1188,19 @@ round).
 frontier" section above (kept as a running per-round log) and
 docs/ROADMAP.md's "Suggested near-term order" section (kept short and
 current, not a history log - docs/STATUS.md has the full history) for
-the actual next task. As of Round 20, VIF UNPACK (item 4) is done;
-the still-open IOP-side item is the real exception-handler-chain
-default-fallback behavior at RAM[0x100] plus the Status.IEc-never-
-enabled gap (corrected from Round 18's original "SYSCALL dispatch
-table" framing) - see ROADMAP.md section 2's bullet and
-docs/STATUS.md's "Round 17"/"Round 18"/"Round 19" sections for the
-full trace that motivates it. Per the user's "1, 4, then 5" ordering,
-item 5 (GS coverage breadth) is next.
+the actual next task. As of Round 21, all three of the user's
+explicitly requested items ("1, 4, then 5") have been addressed: item
+1 was investigated and precisely documented (not fixed - the real
+exception-handler-chain default-fallback behavior at RAM[0x100] plus
+the Status.IEc-never-enabled gap, corrected from Round 18's original
+"SYSCALL dispatch table" framing - see ROADMAP.md section 2's bullet
+and docs/STATUS.md's "Round 17"/"Round 18"/"Round 19" sections), item
+4 (VIF UNPACK) was fully implemented (Round 20), and item 5 (GS
+coverage breadth) got a real increment (POINT/LINE/LINE_STRIP, Round
+21) - though GS coverage remains a large, open-ended area (see
+ROADMAP.md section 6). The next open thread is either finishing item
+1's fix, or picking a new GS/CDVD/COP2 slice per ROADMAP.md's
+near-term-order list.
 
 ## Reference material
 

@@ -793,7 +793,14 @@ programmable GPU nor any of those APIs).
       MODULATE TFX modes, nearest-neighbor PSMCT32 sampling, both UV
       "FST=1" and perspective-correct ST+Q "FST=0" coordinates, no
       CLAMP/wrap modeling), all via the GIF parser (`source/hw/gif.c`).
-      Lines/points are still open.
+      POINT and LINE/LINE_STRIP (Round 21, task: "GS coverage
+      breadth") are now implemented too - a single flat-color pixel
+      (POINT) and real per-pixel-DDA-interpolated segments (LINE/
+      LINE_STRIP, supporting Gouraud shading and linear Z, ported
+      from PCSX2's `GSRasterizer::DrawEdgeLine`) - see
+      `gif.c`'s `rasterize_point()`/`rasterize_line()` and
+      docs/STATUS.md's "Round 21" section. No texture mapping for
+      POINT/LINE (real hardware doesn't support it either).
 - [x] Z-buffer / depth test (task #89, task 6) - real ZBUF_1/TEST_1
       A+D registers (`GIFRegZBUF`'s ZBP/PSM/ZMSK, `GIFRegTEST`'s ZTE/
       ZTST, cross-checked against PCSX2's GS/GSRegs.h), a genuine per-
@@ -908,10 +915,14 @@ already documented, rather than truly returning from the syscall.
    docs/STATUS.md's "Round 20" for the full detail.
 
 5. **GS coverage breadth** (section 6) - primitives (flat/Gouraud
-   triangles, textured sprites, Z-test) exist, but this is still a
-   sliver of real GS - real PCSX2's own GS code is ~114,500 lines. Revisit
-   once real EE/IOP code is actually driving the pipeline (no urgency
-   before then - there's nothing to render yet).
+   triangles, textured sprites, Z-test, and - Round 21 - POINT/LINE/
+   LINE_STRIP) exist, but this is still a sliver of real GS - real
+   PCSX2's own GS code is ~114,500 lines. Still open: REGLIST/IMAGE
+   GIF transfer modes, alpha blending/test, CLUT/paletted textures,
+   real block-swizzled addressing, GS context 2, mipmaps, and more.
+   Revisit further once real EE/IOP code is actually driving the
+   pipeline (no urgency before then - there's nothing real to render
+   yet).
 
 6. Lower priority, deferred: the remaining ~23 EE MMI opcodes (section
    1), Pad/memory card (section 7).

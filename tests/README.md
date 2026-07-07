@@ -1188,6 +1188,32 @@ gcc -I../include -I../source -o test_z_buffer tests/test_z_buffer.c ../source/hw
 ./test_z_buffer
 ```
 
+`test_gif_line.c` covers POINT/LINE/LINE_STRIP rasterization (task:
+"GS coverage breadth", item 5) added to `source/hw/gif.c` -
+`rasterize_point()`/`rasterize_line()`. Like `test_z_buffer.c`, XYZ2
+vertices use genuine PACKED-mode GIF packets (real per-vertex Z, not
+this project's A+D XYZ2 convention which has no room for Z). 17
+checks: a single flat-color POINT with no interpolation; a flat-shaded
+LINE using the real "last vertex" color convention (cross-checked
+against PCSX2's `GSDrawScanline::CSetupPrim`); a Gouraud-shaded LINE
+proving genuine real per-pixel linear interpolation (not a flat fill)
+via distinct red/blue endpoints and a roughly-half-way midpoint check;
+LINE_STRIP's real rolling 2-vertex-window continuation (3 vertices ->
+2 connected segments, same shape as TRIANGLE_STRIP); and a LINE whose
+Z fails the real depth test over a pre-populated Z-buffer, proving
+color/Z stay completely untouched. NOTE: ZBUF_1's ZBP is a real 9-bit
+hardware field (0-511, masked in `apply_ad_write`'s `GS_REG_ZBUF_1`
+case) - this test picks a ZBP value that stays both in-range and far
+enough from the drawn line's own X span to avoid `gs_mem`'s simplified
+flat-addressing scheme aliasing the Z-buffer test pixel with an
+actual drawn color pixel (a real trap this round's own test-writing
+fell into first, documented here so it isn't rediscovered blindly).
+
+```sh
+gcc -I../include -I../source -o test_gif_line tests/test_gif_line.c ../source/hw/gif.c ../source/hw/gs_mem.c
+./test_gif_line
+```
+
 `test_iop_elf.c` covers task #92: `source/hw/iop_elf.c`, a real
 ELF32/MIPS "IRX" module loader with genuine relocation processing
 (R_MIPS_32/26/HI16/LO16, cross-checked against ps2dev/ps2sdk's public

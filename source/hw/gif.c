@@ -23,11 +23,15 @@ static inline uint32_t rd_le32(const uint8_t *p)
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-/* Resets the triangle vertex-accumulation sequence - called whenever
- * PRIM is written (real hardware starts a fresh vertex queue on a new
- * PRIM, so a mid-strip primitive-type change can't accidentally draw
- * a triangle from mismatched vertices). */
-static void reset_tri_vseq(void) { g_gif.tri_vseq = 0; }
+/* Resets the triangle AND line vertex-accumulation sequences - called
+ * whenever PRIM is written (real hardware starts a fresh vertex queue
+ * on a new PRIM, so a mid-strip primitive-type change can't
+ * accidentally draw a triangle/line from mismatched vertices). Also
+ * clears has_vertex0 (SPRITE's own 1-slot accumulator) for the same
+ * reason - previously only reset implicitly by SPRITE completing a
+ * draw; a PRIM change mid-SPRITE-vertex-pair could otherwise leak a
+ * stale first vertex into whatever primitive comes next. */
+static void reset_tri_vseq(void) { g_gif.tri_vseq = 0; g_gif.line_vseq = 0; g_gif.has_vertex0 = 0; }
 
 /* Flat-shaded triangle fill via edge functions (standard scanline
  * rasterization - plain 2D geometry, not real-hardware-specific, so
@@ -378,6 +382,128 @@ static void rasterize_sprite(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
     g_gif.sprites_drawn++;
 }
 
+/* POINT rasterizer (task: "GS coverage breadth"). Real hardware
+ * (PCSX2's `GSRasterizer::DrawPoint`): a single pixel, flat color
+ * only (the point's own vertex - `CSetupPrim` selects `last=0` for
+ * `GS_POINT_CLASS`, i.e. there's only ever one vertex to begin with,
+ * no interpolation of any kind), gated behind the same Z test every
+ * other primitive uses. */
+static void rasterize_point(int32_t x, int32_t y, uint32_t rgba, uint32_t z)
+{
+    if (x < 0 || y < 0) return;
+
+    int z_pass = 1;
+    if (g_gif.zbuf_configured && g_gif.zte) {
+        uint32_t stored_z = gs_mem_read_psmct32(g_gif.zbp, g_gif.fbw, (uint32_t)x, (uint32_t)y);
+        switch (g_gif.ztst) {
+        case GS_ZTST_NEVER:   z_pass = 0; break;
+        case GS_ZTST_ALWAYS:  z_pass = 1; break;
+        case GS_ZTST_GEQUAL:  z_pass = (z >= stored_z); break;
+        case GS_ZTST_GREATER: z_pass = (z >  stored_z); break;
+        default: z_pass = 1; break;
+        }
+    }
+    if (!z_pass) {
+        g_gif.pixels_ztest_failed++;
+        return;
+    }
+
+    gs_mem_write_psmct32(g_gif.fbp, g_gif.fbw, (uint32_t)x, (uint32_t)y, rgba);
+    if (g_gif.zbuf_configured && !g_gif.zmsk)
+        gs_mem_write_psmct32(g_gif.zbp, g_gif.fbw, (uint32_t)x, (uint32_t)y, z);
+    g_gif.points_drawn++;
+}
+
+/* LINE/LINE_STRIP rasterizer (task: "GS coverage breadth"). Ported
+ * from PCSX2's real `GSRasterizer::DrawEdgeLine` DDA algorithm: walk
+ * whichever axis has the larger absolute delta (the "major" axis) one
+ * pixel at a time, and linearly step every interpolated attribute
+ * (color, Z) by its total delta divided by the major-axis step count -
+ * true per-pixel-step DDA, not a Bresenham integer-error accumulator
+ * (real hardware's line rule is the same "step the dependent
+ * coordinate/attributes linearly per major-axis pixel" shape; this
+ * project's own simplification is using a plain float step instead of
+ * PCSX2's fixed-point 16.16 subpixel accumulator - a well-known,
+ * equivalent-result technique for a software rasterizer, not a
+ * real-hardware-specific detail the way the flat/Gouraud-vertex-
+ * selection and linear-Z rules are). Flat shading uses the LAST
+ * vertex's color (c1) - cross-checked against PCSX2's
+ * `GSDrawScanline::CSetupPrim`, which selects `last=1` for
+ * `GS_LINE_CLASS` (the same "flat uses the last vertex" convention
+ * already established for triangles/sprites in this file). */
+static void rasterize_line(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
+                            uint32_t c0, uint32_t c1, uint32_t z0, uint32_t z1)
+{
+    int gouraud = (g_gif.prim & PRIM_IIP_MASK) != 0;
+    uint32_t flat_r = rgba_channel(c1, 0), flat_g = rgba_channel(c1, 8);
+    uint32_t flat_b = rgba_channel(c1, 16), flat_a = rgba_channel(c1, 24);
+
+    int32_t dx = x1 - x0, dy = y1 - y0;
+    int32_t adx = (dx < 0) ? -dx : dx;
+    int32_t ady = (dy < 0) ? -dy : dy;
+
+    if (adx == 0 && ady == 0) {
+        /* Degenerate (both vertices coincide) - real hardware still
+         * draws the single point (a 0-length line still emits its
+         * one pixel); handled the same way DrawPoint would. */
+        uint32_t z_avg = z1;
+        rasterize_point(x0, y0, gouraud ? c1 : rgba_pack(flat_r, flat_g, flat_b, flat_a), z_avg);
+        g_gif.lines_drawn++;
+        return;
+    }
+
+    int32_t steps = (adx >= ady) ? adx : ady;
+    double step_x = (double)dx / (double)steps;
+    double step_y = (double)dy / (double)steps;
+    double step_z = ((double)z1 - (double)z0) / (double)steps;
+    double px = (double)x0, py = (double)y0, pz = (double)z0;
+
+    for (int32_t i = 0; i <= steps; i++) {
+        int32_t xx = (int32_t)(px + 0.5);
+        int32_t yy = (int32_t)(py + 0.5);
+        uint32_t frag_z = (pz < 0.0) ? 0u : (uint32_t)(pz + 0.5);
+
+        if (xx >= 0 && yy >= 0) {
+            int z_pass = 1;
+            if (g_gif.zbuf_configured && g_gif.zte) {
+                uint32_t stored_z = gs_mem_read_psmct32(g_gif.zbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy);
+                switch (g_gif.ztst) {
+                case GS_ZTST_NEVER:   z_pass = 0; break;
+                case GS_ZTST_ALWAYS:  z_pass = 1; break;
+                case GS_ZTST_GEQUAL:  z_pass = (frag_z >= stored_z); break;
+                case GS_ZTST_GREATER: z_pass = (frag_z >  stored_z); break;
+                default: z_pass = 1; break;
+                }
+            }
+            if (!z_pass) {
+                g_gif.pixels_ztest_failed++;
+            } else {
+                uint32_t out;
+                if (!gouraud) {
+                    out = rgba_pack(flat_r, flat_g, flat_b, flat_a);
+                } else {
+                    double t = (double)i / (double)steps;
+                    uint32_t r = (uint32_t)((1.0 - t) * rgba_channel(c0, 0)  + t * rgba_channel(c1, 0)  + 0.5);
+                    uint32_t g = (uint32_t)((1.0 - t) * rgba_channel(c0, 8)  + t * rgba_channel(c1, 8)  + 0.5);
+                    uint32_t b = (uint32_t)((1.0 - t) * rgba_channel(c0, 16) + t * rgba_channel(c1, 16) + 0.5);
+                    uint32_t a = (uint32_t)((1.0 - t) * rgba_channel(c0, 24) + t * rgba_channel(c1, 24) + 0.5);
+                    if (r > 255) r = 255;
+                    if (g > 255) g = 255;
+                    if (b > 255) b = 255;
+                    if (a > 255) a = 255;
+                    out = rgba_pack(r, g, b, a);
+                }
+                gs_mem_write_psmct32(g_gif.fbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy, out);
+                if (g_gif.zbuf_configured && !g_gif.zmsk)
+                    gs_mem_write_psmct32(g_gif.zbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy, frag_z);
+            }
+        }
+
+        px += step_x; py += step_y; pz += step_z;
+    }
+    g_gif.lines_drawn++;
+}
+
 static void apply_xyz2(uint32_t word0, uint32_t word1, uint32_t word2)
 {
     /* PACKED XYZ2 layout (GS/GSRegs.h-compatible bit positions): X in
@@ -397,6 +523,49 @@ static void apply_xyz2(uint32_t word0, uint32_t word1, uint32_t word2)
     int32_t y = (raw_y - (int32_t)g_gif.xyoffset_y) >> 4;
 
     uint32_t ptype = g_gif.prim & 0x7u;
+
+    if (ptype == PRIM_TYPE_POINT) {
+        /* POINT: draws immediately on every single vertex - no
+         * accumulation needed (real hardware: NumIndicesForPrim
+         * returns 1 for POINTLIST, each incoming vertex is a
+         * complete primitive on its own). */
+        rasterize_point(x, y, g_gif.rgba, raw_z);
+        return;
+    }
+
+    if (ptype == PRIM_TYPE_LINE || ptype == PRIM_TYPE_LINE_STRIP) {
+        g_gif.line_vseq++;
+
+        if (ptype == PRIM_TYPE_LINE) {
+            /* Plain LINE: every pair of vertices is an independent
+             * segment - no reuse across segments (matches real
+             * hardware's NumIndicesForPrim==2 for LINELIST, same "no
+             * carry-over" shape as this file's plain TRIANGLE case). */
+            int slot = (g_gif.line_vseq - 1) % 2;
+            g_gif.line_x[slot] = x;
+            g_gif.line_y[slot] = y;
+            g_gif.line_rgba[slot] = g_gif.rgba;
+            g_gif.line_z[slot] = raw_z;
+            if (g_gif.line_vseq % 2 == 0)
+                rasterize_line(g_gif.line_x[0], g_gif.line_y[0], g_gif.line_x[1], g_gif.line_y[1],
+                                g_gif.line_rgba[0], g_gif.line_rgba[1],
+                                g_gif.line_z[0], g_gif.line_z[1]);
+        } else { /* PRIM_TYPE_LINE_STRIP */
+            /* LINE_STRIP: each new vertex (from the 2nd onward) forms
+             * a segment with the previous one - a rolling 2-slot
+             * window, same shape as this file's TRIANGLE_STRIP
+             * handling above, just 2 slots instead of 3. */
+            g_gif.line_x[0] = g_gif.line_x[1]; g_gif.line_y[0] = g_gif.line_y[1];
+            g_gif.line_rgba[0] = g_gif.line_rgba[1]; g_gif.line_z[0] = g_gif.line_z[1];
+            g_gif.line_x[1] = x; g_gif.line_y[1] = y;
+            g_gif.line_rgba[1] = g_gif.rgba; g_gif.line_z[1] = raw_z;
+            if (g_gif.line_vseq >= 2)
+                rasterize_line(g_gif.line_x[0], g_gif.line_y[0], g_gif.line_x[1], g_gif.line_y[1],
+                                g_gif.line_rgba[0], g_gif.line_rgba[1],
+                                g_gif.line_z[0], g_gif.line_z[1]);
+        }
+        return;
+    }
 
     if (ptype == PRIM_TYPE_TRIANGLE || ptype == PRIM_TYPE_TRIANGLE_STRIP || ptype == PRIM_TYPE_TRIANGLE_FAN) {
         g_gif.tri_vseq++;
@@ -507,8 +676,9 @@ static void apply_xyz2(uint32_t word0, uint32_t word1, uint32_t word2)
 
     /* SPRITE only ever accumulates 2 vertices at a time before
      * restarting - it has no strip/fan continuation on real hardware
-     * either (POINT/LINE, still unimplemented here, follow the same
-     * restart-every-N pattern as SPRITE, just with N=1/2). */
+     * either (POINT/LINE, now implemented above this function's
+     * TRIANGLE dispatch, follow the same restart-every-N pattern as
+     * SPRITE, just with N=1/2). */
     g_gif.has_vertex0 = 0;
 }
 

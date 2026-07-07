@@ -2920,6 +2920,82 @@ now 35), all passing; full suite still 0 failures across every
 host-native test binary. Clean Wii/devkitPPC rebuild, same single
 pre-existing harmless `strncpy` truncation warning as prior rounds.
 
+### Round 21 (2026-07-07): POINT/LINE/LINE_STRIP rasterization (item 5 of the user's requested "1, 4, then 5" order)
+
+Real POINT (PRIM type 0) and LINE/LINE_STRIP (types 1/2) rasterization
+added to `source/hw/gif.c` - the "Lines/points are still open" gap
+flagged in every prior GS-related round. Researched and cross-checked
+against a live fetch of PCSX2's own source (`GS/GSRegs.h`'s
+`enum GS_PRIM`/`GS_PRIM_CLASS`, `GS/GSState.cpp`'s `NumIndicesForPrim`/
+`VertexKick`, `GS/Renderers/SW/GSRasterizer.cpp`'s `DrawPoint`/
+`DrawEdgeLine`, `GS/Renderers/SW/GSDrawScanline.cpp`'s `CSetupPrim`) -
+not guessed.
+
+**What's implemented** (see `gif.c`'s `rasterize_point()`/
+`rasterize_line()` and `gif.h`'s updated scope comment for the full
+citation trail):
+
+- POINT: a single flat-color pixel write, no interpolation of any
+  kind (real hardware: `DrawPoint` pulls color from the point's own
+  single vertex, nothing to interpolate between).
+- LINE: independent 2-vertex segments (real hardware:
+  `NumIndicesForPrim` returns 2, no vertex reuse across segments -
+  same "no carry-over" shape as this file's existing plain TRIANGLE
+  handling). LINE_STRIP: a rolling 2-vertex window (each new vertex
+  forms a segment with the previous one), same shape as this file's
+  existing TRIANGLE_STRIP handling, just 2 slots instead of 3.
+- Flat shading uses the LAST vertex's color - cross-checked against
+  `CSetupPrim`, which selects `last=1` for `GS_LINE_CLASS` (the same
+  "flat uses the last vertex" convention this file already established
+  for triangles/sprites). Gouraud (IIP bit) is fully supported for
+  LINE, confirmed real hardware behavior (`CSetupPrim`'s `Color()`
+  path applies identically regardless of primitive class).
+- Real per-pixel-step DDA line rasterization ported from
+  `GSRasterizer::DrawEdgeLine`: walk whichever axis has the larger
+  absolute delta (the major axis) one pixel at a time, stepping every
+  interpolated attribute (color, Z) linearly by its total delta
+  divided by the step count. This project uses a plain floating-point
+  step instead of PCSX2's fixed-point 16.16 subpixel accumulator - an
+  equivalent-result simplification of a well-known rasterization
+  technique, not a real-hardware-specific detail (unlike the flat/
+  Gouraud-vertex-selection and linear-Z rules, which ARE real hardware
+  behavior and are followed exactly).
+- Z interpolates linearly along the segment (real hardware: Z has
+  already been through the perspective projection by the time it
+  reaches the rasterizer, so - same as this project's existing
+  triangle Z handling - no perspective correction is needed), gated
+  behind the same `zbuf_configured`/ZTE/ZTST machinery every other
+  primitive already uses.
+- No texture mapping: real GS hardware does not texture-map POINT/
+  LINE primitives (only SPRITE/TRIANGLE support TME) - correctly not
+  modeled, not an oversight.
+- `reset_tri_vseq()` (now resetting the line accumulator and
+  `has_vertex0` too, not just the triangle one) is called on every
+  PRIM write, matching real hardware starting a fresh vertex queue -
+  this closes a latent gap where a PRIM change mid-SPRITE-vertex-pair
+  could previously leak a stale first vertex into whatever primitive
+  came next.
+
+17 new checks (`tests/test_gif_line.c`): a flat POINT with no
+interpolation; a flat LINE using the real last-vertex convention; a
+Gouraud LINE proving genuine per-pixel linear interpolation (distinct
+red/blue endpoints, a roughly-half-way midpoint - not a flat fill);
+LINE_STRIP's rolling-window continuation (3 vertices -> 2 connected
+segments); and a LINE whose Z fails the real depth test over a
+pre-populated Z-buffer, proving color/Z stay untouched. Two real,
+worth-recording test-construction bugs were found and fixed while
+writing this test (not implementation bugs): a GIFtag NLOOP field that
+didn't match its actual A+D loop count (silently misparsing the
+following bytes as a bogus tag header - the same class of bug this
+project has hit before when hand-building test packets), and a ZBUF_1
+ZBP test value (2000) that exceeded the register's real 9-bit hardware
+field width (0-511) and got silently masked down - both documented in
+`tests/README.md` so they aren't rediscovered blindly.
+
+Regression: 53 host-native test binaries (was 52), 0 failures across
+all of them. Clean Wii/devkitPPC rebuild, same single pre-existing
+harmless `strncpy` truncation warning as prior rounds.
+
 ## Endianness bug found and fixed
 
 Early memory-access code used `memcpy()` to read/write multi-byte

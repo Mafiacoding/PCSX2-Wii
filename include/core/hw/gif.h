@@ -47,8 +47,24 @@
  *     clamp semantics). TFX DECAL replaces color with the texture
  *     sample; MODULATE (and, simplified, HIGHLIGHT/HIGHLIGHT2 too)
  *     blends texture and shaded color as (tex*color)/128 per channel,
- *     the standard GS modulate formula. POINT/LINE still just update
- *     vertex/PRIM state without drawing.
+ *     the standard GS modulate formula. POINT (type 0) and LINE/
+ *     LINE_STRIP (types 1/2, task: "GS coverage breadth") are now
+ *     implemented too - see gif.c's rasterize_point()/
+ *     rasterize_line(). POINT is a single flat-color, non-
+ *     interpolated pixel write (real hardware: no interpolation of
+ *     any kind for a single vertex). LINE/LINE_STRIP support real
+ *     IIP-bit Gouraud shading (flat shading uses the LAST vertex's
+ *     color, same convention as triangles/sprites - cross-checked
+ *     against PCSX2's `GSDrawScanline::CSetupPrim`, which selects
+ *     `last=1` for `GS_LINE_CLASS`) and real linear (not
+ *     perspective-corrected - Z has already been through the
+ *     perspective projection by the time it reaches the rasterizer,
+ *     same as triangles) Z interpolation along the segment, ported
+ *     from PCSX2's `GSRasterizer::DrawEdgeLine` DDA algorithm (walk
+ *     the major axis one pixel at a time, step every interpolated
+ *     attribute - color, Z - linearly per major-axis pixel). No
+ *     texture mapping (real GS hardware does not texture-map POINT/
+ *     LINE - only SPRITE/TRIANGLE support TME).
  *   - Register field bit positions (GIFTag, PRIM, RGBAQ PACKED
  *     layout, XYZ2 PACKED layout, FRAME, XYOFFSET) are cross-checked
  *     against PCSX2's GS/GSRegs.h and Gif.h, not guessed. The triangle
@@ -90,6 +106,14 @@
 #define GS_REG_TEST_1     0x47
 #define GS_REG_ZBUF_1     0x4E
 
+/* POINT/LINE/LINE_STRIP (task: "GS coverage breadth", item 5) -
+ * cross-checked against a live fetch of PCSX2's GS/GSRegs.h `enum
+ * GS_PRIM` (GS_POINTLIST=0, GS_LINELIST=1, GS_LINESTRIP=2,
+ * GS_TRIANGLELIST=3, ...) - these are real 3-bit PRIM.PRIM hardware
+ * field values, not emulator convention. */
+#define PRIM_TYPE_POINT          0
+#define PRIM_TYPE_LINE           1
+#define PRIM_TYPE_LINE_STRIP     2
 #define PRIM_TYPE_TRIANGLE       3
 #define PRIM_TYPE_TRIANGLE_STRIP 4
 #define PRIM_TYPE_TRIANGLE_FAN   5
@@ -263,9 +287,29 @@ typedef struct {
      * unaffected either way). */
     uint32_t tri_z[3];
 
+    /* LINE/LINE_STRIP vertex accumulation (task: "GS coverage
+     * breadth", item 5) - a 2-slot rolling window, the same shape as
+     * TRIANGLE_STRIP's 3-slot one above. line_vseq counts vertices
+     * received since PRIM last changed (reset on every PRIM write,
+     * same as tri_vseq). Real hardware: LINE draws one segment per
+     * PAIR of vertices (no reuse - matches PCSX2's `NumIndicesForPrim`
+     * returning 2 for both LINELIST/LINESTRIP); LINE_STRIP instead
+     * keeps the most recent vertex as the next segment's start,
+     * giving a connected polyline - same "rolling window" shape as
+     * TRIANGLE_STRIP, just 2 slots instead of 3. No texture-
+     * coordinate fields: real GS hardware does not texture-map
+     * POINT/LINE primitives (only SPRITE/TRIANGLE support TME) - not
+     * modeled here since there's nothing to model. */
+    int line_vseq;
+    int32_t line_x[2], line_y[2];
+    uint32_t line_rgba[2];
+    uint32_t line_z[2];
+
     uint64_t quadwords_seen;
     uint64_t sprites_drawn;
     uint64_t triangles_drawn;
+    uint64_t lines_drawn;   /* task: "GS coverage breadth" */
+    uint64_t points_drawn;  /* task: "GS coverage breadth" */
     uint64_t unsupported_prims_seen;
     uint64_t pixels_ztest_failed; /* task #89 - counts fragments rejected by the Z test, for test visibility */
 } gif_state_t;

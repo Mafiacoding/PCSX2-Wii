@@ -3294,6 +3294,94 @@ outputs - same standing rule as every prior round). No regression risk;
 existing 63-test suite and Wii build are unaffected and were not re-run
 this round since nothing in `source/`/`include/` changed.
 
+### Round 29 continued (2026-07-07): B(00h) alloc_kernel_memory implemented for real - root cause fixed, boot wall NOT yet cleared
+
+Direct continuation of the same session/investigation above, per the
+user's explicit "Ja" (continue) after the checkpoint was pushed. Picked
+up exactly where the previous section left off: tracing backward from
+the PCB/TCB-setting mechanism instead of forward from the SYSCALL wall.
+
+**Diagnostic bug found and fixed first**: the previous round's "zero
+calls to 0xB0/0xC0" finding was itself an artifact of a JAL/JALR-only
+trace. Building a full-state watchpoint (checking `RAM[0x100]`,
+`RAM[0x104]`, `RAM[0x10c]`, `RAM[0x114]` after literally every IOP
+instruction, regardless of opcode) found real writes to `RAM[0x10c]`
+and `RAM[0x114]` at ROM PCs `0xbfc50110`/`0xbfc5012c` that the address-
+range store trace had also missed (a second, independent diagnostic
+bug: those stores use `lui $at,0xa000` - KSEG1 addressing, virtual
+address `0xA000010Ch` - and the trace's own address comparison wasn't
+masking to physical address before comparing, unlike the project's
+real `iop_mem_write32()`/`iop_mem_ptr()`, which correctly does
+`& 0x1FFFFFFFu`. Both bugs were in the throwaway diagnostic code, not
+in any project source file.)
+
+**Root cause, confirmed via direct disassembly of the real ROM bytes**:
+genuine, executing BIOS code at `~0xbfc4ff90-0xbfc501f8` (not project
+fabrication) sets up the PCB/TCB size fields directly, then calls
+`B(00h) alloc_kernel_memory(size)` to get the ExCB array's address -
+but not via `jal`/`jalr` (which the earlier trace was watching for).
+It goes through a thunk table at `0xbfc58c80-0xbfc58d80`: each entry is
+`addiu $t1,zero,<function>` / `addiu $t2,zero,<0xA0|0xB0|0xC0>` /
+plain `jr $t2` - a tail call that preserves the ORIGINAL caller's `$ra`,
+invisible to any JAL/JALR-only trace. Since this project's
+`iop_hle_bios.c` had no real case for B0-table function 0, every one
+of these calls fell through to the generic default (`$v0=0`, i.e.
+"allocation failed"), so the real BIOS's own allocation logic correctly
+bailed out and never wrote a valid address into `RAM[0x100]`.
+
+**Fix implemented** (per the user's explicit "lieber aus dem bios dump"
+directive - real BIOS-derived behavior, not a synthetic stub):
+`IOP_HLE_B0_ALLOC_KERNEL_MEMORY` (B0h, function 0x00) is now a real bump
+allocator over the documented Kernel Memory region (psx-spx's BIOS RAM
+Map: "0000E000h 2000h Kernel Memory; ExCBs, EvCBs, and TCBs allocated
+via B(00h)") - starts at `IOP_EXCB_ARRAY_ADDR` (0xE000), 4-byte aligned,
+bounded by a new `IOP_KMEM_REGION_SIZE` (0x2000) constant, with
+persistent `kmem_bump_next`/`kmem_alloc_calls`/`kmem_alloc_failures`
+state in `iop_hle_bios_state_t`. Companion fix in `iop_excb.c`:
+`chain_head_addr()` now reads the chain-head array's base address
+dynamically from `RAM[0x100]` (`IOP_EXCB_TABLE_ADDR`) instead of
+hardcoding `IOP_EXCB_ARRAY_ADDR`, matching the real dispatcher's own
+`lw $s3,(0x100)` behavior - falls back to `IOP_EXCB_ARRAY_ADDR` if
+`RAM[0x100]` is still 0 (nothing allocated yet), preserving every
+pre-existing test's assumptions. New test: `tests/test_iop_kmem_alloc.c`
+(19 checks, all passing) covers the allocator (aligned/unaligned sizes,
+overflow-fails-cleanly) and the dynamic chain-head resolution.
+
+**Verified via live re-trace against the real BIOS that the fix does
+what it's supposed to**: `RAM[0x100]` now genuinely gets set to
+`0x0000E000` around IOP instruction 84,849 (previously stayed 0
+forever) - a real, allocator-driven write, confirmed via the same
+watchpoint harness. `kmem_alloc_calls` also goes from 3 (all silently
+failing) to 4 successful calls with the fix in place.
+
+**Honest result, not oversold**: implementing this fix does NOT, by
+itself, get boot past the same point the pre-fix build reaches. A
+direct A/B test (identical harness, only the `git stash`-toggled fix)
+run to 30 million IOP instructions (240 million EE instructions) shows
+BOTH the before- and after-fix builds land at the exact same steady-
+state PCs (EE at `0x80005e64`, IOP at `0x00101280`), and `RAM[0x100]`
+ends up `0` in both cases by that point regardless. Tracing why: a
+separate, genuinely-executing block of ROM code at `0xbfc4d2c8-
+0xbfc4d360` unconditionally zeroes the entire `0x000-0xf80` low-RAM
+region in a loop (8 words per iteration) shortly AFTER the real
+allocator call succeeds (`RAM[0x100]` set at instr 84,849, wiped again
+by this clear loop at instr 221,259) - this looks like a generic
+kernel-reset/low-memory-clear pass that this BIOS revision runs before
+its real, final ExCB/handler registration, and neither build (before or
+after this fix) has been traced far enough forward to find where (or
+whether, within the currently-traced window) that final registration
+actually happens.
+
+**What this round concretely accomplished**: eliminated a real,
+confirmed behavioral gap (B0-table allocation silently failing when
+the real BIOS legitimately calls it) with real, BIOS-derived semantics
+- not a guess, and not regressive (0 failures across all 64 host-native
+tests, clean Wii/devkitPPC rebuild). It did not, on its own, resolve
+the ultimate early-boot wall; the next concrete step is tracing forward
+from the `0xbfc4d30c` clear loop to find whatever comes after it and
+whether/when the ExCB chain gets rebuilt a second time following that
+clear.
+
 ## GS Round 23: alpha test + alpha blending (TEST_1/ALPHA_1)
 
 

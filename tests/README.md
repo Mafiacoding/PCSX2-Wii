@@ -1490,3 +1490,36 @@ the base level; and a regression check that an unconfigured TEX1
 gcc -I../include -I../source -o test_gs_mipmap tests/test_gs_mipmap.c -lm
 ./test_gs_mipmap
 ```
+
+`test_iop_kmem_alloc.c` covers Round 29's real B(00h)
+`alloc_kernel_memory(size)` bump allocator (`source/hw/iop_hle_bios.c`)
+and the companion fix in `source/hw/iop_excb.c` - see `docs/STATUS.md`'s
+"Round 29 continued" section for the full citation trail (psx-spx's
+BIOS RAM Map: "0000E000h 2000h Kernel Memory; ExCBs, EvCBs, and TCBs
+allocated via B(00h)"). Live tracing against the user's real
+SCPH-10000 dump found that genuine, executing BIOS ROM code calls this
+function via a thunk-table tail call (`jr`, not `jal`/`jalr`), and
+previously always got the generic default return value (0, "alloc
+failed") since this project had no real B0-function-0 case, which is
+why `RAM[0x100]` never got populated even though the real BIOS code
+responsible for populating it is demonstrably present and running.
+
+19 checks: the bump pointer starts at the documented Kernel Memory
+region base; a real allocation returns that base and advances the
+pointer by exactly the (already-aligned) requested size; an unaligned
+size request is correctly rounded up to 4-byte alignment; a request
+that would overflow the documented 0x2000-byte region fails cleanly
+($v0=0) without wrapping or corrupting memory, while still counting as
+a handled call (matching real hardware's malloc-style failure
+convention); the real B0-table dispatch wiring (register-convention
+$a0 size read, $v0 return, correct return-to-$ra); and `iop_excb.c`'s
+`chain_head_addr()` correctly following a DYNAMIC RAM[0x100] value
+(simulating the real allocator having placed the ExCB array somewhere
+other than the old hardcoded constant) with a safe fallback to the old
+constant when RAM[0x100] is still 0 (preserving every pre-Round-29
+test's assumptions).
+
+```sh
+gcc -I../include -I../source -o test_iop_kmem_alloc tests/test_iop_kmem_alloc.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+./test_iop_kmem_alloc
+```

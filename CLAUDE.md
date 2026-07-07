@@ -814,6 +814,23 @@ always ask for/verify the no-disc case explicitly).
   next step is tracing backward from whichever module load sets PCB/TCB
   to find its trigger.
 
+- **Round 29 continued (2026-07-07, same session)**: found and fixed the
+  actual root cause - real BIOS ROM code calls `B(00h)
+  alloc_kernel_memory(size)` via a thunk-table tail call (`jr`, invisible
+  to the earlier JAL/JALR-only trace), always got the generic default
+  ($v0=0) since this project had no real B0-function-0 case, so
+  RAM[0x100] never got a valid address despite the real allocation code
+  being genuinely present and running. Implemented a real bump allocator
+  plus a companion dynamic-lookup fix in `iop_excb.c`. New test
+  `tests/test_iop_kmem_alloc.c` (19 checks), 64/64 regression, clean Wii
+  rebuild. Confirmed via live re-trace that RAM[0x100] now genuinely gets
+  set mid-boot - but honestly, a direct A/B test shows this fix alone
+  does not change how far boot progresses by 30M IOP instructions, since
+  a separate real ROM routine re-clears the whole low-RAM table-of-tables
+  region shortly afterward. See docs/STATUS.md's "Round 29 continued"
+  section for the full story; next step is tracing forward from that
+  clear loop.
+
 ## The mandatory per-change workflow
 
 This project has a strict, consistently-applied ritual for every increment
@@ -1483,6 +1500,32 @@ mechanism. User also has a legally-owned demo DVD dump available for
 future CDVD work, explicitly NOT needed for the current investigation
 (this wall is pure BIOS-kernel bootstrap, before any disc read would
 occur).
+
+**Update (Round 29 continued, same session)**: user said "Ja" (continue)
+plus asked to verify GitHub was fully up to date (confirmed clean via
+`git diff origin/main main --stat` before resuming). Continued the trace
+and found + fixed the actual root cause: real, genuinely-executing BIOS
+ROM code calls `B(00h) alloc_kernel_memory(size)` via a thunk-table tail
+call (`jr`, not `jal`/`jalr` - why the earlier exhaustive JAL/JALR trace
+found "zero calls to 0xB0/0xC0"), and since this project had no real
+case for B0 function 0, it always returned 0 ("alloc failed"), so
+RAM[0x100] never got a valid address even though the real allocation
+code is demonstrably present and running. Implemented a real bump
+allocator (`IOP_HLE_B0_ALLOC_KERNEL_MEMORY` in `iop_hle_bios.c`, bounded
+by a new `IOP_KMEM_REGION_SIZE`) plus a companion fix in `iop_excb.c`
+(`chain_head_addr()` now reads RAM[0x100] dynamically instead of a
+hardcoded constant). New test `tests/test_iop_kmem_alloc.c` (19 checks),
+64/64 total regression, clean Wii rebuild. **Honest result**: verified
+via live re-trace that RAM[0x100] now genuinely gets set to 0xE000
+mid-boot (previously stayed 0 forever) - but a direct A/B test (git-
+stash-toggled) to 30M IOP instructions shows this fix alone does NOT
+change how far boot progresses; both builds land at the identical
+steady-state PC, because a separate, genuinely-executing block of ROM
+code unconditionally re-clears the whole low-RAM table-of-tables region
+shortly after the allocator succeeds. See docs/STATUS.md's "Round 29
+continued" section for the full story. Next step: trace forward from
+that clear loop (ROM ~0xbfc4d2c8-0xbfc4d360) to find what comes after it
+and whether/when the ExCB chain gets rebuilt a second time.
 
 ## Reference material
 

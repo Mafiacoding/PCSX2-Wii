@@ -75,6 +75,11 @@
 #define IOP_EXCB_TABLE_SIZE 0x00000020u /* RAM[0x104]: 4 * 08h, per psx-spx's "Table of Tables" */
 #define IOP_EXCB_NUM_PRIO   4u
 #define IOP_EXCB_ARRAY_ADDR 0x0000E000u /* start of the documented "Kernel Memory" region */
+#define IOP_KMEM_REGION_SIZE 0x00002000u /* psx-spx BIOS RAM Map: "0000E000h 2000h
+                                            * Kernel Memory; ExCBs, EvCBs, and TCBs
+                                            * allocated via B(00h)" - see
+                                            * iop_hle_bios.h's IOP_HLE_B0_ALLOC_KERNEL_MEMORY
+                                            * comment for the real allocator this bounds. */
 
 typedef struct {
     uint64_t enq_calls;

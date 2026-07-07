@@ -170,6 +170,27 @@
 #define IOP_HLE_A0__EXIT      0x3Au
 #define IOP_HLE_A0_FLUSHCACHE 0x44u
 
+/* B-table function this round (Round 29 continuation) implements for
+ * real - see psx-spx's "B-Functions" table and its BIOS RAM Map's
+ * "0000E000h 2000h Kernel Memory; ExCBs, EvCBs, and TCBs allocated
+ * via B(00h)" note. B(00h) alloc_kernel_memory(size) is a real,
+ * fully-specified bump allocator over that documented 0x2000-byte
+ * region - implemented for real here (not fabricated) because live
+ * tracing against the user's own real SCPH-10000 dump (docs/
+ * STATUS.md's "Round 29" section) found the REAL BIOS ROM's own
+ * ExCB/EvCB/PCB/TCB allocation routines (genuine, executing code at
+ * ROM addresses ~0xbfc4ff90-0xbfc501f8, confirmed via live Capstone
+ * disassembly) call exactly this function via the standard "thunk to
+ * 0xB0 with $t1=0" mechanism, and - because this project previously
+ * had no real implementation for it - always received the generic
+ * default return value of 0 (i.e. "allocation failed"), which is why
+ * RAM[0x100] (the ExCB table address) was never actually populated
+ * even though the real BIOS code responsible for populating it is
+ * demonstrably present and running. Implementing the allocator lets
+ * that already-real BIOS code succeed on its own terms - this is
+ * real BIOS behavior unlocked, not new fabricated behavior. */
+#define IOP_HLE_B0_ALLOC_KERNEL_MEMORY 0x00u
+
 typedef struct {
     uint64_t calls_seen;
     uint32_t last_table;     /* one of the IOP_HLE_TABLE_* constants */
@@ -198,6 +219,17 @@ typedef struct {
     uint8_t  heap_initialized;
     uint8_t  exited;               /* 1 once EXIT/_EXIT has halted the core */
     uint32_t exit_code;
+
+    /* B(00h) alloc_kernel_memory(size) - real bump allocator, see the
+     * IOP_HLE_B0_ALLOC_KERNEL_MEMORY comment above. kmem_bump_next
+     * starts at IOP_EXCB_ARRAY_ADDR (0xE000, the documented "Kernel
+     * Memory" region base) and only ever increases; kmem_alloc_calls
+     * is a plain diagnostic counter. */
+    uint32_t kmem_bump_next;
+    uint64_t kmem_alloc_calls;
+    uint64_t kmem_alloc_failures; /* count of calls that returned 0
+                                    * because the request would exceed
+                                    * the documented 0x2000-byte region */
 } iop_hle_bios_state_t;
 
 void iop_hle_bios_init(void);

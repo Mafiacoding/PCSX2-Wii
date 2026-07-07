@@ -34,6 +34,12 @@ void iop_hle_bios_init(void)
     memset(&g_hle, 0, sizeof(g_hle));
     memset(g_exc_template, 0, sizeof(g_exc_template));
     g_exc_template_scanned = 0;
+    /* Round 29: B(00h) alloc_kernel_memory(size) real bump allocator -
+     * starts at the documented Kernel Memory region base (psx-spx's
+     * "0000E000h 2000h Kernel Memory; ExCBs, EvCBs, and TCBs allocated
+     * via B(00h)"), see iop_hle_bios.h's IOP_HLE_B0_ALLOC_KERNEL_MEMORY
+     * comment for the full rationale. */
+    g_hle.kmem_bump_next = IOP_EXCB_ARRAY_ADDR;
 }
 
 iop_hle_bios_state_t *iop_hle_bios_get_state(void) { return &g_hle; }
@@ -317,6 +323,34 @@ int iop_hle_bios_try_handle(iop_state_t *st, uint32_t pc)
         st->next_pc = ra + 4;
         return 1;
     } else if (pc == IOP_HLE_TABLE_A0 && try_handle_a0_real_function(st, function)) {
+        g_hle.known_calls_handled++;
+        st->pc      = ra;
+        st->next_pc = ra + 4;
+        return 1;
+    } else if (pc == IOP_HLE_TABLE_B0 && function == IOP_HLE_B0_ALLOC_KERNEL_MEMORY) {
+        /* Round 29: real B(00h) alloc_kernel_memory(size) - see the
+         * IOP_HLE_B0_ALLOC_KERNEL_MEMORY header comment for the full
+         * root-cause story (real BIOS ROM code, confirmed via live
+         * Capstone disassembly, calls this via a thunk-table tail
+         * call to unblock its own genuine ExCB/EvCB/TCB setup).
+         * Standard MIPS calling convention: $a0=size, return address
+         * in $v0 (0 on failure, matching real hardware's malloc-style
+         * convention already used by this file's INITHEAP handling
+         * above). A real bump allocator, 4-byte aligned (matching
+         * every other word-based struct layout already handled in
+         * this file), bounded by the documented 0x2000-byte Kernel
+         * Memory region. */
+        uint32_t size = st->gpr[4];
+        uint32_t aligned = (size + 3u) & ~3u;
+        g_hle.kmem_alloc_calls++;
+        if ((uint64_t)g_hle.kmem_bump_next + aligned >
+            (uint64_t)IOP_EXCB_ARRAY_ADDR + IOP_KMEM_REGION_SIZE) {
+            g_hle.kmem_alloc_failures++;
+            st->gpr[2] = 0;
+        } else {
+            st->gpr[2] = g_hle.kmem_bump_next;
+            g_hle.kmem_bump_next += aligned;
+        }
         g_hle.known_calls_handled++;
         st->pc      = ra;
         st->next_pc = ra + 4;

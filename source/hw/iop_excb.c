@@ -31,9 +31,28 @@ void iop_excb_init(iop_state_t *st)
     }
 }
 
-static uint32_t chain_head_addr(uint32_t priority)
+/* Round 29: reads the chain-head ARRAY's base address dynamically
+ * from RAM[0x100] (IOP_EXCB_TABLE_ADDR) instead of assuming it's
+ * always IOP_EXCB_ARRAY_ADDR. This matters now that
+ * IOP_HLE_B0_ALLOC_KERNEL_MEMORY is implemented for real (see
+ * iop_hle_bios.h/.c): a real, executing BIOS can legitimately
+ * allocate the ExCB array via a real B(00h) call and store whatever
+ * address it actually got back into RAM[0x100] - which will usually
+ * (but is not guaranteed to) be IOP_EXCB_ARRAY_ADDR itself, e.g. if
+ * some earlier B(00h) call already consumed part of the Kernel Memory
+ * region first. Matches the real exception dispatcher's own behavior,
+ * confirmed via live disassembly (docs/STATUS.md's "Round 29"
+ * section): `addiu $s3,zero,0x100 / lw $s3,($s3)` before ever touching
+ * the array itself. Falls back to IOP_EXCB_ARRAY_ADDR if RAM[0x100]
+ * is still 0 (nothing has allocated it yet - e.g. host-native unit
+ * tests that call this directly without a real BIOS boot), preserving
+ * every existing test's behavior. */
+static uint32_t chain_head_addr(iop_state_t *st, uint32_t priority)
 {
-    return IOP_EXCB_ARRAY_ADDR + priority * 8u;
+    uint32_t table_addr = iop_mem_read32(st, IOP_EXCB_TABLE_ADDR);
+    if (table_addr == 0u)
+        table_addr = IOP_EXCB_ARRAY_ADDR;
+    return table_addr + priority * 8u;
 }
 
 void iop_excb_sys_enq_int_rp(iop_state_t *st, uint32_t priority, uint32_t struc)
@@ -50,7 +69,7 @@ void iop_excb_sys_enq_int_rp(iop_state_t *st, uint32_t priority, uint32_t struc)
      * (first function) are the CALLER's own responsibility (already
      * filled in before calling SysEnqIntRP) and are left untouched
      * here. */
-    uint32_t addr = chain_head_addr(priority);
+    uint32_t addr = chain_head_addr(st, priority);
     uint32_t old_head = iop_mem_read32(st, addr);
     iop_mem_write32(st, struc + 0x00u, old_head); /* struc->next = old head */
     iop_mem_write32(st, addr, struc);             /* chain head  = struc    */
@@ -62,7 +81,7 @@ void iop_excb_sys_deq_int_rp(iop_state_t *st, uint32_t priority, uint32_t struc)
     if (priority >= IOP_EXCB_NUM_PRIO)
         return;
 
-    uint32_t addr = chain_head_addr(priority);
+    uint32_t addr = chain_head_addr(st, priority);
     uint32_t head = iop_mem_read32(st, addr);
 
     if (head == struc) {

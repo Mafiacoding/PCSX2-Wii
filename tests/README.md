@@ -1523,3 +1523,36 @@ test's assumptions).
 gcc -I../include -I../source -o test_iop_kmem_alloc tests/test_iop_kmem_alloc.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
 ./test_iop_kmem_alloc
 ```
+
+`test_iop_syscall_handler.c` covers Round 29 continued's second real
+fix: C(01h) EnqueueSyscallHandler(priority) and B(18h) ResetEntryInt().
+See `include/core/hw/iop_hle_bios.h`'s `IOP_HLE_C0_ENQUEUESYSCALLHANDLER`
+and `IOP_HLE_B0_RESET_ENTRY_INT` comments, and `docs/STATUS.md`'s
+"Round 29 continued" section, for the full citation trail: live
+tracing against the user's real SCPH-10000 dump found the real BIOS
+calls both of these functions right after B(00h) succeeds, and found
+the real dispatcher/ReturnFromException code this round's hand-
+assembled MIPS trampoline is cross-checked against.
+
+26 checks: ResetEntryInt correctly writes the real, ROM-confirmed
+jmp_buf pointer constant (0x00006C34) into RAM[0x7520] and returns it
+in $v0; EnqueueSyscallHandler installs a real, position-independent
+MIPS trampoline into the Kernel Memory bump allocator exactly once
+(reused, not re-installed, on subsequent calls) and enqueues a real
+ExCB chain node (via the already-real, Round-22 SysEnqIntRP mechanism)
+at the requested priority whose first-function field points at it. The
+strongest checks actually EXECUTE the installed trampoline bytes
+through the real IOP interpreter (not just inspect them): a simulated
+EnterCriticalSection syscall (saved $a0==1) correctly clears SR bits 2
+and 10 and returns 1 in $v0 (both were set beforehand, matching
+psx-spx's documented return rule) before ending up at the real
+ReturnFromException address (0x00000f30); a simulated ExitCriticalSection
+(saved $a0==2) correctly sets both bits; and a non-syscall exception
+(Cause.ExcCode != 8) correctly returns 0 via a plain `jr $ra` without
+touching SR at all, matching the real dispatcher's "let the next chain
+element try" contract.
+
+```sh
+gcc -I../include -I../source -o test_iop_syscall_handler tests/test_iop_syscall_handler.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+./test_iop_syscall_handler
+```

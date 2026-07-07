@@ -149,6 +149,63 @@
 #define IOP_HLE_C0_SYSENQINTRP 0x02u
 #define IOP_HLE_C0_SYSDEQINTRP 0x03u
 
+/* Round 29 continued (2nd fix this round): C(01h) EnqueueSyscallHandler
+ * (priority) - psx-spx: "Internally used to add some default IRQ and
+ * Exception handlers", used with priority=0. Live tracing against the
+ * user's real SCPH-10000 dump (docs/STATUS.md's "Round 29 continued"
+ * section) found the real BIOS calls this EXACT function right after
+ * B(00h) successfully allocates the ExCB table - confirming this is
+ * genuinely on the real boot path, not a hypothetical. Unlike
+ * SysEnqIntRP/SysDeqIntRP (whose CHAIN-MANIPULATION mechanism psx-spx
+ * documents byte-exactly), psx-spx does NOT give byte-level semantics
+ * for what "internal default handler" C(01h) installs - so instead of
+ * fabricating an address, this project installs a REAL, position-
+ * independent MIPS machine-code trampoline (assembled by hand,
+ * verified via Capstone round-trip and cross-checked against the
+ * ACTUAL, live-disassembled real dispatcher/ReturnFromException code
+ * found this round - see iop_hle_bios.c's g_syscall_handler_code and
+ * the IOP_RFE_TRAMPOLINE_TARGET comment) that implements psx-spx's
+ * own word-for-word documented SYS(01h)/SYS(02h) behavior:
+ *   "SYS(01h) EnterCriticalSection(): Disables interrupts by clearing
+ *    SR (cop0r12) Bit 2 and 10 ... Returns 1 if both bits were set"
+ *   "SYS(02h) ExitCriticalSection(): Enables interrupts by set SR
+ *    (cop0r12) Bit 2 and 10 ... no return value"
+ * and ends by jumping to the REAL ReturnFromException entry point
+ * (address 0x00000f30, confirmed via live disassembly of the user's
+ * own real BIOS's resident kernel image this round - see
+ * docs/STATUS.md), exactly matching real hardware's own documented
+ * behavior ("the handler may execute ReturnFromException to abort
+ * further exception handling"). The trampoline's bytes are executed
+ * by the ordinary IOP interpreter like any other code - this is NOT
+ * a 4th special HLE trap PC, it is genuine, position-independent
+ * MIPS machine code placed into the real Kernel Memory region via the
+ * same real B(00h)-style bump allocator. */
+#define IOP_HLE_C0_ENQUEUESYSCALLHANDLER 0x01u
+
+/* B(18h) ResetEntryInt() - psx-spx: "Applies the default 'Exit'
+ * structure (which consists of a pointer to ReturnFromException, and
+ * the Kernel's exception stacktop (minus 4), and zeroes for
+ * R16..R23,R28,R30). Returns the address of that structure." Live
+ * disassembly this round found that the REAL BIOS's own resident
+ * kernel image ALREADY has this exact default structure correctly
+ * pre-populated at address 0x00006C34 (ra field == 0x00000f30, the
+ * real ReturnFromException address; sp field == 0x00008524, matching
+ * "exception stacktop minus 4" against the real RAM[0x6c30]=0x8528
+ * stack-top value) - confirmed byte-for-byte via a live RAM snapshot
+ * (see docs/STATUS.md's "Round 29 continued" section). The ONLY part
+ * of ResetEntryInt's job this project's boot path doesn't already do
+ * for free is resetting the POINTER VARIABLE at RAM[0x00007520] (read
+ * by the real dispatcher's post-priority-chain fallback code, live-
+ * disassembled at ROM-resident address 0x00000e44) back to that
+ * struct's address - which stays 0 (a real, confirmed gap; the struct
+ * CONTENTS are real and already correct, but nothing currently sets
+ * the pointer TO them) until this function runs. This constant
+ * (0x00006C34) is not a guess - it is the literal immediate value
+ * (`addiu $v0,$v0,0x6c34`) the real ROM-resident code itself uses. */
+#define IOP_HLE_B0_RESET_ENTRY_INT 0x18u
+#define IOP_JMPBUF_DEFAULT_PTR_ADDR    0x00007520u
+#define IOP_JMPBUF_DEFAULT_STRUCT_ADDR 0x00006C34u
+
 /* A0-table function numbers this round implements for real - see the
  * header comment above and psx-spx's "A-Functions" table. */
 #define IOP_HLE_A0_EXIT       0x06u
@@ -230,6 +287,23 @@ typedef struct {
     uint64_t kmem_alloc_failures; /* count of calls that returned 0
                                     * because the request would exceed
                                     * the documented 0x2000-byte region */
+
+    /* Round 29 continued: C(01h) EnqueueSyscallHandler real trampoline
+     * - see IOP_HLE_C0_ENQUEUESYSCALLHANDLER's header comment.
+     * syscall_handler_code_addr is where the real machine-code
+     * trampoline was written (0 until the first C(01h) call installs
+     * it - only installed once, reused on subsequent calls).
+     * syscall_handler_installs counts how many times C(01h) actually
+     * ran (each one enqueues a fresh chain node at whatever priority
+     * was requested, but only allocates the shared code ONCE). */
+    uint32_t syscall_handler_code_addr;
+    uint64_t syscall_handler_installs;
+
+    /* Round 29 continued: B(18h) ResetEntryInt - see
+     * IOP_HLE_B0_RESET_ENTRY_INT's header comment. Plain diagnostic
+     * counter, no other state needed since the real fix is just
+     * writing a well-evidenced constant to a fixed RAM address. */
+    uint64_t reset_entry_int_calls;
 } iop_hle_bios_state_t;
 
 void iop_hle_bios_init(void);

@@ -654,6 +654,24 @@ instead of fully emulating the real IOP BIOS ROM.
       story, including the two diagnostic-tooling bugs found and fixed
       along the way (JAL/JALR-only tracing missing tail calls; an
       unmasked KSEG1 address comparison missing real stores).
+- [x] Real C(01h) EnqueueSyscallHandler + B(18h) ResetEntryInt - live
+      disassembly fully mapped out the real exception dispatcher
+      (0xc80-0xe98) and ReturnFromException (0xf30-0x1000), confirming
+      the real BIOS calls both functions right after B(00h) succeeds.
+      ResetEntryInt writes the real, ROM-confirmed jmp_buf pointer
+      constant (RAM[0x7520]=0x6C34); EnqueueSyscallHandler installs a
+      real, hand-assembled, position-independent MIPS trampoline
+      (implementing psx-spx's exact SYS(01h)/SYS(02h) semantics,
+      ending at the real ReturnFromException address) via the existing
+      real SysEnqIntRP mechanism. `tests/test_iop_syscall_handler.c`
+      (26 checks, including full execution of the installed bytes
+      through the real IOP interpreter). **Still does not clear the
+      ultimate wall**: a separate real ROM clear-loop wipes RAM[0x100]
+      ~2.8M instructions before the dispatcher runs, well after these
+      fixes take effect - see docs/STATUS.md's "Round 29 continued"
+      (2nd fix) section for the precise next step (trace forward from
+      the clear-loop's own return address rather than backward from
+      the dispatcher).
 
 ## 3. DMA controller
 

@@ -1527,6 +1527,34 @@ continued" section for the full story. Next step: trace forward from
 that clear loop (ROM ~0xbfc4d2c8-0xbfc4d360) to find what comes after it
 and whether/when the ExCB chain gets rebuilt a second time.
 
+**Update (Round 29 continued, 2nd fix, same session)**: user said "real
+implementieren" (implement it for real) after being shown that C(01h)/
+C(0Ch) only had vague psx-spx documentation. Deep live disassembly fully
+mapped out the real exception dispatcher (0xc80-0xe98) and
+ReturnFromException (0xf30-0x1000) byte-for-byte, confirming the real
+BIOS calls C(01h) EnqueueSyscallHandler and C(0Ch) InitDefInt right
+after B(00h) succeeds. Implemented B(18h) ResetEntryInt (writes the
+real, ROM-confirmed RAM[0x7520]=0x6C34 constant) and C(01h)
+EnqueueSyscallHandler (installs a real, hand-assembled, position-
+independent MIPS trampoline implementing psx-spx's exact SYS(01h)/
+SYS(02h) semantics, ending at the real ReturnFromException address, via
+the existing real SysEnqIntRP mechanism). New test
+tests/test_iop_syscall_handler.c (26 checks, including full execution
+of the installed bytes through the real IOP interpreter), 64/64 total
+regression, clean Wii rebuild. **Honest result**: both fixes genuinely
+execute on the real boot path, but do NOT clear the ultimate wall - the
+SAME real ROM clear-loop found in the first fix this round wipes
+RAM[0x100] ~2.8M instructions before the dispatcher ever runs, so the
+new syscall-handler chain node (though correctly built) becomes
+unreachable by the time it's needed. EE/IOP land at the identical
+steady-state PCs as before. See docs/STATUS.md's "Round 29 continued
+(2nd fix)" section. C(0Ch)/InitDefInt was deliberately left
+unimplemented this round (DefaultInterruptHandler's real behavior is
+far more complex and not well-evidenced enough to implement responsibly
+yet). Next step: trace forward from the clear-loop's own return address
+to find whether/how RAM[0x100]/RAM[0x108] get re-established before the
+dispatcher runs.
+
 ## Reference material
 
 `README.md` names the exact upstream PCSX2 commit/branch used as the

@@ -277,6 +277,150 @@ static int try_handle_a0_real_function(iop_state_t *st, uint32_t function)
     }
 }
 
+/* -- Round 29 continued: real B(00h)-backed bump allocator, shared by
+ * the B0-table alloc_kernel_memory case and this file's own internal
+ * needs (the syscall-handler trampoline + its ExCB chain node below).
+ * Bounded by the same documented 0x2000-byte Kernel Memory region as
+ * before; returns 0 on overflow, matching real malloc-style failure. */
+static uint32_t kmem_alloc(uint32_t size)
+{
+    uint32_t aligned = (size + 3u) & ~3u;
+    if ((uint64_t)g_hle.kmem_bump_next + aligned >
+        (uint64_t)IOP_EXCB_ARRAY_ADDR + IOP_KMEM_REGION_SIZE) {
+        return 0;
+    }
+    uint32_t addr = g_hle.kmem_bump_next;
+    g_hle.kmem_bump_next += aligned;
+    return addr;
+}
+
+/* Round 29 continued: real, position-independent MIPS machine code
+ * implementing psx-spx's word-for-word documented SYS(01h)/SYS(02h)
+ * behavior - see IOP_HLE_C0_ENQUEUESYSCALLHANDLER's header comment
+ * for the full design rationale and citation trail. Hand-assembled
+ * (Keystone), round-trip-verified (Capstone) against the ACTUAL,
+ * live-disassembled real dispatcher/ReturnFromException code found
+ * this round via the user's real SCPH-10000 dump - see
+ * docs/STATUS.md's "Round 29 continued" section for the full
+ * disassembly listing this was cross-checked against. Logic:
+ *   1. Read Cause (cop0 r13); if ExcCode != Syscall(8), return 0 in
+ *      $v0 via a plain `jr $ra` (matches the real dispatcher's own
+ *      "func1 returns r2==0 -> try the next chain element" contract
+ *      - live-disassembled at ROM-resident 0xe08-0xe28).
+ *   2. Otherwise, re-derive the current TCB base exactly as the real
+ *      dispatcher's own entry code does (`addiu $k0,zero,0x100 / lw
+ *      $k0,8($k0) / lw $k0,($k0) / addi $k0,$k0,8`, byte-identical to
+ *      the real code at ROM-resident 0xc90-0xca4) and read the
+ *      ORIGINAL (pre-exception) $a0 back out of it at offset +0x10
+ *      (where the real entry code saved it, `sw $a0,0x10($k0)` at
+ *      0xd30) - this is the real SYS(nnh) function number.
+ *   3. a0==1 (EnterCriticalSection): clear SR bits 2 and 10 (0x404),
+ *      $v0 = 1 iff both bits were set beforehand, else 0 - exactly
+ *      psx-spx's documented return-value rule.
+ *      a0==2 (ExitCriticalSection): set SR bits 2 and 10; psx-spx
+ *      documents no meaningful return value.
+ *      Any other a0: an honest, explicitly-scoped gap (psx-spx lists
+ *      further SYS(nnh) functions - e.g. ChangeThreadSubFunction -
+ *      this project does not fabricate their behavior) - falls
+ *      through to ReturnFromException as a safe no-op rather than
+ *      risking an infinite re-entry loop.
+ *   4. All three syscall-handled paths end by jumping directly to the
+ *      REAL ReturnFromException entry point (0x00000f30, confirmed
+ *      via live disassembly this round), matching real hardware's own
+ *      documented behavior for chain elements that fully handle their
+ *      exception ("the handler may execute ReturnFromException to
+ *      abort further exception handling").
+ * Assembled once from this source (kept here as the definitive,
+ * human-readable record of what the bytes below implement):
+ *
+ *   mfc0  $t0, $13
+ *   andi  $t0, $t0, 0x7c
+ *   addiu $t1, $zero, 0x20
+ *   bne   $t0, $t1, NOT_SYSCALL
+ *   nop
+ *   addiu $k0, $zero, 0x100
+ *   lw    $k0, 8($k0)
+ *   lw    $k0, 0($k0)
+ *   addi  $k0, $k0, 8
+ *   lw    $a0, 0x10($k0)
+ *   addiu $t1, $zero, 1
+ *   beq   $a0, $t1, DO_ENTER
+ *   nop
+ *   addiu $t1, $zero, 2
+ *   beq   $a0, $t1, DO_EXIT
+ *   nop
+ *   b     RETURN_FROM_EXCEPTION
+ *   nop
+ * DO_ENTER:
+ *   mfc0  $t0, $12
+ *   andi  $t1, $t0, 0x404
+ *   xori  $t1, $t1, 0x404
+ *   sltiu $v0, $t1, 1
+ *   lui   $t2, 0xFFFF
+ *   ori   $t2, $t2, 0xFBFB
+ *   and   $t0, $t0, $t2
+ *   mtc0  $t0, $12
+ *   b     RETURN_FROM_EXCEPTION
+ *   nop
+ * DO_EXIT:
+ *   mfc0  $t0, $12
+ *   ori   $t0, $t0, 0x404
+ *   mtc0  $t0, $12
+ *   addiu $v0, $zero, 1
+ *   b     RETURN_FROM_EXCEPTION
+ *   nop
+ * NOT_SYSCALL:
+ *   addiu $v0, $zero, 0
+ *   jr    $ra
+ *   nop
+ * RETURN_FROM_EXCEPTION:
+ *   j     0xf30
+ *   nop
+ */
+static const uint32_t g_syscall_handler_code[] = {
+    0x40086800u, 0x3108007Cu, 0x24090020u, 0x15090024u,
+    0x00000000u, 0x00000000u, 0x241A0100u, 0x8F5A0008u,
+    0x8F5A0000u, 0x235A0008u, 0x8F440010u, 0x24090001u,
+    0x10890009u, 0x00000000u, 0x00000000u, 0x24090002u,
+    0x10890010u, 0x00000000u, 0x00000000u, 0x10000018u,
+    0x00000000u, 0x00000000u, 0x40086000u, 0x31090404u,
+    0x39290404u, 0x2D220001u, 0x3C0AFFFFu, 0x354AFBFBu,
+    0x010A4024u, 0x40886000u, 0x1000000Du, 0x00000000u,
+    0x00000000u, 0x40086000u, 0x35080404u, 0x40886000u,
+    0x24020001u, 0x10000006u, 0x00000000u, 0x00000000u,
+    0x24020000u, 0x03E00008u, 0x00000000u, 0x00000000u,
+    0x080003CCu, 0x00000000u, 0x00000000u,
+};
+#define SYSCALL_HANDLER_CODE_WORDS \
+    (sizeof(g_syscall_handler_code) / sizeof(g_syscall_handler_code[0]))
+
+/* Installs (once) the real trampoline above into the Kernel Memory
+ * region, then enqueues a real ExCB chain node (via the already-real,
+ * already-tested SysEnqIntRP mechanism from Round 22) at the given
+ * priority whose "first function" pointer targets it - exactly the
+ * real chain-element format psx-spx documents for C(02h)/SysEnqIntRP
+ * (00h=next, 04h=second function, 08h=first function, 0Ch=unused). */
+static void install_syscall_handler(iop_state_t *st, uint32_t priority)
+{
+    if (g_hle.syscall_handler_code_addr == 0) {
+        uint32_t code_addr = kmem_alloc((uint32_t)(SYSCALL_HANDLER_CODE_WORDS * 4u));
+        if (code_addr == 0)
+            return; /* real hardware: Kernel Memory exhausted - honest failure, no crash */
+        for (uint32_t i = 0; i < SYSCALL_HANDLER_CODE_WORDS; i++)
+            iop_mem_write32(st, code_addr + i * 4u, g_syscall_handler_code[i]);
+        g_hle.syscall_handler_code_addr = code_addr;
+    }
+
+    uint32_t node_addr = kmem_alloc(16u);
+    if (node_addr == 0)
+        return;
+    iop_mem_write32(st, node_addr + 0x04u, 0u); /* no second function */
+    iop_mem_write32(st, node_addr + 0x08u, g_hle.syscall_handler_code_addr);
+    iop_mem_write32(st, node_addr + 0x0Cu, 0u);
+    iop_excb_sys_enq_int_rp(st, priority, node_addr);
+    g_hle.syscall_handler_installs++;
+}
+
 int iop_hle_bios_try_handle(iop_state_t *st, uint32_t pc)
 {
     if (pc != IOP_HLE_TABLE_A0 && pc != IOP_HLE_TABLE_B0 && pc != IOP_HLE_TABLE_C0)
@@ -341,16 +485,40 @@ int iop_hle_bios_try_handle(iop_state_t *st, uint32_t pc)
          * this file), bounded by the documented 0x2000-byte Kernel
          * Memory region. */
         uint32_t size = st->gpr[4];
-        uint32_t aligned = (size + 3u) & ~3u;
         g_hle.kmem_alloc_calls++;
-        if ((uint64_t)g_hle.kmem_bump_next + aligned >
-            (uint64_t)IOP_EXCB_ARRAY_ADDR + IOP_KMEM_REGION_SIZE) {
+        st->gpr[2] = kmem_alloc(size);
+        if (st->gpr[2] == 0)
             g_hle.kmem_alloc_failures++;
-            st->gpr[2] = 0;
-        } else {
-            st->gpr[2] = g_hle.kmem_bump_next;
-            g_hle.kmem_bump_next += aligned;
-        }
+        g_hle.known_calls_handled++;
+        st->pc      = ra;
+        st->next_pc = ra + 4;
+        return 1;
+    } else if (pc == IOP_HLE_TABLE_B0 && function == IOP_HLE_B0_RESET_ENTRY_INT) {
+        /* Round 29 continued: real B(18h) ResetEntryInt() - see the
+         * IOP_HLE_B0_RESET_ENTRY_INT header comment. The default
+         * jmp_buf STRUCT (ra/sp/fp/s0-7/gp) is already correctly
+         * resident at IOP_JMPBUF_DEFAULT_STRUCT_ADDR (confirmed via
+         * live disassembly - its ra field already equals the real
+         * ReturnFromException address, its sp field already equals
+         * the real exception-stacktop-minus-4 value); the only thing
+         * missing is the POINTER variable that tells the dispatcher's
+         * post-priority-chain fallback where to find it. Real
+         * hardware: "Returns the address of that structure." */
+        iop_mem_write32(st, IOP_JMPBUF_DEFAULT_PTR_ADDR, IOP_JMPBUF_DEFAULT_STRUCT_ADDR);
+        st->gpr[2] = IOP_JMPBUF_DEFAULT_STRUCT_ADDR;
+        g_hle.reset_entry_int_calls++;
+        g_hle.known_calls_handled++;
+        st->pc      = ra;
+        st->next_pc = ra + 4;
+        return 1;
+    } else if (pc == IOP_HLE_TABLE_C0 && function == IOP_HLE_C0_ENQUEUESYSCALLHANDLER) {
+        /* Round 29 continued: real C(01h) EnqueueSyscallHandler(priority)
+         * - see the IOP_HLE_C0_ENQUEUESYSCALLHANDLER header comment
+         * for the full design rationale (real, position-independent
+         * MIPS trampoline implementing psx-spx's word-for-word
+         * documented SYS(01h)/SYS(02h) behavior, ending at the real,
+         * live-disassembled ReturnFromException address). */
+        install_syscall_handler(st, st->gpr[4]);
         g_hle.known_calls_handled++;
         st->pc      = ra;
         st->next_pc = ra + 4;

@@ -3382,6 +3382,102 @@ from the `0xbfc4d30c` clear loop to find whatever comes after it and
 whether/when the ExCB chain gets rebuilt a second time following that
 clear.
 
+### Round 29 continued (2nd fix, 2026-07-07): real C(01h) EnqueueSyscallHandler + B(18h) ResetEntryInt - forward progress confirmed, ultimate wall still open (real ROM clear-loop timing)
+
+Direct continuation of the same session/investigation, per the user's
+explicit "real implementieren" (implement it for real) after being shown
+that psx-spx documents C(00h)/C(01h)/C(0Ch) only vaguely ("internally
+used to add some default handlers") and asked whether to pursue this.
+
+**Deep live disassembly this round** of the user's real SCPH-10000 dump's
+resident kernel image (dumped IOP RAM at the exact instant these calls
+happen, disassembled offline with Capstone) fully mapped out, for the
+first time, the REAL exception dispatcher's entire body
+(`0x00000c80`-`0x00000e98`) and the REAL `ReturnFromException` routine
+(`0x00000f30`-`0x00001000`), byte-for-byte:
+
+- The dispatcher's entry code re-derives the current TCB via
+  `RAM[0x108]` (PCB pointer) -> `RAM[PCB]` (current-TCB pointer) -> `+8`
+  (TCB body base), saves ALL GPRs/HI/LO/SR/EPC into it, reads
+  `RAM[0x100]` (the ExCB table address - exactly the address this
+  project's earlier B(00h) fix now populates for real) and walks all 4
+  priority chains calling each element's first-function
+  (`jalr $s1`) and, if it returned nonzero, its second-function
+  - byte-for-byte matching psx-spx's documented "Priority Chains"
+  mechanism exactly, including the "second function executes iff func1
+  returns r2<>0" rule.
+- If NOTHING in any chain calls `ReturnFromException` directly, the
+  dispatcher falls through to a `setjmp`/`longjmp`-style restore from a
+  pointer at `RAM[0x7520]` - matching psx-spx's `B(19h) HookEntryInt`
+  documentation's struct layout exactly (ra/sp/fp/s0-7/gp fields).
+  Live-dumping RAM found the STRUCT this points to by default
+  (`RAM[0x00006C34]`) is ALREADY correctly populated by other, already-
+  resident real kernel code (`ra` field == `0x00000f30`, the real
+  `ReturnFromException` address; `sp` field == `0x00008524`, matching
+  "exception stacktop minus 4" against the real `RAM[0x6c30]=0x8528`) -
+  but the POINTER VARIABLE at `RAM[0x7520]` itself stays 0 until
+  `B(18h) ResetEntryInt()` runs, which this project did not previously
+  implement (fell through to the generic default, a no-op).
+- `ReturnFromException` (`0x00000f30`) restores every GPR/HI/LO/SR from
+  the current TCB and finishes with `jr $k0` where `$k0` was loaded
+  from the TCB's own saved "resume PC" field (offset `+0x80`) -
+  confirming this is genuinely the real, complete return-from-exception
+  mechanism, not a partial/incomplete stub.
+
+**Root cause of the STILL-unresolved wall, precisely identified**: the
+real BIOS DOES call `C(01h) EnqueueSyscallHandler(priority=0)` and
+`C(0Ch) InitDefInt(priority=3)` immediately after `B(00h)` succeeds
+(confirmed via a full HLE-call log: instr 84862 and 84868, right after
+the B(00h) alloc at instr 84702) - exactly matching psx-spx's own
+documented usage ("used with prio=0" / "used with prio=3"). Since this
+project did not implement `C(01h)` for real, the priority-0 chain never
+actually got a real `SyscallException`-equivalent handler installed,
+even though `RAM[0x100]` itself was (briefly) valid.
+
+**Fix implemented**: `B(18h) ResetEntryInt()` now writes the real,
+ROM-confirmed constant `RAM[0x00007520] = 0x00006C34` (not a guess -
+the literal immediate value the real ROM code itself uses,
+`addiu $v0,$v0,0x6c34`), matching real hardware's documented behavior.
+`C(01h) EnqueueSyscallHandler(priority)` now installs a real, hand-
+assembled (Keystone), Capstone-round-trip-verified, position-
+independent MIPS machine-code trampoline into the Kernel Memory bump
+allocator (reused across calls, not re-installed) implementing psx-spx's
+own word-for-word documented `SYS(01h)`/`SYS(02h)` behavior
+(`EnterCriticalSection`/`ExitCriticalSection`: clear/set `SR` bits 2 and
+10, with the documented return-value rule for `EnterCriticalSection`),
+re-deriving the current TCB exactly as the real dispatcher's own entry
+code does, and ending by jumping directly to the REAL, live-disassembled
+`ReturnFromException` address (`0x00000f30`) - not a synthetic shortcut,
+genuine MIPS instructions executed by the ordinary IOP interpreter, with
+no new special-cased trap PC. New test `tests/test_iop_syscall_handler.c`
+(26 checks) actually EXECUTES the installed trampoline bytes through the
+real IOP interpreter end-to-end (not just inspects them), for both the
+Enter/ExitCriticalSection paths and the "not our exception" fallthrough.
+64/64 total regression (0 failures), clean Wii/devkitPPC rebuild.
+
+**Honest result, not oversold**: live re-trace confirms both fixes
+genuinely execute on the real boot path (`known_calls_handled` rises
+from 7 to 9), and the syscall-handler chain node is correctly built and
+wired. However, this does NOT change the ultimate observed wall: RAM[0x100]
+still gets wiped by the SAME real ROM clear-loop (`~0xbfc4d2c8-0xbfc4d360`,
+found in the previous fix this round) at IOP instruction 221,259 - nearly
+2.8 million instructions BEFORE the dispatcher actually runs
+(~instruction 3,055,000) - so by the time the dispatcher needs to find
+the priority-0 chain, `RAM[0x100]` is 0 again, and the newly-built
+syscall-handler chain node (which itself survives untouched, since it
+lives above the cleared `0x000-0xf80` range) becomes unreachable. The EE
+and IOP land at the exact same steady-state PCs as before this fix
+(`0x80005e64` / `0x00101280` at 30M IOP instructions), confirmed via
+direct re-trace. The real, precise, and only remaining open question is
+why that clear-loop runs AFTER the real ExCB/PCB/TCB setup succeeds, and
+whether the real BIOS re-establishes `RAM[0x100]`/`RAM[0x108]` a second
+time afterward via some as-yet-untraced path (the full HLE-call log
+shows NO further B(00h) calls anywhere in the 30M-instruction window
+after instruction 85,844, meaning if a second setup pass exists, it does
+not go through the B0/C0 vector mechanism this project intercepts -
+worth tracing directly from the clear-loop's own return address forward,
+rather than backward from the dispatcher, as the next concrete step).
+
 ## GS Round 23: alpha test + alpha blending (TEST_1/ALPHA_1)
 
 

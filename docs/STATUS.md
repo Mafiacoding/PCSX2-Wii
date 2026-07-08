@@ -6013,3 +6013,80 @@ since the 27th finding - which would finally give this project the
 real entry-struct format needed to populate LOADCORE's list with real
 (not fabricated) entries, resolving task #151 at its root instead of
 via the current safe bypass.
+
+## 35th finding (Round 29 continued, task #151/#154 continued): the real boot_info[0x18]/[0x1C] registration-list format, fully reverse-engineered from the live PCSX2 reference debugger
+
+Continuing the 34th finding's live-debugger investigation, traced
+LOADCORE's real entry function (0x1630) past the boot_info field
+reads all the way through its actual use of boot_info[0x18]/[0x1C]
+(loaded into local variables at fp+0x50/fp+0x54 - see the 34th
+finding), and found the exact real mechanism task #151 has been
+missing since the pre-session 27th finding:
+
+**The real call chain, traced instruction-by-instruction:**
+- At 0x18c4/0x18c8, LOADCORE reloads `boot_info[0x18]` into `a2` and
+  `boot_info[0x1C]` into `a1`.
+- `a2` is transformed into a byte count: `(boot_info[0x18] + 1) * 4`.
+- Stack space of that (8-byte-rounded) size is carved out; a fresh
+  buffer pointer is saved into `s0`.
+- `0x2810` is called with `a0 = s0` (dest), `a1 = boot_info[0x1C]`
+  (**the real source pointer**, untouched from the fp+0x54 reload),
+  `a2` = the byte count above. Disassembling `0x2810` shows it is a
+  literal `memcpy`/`memmove` (byte-copy loop with an overlap-direction
+  check) - i.e. this is a real, confirmed **memcpy of
+  `boot_info[0x18]+1` words from the real address in `boot_info[0x1C]`
+  into a local stack buffer.**
+- The copied buffer is then walked word-by-word starting at 0x1918.
+  Each word's bit 0 selects one of two entry kinds:
+  - **bit0 = 1**: a pure "phase tag" marker. The tag itself is
+    `word >> 2` (saved to `s1`); the walker advances by exactly one
+    word and continues (no header parsing this iteration).
+  - **bit0 = 0**: the word instead holds a **pointer to a real module
+    image header located elsewhere in memory**. This pointer is
+    passed to `0x2890`.
+- `0x2890` is a real COFF/ELF header-format sniffer and field-copier:
+  it recognizes an ECOFF/COFF-style header via magic `0x162` (the
+  well-known real `MIPSELMAGIC` constant from little-endian MIPS COFF
+  object headers) with secondary validation fields at header offsets
+  `+0x14` (must be `0x107`), `+0x10` (masked `0x2FFFF`, must be
+  `0x38`), and cross-checks a size field at `a1+8` against `a2+0x14`;
+  on match it copies text/data/bss/entry/gp-style fields out to an
+  output descriptor. It separately recognizes an ELF-header-shaped
+  structure via a distinct set of offset checks (`+4==0x101`,
+  `+0x12==8`, `+0x2A==0x20`, `+0x2C==2` - consistent with real
+  ELF32 `e_machine=EM_MIPS(8)` / `e_phentsize=0x20` style fields at
+  non-standard offsets, i.e. a project/kernel-specific header layout
+  built around a real ELF header rather than a raw standard `Elf32_Ehdr`).
+- The walker continues until it reads a **zero word** (list
+  terminator) at `s0`, at which point it falls into further
+  finalization code (0x1B08 onward) rather than looping again.
+- The failure path (return code not recognized) jumps to **the exact
+  same panic sequence bytes this project's `is_loadcore_panic_loop()`
+  already recognizes** (`sb v0,(v1); j self` at 0x1c00) - direct,
+  independent, real-hardware confirmation that this project's task
+  #148 panic-loop signature is matching the correct, real code path,
+  not a coincidental byte pattern.
+
+**What this means for task #151:** `boot_info[0x18]` is not an opaque
+flag - it is a real **word count minus one**, and `boot_info[0x1C]` is
+a real **pointer to a zero-terminated array of tag/pointer words**,
+where pointer words reference real COFF- or ELF-shaped module image
+headers elsewhere in IOP RAM. This is concrete enough to actually
+build: this project's own loader already parses every boot-list
+module's real header while loading it (`iop_module_loader.c`); the
+real fix would be to keep each loaded module's header resident,
+build a zero-terminated tag/pointer array referencing them (using the
+now-known bit0/tag-shift/pointer encoding and the COFF/ELF field
+offsets above), and point `boot_info[0x18]`/`[0x1C]` at that real
+array - replacing the current safe bypass (`is_unconditional_trap_stub`
+/ `is_loadcore_panic_loop`, task #148/#152) with a genuine fix rather
+than a recognize-and-skip workaround.
+
+This is not yet implemented - this finding is investigation-only (no
+source changed), and confirms the structural facts above, not
+specific byte values, consistent with the project's standing rule
+against reproducing any real BIOS/game bytes. Task #151 remains
+open, but is now unblocked in the sense that matters most: the real
+target format is fully known. Implementing it is real, nontrivial
+work (constructing valid COFF/ELF-shaped headers this project's own
+loader can point to) and is the natural next step.

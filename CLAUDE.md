@@ -2313,3 +2313,33 @@ upstream references. Task #151 remains open; next step would be
 tracing 0x1c70's caller to determine if it's really LOADCORE's
 registration-list walker, which would finally supply the real entry-
 struct format needed to close task #151 at its root.
+
+## Update (Round 29 continued, 35th finding): real boot_info[0x18]/[0x1C] registration-list format fully reverse-engineered (Task #151/#154 continued)
+
+Traced LOADCORE's real entry function (0x1630) on the live PCSX2
+reference debugger past where it re-reads boot_info[0x18]/[0x1C], all
+the way to their actual use:
+
+- `boot_info[0x1C]` is copied (via a real memcpy at 0x2810) as the
+  **source pointer**, `(boot_info[0x18]+1)*4` as the **byte count**,
+  into a local buffer LOADCORE then walks word-by-word.
+- Each word: bit0=1 -> phase tag (`word>>2`), advance one word. bit0=0
+  -> pointer to a real module image header, passed to a real
+  COFF/ELF-header-sniffer function (0x2890) that recognizes COFF via
+  magic `0x162` (real MIPSELMAGIC) or an ELF-shaped header via
+  `e_machine`/`e_phentsize`-style field checks, then copies
+  text/data/bss/entry/gp fields to an output descriptor.
+- List ends on a zero word. The failure/unrecognized path jumps to
+  **the exact same panic bytes** this project's `is_loadcore_panic_loop()`
+  (task #148) already recognizes - independent confirmation that
+  signature is correct.
+
+Conclusion: `boot_info[0x18]` = real word count minus one,
+`boot_info[0x1C]` = real pointer to a zero-terminated tag/pointer
+array. Task #151's real fix is now concretely buildable: construct
+real COFF/ELF-shaped headers for this project's own already-loaded
+modules, build the tag/pointer array pointing at them, and set
+boot_info accordingly - replacing the current safe bypass with a real
+fix. Not implemented yet - this round was investigation only, no
+source changed. Nothing from the live reference instance's real memory
+is reproduced verbatim in this project.

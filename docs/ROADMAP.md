@@ -1368,6 +1368,23 @@ already documented, rather than truly returning from the syscall.
    0x1c70 matching the 27th finding's "phase-tagged list" description,
    not yet confirmed as the actual gate on task #151. No source
    changed - pure investigation. See STATUS.md's 34th finding.
+   UPDATE (Round 29 continued, 35th finding, task #151/#154
+   continued): fully reverse-engineered the real boot_info[0x18]/
+   [0x1C] format from the live debugger. boot_info[0x18] = real word
+   count minus one; boot_info[0x1C] = real pointer to a
+   zero-terminated array of tag/pointer words (bit0=1 -> phase tag =
+   word>>2; bit0=0 -> pointer to a real COFF (MIPSELMAGIC 0x162) or
+   ELF-shaped module header, parsed by a real header-sniffer
+   function). Confirmed the failure path lands in the exact same
+   panic-sequence bytes this project's task #148
+   `is_loadcore_panic_loop()` already recognizes - independent
+   real-hardware validation of that signature. Task #151 is now
+   unblocked in the sense that the real target format is fully known;
+   implementing a real fix (building real COFF/ELF-shaped headers for
+   this project's own loaded modules and pointing boot_info at them)
+   is the natural next step, replacing the current safe bypass. Not
+   yet implemented - investigation only. See STATUS.md's 35th
+   finding.
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the
    register-block entry in section 7 above. Register-level scaffold

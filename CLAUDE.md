@@ -1663,3 +1663,21 @@ wall by itself - that still needs backward disassembly from IOP RAM
 0x1011ac. Verified: clean Wii rebuild (exit 0), 67-test host-native
 regression suite (0 failures). See docs/STATUS.md's "Round 29
 continued (6th change)" section.
+
+**Update (Round 29 continued, 7th finding, same session)**: continued
+task #124/#132 (per the user's "erledige alle Aufgaben soweit wie
+moeglich" - do all tasks as far as possible - instruction) with full
+dynamic instruction tracing instead of static disassembly guessing.
+Corrected the 5th finding's "resembles a device table" guess: the
+retry loop's list is confirmed genuinely empty via live trace (`lw
+$v0,8($s0); beqz $v0,0x101188` - branch taken), traced one level
+further back to a specific stack slot (`$fp+0x40`) that's zero/null
+when a real IOP routine runs around IOP instruction 3.05M (deep inside
+the LOGO-module window, not near the C(0Ch) InitDefInt call at
+instruction 84868 - so probably NOT InitDefInt despite the tempting
+docs match). No code change this round - pure diagnostic progress,
+documented in docs/STATUS.md's "Round 29 continued (7th finding)"
+section. Next step: trace backward from this routine's entry/call site
+to find the real missing data source. Pausing this specific thread
+here (diminishing returns without much more tracing) to pick up other
+ROADMAP items per the user's "as far as possible" instruction.

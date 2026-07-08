@@ -693,6 +693,23 @@ instead of fully emulating the real IOP BIOS ROM.
       continued (5th finding + fix)" section for the full trace and
       the concrete next step (disassemble backward from 0x1011ac to
       find what condition each retry pass actually tests).
+- [ ] **7th finding (2026-07-08)**: full dynamic instruction tracing
+      (not static disassembly) pinpointed the retry loop's root cause
+      precisely: a specific stack slot (`$fp+0x40`) that a real IOP
+      routine reads is zero/null at the time it runs, causing it to
+      skip building its entry list entirely, leaving the list the
+      4-pass retry loop walks genuinely empty on every pass. This
+      routine is NOT the ROM-resident exception dispatcher already
+      mapped this session, and its timing (~3.05M IOP instructions in,
+      deep inside the LOGO-module execution window) makes it unlikely
+      to be C(0Ch) InitDefInt directly, despite InitDefInt's
+      documented job ("add some default IRQ and Exception handlers")
+      being a tempting surface match. Most likely owner: the
+      LOGO-loading IRX module itself, or a kernel helper it calls.
+      Next step: trace backward from this routine's own entry/call
+      site to find what real data source should have supplied
+      `$fp+0x40` and why it's empty in this emulation. See
+      docs/STATUS.md's "Round 29 continued (7th finding)" section.
 - [x] **6th change (2026-07-08)**: real A(96h) AddCDROMDevice() and
       A(97h) AddMemCardDevice(), per explicit user request ("add both
       as active devices, not as demo"). Implemented as real, queryable

@@ -4409,3 +4409,70 @@ TARGET=boot`, exit 0, only the pre-existing unrelated
 `iop_module_loader.c` strncpy warning), full host-native regression
 suite (67 test binaries including this round's new
 `test_iop_device_registration.c`, 0 failures).
+
+## Round 29 continued (7th finding, 2026-07-08): full execution trace pinpoints the exact empty list causing the panic
+
+Continuing task #124/#132 with full instruction-level tracing (not
+static disassembly guesswork) from IOP instruction 3054991 (the last
+named HLE call before the wall) through to the panic at 0x101280.
+
+**Corrected an error from the 5th finding's write-up**: static
+disassembly of 0x101100-0x101288 in isolation suggested a self-
+contained "4-pass retry loop over a device-driver-like table". Full
+dynamic tracing shows the real picture is more specific: a much larger
+routine (spanning roughly 0x100d80-0x101e90+, running through several
+internal helper calls including two real initialization/copy loops -
+one real, bounded 912-iteration loop at 0x101e48 that completes
+normally) eventually reaches its core dispatch logic at 0x100f9c,
+which checks `lw $v0, 8($s0); beqz $v0, 0x101188` - i.e., "if this
+list's first-entry field is zero, skip the whole per-entry dispatch
+loop". The live trace confirms this branch IS taken - the list is
+genuinely empty (`8($s0) == 0`) - so the inner `jalr`-based dispatch
+loop (the "device table walker" described in the 5th finding) never
+actually executes even once; execution instead jumps straight to
+0x101188, which feeds directly into the 4-pass retry loop
+(0x1011ac-0x101270) with nothing to process on any pass, and falls
+into the panic at 0x101280 exactly as before.
+
+**Traced the empty list one level further back**: the list at `$s0` is
+populated (a few thousand instructions earlier, ~0x100eec-0x100f24) by
+copying `RAM[$fp+0x40]`-many entries from address `RAM[$fp+0x40]`
+itself (i.e., `$fp+0x40` is a local/parameter slot holding both a
+"how many" and "from where" reference used together) into a freshly
+stack-allocated buffer - but only if `RAM[$fp+0x40] != 0` first (`lw
+$a0, 0x40($fp); beqz $a0, 0x100f44` at 0x100eec/0x100ef4). The live
+trace confirms THIS branch is also taken (the copy is skipped
+entirely), meaning `$fp+0x40` - some parameter or upstream value this
+particular call received - was itself zero/null at the time this
+routine ran.
+
+**What this rules in/out**: this specific code is NOT the ROM-resident
+exception dispatcher (0xc80-0xe98) already fully mapped earlier this
+session, and the timing (this routine runs ~3.05M IOP instructions
+in, i.e. deep inside the ~2.8M-instruction LOGO-module execution
+window from the 3rd finding, not near the C(0Ch) InitDefInt call at
+instruction 84868) makes it very unlikely to be directly InitDefInt's
+own code - despite InitDefInt(priority=3) being psx-spx-documented as
+"internally used to add some default IRQ and Exception handlers" (a
+tempting, but - on this timing evidence - probably coincidental,
+match). The much likelier owner of this code is the LOGO-loading IRX
+module itself (or a kernel helper it calls), processing some kind of
+caller-supplied list/table (asset chunks, draw commands, or similar)
+that is legitimately allowed to be empty/absent in this call, but
+which - when empty - runs out a bounded retry budget and hits a
+hardcoded panic rather than degrading gracefully.
+
+**Status**: root cause is now empirically pinpointed to a specific
+zero/null value at a specific stack slot in a specific real routine,
+which is much more actionable than the 5th finding's "resembles a
+device table" guess - but identifying WHERE that zero value should
+instead be coming from (what real data this project isn't yet
+providing, and from what real source: BIOS ROM resource table, disc
+data, or an earlier IOP RAM structure this project doesn't populate)
+needs at least one more round of backward tracing from this routine's
+own call site/entry point, which was not reached within this round's
+time budget. Task #124/#132 remains open with this sharpened target.
+
+No code changes this round (pure diagnostic/tracing work); no test,
+build, or commit needed for this specific finding, but see below for
+this session's next change.

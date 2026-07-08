@@ -503,6 +503,32 @@ static int iop_step(void)
         case 0x27: /* NOR */  if (rd) GPR(rd) = ~(rs32 | rt32); break;
         case 0x2A: /* SLT */  if (rd) GPR(rd) = ((int32_t)rs32 < (int32_t)rt32) ? 1 : 0; break;
         case 0x2B: /* SLTU */ if (rd) GPR(rd) = (rs32 < rt32) ? 1 : 0; break;
+        case 0x30: /* TGE - Trap if Greater or Equal (signed). Task #150:
+             * this opcode was first observed as an "unimplemented
+             * SPECIAL funct 0x30" halt at pc=0x800000AC, reached after
+             * task #149's syscall-return fix let a second real syscall
+             * fall through the still-unclaimed general exception
+             * vector and re-walk that low-memory region. Real MIPS
+             * trap semantics (condition-taken raises a Trap exception,
+             * ExcCode=13 pre-shifted to bits 2-6 as 0x34; condition-
+             * not-taken is a pure no-op with no side effects at all -
+             * not even implicitly falling through like a branch, since
+             * there's no delay slot for trap instructions). Delivery
+             * mirrors this file's own existing SYSCALL exception path
+             * exactly (EPC=this instruction's own address, PC vectors
+             * to 0xBFC00180/0x80000080 depending on Status.BEV, same
+             * Status KU/IE stack left-shift-by-2 push) - the same
+             * real R3000A exception-delivery mechanism, just a
+             * different ExcCode and trigger condition. */
+            if ((int32_t)rs32 >= (int32_t)rt32) {
+                st->cop0[13] = (st->cop0[13] & ~0x7Fu) | 0x34u; /* Cause.ExcCode = 13 (Trap) */
+                st->cop0[14] = this_pc; /* EPC */
+                uint32_t vector = (st->cop0[12] & 0x400000u) ? 0xBFC00180u : 0x80000080u; /* Status.BEV */
+                st->pc = vector;
+                st->next_pc = vector + 4;
+                st->cop0[12] = (st->cop0[12] & ~0x3Fu) | ((st->cop0[12] & 0x0Fu) << 2); /* Status stack push */
+            }
+            break;
         default:
         {
             char buf[96];

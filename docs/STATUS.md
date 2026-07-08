@@ -5635,3 +5635,65 @@ vermutlich muss entweder `TGE` (Trap if Greater or Equal) als
 Opcode implementiert werden, oder es handelt sich um ein weiteres
 Symptom desselben architektonischen Grundproblems (fehlender echter
 Exception-Handler), das an einer neuen Stelle sichtbar wird.
+
+## 30th finding/change (Round 29 continued): TGE implemented; real-BIOS testing reveals a non-halting retry loop (task #150)
+
+Note: per user direction, documentation from this point forward is
+written in English (the chat itself may still be conducted in
+German - this only affected doc language, not process).
+
+**Root cause of the `pc=0x800000AC`/"unimplemented SPECIAL funct
+0x30" halt** (see the 29th finding): after task #149's syscall-return
+fix, a second real syscall in INTRMANP's init falls through the same
+still-unclaimed general exception vector down a different path and
+reaches a genuine `TGE` (Trap if Greater or Equal) instruction, which
+this interpreter had never implemented.
+
+**Fix** (`source/core/iop/iop_core.c`, SPECIAL funct `0x30`): real
+MIPS trap semantics. If signed `rs >= rt`, raises a Trap exception
+(`Cause.ExcCode=13`, pre-shifted into bits 2-6 as `0x34`), `EPC` set
+to the TGE instruction's own address, PC vectors to `0xBFC00180` or
+`0x80000080` per `Status.BEV` - the exact same delivery mechanism as
+this file's existing SYSCALL case, just a different ExcCode/trigger.
+If the condition is false, TGE is a pure no-op: no exception, no
+delay slot, no side effect of any kind.
+
+New test `tests/test_iop_tge.c` (13 checks, synthetic only): covers
+both outcomes. Trap-taken (5>=3) verifies Cause/EPC/PC vectoring
+matches the SYSCALL pattern exactly, just with ExcCode 13. Trap-not-
+taken (3>=5 is false) verifies Cause and EPC are completely untouched
+and that execution falls through normally to a following marker
+instruction, then reaches a trailing BREAK cleanly. Full 85-block
+regression suite passes (84 previously + this new one); clean Wii
+rebuild verified (only the known harmless `strncpy` warning).
+
+**Honest real-BIOS follow-up**: this specific halt is gone, but
+host-native testing against the actual SCPH-10000 BIOS (`diag85`,
+100M-slice budget, periodic PC sampling) shows the IOP does NOT make
+further real boot progress after this fix. Instead it settles into a
+tight, non-halting loop cycling through roughly 11 instructions in
+the `0x80000080`-`0x800000A8` range, forever - sampled PC values at
+5M-slice intervals show the exact same small set of addresses
+repeating in the same order indefinitely, with no forward movement
+into new code. The most likely explanation: a real syscall is being
+re-issued repeatedly, each time falling through to the still-
+unclaimed vector and getting task #149's stub return value (`$v0=0`)
+- and `0` apparently does not satisfy whatever condition the calling
+code is polling for, so it retries indefinitely instead of proceeding
+(or halting).
+
+This is the same class of finding as the 27th finding's LOADCORE
+registration-list closure (#124/#132): an honest architectural stop,
+not a crash, not a test artifact, and not a regression - real
+forward motion (past BREAK@0x18) has already been demonstrated in the
+29th finding. It is deliberately NOT pursued further this round: doing
+so would require reverse-engineering which real kernel service this
+specific repeated syscall expects and constructing a plausible non-
+zero return value or real handler behavior for it, which carries the
+same "guessing at real subsystem semantics" risk this project has
+consistently declined to take without stronger evidence (see the
+27th finding's registration-list writeup for the precedent). This has
+been left as an open task (#151) for whoever continues this thread,
+with the exact PC range and the `diag85`-style sampling technique
+documented here so it doesn't need to be rediscovered from scratch.
+

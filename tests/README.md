@@ -1956,3 +1956,38 @@ halting when the signature is reached.
 gcc -I../include -I../source -o test_iop_loadcore_panic_bypass tests/test_iop_loadcore_panic_bypass.c ../source/core/iop/iop_core.c ../source/hw/iop_elf.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_cdvd.c ../source/hw/iop_spu2.c
 ./test_iop_loadcore_panic_bypass
 ```
+
+`test_iop_tge.c` covers `iop_core.c`'s TGE (Trap if Greater or Equal,
+SPECIAL funct 0x30) implementation, added task #150. Found as an
+"unimplemented SPECIAL funct 0x30" halt at `pc=0x800000AC` after task
+#149's syscall-return fix let a second real syscall fall through the
+still-unclaimed general exception vector and re-walk that region down
+a different path, reaching a genuine TGE instruction. Real MIPS trap
+semantics: if signed `rs >= rt`, raises a Trap exception
+(`Cause.ExcCode=13`, pre-shifted to bits 2-6 as `0x34`), `EPC` set to
+the TGE's own address, PC vectors per `Status.BEV` - mirrors this
+file's existing SYSCALL exception delivery exactly, just a different
+ExcCode/trigger. If the condition is false, TGE is a pure no-op (no
+exception, no delay slot, no side effect at all). 13 checks across
+both outcomes: trap-taken path verifies Cause/EPC/PC vectoring;
+trap-not-taken path verifies Cause/EPC are completely untouched and
+execution falls through normally to a following marker instruction.
+
+Real-BIOS follow-up (see docs/STATUS.md's 30th finding): with TGE
+implemented, this specific halt is gone, but host-native testing
+against the actual SCPH-10000 BIOS shows the IOP does not make
+further real boot progress either - it settles into a tight,
+non-halting loop cycling through roughly 11 instructions in the
+`0x80000080`-`0x800000A8` range forever (a real syscall re-issued,
+returning the same stub `0` via task #149's fix, apparently not
+satisfying whatever condition the calling code is polling for, so it
+retries indefinitely). This is the same class of finding as
+#124/#132's LOADCORE registration list: an honest architectural stop,
+not a crash, and not further pursued this round since it would
+require implementing whatever real kernel service this repeated
+syscall actually expects.
+
+```sh
+gcc -I../include -I../source -o test_iop_tge tests/test_iop_tge.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
+./test_iop_tge
+```

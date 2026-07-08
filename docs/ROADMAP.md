@@ -1274,6 +1274,23 @@ already documented, rather than truly returning from the syscall.
    clean Wii rebuild verified. The new `pc=0x800000AC`/`unimplemented
    SPECIAL funct 0x30` stop is not yet root-caused - that's the
    natural next step for whoever continues this thread.
+   UPDATE (Round 29 continued, 30th change, task #150): root-caused
+   as a real `TGE` (Trap if Greater or Equal) instruction and
+   implemented (`source/core/iop/iop_core.c`, SPECIAL funct 0x30)
+   with real MIPS trap semantics - Trap exception (ExcCode=13) if
+   signed rs>=rt, pure no-op otherwise, same delivery mechanism as
+   SYSCALL. Tested via `tests/test_iop_tge.c` (13 checks, both
+   trap-taken and trap-not-taken paths). Full 85-block regression
+   suite passes; clean Wii rebuild verified. HONEST FINDING: real-BIOS
+   testing (`diag85`, 100M slices) shows this specific halt is gone,
+   but the IOP does not progress further either - it settles into a
+   tight, non-halting loop cycling through ~11 instructions in the
+   `0x80000080`-`0x800000A8` range forever (a real syscall re-issued
+   repeatedly, apparently not satisfied by task #149's stub 0 return
+   value). Same class of finding as #124/#132's LOADCORE closure: an
+   honest architectural stop, not pursued further this round. See
+   STATUS.md's 30th finding for full detail. Open follow-up: task
+   #151.
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the
    register-block entry in section 7 above. Register-level scaffold

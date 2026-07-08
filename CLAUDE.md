@@ -2155,3 +2155,32 @@ verifiziert (nur die bekannte harmlose `strncpy`-Warnung).
 Nächster natürlicher Schritt: `pc=0x800000AC`/"unimplemented SPECIAL
 funct 0x30" root-causen (vermutlich `TGE`-Opcode implementieren oder
 ein weiteres Symptom desselben Exception-Handler-Grundproblems).
+
+## Update (Round 29 continued, 30th change): TGE implemented, real-BIOS retry loop found (Task #150)
+
+Root cause of the `pc=0x800000AC`/"unimplemented SPECIAL funct 0x30"
+halt: a real TGE (Trap if Greater or Equal) instruction, reached when
+a second real syscall in INTRMANP falls through the still-unclaimed
+exception vector down a different path than task #149's fix handled.
+
+Fix in `source/core/iop/iop_core.c` (SPECIAL funct 0x30): real MIPS
+trap semantics - Trap exception (`Cause.ExcCode=13`) if signed
+`rs>=rt`, same delivery as SYSCALL; pure no-op otherwise (no
+exception, no side effect). New test `tests/test_iop_tge.c` (13
+checks, both outcomes). Full 85-block regression suite passes; clean
+Wii rebuild verified (only the known harmless `strncpy` warning).
+
+**Honest finding**: with TGE implemented, this specific halt is gone,
+but real-BIOS testing (`diag85`, 100M-slice sampling) shows the IOP
+does not advance further - it settles into a tight, non-halting loop
+cycling through ~11 instructions in the `0x80000080`-`0x800000A8`
+range forever. Likely cause: a real syscall re-issued repeatedly,
+never satisfied by task #149's stub `$v0=0` return value, so the
+calling code retries indefinitely instead of proceeding. Same class
+of finding as #124/#132's LOADCORE registration-list closure - an
+honest architectural stop, not pursued further this round. Left open
+as task #151 (documented with the exact PC range and sampling
+technique so it doesn't need rediscovery).
+
+Per user direction, documentation is now written in English going
+forward (chat itself remains in whatever language the user uses).

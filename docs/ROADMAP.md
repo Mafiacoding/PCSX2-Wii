@@ -1226,15 +1226,16 @@ already documented, rather than truly returning from the syscall.
    and microcode interpreter both exist (Round 13/14). QMFC2/QMTC2/
    CFC2/CTC2 (32/128-bit transfers) and a growing set of macro-mode
    vector ops (VSUB/VISWR/VSQI/VIADD/VISUB/VIAND/VIOR from round 13;
-   VADD/VMUL/VIADDI added Round 29 continued's 11th change) are wired
-   up and tested. Real BIOS boot code very likely uses VU0 macro mode
-   for the splash screen's transform/lighting math - NOT YET REACHED by
-   the current boot trace (EE is still steady-state SIF-polling), so
-   this remains readiness work rather than a wall-clearing fix. Open:
-   VMAX/VMSUB/VOPMSUB/VMINI (VSUB/VADD/VMUL's row siblings), the
-   broadcast forms (VADDx/y/z/w etc), the accumulator forms (VADDA/
-   VMULA/VMADD/VMSUB), and the memory-access family beyond VISWR/VSQI
-   (VILWR/VLQI/VLQD/VSQD/VDIV/etc).
+   VADD/VMUL/VIADDI added Round 29 continued's 11th change; VMAX/VMINI
+   added Round 29 continued's 16th change) are wired up and tested.
+   Real BIOS boot code very likely uses VU0 macro mode for the splash
+   screen's transform/lighting math - NOT YET REACHED by the current
+   boot trace (EE is still steady-state SIF-polling), so this remains
+   readiness work rather than a wall-clearing fix. Open: VMSUB/VOPMSUB
+   (the two remaining row siblings), the broadcast forms (VADDx/y/z/w
+   etc), the accumulator forms (VADDA/VMULA/VMADD/VMSUB), and the
+   memory-access family beyond VISWR/VSQI (VILWR/VLQI/VLQD/VSQD/
+   VDIV/etc).
 
 4. **VIF UNPACK** (section 4) - DONE (Round 20). Real vertex/
    texture/attribute data now flows from EE RAM into VU0/VU1 local

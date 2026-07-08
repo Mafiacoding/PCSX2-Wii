@@ -4915,3 +4915,35 @@ Remaining, explicitly still open: CLAMP/TEX2/SCISSOR/FBA are not
 modeled at all yet (for either context) - a separate, larger gap,
 since (unlike TEX1/MIPTBP) these registers don't exist anywhere in
 this codebase yet to extend.
+
+## Round 29 continued (16th change: EE COP2 VMAX/VMINI added to VU0 macro datapath)
+
+Extended the VADD/VMUL/VSUB row (Round 13's VSUB, this round's earlier
+10th change's VADD/VMUL - all COP2 CO-format, `funct` field
+distinguishing the specific op) with `VMAX` (funct 0x2B) and `VMINI`
+(funct 0x2F). Same 3-operand full-vector shape as VADD/VMUL/VSUB:
+`FD[lane] = FS[lane] OP FT[lane]` per lane selected by destmask,
+operating on the reinterpreted bit patterns as real `float`.
+
+Ported from PCSX2 upstream's own `VUops.cpp` `_vuMAX`/`_vuMINI`, which
+use `applyMinMax<fp_max>(VU)`/`applyMinMax<fp_min>(VU)` - a plain
+float max/min comparison per lane (`fp_max(a,b)`/`fp_min(a,b)`), with
+no NaN/signed-zero special-casing. Implemented here as the equally
+plain C ternary `(a > b) ? a : b` / `(a < b) ? a : b`, consistent with
+this project's existing float datapath not modeling NaN/signed-zero
+edge cases anywhere else either (VADD/VMUL/VSUB, the FPU accumulator
+family, etc. all use plain C arithmetic on the reinterpreted bits).
+
+VMSUB/VOPMSUB remain the two still-unimplemented ops in this SPECIAL1
+CO-format arithmetic row - not added this round.
+
+New test `tests/test_ee_cop2_arith3.c` (4 checks): loads VF1=(2,-3,4,-5)
+and VF2=(1,1,10,-10) via LQ+QMTC2, executes `VMAX.xyzw VF3,VF1,VF2`
+and verifies the per-lane max (2,1,10,-5); executes `VMINI.xyzw
+VF4,VF1,VF2` and verifies the per-lane min (1,-3,4,-10); executes
+`VMAX.x VF5,VF1,VF2` (single-lane destmask, VF5 starts at 0) and
+verifies only the X lane changed while Y stayed 0, proving the
+destmask is honored per-lane rather than always writing the full
+vector. Full 73-block regression suite passes (72 pre-existing + this
+new one); clean Wii rebuild verified (only the pre-existing, harmless
+`strncpy` truncation warning in `iop_module_loader.c`).

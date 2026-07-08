@@ -1540,20 +1540,24 @@ static int ee_step(void)
             uint32_t fs = (instr >> 11) & 0x1Fu;
             uint32_t fd = (instr >> 6) & 0x1Fu;
 
-            if (funct == 0x28 || funct == 0x2A || funct == 0x2C) {
-                /* VADD(0x28)/VMUL(0x2A)/VSUB(0x2C): FD[lane] = FS[lane]
-                 * (+|*|-) FT[lane], real float arithmetic on the
-                 * reinterpreted bit patterns, for each lane selected
-                 * by destmask. Round 13 implemented VSUB only; VADD
-                 * and VMUL are the same 3-operand full-vector shape
-                 * (confirmed against PCSX2's own R5900OpcodeTables.cpp
-                 * SPECIAL1 table: funct 0x28=VADD, 0x2A=VMUL, both in
-                 * the same row as VSUB/VMAX/VMSUB/VOPMSUB/VMINI) and
-                 * are the two ops real BIOS VU0-macro transform/
-                 * lighting math (dot-products = multiply-then-add
-                 * chains) is most likely to need next - see
-                 * docs/ROADMAP.md section 5 item 3. VMAX/VMSUB/
-                 * VOPMSUB/VMINI (the rest of this row) are not added
+            if (funct == 0x28 || funct == 0x2A || funct == 0x2B || funct == 0x2C || funct == 0x2F) {
+                /* VADD(0x28)/VMUL(0x2A)/VMAX(0x2B)/VSUB(0x2C)/
+                 * VMINI(0x2F): FD[lane] = FS[lane] OP FT[lane], real
+                 * float arithmetic/comparison on the reinterpreted
+                 * bit patterns, for each lane selected by destmask.
+                 * Round 13 implemented VSUB only; VADD/VMUL (Round 29
+                 * continued, 10th change) and VMAX/VMINI (Round 29
+                 * continued, 16th change) are the same 3-operand
+                 * full-vector shape (confirmed against PCSX2's own
+                 * R5900OpcodeTables.cpp SPECIAL1 table row: funct
+                 * 0x28=VADD, 0x2A=VMUL, 0x2B=VMAX, 0x2C=VSUB,
+                 * 0x2F=VMINI - VMAX/VMINI ported from PCSX2's own
+                 * VUops.cpp _vuMAX/_vuMINI, which use a plain fp_max/
+                 * fp_min comparison - a straightforward C ternary
+                 * comparison here, consistent with this project not
+                 * modeling any NaN/signed-zero edge cases anywhere
+                 * else in its float datapath either). VMSUB/VOPMSUB
+                 * (the two remaining ops in this row) are not added
                  * yet - not seen in the traced boot path, a scoped
                  * future gap like VIAND/VIOR's siblings below. */
                 for (int lane = 0; lane < 4; lane++) {
@@ -1565,6 +1569,8 @@ static int ee_step(void)
                     memcpy(&b, &ub, 4);
                     if (funct == 0x28) r = a + b;
                     else if (funct == 0x2A) r = a * b;
+                    else if (funct == 0x2B) r = (a > b) ? a : b;
+                    else if (funct == 0x2F) r = (a < b) ? a : b;
                     else r = a - b;
                     memcpy(&ur, &r, 4);
                     vu0_vf_write_lane(st, fd, (uint32_t)lane, ur);

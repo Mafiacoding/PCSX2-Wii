@@ -1841,3 +1841,22 @@ mipmap/context2 tests still pass unchanged. Full 72-block regression
 passes, clean Wii rebuild verified. CLAMP/TEX2/SCISSOR/FBA remain
 entirely unmodeled - a separate, bigger gap since those registers
 don't exist in this codebase at all yet.
+
+## Update (Round 29 continued, 16th change - EE COP2 VMAX/VMINI added)
+
+Extended the VADD/VMUL/VSUB COP2 CO-format arithmetic row (Round 13's
+VSUB, this round's earlier 10th change's VADD/VMUL) with VMAX (funct
+0x2B) and VMINI (funct 0x2F) - same 3-operand full-vector shape, per
+lane selected by destmask. Ported from PCSX2 upstream's own
+VUops.cpp _vuMAX/_vuMINI (applyMinMax<fp_max>/applyMinMax<fp_min> -
+plain float max/min, no NaN/signed-zero special-casing), implemented
+as the equally plain C ternary comparison, consistent with this
+project's existing float datapath elsewhere. New test
+tests/test_ee_cop2_arith3.c (4 checks, all passing): VMAX.xyzw and
+VMINI.xyzw per-lane results verified against hand-computed values;
+VMAX.x (single-lane destmask) verified to only write that one lane.
+Full 73-block regression suite passes (72 pre-existing + this new
+one), clean Wii rebuild verified (only the pre-existing, harmless
+strncpy truncation warning in iop_module_loader.c). VMSUB/VOPMSUB
+remain the two still-unimplemented ops in this row - not added this
+round.

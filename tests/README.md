@@ -1685,3 +1685,18 @@ correctly rejected.
 gcc -I../include -o test_iop_cdvd tests/test_iop_cdvd.c ../source/hw/iop_cdvd.c
 ./test_iop_cdvd
 ```
+
+`test_ee_cop2_arith3.c` covers Round 29 continued's 16th change -
+extending the VADD/VMUL/VSUB row (Round 13's VSUB, Round 29
+continued's 10th change's VADD/VMUL) with `VMAX` (funct 0x2B) and
+`VMINI` (funct 0x2F), the same 3-operand full-vector shape, ported
+from PCSX2's own `VUops.cpp` `_vuMAX`/`_vuMINI` (a plain float max/min
+comparison per lane, no NaN/signed-zero special handling). 4 checks:
+`VMAX.xyzw` computes the correct per-lane max; `VMINI.xyzw` computes
+the correct per-lane min; a single-lane destmask (`VMAX.x`) only
+writes that one lane.
+
+```sh
+gcc -I../include -I../source -o test_ee_cop2_arith3 tests/test_ee_cop2_arith3.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
+./test_ee_cop2_arith3
+```

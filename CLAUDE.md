@@ -1896,3 +1896,19 @@ passing). Full 75-block regression suite passes, clean Wii rebuild
 verified (only the pre-existing strncpy warning). VMADDx/y/z/w
 /VMSUBx/y/z/w (ACC-based broadcast) and VMULq/VMAXi/VMULi/VMINIi
 (Q/I-register broadcast) remain open, scoped follow-ups.
+
+## Update (Round 29 continued, 19th change - EE COP2 broadcast row completed)
+
+Closed the last two follow-ups from the 18th change, completing the
+entire funct 0x00-0x2F COP2 CO-format arithmetic space: VMADDx/y/z/w
+/VMSUBx/y/z/w (funct 0x08-0x0F, ACC-based broadcast) and
+VMULq/VMAXi/VMULi/VMINIi (funct 0x1C-0x1F, which broadcast the Q/I
+control registers - cop2_ctrl[22]/[21] - instead of an FT lane,
+confirmed these ops take no FT operand via real PCSX2 upstream's
+DisR5900asm.cpp). Refactored the dispatch into a single funct<=0x1F
+branch. New test tests/test_ee_cop2_broadcast2.c (7 checks, all
+passing) sets Q/I via real CTC2, pokes vu0_acc directly. Full
+76-block regression suite passes, clean Wii rebuild verified. Open
+VU0 macro-mode gaps now: the accumulator-writing family (COP2SPECIAL2
+table), VABS/VCLIPw, VMOVE/VMR32, memory-access beyond VISWR/VSQI,
+and VDIV/VSQRT/VRSQRT.

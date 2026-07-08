@@ -1575,40 +1575,71 @@ static int ee_step(void)
                     memcpy(&ur, &r, 4);
                     vu0_vf_write_lane(st, fd, (uint32_t)lane, ur);
                 }
-            } else if (funct <= 0x07 || (funct >= 0x10 && funct <= 0x1B)) {
-                /* Broadcast-form row (funct 0x00-0x1B, excluding
-                 * 0x08-0x0F which are the ACC-based VMADD/VMSUB
-                 * broadcast forms - not implemented yet, a scoped
-                 * follow-up): VADDx/y/z/w(0x00-0x03), VSUBx/y/z/w
-                 * (0x04-0x07), VMAXx/y/z/w(0x10-0x13), VMINIx/y/z/w
-                 * (0x14-0x17), VMULx/y/z/w(0x18-0x1B). Confirmed
-                 * against PCSX2's R5900OpcodeTables.cpp SPECIAL1
-                 * table's first 4 rows (funct 0-31 laid out as 8
-                 * columns x 4 rows, x/y/z/w cycling every 4 entries)
-                 * and VUops.cpp's applyBinaryMACOpBroadcast: same
-                 * shape as the full-vector forms above, but FT is
-                 * replaced by a SINGLE broadcast lane of FT (fixed by
-                 * which specific opcode - the low 2 bits of funct
-                 * select x/y/z/w - not by destmask), applied to every
-                 * lane selected by destmask: FD[lane] = FS[lane] OP
-                 * FT.<bc-lane>. VMULq/VMAXi/VMULi/VMINIi (funct
-                 * 0x1C-0x1F, which broadcast the Q/I registers
-                 * instead of an FT lane) are a separate, still-open
-                 * gap - not added this round. */
+            } else if (funct <= 0x1F) {
+                /* Full broadcast row (funct 0x00-0x1F), completed
+                 * across two rounds (Round 29 continued's 18th
+                 * change added 0x00-0x07/0x10-0x1B; this 19th change
+                 * adds the remaining 0x08-0x0F and 0x1C-0x1F).
+                 * Confirmed against PCSX2's R5900OpcodeTables.cpp
+                 * SPECIAL1 table's first 4 rows (funct 0-31 laid out
+                 * as 8 columns x 4 rows):
+                 *   0x00-0x03 VADDx/y/z/w    0x04-0x07 VSUBx/y/z/w
+                 *   0x08-0x0B VMADDx/y/z/w   0x0C-0x0F VMSUBx/y/z/w
+                 *   0x10-0x13 VMAXx/y/z/w    0x14-0x17 VMINIx/y/z/w
+                 *   0x18-0x1B VMULx/y/z/w    0x1C VMULq, 0x1D VMAXi,
+                 *   0x1E VMULi, 0x1F VMINIi
+                 * VADDx/y/z/w/VSUBx/y/z/w/VMAXx/y/z/w/VMINIx/y/z/w/
+                 * VMULx/y/z/w: FD[lane] = FS[lane] OP FT.<bc-lane>,
+                 * where <bc-lane> is fixed by the opcode (funct&0x3),
+                 * per PCSX2's VUops.cpp applyBinaryMACOpBroadcast.
+                 * VMADDx/y/z/w/VMSUBx/y/z/w: same shape but reads a
+                 * third operand from the VU0 macro-mode accumulator
+                 * (vu0_acc[4]), per applyTernaryMACOpBroadcast:
+                 * FD[lane] = ACC[lane] +- FS[lane]*FT.<bc-lane>.
+                 * VMULq/VMAXi/VMULi/VMINIi (0x1C-0x1F): no FT operand
+                 * at all (confirmed against DisR5900asm.cpp's
+                 * P_VMULq/P_VMAXi/P_VMULi/P_VMINIi, which only print
+                 * FD/FS - "vmulq.xyzw vf1,vf2,Q" etc) - instead
+                 * broadcast the scalar Q or I control register
+                 * (cop2_ctrl[22]/cop2_ctrl[21] per PCSX2's VU.h
+                 * REG_Q=22/REG_I=21) to every destmask lane:
+                 * FD[lane] = FS[lane] OP scalar. */
                 uint32_t bc_lane = funct & 0x3u;
-                uint32_t base_op = (funct >> 2) & 0x7u; /* 0=VADD,1=VSUB,4=VMAX,5=VMINI,6=VMUL (0x08-0x0F/2=3 handled above, excluded) */
-                uint32_t ub = vu0_vf_read_lane(st, ft, bc_lane);
-                float b; memcpy(&b, &ub, 4);
+                uint32_t base_op = (funct >> 2) & 0x7u; /* 0=VADD,1=VSUB,2=VMADD,3=VMSUB,4=VMAX,5=VMINI,6=VMUL,7=Q/I-row */
+                /* op_kind: 0=ADD,1=SUB,2=MADD(acc),3=MSUB(acc),
+                 * 4=MAX,5=MINI,6=MUL. For base_op 0-6 this is just
+                 * base_op itself; for base_op==7 (the Q/I row) the
+                 * real operator is selected by bc_lane instead:
+                 * bc_lane 0=VMULq(MUL), 1=VMAXi(MAX), 2=VMULi(MUL),
+                 * 3=VMINIi(MINI). */
+                uint32_t op_kind;
+                float b; uint32_t ub;
+                if (base_op == 7) {
+                    if (bc_lane == 0) { op_kind = 6; ub = vu0_vi_read(st, 22); }      /* VMULq: Q = cop2_ctrl[22] */
+                    else if (bc_lane == 1) { op_kind = 4; ub = vu0_vi_read(st, 21); } /* VMAXi: I = cop2_ctrl[21] */
+                    else if (bc_lane == 2) { op_kind = 6; ub = vu0_vi_read(st, 21); } /* VMULi */
+                    else { op_kind = 5; ub = vu0_vi_read(st, 21); }                    /* VMINIi */
+                } else {
+                    op_kind = base_op;
+                    ub = vu0_vf_read_lane(st, ft, bc_lane);
+                }
+                memcpy(&b, &ub, 4);
                 for (int lane = 0; lane < 4; lane++) {
                     if (!(destmask & (0x8u >> lane))) continue;
                     uint32_t ua = vu0_vf_read_lane(st, fs, (uint32_t)lane);
                     float a, r; uint32_t ur;
                     memcpy(&a, &ua, 4);
-                    if (base_op == 0) r = a + b;
-                    else if (base_op == 1) r = a - b;
-                    else if (base_op == 4) r = (a > b) ? a : b;
-                    else if (base_op == 5) r = (a < b) ? a : b;
-                    else r = a * b; /* base_op == 6, VMULx/y/z/w */
+                    if (op_kind == 0) r = a + b;                     /* VADDx/y/z/w */
+                    else if (op_kind == 1) r = a - b;                 /* VSUBx/y/z/w */
+                    else if (op_kind == 2) {                          /* VMADDx/y/z/w */
+                        uint32_t uacc = st->vu0_acc[lane]; float acc; memcpy(&acc, &uacc, 4);
+                        r = acc + a * b;
+                    } else if (op_kind == 3) {                        /* VMSUBx/y/z/w */
+                        uint32_t uacc = st->vu0_acc[lane]; float acc; memcpy(&acc, &uacc, 4);
+                        r = acc - a * b;
+                    } else if (op_kind == 4) r = (a > b) ? a : b;    /* VMAXx/y/z/w or VMAXi */
+                    else if (op_kind == 5) r = (a < b) ? a : b;      /* VMINIx/y/z/w or VMINIi */
+                    else r = a * b;                                  /* VMULx/y/z/w or VMULq/VMULi */
                     memcpy(&ur, &r, 4);
                     vu0_vf_write_lane(st, fd, (uint32_t)lane, ur);
                 }

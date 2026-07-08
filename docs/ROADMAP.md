@@ -1232,16 +1232,19 @@ already documented, rather than truly returning from the syscall.
    VADD/VMADD/VMUL/VMAX/VSUB/VMSUB/VOPMSUB/VMINI SPECIAL1 arithmetic
    row; VADDx/y/z/w, VSUBx/y/z/w, VMAXx/y/z/w, VMINIx/y/z/w,
    VMULx/y/z/w (the FT-lane-broadcast forms, 20 opcodes) added Round
-   29 continued's 18th change) are wired up and tested. Real BIOS boot
-   code very likely uses VU0 macro mode for the splash screen's
-   transform/lighting math - NOT YET REACHED by the current boot
-   trace (EE is still steady-state SIF-polling), so this remains
-   readiness work rather than a wall-clearing fix. Open: VMADDx/y/z/w
-   /VMSUBx/y/z/w (the ACC-based broadcast forms) and
-   VMULq/VMAXi/VMULi/VMINIi (the Q/I-register broadcast forms), the
-   accumulator-writing family (VADDA/VMULA/VMADDA/VMSUBA/VOPMULA), and
-   the memory-access family beyond VISWR/VSQI (VILWR/VLQI/VLQD/VSQD/
-   VDIV/etc).
+   29 continued's 18th change; VMADDx/y/z/w/VMSUBx/y/z/w and
+   VMULq/VMAXi/VMULi/VMINIi added Round 29 continued's 19th change,
+   completing the entire funct 0x00-0x2F COP2 CO-format arithmetic
+   space) are wired up and tested. Real BIOS boot code very likely
+   uses VU0 macro mode for the splash screen's transform/lighting
+   math - NOT YET REACHED by the current boot trace (EE is still
+   steady-state SIF-polling), so this remains readiness work rather
+   than a wall-clearing fix. Open: the accumulator-writing family
+   (VADDA/VMULA/VMADDA/VMSUBA/VOPMULA/etc - COP2SPECIAL2, a separate
+   64-entry table), VABS/VCLIPw, VMOVE/VMR32, the memory-access family
+   beyond VISWR/VSQI (VLQI/VLQD/VSQD/VILWR), and VDIV/VSQRT/VRSQRT
+   (would also need to model the Q register's real "busy" timing, not
+   just its value).
 
 4. **VIF UNPACK** (section 4) - DONE (Round 20). Real vertex/
    texture/attribute data now flows from EE RAM into VU0/VU1 local

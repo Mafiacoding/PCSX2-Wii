@@ -1743,3 +1743,22 @@ of scope - a separate follow-up.
 gcc -I../include -I../source -o test_ee_cop2_broadcast tests/test_ee_cop2_broadcast.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_broadcast
 ```
+
+`test_ee_cop2_broadcast2.c` covers Round 29 continued's 19th change -
+completing the funct 0x00-0x1F broadcast row with its last two op
+families: `VMADDx/y/z/w`/`VMSUBx/y/z/w` (funct 0x08-0x0F, the
+ACC-based broadcast forms - `FD[lane] = ACC[lane] +-
+FS[lane]*FT.<bc-lane>`) and `VMULq`/`VMAXi`/`VMULi`/`VMINIi` (funct
+0x1C-0x1F, which have no FT operand at all - confirmed against a real
+PCSX2 upstream reference clone's `DisR5900asm.cpp` - and instead
+broadcast the scalar `Q`/`I` control register, `cop2_ctrl[22]`/
+`cop2_ctrl[21]` per PCSX2's `VU.h` `REG_Q`/`REG_I`). 7 checks: `Q`/`I`
+set via `CTC2`, `ACC` poked directly (no macro-mode "write ACC"
+opcode exists yet); `VMADDy`/`VMSUBx` broadcast-with-accumulator
+results verified; `VMULq`/`VMAXi`/`VMULi`/`VMINIi` each verified
+against hand-computed values.
+
+```sh
+gcc -I../include -I../source -o test_ee_cop2_broadcast2 tests/test_ee_cop2_broadcast2.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
+./test_ee_cop2_broadcast2
+```

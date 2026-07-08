@@ -5026,3 +5026,50 @@ Explicitly out of scope this round: `VMADDx/y/z/w`/`VMSUBx/y/z/w`
 `VMULq`/`VMAXi`/`VMULi`/`VMINIi` (funct 0x1C-0x1F, which broadcast the
 Q/I registers instead of an FT lane) - both scoped, well-understood
 follow-ups reusing this same dispatch shape.
+
+## Round 29 continued (19th change: EE COP2 broadcast row completed - VMADD/VMSUB broadcast + VMULq/VMAXi/VMULi/VMINIi)
+
+Closed the two follow-ups explicitly scoped out of the 18th change,
+completing the entire funct 0x00-0x1F broadcast row:
+
+`VMADDx/y/z/w` (funct 0x08-0x0B) and `VMSUBx/y/z/w` (0x0C-0x0F) are
+the ACC-based broadcast forms - same shape as `VMADD`/`VMSUB` (Round
+29 continued's 17th change), but the second multiplicand is a single
+broadcast lane of FT rather than the matching lane: `FD[lane] =
+ACC[lane] +- FS[lane]*FT.<bc-lane>`, ported from PCSX2's own
+`VUops.cpp` `applyTernaryMACOpBroadcast`.
+
+`VMULq` (funct 0x1C), `VMAXi` (0x1D), `VMULi` (0x1E), `VMINIi` (0x1F)
+broadcast the scalar `Q`/`I` VU control registers instead of an FT
+lane - confirmed these 4 ops take no FT operand at all by checking a
+real PCSX2 upstream reference clone's `DisR5900asm.cpp` disassembly
+formatters (`P_VMULq` etc print only `FD,FS,Q` / `FD,FS,I`, no third
+register). `Q` lives at `cop2_ctrl[22]`, `I` at `cop2_ctrl[21]` (per
+PCSX2's `VU.h` `REG_Q=22`/`REG_I=21` - already-existing general
+control-register storage, set via the existing `CTC2` transfer,
+needed no new state).
+
+The dispatch was refactored into a single `funct <= 0x1F` branch
+covering the complete row: `op_kind` (ADD/SUB/MADD/MSUB/MAX/MINI/MUL)
+and the broadcast operand's source (an FT lane, vs `Q`/`I` for the
+four `base_op==7` opcodes) are both derived from `funct`, then the
+same per-lane loop as every other arithmetic op in this file applies.
+
+New test `tests/test_ee_cop2_broadcast2.c` (7 checks): sets `Q`/`I`
+via real `CTC2` instructions, pokes `vu0_acc` directly (still no
+macro-mode "write ACC" opcode), verifies `VMADDy`/`VMSUBx`
+broadcast-with-accumulator results and all four `VMULq`/`VMAXi`/
+`VMULi`/`VMINIi` results against hand-computed values. Full 76-block
+regression suite passes (75 pre-existing + this new one); clean Wii
+rebuild verified (only the pre-existing, harmless `strncpy` truncation
+warning in `iop_module_loader.c`).
+
+The entire funct 0x00-0x2F COP2 CO-format arithmetic space (broadcast
+row + full-vector row) is now implemented. Remaining VU0 macro-mode
+gaps: the accumulator-writing family (`VADDA`/`VMULA`/`VMADDA`/
+`VMSUBA`/`VOPMULA`/etc, funct 0x00-0x2F of `COP2SPECIAL2`, a separate
+64-entry table), `VABS`/`VCLIPw`, `VMOVE`/`VMR32`, the memory-access
+family beyond `VISWR`/`VSQI` (`VLQI`/`VLQD`/`VSQD`/`VILWR`), and
+`VDIV`/`VSQRT`/`VRSQRT` (which would also need to model the `Q`
+register's real "busy" timing, not just its value - not attempted
+yet).

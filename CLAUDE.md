@@ -1824,3 +1824,20 @@ two GIF-packet test-authoring bugs along the way (NLOOP undercounting,
 splitting TEX1/MIPTBP1 across two separate packet calls instead of
 one) - product code was fine, the test fixtures needed the fix. Full
 71-block regression passes, clean Wii rebuild verified.
+
+## Update (Round 29 continued, 15th change - GS TEX1/MIPTBP made per-context)
+
+Closed part of Round 27's "CLAMP/TEX1/TEX2/SCISSOR/FBA/MIPTBP
+unmodeled for either context" gap: TEX1/MIPTBP1/MIPTBP2 (Round 28's
+mipmap registers) were context-1-only, meaning a context-2 draw
+silently reused context 1's mip config. Added the real _2 register
+addresses (base+1, same convention as every other pair), per-context
+permanent storage, and wired into gs_activate_context() - same
+established Round 27 pattern. New test (6 checks, all passing) proves
+genuine independence: context 1 configured with mipmapping engaged
+samples its own mip level; context 2 (TEX1_2 never written) correctly
+uses the base level instead of inheriting context 1's. All existing
+mipmap/context2 tests still pass unchanged. Full 72-block regression
+passes, clean Wii rebuild verified. CLAMP/TEX2/SCISSOR/FBA remain
+entirely unmodeled - a separate, bigger gap since those registers
+don't exist in this codebase at all yet.

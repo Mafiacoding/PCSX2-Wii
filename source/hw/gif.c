@@ -323,6 +323,17 @@ static void gs_activate_context(void)
         g_gif.alpha_c = g_gif.ctx2_alpha_c;
         g_gif.alpha_d = g_gif.ctx2_alpha_d;
         g_gif.alpha_fix = g_gif.ctx2_alpha_fix;
+        g_gif.tex1_lcm = g_gif.ctx2_tex1_lcm;
+        g_gif.tex1_mxl = g_gif.ctx2_tex1_mxl;
+        g_gif.tex1_mmag = g_gif.ctx2_tex1_mmag;
+        g_gif.tex1_mmin = g_gif.ctx2_tex1_mmin;
+        g_gif.tex1_mtba = g_gif.ctx2_tex1_mtba;
+        g_gif.tex1_l = g_gif.ctx2_tex1_l;
+        g_gif.tex1_k = g_gif.ctx2_tex1_k;
+        for (int lvl = 0; lvl < 6; lvl++) {
+            g_gif.tex_mip_tbp[lvl] = g_gif.ctx2_tex_mip_tbp[lvl];
+            g_gif.tex_mip_tbw[lvl] = g_gif.ctx2_tex_mip_tbw[lvl];
+        }
     } else {
         g_gif.fbp = g_gif.ctx1_fbp;
         g_gif.fbw = g_gif.ctx1_fbw;
@@ -352,6 +363,17 @@ static void gs_activate_context(void)
         g_gif.alpha_c = g_gif.ctx1_alpha_c;
         g_gif.alpha_d = g_gif.ctx1_alpha_d;
         g_gif.alpha_fix = g_gif.ctx1_alpha_fix;
+        g_gif.tex1_lcm = g_gif.ctx1_tex1_lcm;
+        g_gif.tex1_mxl = g_gif.ctx1_tex1_mxl;
+        g_gif.tex1_mmag = g_gif.ctx1_tex1_mmag;
+        g_gif.tex1_mmin = g_gif.ctx1_tex1_mmin;
+        g_gif.tex1_mtba = g_gif.ctx1_tex1_mtba;
+        g_gif.tex1_l = g_gif.ctx1_tex1_l;
+        g_gif.tex1_k = g_gif.ctx1_tex1_k;
+        for (int lvl = 0; lvl < 6; lvl++) {
+            g_gif.tex_mip_tbp[lvl] = g_gif.ctx1_tex_mip_tbp[lvl];
+            g_gif.tex_mip_tbw[lvl] = g_gif.ctx1_tex_mip_tbw[lvl];
+        }
     }
 }
 
@@ -1323,7 +1345,9 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
          * round's other new registers - see docs/STATUS.md's "GS
          * Round 28" section): word0 = LCM:1(bit0), MXL:3(bits2-4),
          * MMAG:1(bit9), MMIN:3(bits10-12), MTBA:1(bit14); word1 =
-         * L:2(bits0-1), K:12(bits2-13, signed, 1/16 units). */
+         * L:2(bits0-1), K:12(bits2-13, signed, 1/16 units). Round 29
+         * continued (15th change): also mirrors into ctx1_tex1_xxx,
+         * same pattern as every other _1 register in this function. */
         g_gif.tex1_lcm = (data_lo & 0x1u) ? 1 : 0;
         g_gif.tex1_mxl = (data_lo >> 2) & 0x7u;
         g_gif.tex1_mmag = (data_lo & 0x200u) ? 1 : 0;
@@ -1337,6 +1361,29 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
             if (k_raw & 0x800) k_raw -= 0x1000; /* sign-extend a 12-bit value */
             g_gif.tex1_k = k_raw;
         }
+        g_gif.ctx1_tex1_lcm = g_gif.tex1_lcm;
+        g_gif.ctx1_tex1_mxl = g_gif.tex1_mxl;
+        g_gif.ctx1_tex1_mmag = g_gif.tex1_mmag;
+        g_gif.ctx1_tex1_mmin = g_gif.tex1_mmin;
+        g_gif.ctx1_tex1_mtba = g_gif.tex1_mtba;
+        g_gif.ctx1_tex1_l = g_gif.tex1_l;
+        g_gif.ctx1_tex1_k = g_gif.tex1_k;
+    } break;
+    case GS_REG_TEX1_2: {
+        /* Context 2's TEX1 - identical bitfield to TEX1_1 above,
+         * written ONLY into the ctx2_tex1_xxx permanent fields
+         * (Round 29 continued, 15th change). */
+        g_gif.ctx2_tex1_lcm = (data_lo & 0x1u) ? 1 : 0;
+        g_gif.ctx2_tex1_mxl = (data_lo >> 2) & 0x7u;
+        g_gif.ctx2_tex1_mmag = (data_lo & 0x200u) ? 1 : 0;
+        g_gif.ctx2_tex1_mmin = (data_lo >> 10) & 0x7u;
+        g_gif.ctx2_tex1_mtba = (data_lo & 0x4000u) ? 1 : 0;
+        g_gif.ctx2_tex1_l = data_hi & 0x3u;
+        {
+            int32_t k_raw = (int32_t)((data_hi >> 2) & 0xFFFu);
+            if (k_raw & 0x800) k_raw -= 0x1000;
+            g_gif.ctx2_tex1_k = k_raw;
+        }
     } break;
     case GS_REG_MIPTBP1_1: {
         /* GIFRegMIPTBP1 (Round 28) - modeled as a plain sequential
@@ -1346,7 +1393,9 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
          * honesty note as TEX1_1 above. TBP2/TBP3 straddle the
          * word0/word1 boundary, decoded with the same cross-word
          * technique this project already uses for TEX0's TW/TH
-         * field (see that case's own comment, several rounds ago). */
+         * field (see that case's own comment, several rounds ago).
+         * Round 29 continued (15th change): also mirrors into
+         * ctx1_tex_mip_tbp/tbw[0..2]. */
         g_gif.tex_mip_tbp[0] = data_lo & 0x3FFFu;             /* TBP1: bits 0-13 */
         g_gif.tex_mip_tbw[0] = ((data_lo >> 14) & 0x3Fu) * 64u; /* TBW1: bits 14-19 */
         if (g_gif.tex_mip_tbw[0] == 0) g_gif.tex_mip_tbw[0] = 640;
@@ -1356,10 +1405,28 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
         g_gif.tex_mip_tbp[2] = (data_hi >> 8) & 0x3FFFu;      /* TBP3: bits 40-53 */
         g_gif.tex_mip_tbw[2] = ((data_hi >> 22) & 0x3Fu) * 64u; /* TBW3: bits 54-59 */
         if (g_gif.tex_mip_tbw[2] == 0) g_gif.tex_mip_tbw[2] = 640;
+        g_gif.ctx1_tex_mip_tbp[0] = g_gif.tex_mip_tbp[0]; g_gif.ctx1_tex_mip_tbw[0] = g_gif.tex_mip_tbw[0];
+        g_gif.ctx1_tex_mip_tbp[1] = g_gif.tex_mip_tbp[1]; g_gif.ctx1_tex_mip_tbw[1] = g_gif.tex_mip_tbw[1];
+        g_gif.ctx1_tex_mip_tbp[2] = g_gif.tex_mip_tbp[2]; g_gif.ctx1_tex_mip_tbw[2] = g_gif.tex_mip_tbw[2];
+    } break;
+    case GS_REG_MIPTBP1_2: {
+        /* Context 2's MIPTBP1 - identical layout to MIPTBP1_1 above,
+         * written ONLY into ctx2_tex_mip_tbp/tbw[0..2] (Round 29
+         * continued, 15th change). */
+        g_gif.ctx2_tex_mip_tbp[0] = data_lo & 0x3FFFu;
+        g_gif.ctx2_tex_mip_tbw[0] = ((data_lo >> 14) & 0x3Fu) * 64u;
+        if (g_gif.ctx2_tex_mip_tbw[0] == 0) g_gif.ctx2_tex_mip_tbw[0] = 640;
+        g_gif.ctx2_tex_mip_tbp[1] = ((data_lo >> 20) & 0xFFFu) | ((data_hi & 0x3u) << 12);
+        g_gif.ctx2_tex_mip_tbw[1] = (((data_hi >> 2) & 0x3Fu)) * 64u;
+        if (g_gif.ctx2_tex_mip_tbw[1] == 0) g_gif.ctx2_tex_mip_tbw[1] = 640;
+        g_gif.ctx2_tex_mip_tbp[2] = (data_hi >> 8) & 0x3FFFu;
+        g_gif.ctx2_tex_mip_tbw[2] = ((data_hi >> 22) & 0x3Fu) * 64u;
+        if (g_gif.ctx2_tex_mip_tbw[2] == 0) g_gif.ctx2_tex_mip_tbw[2] = 640;
     } break;
     case GS_REG_MIPTBP2_1: {
         /* GIFRegMIPTBP2 - identical layout to MIPTBP1 above, for
-         * levels 4/5/6 instead of 1/2/3. */
+         * levels 4/5/6 instead of 1/2/3. Round 29 continued (15th
+         * change): also mirrors into ctx1_tex_mip_tbp/tbw[3..5]. */
         g_gif.tex_mip_tbp[3] = data_lo & 0x3FFFu;
         g_gif.tex_mip_tbw[3] = ((data_lo >> 14) & 0x3Fu) * 64u;
         if (g_gif.tex_mip_tbw[3] == 0) g_gif.tex_mip_tbw[3] = 640;
@@ -1369,6 +1436,23 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
         g_gif.tex_mip_tbp[5] = (data_hi >> 8) & 0x3FFFu;
         g_gif.tex_mip_tbw[5] = ((data_hi >> 22) & 0x3Fu) * 64u;
         if (g_gif.tex_mip_tbw[5] == 0) g_gif.tex_mip_tbw[5] = 640;
+        g_gif.ctx1_tex_mip_tbp[3] = g_gif.tex_mip_tbp[3]; g_gif.ctx1_tex_mip_tbw[3] = g_gif.tex_mip_tbw[3];
+        g_gif.ctx1_tex_mip_tbp[4] = g_gif.tex_mip_tbp[4]; g_gif.ctx1_tex_mip_tbw[4] = g_gif.tex_mip_tbw[4];
+        g_gif.ctx1_tex_mip_tbp[5] = g_gif.tex_mip_tbp[5]; g_gif.ctx1_tex_mip_tbw[5] = g_gif.tex_mip_tbw[5];
+    } break;
+    case GS_REG_MIPTBP2_2: {
+        /* Context 2's MIPTBP2 - identical layout to MIPTBP2_1 above,
+         * written ONLY into ctx2_tex_mip_tbp/tbw[3..5] (Round 29
+         * continued, 15th change). */
+        g_gif.ctx2_tex_mip_tbp[3] = data_lo & 0x3FFFu;
+        g_gif.ctx2_tex_mip_tbw[3] = ((data_lo >> 14) & 0x3Fu) * 64u;
+        if (g_gif.ctx2_tex_mip_tbw[3] == 0) g_gif.ctx2_tex_mip_tbw[3] = 640;
+        g_gif.ctx2_tex_mip_tbp[4] = ((data_lo >> 20) & 0xFFFu) | ((data_hi & 0x3u) << 12);
+        g_gif.ctx2_tex_mip_tbw[4] = (((data_hi >> 2) & 0x3Fu)) * 64u;
+        if (g_gif.ctx2_tex_mip_tbw[4] == 0) g_gif.ctx2_tex_mip_tbw[4] = 640;
+        g_gif.ctx2_tex_mip_tbp[5] = (data_hi >> 8) & 0x3FFFu;
+        g_gif.ctx2_tex_mip_tbw[5] = ((data_hi >> 22) & 0x3Fu) * 64u;
+        if (g_gif.ctx2_tex_mip_tbw[5] == 0) g_gif.ctx2_tex_mip_tbw[5] = 640;
     } break;
     case GS_REG_BITBLTBUF: {
         /* GIFRegBITBLTBUF (Round 26): word0 = SBP:14(0-13),

@@ -4881,3 +4881,37 @@ bugs, not product bugs; documenting them here since they're the kind
 of mistake worth remembering for future GIF-packet-based tests in this
 suite. Full 71-block regression suite passes (70 pre-existing + this
 new one); clean Wii rebuild verified.
+
+## Round 29 continued (15th change: GS TEX1/MIPTBP made genuinely per-context)
+
+Closed part of the "CLAMP/TEX1/TEX2/SCISSOR/FBA/MIPTBP unmodeled for
+either context" gap Round 27 explicitly left open: TEX1/MIPTBP1/
+MIPTBP2 (Round 28's mipmap registers) were context-1-only - a context
+2 draw silently used whatever context 1's mip configuration happened
+to be, since TEX1_2/MIPTBP1_2/MIPTBP2_2 register addresses weren't
+even recognized.
+
+Added the real _2 register addresses (TEX1_2=0x15, MIPTBP1_2=0x35,
+MIPTBP2_2=0x37 - same base+1 convention every other _1/_2 pair in this
+file already follows), per-context permanent storage
+(`ctx1_tex1_xxx`/`ctx2_tex1_xxx`, `ctx1_tex_mip_tbp/tbw[6]`/
+`ctx2_tex_mip_tbp/tbw[6]`), and wired both into
+`gs_activate_context()` (same pattern Round 27 established for FRAME/
+XYOFFSET/TEX0/ZBUF/TEST/ALPHA - refresh the flat/active fields from
+whichever context PRIM's CTXT bit selects, right before each
+rasterizer draws).
+
+New test `tests/test_gs_context2_mipmap.c` (6 checks): configures
+context 1 WITH mipmapping engaged and context 2 WITHOUT (against the
+same base texture, same minifying screen size) and draws one SPRITE
+per context - context 1 must sample its own mip level, context 2 must
+use the base level, proving genuine independence rather than shared/
+leaking state. All existing mipmap/context2 tests (`test_gs_mipmap.c`,
+`test_gs_mipmap_triangle.c`, `test_gs_context2.c`) still pass
+unchanged. Full 72-block regression suite passes; clean Wii rebuild
+verified.
+
+Remaining, explicitly still open: CLAMP/TEX2/SCISSOR/FBA are not
+modeled at all yet (for either context) - a separate, larger gap,
+since (unlike TEX1/MIPTBP) these registers don't exist anywhere in
+this codebase yet to extend.

@@ -1255,10 +1255,12 @@ already documented, rather than truly returning from the syscall.
    not user-directed: actually wiring Round 25's real swizzle
    addressing into the rendering pipeline (currently a separate,
    additive API only); extending Round 27's dual-context support to
-   CLAMP/TEX1/TEX2/SCISSOR/FBA/MIPTBP (currently context-1-only for
-   both contexts); extending Round 28's mipmap support to per-pixel/
-   trilinear filtering (currently per-primitive, nearest-single-level
-   - TRIANGLE coverage DONE, Round 29 continued's 14th change); and
+   CLAMP/TEX2/SCISSOR/FBA (TEX1/MIPTBP DONE, Round 29 continued's
+   15th change - these registers don't exist in this codebase at all
+   yet for either context, a separate/larger gap than TEX1/MIPTBP's
+   was); extending Round 28's mipmap support to per-pixel/trilinear
+   filtering (currently per-primitive, nearest-single-level -
+   TRIANGLE coverage DONE, Round 29 continued's 14th change); and
    implementing MTBA=1 auto mip-address calculation (currently falls
    back to level 0).
 

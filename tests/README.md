@@ -1500,6 +1500,22 @@ gcc -I../include -I../source -o test_gs_context2 tests/test_gs_context2.c
 ./test_gs_context2
 ```
 
+`test_gs_context2_mipmap.c` covers Round 29 continued's 15th change:
+making TEX1/MIPTBP1/MIPTBP2 genuinely per-context (Round 28's mipmap
+support was context-1-only, one of the specific gaps Round 27's own
+dual-context work explicitly left open). Configures context 1 WITH
+mipmapping engaged and context 2 WITHOUT (against the same base
+texture and the same minifying screen size) and draws one SPRITE per
+context: context 1 must sample its own configured mip level, context
+2 must use the base level - proving the two contexts' mip
+configuration is genuinely independent, not shared/leaking state. 6
+checks (2 pixel-sampling outcomes + 4 direct permanent-storage checks).
+
+```sh
+gcc -I../include -I../source -o test_gs_context2_mipmap tests/test_gs_context2_mipmap.c -lm
+./test_gs_context2_mipmap
+```
+
 ## test_gs_mipmap.c (GS Round 28)
 
 Tests TEX1/MIPTBP1/MIPTBP2 register parsing and SPRITE-only,

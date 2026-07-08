@@ -149,15 +149,24 @@
  * MIPTBP2 (per-level texture base pointers, levels 1-6). Real
  * addresses (well-known GS register set, same session-limited-
  * research caveat as Rounds 24-27 - see docs/STATUS.md's "GS Round
- * 28" section). Scoped to context 1 only this round (matches the
- * "CLAMP/TEX1/TEX2/SCISSOR/FBA/MIPTBP unmodeled for either context"
- * gap Round 27 explicitly left open - this round closes part of it
- * for context 1; context 2 mipmap support remains a documented,
- * explicit future increment, consistent with Round 27's own scope
- * note). */
+ * 28" section). Round 29 continued (15th change) closes the
+ * context-2 half of the "CLAMP/TEX1/TEX2/SCISSOR/FBA/MIPTBP
+ * unmodeled for either context" gap Round 27 explicitly left open:
+ * TEX1/MIPTBP1/MIPTBP2 are now genuinely per-context, using the same
+ * real _2 register addresses (base+1, the same convention every
+ * other _1/_2 pair in this file already follows) and the same
+ * ctx1_xxx/ctx2_xxx permanent-storage + gs_activate_context()
+ * pattern Round 27 established for FRAME/XYOFFSET/TEX0/ZBUF/TEST/
+ * ALPHA. CLAMP/TEX2/SCISSOR/FBA remain entirely unmodeled (for either
+ * context) - a separate, larger gap (these registers don't exist in
+ * this codebase at all yet, unlike TEX1/MIPTBP which already had a
+ * context-1 implementation to extend). */
 #define GS_REG_TEX1_1     0x14
 #define GS_REG_MIPTBP1_1  0x34
 #define GS_REG_MIPTBP2_1  0x36
+#define GS_REG_TEX1_2     0x15
+#define GS_REG_MIPTBP1_2  0x35
+#define GS_REG_MIPTBP2_2  0x37
 
 /* TEX1's MMIN field (3 bits) - real hardware distinguishes several
  * NEAREST/LINEAR x MIPMAP_NEAREST/MIPMAP_LINEAR combinations (values
@@ -496,13 +505,13 @@ typedef struct {
     uint32_t ctx2_aref;
     uint32_t ctx2_alpha_a, ctx2_alpha_b, ctx2_alpha_c, ctx2_alpha_d, ctx2_alpha_fix;
 
-    /* Round 28: mipmaps (TEX1 + MIPTBP1/MIPTBP2), context 1 only -
-     * see GS_REG_TEX1_1/MIPTBP1_1/MIPTBP2_1's header comment for the
-     * scope note. TEX1's fields: tex1_lcm (LOD Calculation Method:
-     * 0=computed from texture/screen size ratio, 1=fixed from K),
-     * tex1_mxl (Max LOD level, 0-6), tex1_mmag/tex1_mmin (real filter
-     * mode fields - only tex1_mmin is actually used, to decide
-     * whether mipmapping is engaged at all, per
+    /* Round 28: mipmaps (TEX1 + MIPTBP1/MIPTBP2) - see
+     * GS_REG_TEX1_1/MIPTBP1_1/MIPTBP2_1's header comment for the
+     * field-layout scope note. TEX1's fields: tex1_lcm (LOD
+     * Calculation Method: 0=computed from texture/screen size ratio,
+     * 1=fixed from K), tex1_mxl (Max LOD level, 0-6), tex1_mmag/
+     * tex1_mmin (real filter mode fields - only tex1_mmin is actually
+     * used, to decide whether mipmapping is engaged at all, per
      * GS_MMIN_MIPMAP_THRESHOLD's comment), tex1_mtba (Mipmap Texture
      * Base Auto - only MTBA=0, explicit MIPTBP1/2 lookup, is
      * implemented; MTBA=1's automatic per-level address formula is a
@@ -514,7 +523,11 @@ typedef struct {
      * hold levels 1-6's base pointer/width (index 0 = level 1, index
      * 5 = level 6), parsed from MIPTBP1_1 (levels 1-3) and
      * MIPTBP2_1 (levels 4-6) - level 0 itself continues to use the
-     * existing tex_tbp0/tex_tbw fields, unchanged. */
+     * existing tex_tbp0/tex_tbw fields, unchanged. These are the
+     * "flat/active" fields gs_activate_context() refreshes at the top
+     * of each rasterizer (Round 29 continued, 15th change) from
+     * whichever of ctx1_tex1_xxx/ctx2_tex1_xxx below PRIM's CTXT bit
+     * currently selects - same pattern as fbp/tex_tbp0/alpha_a/etc. */
     int tex1_lcm;
     uint32_t tex1_mxl;
     int tex1_mmag;
@@ -523,6 +536,27 @@ typedef struct {
     uint32_t tex1_l;
     int32_t tex1_k;
     uint32_t tex_mip_tbp[6], tex_mip_tbw[6];
+
+    /* Round 29 continued (15th change): per-context permanent storage
+     * for the TEX1/MIPTBP fields above - see this file's
+     * GS_REG_TEX1_2/MIPTBP1_2/MIPTBP2_2 comment for the scope. */
+    int ctx1_tex1_lcm;
+    uint32_t ctx1_tex1_mxl;
+    int ctx1_tex1_mmag;
+    uint32_t ctx1_tex1_mmin;
+    int ctx1_tex1_mtba;
+    uint32_t ctx1_tex1_l;
+    int32_t ctx1_tex1_k;
+    uint32_t ctx1_tex_mip_tbp[6], ctx1_tex_mip_tbw[6];
+
+    int ctx2_tex1_lcm;
+    uint32_t ctx2_tex1_mxl;
+    int ctx2_tex1_mmag;
+    uint32_t ctx2_tex1_mmin;
+    int ctx2_tex1_mtba;
+    uint32_t ctx2_tex1_l;
+    int32_t ctx2_tex1_k;
+    uint32_t ctx2_tex_mip_tbp[6], ctx2_tex_mip_tbw[6];
 
     /* Current UV register value (real hardware's 12.4 fixed-point
      * texel coordinate "FST=1" mode - see gif.h's scope comment),

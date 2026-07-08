@@ -710,6 +710,21 @@ instead of fully emulating the real IOP BIOS ROM.
       site to find what real data source should have supplied
       `$fp+0x40` and why it's empty in this emulation. See
       docs/STATUS.md's "Round 29 continued (7th finding)" section.
+- [ ] **9th finding (2026-07-08)**: traced `$fp+0x40` one level further
+      - it's `RAM[0x100010+0x08]`, a field inside SYSMEM's OWN
+      "boot info" structure (`source/hw/iop_module_loader.c`'s already-
+      cited `BOOT_INFO_RAM_MB` work only populates word 0 of this
+      struct; SYSMEM's own code reads 7 more words, offsets 0x04-0x18,
+      and offset 0x08 being zero is what causes the empty list). No
+      citable real byte layout found for what belongs at those seven
+      offsets (checked psx-spx, ps2tek, PCSX2 upstream, and an
+      independent detailed PS2-boot-process write-up) - fabricating
+      values without evidence was avoided, matching this project's own
+      standard. Next step: disassemble SYSMEM's own use of offsets
+      0x08-0x1c (around 0x100d54-0x100e98) to infer plausible values
+      from how each field gets used, the same approach that resolved
+      the B(00h)/B(18h)/B(19h) findings. See docs/STATUS.md's "Round 29
+      continued (9th finding)" section.
 - [x] **6th change (2026-07-08)**: real A(96h) AddCDROMDevice() and
       A(97h) AddMemCardDevice(), per explicit user request ("add both
       as active devices, not as demo"). Implemented as real, queryable

@@ -4539,3 +4539,54 @@ TARGET=boot`, exit 0, only the pre-existing unrelated
 `iop_module_loader.c` strncpy warning; confirmed `iop_cdvd.c` compiles
 into the Wii build too), full host-native regression suite (68 test
 binaries including this round's new `test_iop_cdvd.c`, 0 failures).
+
+## Round 29 continued (9th finding, 2026-07-08): traced the empty field to SYSMEM's own boot_info struct
+
+Continuing task #124/#132 one level further back from the 7th finding.
+
+**Traced `$fp+0x40`'s true origin**: live register capture at the exact
+moment the routine investigated in the 7th finding is entered shows
+`$a0 = 0x00100010` - i.e. this routine's "list" parameter is not an
+arbitrary caller-supplied list at all, but a pointer into the SYSMEM
+module's OWN loaded image, at its own base address (0x00100000) plus
+0x10. Disassembly of the routine's entry (0x100d00-0x100d54) shows it
+copies EIGHT consecutive words from that address into local variables:
+`fp+0x38..fp+0x50` = `*(a0+0x00)` through `*(a0+0x18)`, i.e.
+`RAM[0x100010]` through `RAM[0x100028]`. `fp+0x40` (the 7th finding's
+empty list) is exactly `RAM[0x100010 + 0x08]` = `RAM[0x100018]`.
+
+**This directly ties into previously-fixed, already-cited work**:
+`source/hw/iop_module_loader.c`'s own `BOOT_INFO_RAM_MB` comment
+already documents that SYSMEM's real module-entry code does `lw
+v0,(a0); sll sp,v0,0x14` at its very start - i.e. `a0` points at a
+"boot info" structure whose word 0 gives the IOP's RAM size in MB (2).
+This project's loader already supplies that first word correctly
+(confirmed: `RAM[0x100010]` reads back 2, matching `BOOT_INFO_RAM_MB`).
+What this round's tracing newly found is that SYSMEM's own code reads
+SEVEN MORE words from the same structure later on (offsets 0x04
+through 0x18) - a real, larger "boot info" struct than the single
+RAM-MB word this project's loader currently populates (everything past
+offset 0x00 is presently zero, simply because nothing has ever written
+there). Offset 0x08 in particular is the one this round's earlier
+findings traced through to the panic loop.
+
+**Why no fix was made this round**: no citable, verified real byte
+layout for what belongs at offsets 0x04-0x18 was found (searched
+psx-spx, ps2tek, PCSX2 upstream source, and a detailed independent PS2
+boot-process write-up - none document SYSMEM's specific internal boot
+parameter struct beyond the single RAM-MB word already implemented).
+Guessing values for the remaining seven words would be fabrication
+without evidence, which this project has consistently avoided (see
+e.g. the CDVD/DCB-struct decision in the 6th change). The next step
+for whoever continues this thread: live-disassemble SYSMEM's own code
+further (particularly around 0x100d54-0x100e98, which reads/uses
+offsets 0x08-0x1c after the copy) to infer, from HOW each field is
+used, what a real, non-zero, plausible value would need to be - the
+same "let the real code's own behavior tell you the answer" approach
+that successfully resolved the B(00h)/B(18h)/B(19h) findings earlier
+this session.
+
+No code changes this round. Task #124/#132 remains open, now traced
+three levels deep (empty-list check -> empty-parameter check ->
+SYSMEM's own under-populated boot_info struct) from where the 5th
+finding left off.

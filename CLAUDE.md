@@ -1707,3 +1707,32 @@ coverage; does not change the steady-state wall from the 5th/7th
 findings. Verified: clean Wii rebuild (exit 0, iop_cdvd.c confirmed
 compiled in), 68-test host-native regression suite (0 failures). See
 docs/STATUS.md's "Round 29 continued (8th change)" section.
+
+**Update (Round 29 continued, 9th finding, same session)**: traced the
+7th finding's empty `$fp+0x40` one level further. It's
+`RAM[0x100010+0x08]` - a field inside SYSMEM module's OWN "boot info"
+struct at its load address+0x10. `source/hw/iop_module_loader.c`'s
+already-cited `BOOT_INFO_RAM_MB` work populates word 0 of this struct
+correctly (confirmed: reads back 2, matching real hardware's RAM-MB
+convention), but SYSMEM's own code (disassembled this round, entry at
+0x100d00-0x100d54) reads SEVEN MORE words from the same struct
+(offsets 0x04-0x18) that this project has never populated (all zero).
+Offset 0x08 is exactly the field the panic loop traces back to.
+Searched psx-spx, ps2tek, PCSX2 upstream source (freshly cloned this
+session), and an independent detailed PS2-boot-process write-up
+(Woon Yung's "Initializing the PS2/PSX") - none document SYSMEM's
+specific internal boot-parameter struct beyond the single RAM-MB word
+already implemented, so no fix was made (fabricating values without
+evidence would violate this project's own standard - see the CDVD/DCB
+decision in the 8th change). Next step for whoever continues: trace
+SYSMEM's own use of offsets 0x08-0x1c to infer plausible real values
+from behavior, the same approach that resolved B(00h)/B(18h)/B(19h)
+earlier this session. Task #124/#132 now traced three levels deep from
+where the 5th finding left off. Pausing this thread here - this is a
+natural, well-documented stopping point after a full session of real,
+verified, incremental progress (main.c real boot flow, setjmp/
+HookEntryInt fix, AddCDROMDevice/AddMemCardDevice, CDVD register
+scaffold, and this precise 3-level trace) with every change
+individually committed, pushed, and rsynced as its own checkpoint per
+the user's explicit "work until the limit runs out, don't forget
+checkpoints" instruction.

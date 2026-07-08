@@ -6428,3 +6428,69 @@ temporary, reverted trace in our own host-native diagnostic to
 directly confirm both sides hit the identical real code. Verified via
 `diff` that the temporary instrumentation left `iop_module_loader.c`
 byte-identical to its pre-trace state afterward.
+
+## Round 29 continued (40th finding, task #151/#163): the retry loop runs AFTER the full registration-list walk completes, not per-entry - it's a post-walk finalization check
+
+Continuing the 39th finding's investigation (same technique: static
+disassembly of our own emulator's resident real LOADCORE code via a
+host-native diagnostic, cross-referenced against the live pcsx2-mcp
+reference debugger's structurally-identical code at different
+relocated addresses), traced the full per-entry loop body end to end
+and found where the retry loop actually connects in:
+
+- The per-entry loop (allocator call at our-boot's `0x101080` =
+  live's `0x19e0`; jalr dispatch at `0x10111c` = live's `0x1a7c`;
+  post-jalr `s1` return-value handling and the three follow-up calls
+  matching live's `0x22EC`/`0x1D70`/`0x1CCC`) ends with `addiu s0,4`
+  (advance list pointer) then **reloads the next list word and
+  branches back to the top of the loop while it's non-zero**
+  (`lw v0,(s0); bnez v0,->loop_top`). This confirms the whole
+  allocator+dispatch+bookkeeping sequence is one loop body executed
+  once per list entry, terminating only when a zero (terminator) word
+  is read - matching this project's own `build_real_registration_list()`
+  terminator convention exactly.
+- **Only once the loop naturally exits** (terminator found) does
+  execution reach `lw a0,0x48(fp); beqz a0,+3` - a conditional gate on
+  a flag/pointer at `fp+0x48` - guarding a call to the SAME subroutine
+  (relative target matching `0x1028dc`) that is ALSO called
+  unconditionally near the very top of the whole routine (before the
+  loop even starts). This call's role is not yet determined (finalize/
+  sync of some kind - called both before list processing starts and
+  again after it ends, conditionally).
+- **Immediately after that gated call is exactly where the retry loop
+  begins**: zero the counter at `fp+0x58`, set the fixed search tag
+  `s3=3`, `s4=-4` (a `~3` mask), then the bounded 4-try backward scan
+  documented in the 39th finding.
+
+**Revised understanding of task #151's blocker:** this is POST-WALK
+finalization code, not a per-entry mechanism, and not related to
+task #158's jalr double-dispatch theory at all (independently
+reconfirmed a third time). The natural reading: after LOADCORE
+finishes walking the ENTIRE registration list and registering every
+recognized module, it performs one final check - scanning a separate,
+8-byte-stride table for an entry tagged `3`, up to 4 times - almost
+certainly verifying that some specific expected condition (a
+particular required module/component actually finished registering,
+or some synchronization primitive reached a specific state) became
+true as a side effect of the walk that just completed. On real
+hardware this always succeeds within 4 tries; in this project's boot,
+it never does, meaning something the registration walk is supposed to
+cause as a side effect (writing a tag-3 entry into this separate
+table) either never happens in this project's simulated walk, or
+happens in the wrong place/format for this scan to find it.
+
+**Next concrete steps (unchanged goal, more precisely scoped):**
+determine (a) what real structure is being scanned (its base address
+relative to `fp` or a fixed IOP address, and what real-world object
+it represents - candidates: a semaphore/event-flag table, a thread
+table, or a device-registration table separate from the module
+registration list), (b) what `fp+0x48`'s gating flag represents and
+whether this project's boot sequence sets the analogous condition
+correctly, and (c) what the shared subroutine at relative offset
+`0x1028dc` (called both before the walk starts and after it ends)
+actually does - likely the key to understanding what "tag 3" means and
+what's supposed to write it.
+
+No source code changed - pure investigation (same discipline as the
+36th-39th findings: static/live disassembly only, no unverified fix
+attempted).

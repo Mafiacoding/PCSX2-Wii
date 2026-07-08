@@ -1455,6 +1455,15 @@ already documented, rather than truly returning from the syscall.
    attempts. Task #158's jalr-dispatch fix reconfirmed unrelated to
    this dead end. Next: trace what real structure is being scanned and
    why our boot never populates a match. See STATUS.md's 39th finding.
+   UPDATE (Round 29 continued, 40th finding, task #151/#163): traced
+   the full per-entry loop body end to end and confirmed the retry
+   loop from the 39th finding is POST-WALK finalization code (runs only
+   after the terminator word is read and the loop exits), gated by a
+   flag at fp+0x48 and calling a subroutine (also called before the
+   walk starts) immediately before the 4-try tag-3 scan begins. Third
+   independent reconfirmation that task #158's jalr-dispatch theory is
+   unrelated. Next: identify the scanned structure, the fp+0x48 flag,
+   and what the shared subroutine does. See STATUS.md's 40th finding.
    next concrete target (the new, deeper dead end this round found).
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the

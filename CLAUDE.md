@@ -2492,3 +2492,25 @@ from the retry loop's entry to find what sets up `s0`/`s2`/`s3`, and
 determine what structure it's really scanning and why our boot process
 never populates a match. No source changed - pure investigation, see
 docs/STATUS.md's 39th finding for full detail.
+
+## Update (Round 29 continued, 40th finding): retry loop is POST-WALK finalization, not per-entry (Task #151/#163)
+
+Traced the full per-entry loop body (allocator -> jalr dispatch ->
+post-return bookkeeping -> advance -> reload -> loop-back-while-nonzero)
+end to end in our own emulator's resident LOADCORE code and confirmed:
+the retry loop from the 39th finding only begins AFTER the list walk's
+terminator word (0) is read and the loop naturally exits - it's a
+POST-WALK finalization check, not part of per-entry processing, and a
+third independent reconfirmation that task #158's jalr-dispatch theory
+is unrelated. Right after the loop exits, a flag at fp+0x48 gates a
+call to a subroutine (relative offset matching our boot's 0x1028dc)
+that's ALSO called unconditionally before the walk even starts - then
+the 4-try retry loop begins immediately after. Reading: LOADCORE does
+one final check after registering every module - scanning a separate
+8-byte-stride table for a tag==3 entry - almost certainly verifying
+some required side effect of the walk (a specific module fully
+registering, or a sync primitive reaching a state) that real hardware
+always satisfies within 4 tries and this project's boot never does.
+Next: identify the scanned structure, the fp+0x48 flag's meaning, and
+what the 0x1028dc subroutine does. See docs/STATUS.md's 40th finding.
+No source changed - pure investigation.

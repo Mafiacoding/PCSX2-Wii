@@ -1405,6 +1405,24 @@ already documented, rather than truly returning from the syscall.
    SIF handshake blocker on its own. Full 87-block regression suite
    passes (0 hangs); clean Wii rebuild verified. Task #151 remains
    open - see STATUS.md's 36th finding for the full result and the
+   UPDATE (Round 29 continued, 37th finding, task #151 continued):
+   live-debugger tracing confirmed LOADCORE's registration-list walk
+   is an ACTIVE, re-entrant call-dispatch mechanism - for each
+   recognized real entry, it loads a function pointer from the
+   parsed header's real `entry` field, sets `$gp` from the real `gp`
+   field, and calls it directly via `jalr`. This project's own
+   external module-sequencer (`advance_to_next_module()`) ALSO
+   already runs every module's entry once, independently - so task
+   #155's list (which includes every loaded module, including ones
+   already run) likely causes LOADCORE to re-invoke an already-run
+   module's entry a second time, which real kernel init code is not
+   generally written to tolerate - a well-supported, NOT YET verified
+   hypothesis for this round's new registration-walk panic. Two
+   candidate directions for whoever continues: only list not-yet-run
+   modules at the point LOADCORE's walk reaches this code, or let
+   LOADCORE's own jalr-based walk become the real sequencer with this
+   project's external loader stepping back after invoking it. No
+   source changed - pure investigation. See STATUS.md's 37th finding.
    next concrete target (the new, deeper dead end this round found).
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the

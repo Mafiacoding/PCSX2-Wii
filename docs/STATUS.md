@@ -6169,3 +6169,85 @@ continues this investigation - likely requiring the same kind of live-
 debugger tracing this round used to find LOADCORE's list format in
 the first place, this time aimed at whatever validation step rejects
 the real ELF headers this project already supplies.
+
+## 37th finding (Round 29 continued, task #151 continued): LOADCORE's registration list is an ACTIVE, re-entrant call-dispatch mechanism, not passive bookkeeping - likely explains the new registration-walk panic
+
+Continuing the live pcsx2-mcp reference-debugger trace from the 34th/
+35th findings, followed LOADCORE's real per-entry processing past the
+COFF/ELF header validation (0x2890) into what happens on a
+SUCCESSFULLY recognized entry, disassembling 0x1a38-0x1af0 and the
+called subroutine 0x2a80 on the live instance.
+
+**Confirmed structurally, with exact real field offsets:**
+- 0x2a80 re-validates the header (checking a discriminant word at the
+  entry buffer for values 1/3/4, dispatching to one of three further
+  sub-parsers) and, for the ELF path specifically (0x29d0-0x29f4 in
+  the earlier-traced 0x2890), checks the REAL program header's
+  `p_type == 0x70000080` (PT_MIPS_IOPMOD - the exact real, Sony-
+  specific segment type this project's OWN `iop_elf.h` already cites
+  and implements) and the REAL ELF header's `e_type == 0xFF80` (the
+  exact real vendor e_type this project's OWN `iop_elf.h` already
+  cites) - independent, live-hardware confirmation that this
+  project's existing ELF loader citations are correct.
+- Then, critically, at 0x1a7c-0x1a90: LOADCORE loads a function
+  pointer from `fp+0x14` (populated by the header-parsing chain above
+  - almost certainly the module's real `entry` field) into `$v0`,
+  sets `$gp` from `fp+0x18` (the module's real `gp` field), sets
+  `a0=0, a1=0, a2=<the current list-entry pointer itself>`, and
+  **calls it directly via `jalr $v0`** - i.e. LOADCORE's own real
+  registration-list walk DIRECTLY INVOKES each recognized module's
+  real entry point itself, inline, as part of its own continuous
+  execution - it does not just record bookkeeping data for something
+  else to call later.
+
+**Why this likely explains this round's new registration-walk panic
+(36th finding):** this project's own external module-loader sequencer
+(`iop_module_loader.c`'s `advance_to_next_module()`) ALSO already runs
+every module's real entry point once, one at a time, via its own
+trampoline mechanism - completely independently of LOADCORE's
+internal list. Task #155's `build_real_registration_list()` populates
+the list with a pointer to EVERY successfully-loaded module,
+including ones this project's own external sequencer has ALREADY run
+to completion (e.g. SYSMEM, which always runs first). Given the jalr
+mechanism just confirmed, real LOADCORE code reaching this point would
+therefore call SYSMEM's real entry point A SECOND TIME - real kernel
+init code is generally not written to be safely re-entered, so a
+second real execution plausibly corrupts some state this project
+hasn't identified yet, which a subsequent check then rejects,
+producing the new panic tail found in the 36th finding. This is a
+well-supported hypothesis from the exact mechanism now confirmed, but
+NOT yet verified by directly observing which specific list entry
+triggers the failing call (that would need single-step tracing
+through the actual jalr and the state it touches - not completed this
+session due to time constraints).
+
+**What this implies architecturally, for whoever continues task
+#151:** this project's current architecture - an external sequencer
+that runs every boot-list module's entry point once, itself - is a
+project-specific simplification of what real hardware actually does:
+LOADCORE's own init code appears to BE the real sequencer, walking its
+internal list and jalr-ing into each module in turn. Supplying
+LOADCORE a real list of ALL modules (including already-run ones) most
+likely conflicts with this project's own separate external sequencing.
+Two candidate directions for a future session: (a) only include NOT-
+YET-RUN modules in the list handed to LOADCORE at the point its walk
+reaches this code (requires knowing exactly when, in boot order,
+LOADCORE's own init reaches this check, and truncating/rotating the
+list accordingly - tricky since this project's own external sequencer
+and LOADCORE's internal one are not obviously synchronized), or (b)
+the larger architecture change already flagged as an option earlier
+this session: let LOADCORE's own jalr-based walk BE the real
+sequencer once it starts, and have this project's external loader
+step back after invoking LOADCORE, rather than continuing to run its
+own competing one-at-a-time trampoline sequence in parallel. Neither
+was attempted this session - this is intentionally left as a clearly-
+scoped, well-evidenced starting point rather than a rushed, unverified
+attempt, consistent with this project's standing discipline of not
+claiming a fix without empirical confirmation.
+
+No source code was changed for this finding - pure investigation,
+same category as the 33rd/34th/35th findings. Nothing from the live
+reference instance's real memory is reproduced verbatim in this
+project's own source - only the structural facts above, cited the
+same way prior findings cited ps2sdk/PCSX2 upstream and this
+project's own already-existing iop_elf.h citations.

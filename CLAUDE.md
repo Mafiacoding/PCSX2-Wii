@@ -2392,3 +2392,42 @@ Wii rebuild verified. Task #151 remains open - next concrete target
 is tracing the new, deeper dead end (likely needs the same live-
 debugger approach that found the registration-list format in the
 first place).
+
+## Update (Round 29 continued, 37th finding): LOADCORE's registration list is an active jalr call-dispatcher, not passive bookkeeping (Task #151 continued)
+
+Live pcsx2-mcp reference-debugger tracing (continuing the 34th/35th
+findings) followed a successfully-validated registration-list entry
+past its COFF/ELF header checks (which independently confirmed this
+project's own iop_elf.h citations: real PT_MIPS_IOPMOD=0x70000080 and
+e_type=0xFF80) into what LOADCORE does next: it loads a function
+pointer from the parsed header's real `entry` field, sets `$gp` from
+the real `gp` field, and calls it directly via `jalr` - i.e. LOADCORE
+itself walks its list and invokes each recognized module's real entry
+point inline, as part of its own continuous execution.
+
+This project's own external sequencer (`advance_to_next_module()` in
+`iop_module_loader.c`) ALSO already runs every boot-list module's
+entry point once, independently of LOADCORE's internal list. Task
+#155's registration list includes every successfully-loaded module -
+including ones the external sequencer has ALREADY run to completion
+(e.g. SYSMEM, always first). Given the jalr mechanism just confirmed,
+LOADCORE's own walk would then call an already-run module's entry a
+SECOND time - real kernel init code generally isn't written to
+tolerate re-entry, which plausibly explains this round's new
+registration-walk panic (36th finding). This is a well-reasoned,
+evidence-backed hypothesis, explicitly NOT yet verified by directly
+observing the failing call (would need further single-step tracing -
+not completed this session; a same-emulator JALR-target trace this
+session logged only 7 JALR calls with targets >=0x00100000 over a
+30M-slice run, one repeated exactly twice, loosely consistent but not
+conclusive).
+
+Two candidate directions for whoever continues task #151: (a) only
+include not-yet-run modules in the list LOADCORE sees at the point its
+walk reaches this code, or (b) a larger architecture change - let
+LOADCORE's own jalr-based walk become the real sequencer, with this
+project's external loader stepping back once it hands off to
+LOADCORE, instead of continuing to run its own separate one-at-a-time
+sequence in parallel. Neither attempted this session (intentionally -
+this is left as a clearly-scoped, well-evidenced starting point, not a
+rushed fix). No source changed - pure investigation.

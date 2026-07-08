@@ -4783,3 +4783,73 @@ Task #124/#132 remains open (the panic loop is still eventually hit),
 but this is real, verified, measurable progress along that thread,
 not readiness work - continuing per the user's explicit instruction
 to keep chasing this specific root cause.
+
+## Round 29 continued (13th finding: precisely characterized the retry-loop's "empty list", ruled out a hypothesis empirically)
+
+Continuing directly from the 12th change's new wall (pc=0x001012A8),
+traced backward from the retry loop (RAM 0x1011A8-0x101294) to its
+caller (RAM 0x100F00-0x101000) via a targeted single-step + disassembly
+dump, plus a raw stack-memory dump around `fp`/`s2` at the exact
+moment of the first retry-loop iteration.
+
+**What the retry loop actually is**: `s2` (the pointer the loop's
+`lw v0,(s2); beqz v0,skip` empty-check reads) is NOT a global table -
+it's a freshly stack-allocated buffer, sized directly from boot_info
+struct offset 0x10:
+
+```
+lw   v0, 0x50(fp)      ; v0 = boot_info offset 0x10 (copied earlier)
+sll  v0, v0, 3         ; v0 = count * 8 bytes/entry
+subu sp, sp, v0        ; allocate that many bytes on the stack
+addiu s2, sp, 0x10
+sw   zero, 0x10(sp)    ; zero the first entry/slot
+```
+
+A second, separate list (checked earlier, at `lw v0,8(s0)` /
+`beqz v0,0x1011a8`) is sized the same way from offset 0x1C:
+
+```
+lw   a2, 0x50(fp) ; lw a1, 0x54(fp)   ; offsets 0x10 and 0x1C
+addiu a2, a2, 1 ; sll a2, a2, 2 ; ...  ; count+1 entries, 4 bytes each
+subu  sp, sp, v0                       ; allocate
+addiu s0, sp, 0x10
+```
+
+Since this project supplies 0 for both offset 0x10 and offset 0x1C
+(their real values are still unknown - see the 9th/10th findings),
+both allocations compute to (near-)zero size, and the explicit
+`sw zero,0x10(sp)` guarantees the first slot of each list reads 0 -
+i.e. these two boot_info fields are dynamic LIST-SIZE/COUNT fields,
+and supplying 0 for them structurally guarantees both lists look
+"empty" to the retry loop, regardless of anything else.
+
+**Hypothesis tested and REJECTED (honest negative result)**: patched a
+throwaway diagnostic to supply small nonzero counts (1, 4, 8) for both
+offsets instead of 0, to test whether merely allocating more stack
+space would let the retry loop see a non-empty list. Result: the IOP
+steady-state pc is IDENTICAL (`0x001012A8`) in every case - allocating
+more space does not, by itself, populate any entries (the buffer is
+still explicitly zero-filled by `sw zero,0x10(sp)` above; nothing else
+writes into it in the disassembled span). This confirms the real gap
+is NOT "these fields need a specific magic count" - it's that some
+real registration mechanism (an actual device/handler registration
+call this project doesn't yet emulate) is what's supposed to populate
+these lists' entries after allocation, and no citable value for either
+field, nor any citable description of that registration mechanism,
+was found (same exhausted search as the 9th/10th findings: psx-spx,
+ps2tek, PCSX2 upstream, an independent PS2-boot write-up, and the live
+pcsx2-mcp reference instance).
+
+**No further code change made this round** - deliberately: supplying
+an arbitrary nonzero count for offsets 0x10/0x1C, having just proven
+empirically that it doesn't change the outcome, would be fabrication
+with no evidentiary or empirical benefit (unlike offset 0x0C's fix,
+which had a clear, demonstrated real effect). This is a genuine,
+well-evidenced stopping point for this specific sub-thread: the
+remaining gap is a real registration mechanism, not a missing number.
+Task #124/#132 remains open. Whoever continues this thread next should
+look for what subroutine calls (if any) populate a list at a stack
+address matching this shape, likely earlier in SYSMEM's own init or in
+a preceding module (LOADCORE is the next name in the real IOPBTCONF
+list per task #92's citation) - not guess at offset 0x10/0x1C's values
+directly.

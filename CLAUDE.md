@@ -1789,3 +1789,26 @@ is still eventually hit, so task #124/#132 stays open, but this is
 real measurable progress, not a dead end. New test (7 checks, all
 passing), full 70-block regression passes, clean Wii rebuild
 verified, all docs updated.
+
+## Update (Round 29 continued, 13th finding - precise characterization + honest negative result)
+
+Traced the NEW wall (pc=0x001012A8, after the 12th change's real fix)
+backward to its caller. Found: the retry loop's "empty list" check
+reads a freshly stack-allocated buffer whose SIZE is computed directly
+from boot_info offsets 0x10 and 0x1C (both currently 0 in this
+project, real values still unknown). Empirically tested (throwaway
+diagnostic, not committed) whether supplying small nonzero counts (1,
+4, 8) for these fields changes anything: it does NOT - IOP pc stays
+identical at 0x001012A8 in every case, since the buffer is explicitly
+zero-filled regardless of its size and nothing else populates it in
+the traced code. This rules out "these fields just need a specific
+count" and correctly re-scopes the real gap: some actual device/
+handler registration mechanism this project doesn't yet emulate is
+what's supposed to populate these lists - not a missing magic number.
+No code change made (deliberately - the tested hypothesis failed, and
+guessing further would be fabrication with no evidence behind it).
+Task #124/#132 remains open; documented precisely so whoever continues
+next knows exactly what's been ruled out and what the real remaining
+question is (find the real registration mechanism, likely in LOADCORE
+or an earlier part of SYSMEM's own init, not in boot_info's raw
+values).

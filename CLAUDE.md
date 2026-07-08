@@ -1812,3 +1812,15 @@ next knows exactly what's been ruled out and what the real remaining
 question is (find the real registration mechanism, likely in LOADCORE
 or an earlier part of SYSMEM's own init, not in boot_info's raw
 values).
+
+## Update (Round 29 continued, 14th change - GS mipmap extended to TRIANGLE)
+
+Extended Round 28's SPRITE-only mipmap LOD-selection to TRIANGLE too
+(source/hw/gif.c's rasterize_triangle()), reusing the exact same
+algorithm with the triangle's screen-space bounding box standing in
+for SPRITE's well-defined width/height. New test (3 checks, all
+passing) mirrors test_gs_mipmap.c's structure. Found and documented
+two GIF-packet test-authoring bugs along the way (NLOOP undercounting,
+splitting TEX1/MIPTBP1 across two separate packet calls instead of
+one) - product code was fine, the test fixtures needed the fix. Full
+71-block regression passes, clean Wii rebuild verified.

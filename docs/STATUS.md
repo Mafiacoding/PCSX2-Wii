@@ -4853,3 +4853,31 @@ address matching this shape, likely earlier in SYSMEM's own init or in
 a preceding module (LOADCORE is the next name in the real IOPBTCONF
 list per task #92's citation) - not guess at offset 0x10/0x1C's values
 directly.
+
+## Round 29 continued (14th change: GS mipmap support extended to TRIANGLE)
+
+Extended Round 28's mipmap LOD-selection (previously SPRITE-only) to
+TRIANGLE, in `source/hw/gif.c`'s `rasterize_triangle()`. Uses the exact
+same algorithm already implemented and tested for SPRITE (LCM=1 fixed
+LOD from K, or a computed ratio-based LOD, clamped to MXL, MTBA=0
+explicit MIPTBP lookup only) - the one necessary adaptation is the
+"screen size" input to the ratio formula: SPRITE has a well-defined
+axis-aligned width/height, but a triangle doesn't, so this uses the
+triangle's screen-space bounding box (maxx-minx, maxy-miny) instead,
+the natural analog. Same honest simplifications as SPRITE's own
+implementation: per-primitive (not per-pixel/trilinear) selection, and
+the override is scoped strictly to one draw call (saved/restored
+around it, same as SPRITE).
+
+New test `tests/test_gs_mipmap_triangle.c` (3 checks: computed LOD,
+MXL clamp, magnification-always-base-level) mirrors
+`test_gs_mipmap.c`'s SPRITE test structure. Found and fixed two GIF-
+packet-construction bugs while writing this test (NLOOP undercounting
+the PRIM register alongside the 3 vertices' RGBAQ/UV/XYZ2 writes, and
+splitting TEX1/MIPTBP1 register writes across two separate
+`gif_process_quadwords()` calls instead of one combined packet caused
+the second write to silently not take effect) - both were test-file
+bugs, not product bugs; documenting them here since they're the kind
+of mistake worth remembering for future GIF-packet-based tests in this
+suite. Full 71-block regression suite passes (70 pre-existing + this
+new one); clean Wii rebuild verified.

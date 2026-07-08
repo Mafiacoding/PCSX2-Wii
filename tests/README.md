@@ -1532,6 +1532,21 @@ gcc -I../include -I../source -o test_gs_mipmap tests/test_gs_mipmap.c -lm
 ./test_gs_mipmap
 ```
 
+`test_gs_mipmap_triangle.c` covers Round 29 continued's 14th change:
+extending Round 28's mipmap support (previously SPRITE-only) to
+TRIANGLE, using the exact same per-primitive (not per-pixel/
+trilinear) LOD-selection formula, with the triangle's screen-space
+bounding box standing in for SPRITE's well-defined width/height (a
+triangle has no single natural "size" otherwise). 3 checks: computed
+LOD samples the correct mip level; MXL clamps a computed LOD down to
+the configured maximum; magnification (texture smaller than the
+bounding box) always uses the base level.
+
+```sh
+gcc -I../include -I../source -o test_gs_mipmap_triangle tests/test_gs_mipmap_triangle.c -lm
+./test_gs_mipmap_triangle
+```
+
 `test_iop_kmem_alloc.c` covers Round 29's real B(00h)
 `alloc_kernel_memory(size)` bump allocator (`source/hw/iop_hle_bios.c`)
 and the companion fix in `source/hw/iop_excb.c` - see `docs/STATUS.md`'s

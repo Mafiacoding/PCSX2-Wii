@@ -1256,11 +1256,11 @@ already documented, rather than truly returning from the syscall.
    addressing into the rendering pipeline (currently a separate,
    additive API only); extending Round 27's dual-context support to
    CLAMP/TEX1/TEX2/SCISSOR/FBA/MIPTBP (currently context-1-only for
-   both contexts); extending Round 28's mipmap support to TRIANGLE
-   (currently SPRITE-only) and to per-pixel/trilinear filtering
-   (currently per-primitive, nearest-single-level); and implementing
-   MTBA=1 auto mip-address calculation (currently falls back to
-   level 0).
+   both contexts); extending Round 28's mipmap support to per-pixel/
+   trilinear filtering (currently per-primitive, nearest-single-level
+   - TRIANGLE coverage DONE, Round 29 continued's 14th change); and
+   implementing MTBA=1 auto mip-address calculation (currently falls
+   back to level 0).
 
 6. Lower priority, deferred: the remaining ~23 EE MMI opcodes (section
    1), Pad/memory card (section 7).

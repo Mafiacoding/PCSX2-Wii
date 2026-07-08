@@ -391,6 +391,44 @@ static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, i
 
     double inv_area = 1.0 / (double)area;
 
+    /* Round 29 continued (14th change): extends Round 28's mipmap
+     * support (previously SPRITE-only - see rasterize_sprite()'s own
+     * comment for the full scope/citation and the honest limitations
+     * this shares: per-PRIMITIVE not per-pixel LOD selection, no
+     * trilinear blending, only MTBA=0 explicit-MIPTBP lookup) to
+     * TRIANGLE. Uses the triangle's screen-space bounding box
+     * (maxx-minx, maxy-miny) as the "screen size" input to the exact
+     * same ratio-based LOD formula SPRITE already uses - the natural
+     * analog of SPRITE's own (sx1-sx0, sy1-sy0) size, since a
+     * triangle has no single well-defined width/height the way an
+     * axis-aligned SPRITE rectangle does. Like SPRITE, the override
+     * is scoped strictly to this one draw call and restored below. */
+    uint32_t saved_mip_tbp0 = g_gif.tex_tbp0;
+    uint32_t saved_mip_tbw = g_gif.tex_tbw;
+    if (textured && g_gif.tex1_mxl > 0 && g_gif.tex1_mmin >= GS_MMIN_MIPMAP_THRESHOLD && !g_gif.tex1_mtba) {
+        uint32_t lod = 0;
+        if (g_gif.tex1_lcm) {
+            double k = (double)g_gif.tex1_k / 16.0;
+            lod = (k <= 0.0) ? 0u : (uint32_t)(k + 0.5);
+        } else {
+            int32_t screen_w = maxx - minx, screen_h = maxy - miny;
+            double tex_w = (double)(1u << g_gif.tex_tw);
+            double tex_h = (double)(1u << g_gif.tex_th);
+            double ratio_w = (screen_w > 0) ? tex_w / (double)screen_w : 1.0;
+            double ratio_h = (screen_h > 0) ? tex_h / (double)screen_h : 1.0;
+            double ratio = (ratio_w > ratio_h) ? ratio_w : ratio_h;
+            if (ratio > 1.0) {
+                double lod_f = log2(ratio);
+                lod = (lod_f < 0.0) ? 0u : (uint32_t)lod_f;
+            }
+        }
+        if (lod > g_gif.tex1_mxl) lod = g_gif.tex1_mxl;
+        if (lod > 0) {
+            g_gif.tex_tbp0 = g_gif.tex_mip_tbp[lod - 1];
+            g_gif.tex_tbw = g_gif.tex_mip_tbw[lod - 1];
+        }
+    }
+
     for (int32_t yy = miny; yy <= maxy; yy++) {
         for (int32_t xx = minx; xx <= maxx; xx++) {
             int32_t w0 = edge(x1, y1, x2, y2, xx, yy);
@@ -546,6 +584,13 @@ static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, i
         }
     }
     g_gif.triangles_drawn++;
+
+    /* Round 29 continued (14th change): restore tex_tbp0/tex_tbw in
+     * case a non-base mip level was temporarily selected above - keeps
+     * the override strictly local to this single draw call, same as
+     * rasterize_sprite()'s own restore. */
+    g_gif.tex_tbp0 = saved_mip_tbp0;
+    g_gif.tex_tbw = saved_mip_tbw;
 }
 
 /* SPRITE rasterizer (task #88 adds texturing here - previously

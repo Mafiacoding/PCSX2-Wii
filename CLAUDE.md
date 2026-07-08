@@ -2514,3 +2514,29 @@ always satisfies within 4 tries and this project's boot never does.
 Next: identify the scanned structure, the fp+0x48 flag's meaning, and
 what the 0x1028dc subroutine does. See docs/STATUS.md's 40th finding.
 No source changed - pure investigation.
+
+## Update (Round 29 continued, 41st finding): this session's tracing reconnects to and reopens the ORIGINAL task #151 investigation
+
+Re-read the 31st finding (earlier round) and found this session's
+39th/40th findings resolve its stated blocker: it said LOADCORE's own
+code region reads back all-zero by the time the retry loop is active,
+blocking reverse-engineering the registration-entry format from
+memory. This session successfully read fully valid, non-zero real
+code at that exact region (via both our own emulator and the live
+pcsx2-mcp debugger) - the obstacle no longer applies, likely due to
+IOP RAM timing changes from intervening fixes (tasks #155-158).
+
+Confirmed by name (temporary reverted trace) that SIFCMD and SIFINIT
+are among the 13 modules hitting `is_unconditional_trap_stub()` at the
+real R3000A exception vector `0x80000080` - the ORIGINAL task #151
+mechanism (29th/30th/32nd findings: a real syscall re-enters
+LOADCORE's exception handler, which consults "LOADCORE's own internal
+module/library registration list" and fails). Working hypothesis:
+this is the SAME real 8-byte-stride table this session traced via
+LOADCORE's own post-walk dispatch code (39th/40th findings) - meaning
+one real fix could resolve both the trap-stub bypass (SIFCMD/SIFINIT)
+and the registration-walk-panic bypass (LOADCORE itself)
+simultaneously. NOT yet empirically confirmed - the next concrete step
+is tracing forward from INTRMANP's ExitCriticalSection syscall to see
+if it reaches the same table-scanning code. See docs/STATUS.md's 41st
+finding. No source changed - pure investigation.

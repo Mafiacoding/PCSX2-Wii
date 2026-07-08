@@ -6494,3 +6494,78 @@ what's supposed to write it.
 No source code changed - pure investigation (same discipline as the
 36th-39th findings: static/live disassembly only, no unverified fix
 attempted).
+
+## Round 29 continued (41st finding, task #151): this session's findings reconnect to and reopen the ORIGINAL task #151 investigation (29th/30th/31st findings) - a previously-blocked path is now open
+
+Re-reading the 31st finding (an earlier round's honest dead-end
+report) in light of this session's 39th/40th findings resolves an
+apparent contradiction and clarifies what this session's deep-dive
+actually means for task #151.
+
+**The contradiction:** the 31st finding stated that dumping IOP RAM
+at LOADCORE's own code region (`0x100CD0` onward) "reads back as
+all-zero by the time the retry loop is active," blocking any attempt
+to reverse-engineer the real registration-entry struct format from
+resident memory. This session's diagnostics (39th/40th findings) read
+that SAME region, at a similar point (end of the full boot sequence),
+and found fully valid, non-zero, structurally-consistent real MIPS
+code there - not zeroed. The most likely explanation: intervening
+fixes between the 31st finding and now (task #155's real registration
+list, task #156's RFE fix, task #157's second bypass, task #158's
+slot-patching) changed IOP RAM allocation/timing enough that
+LOADCORE's own module memory is no longer overwritten by later
+allocations at the point this project's diagnostics inspect it. This
+was not independently re-verified against the OLD (pre-task-155)
+commit this round, but the practical upshot is unambiguous either way:
+**the previously-blocking obstacle no longer applies** - LOADCORE's
+real code is readable today, via both this project's own emulator and
+the live pcsx2-mcp reference debugger.
+
+**What this means for task #151, tying the whole arc together:**
+- The ORIGINAL task #151 (29th/30th finding): a real syscall
+  (ExitCriticalSection, `$a0=2`, from INTRMANP) re-enters LOADCORE's
+  own installed exception handler, which walks "LOADCORE's own
+  internal module/library registration list" and finds it wanting,
+  landing in an unconditional TGE trap. This project's
+  `is_unconditional_trap_stub()` (32nd finding) recognizes and
+  bypasses this - currently firing for 13 modules this round
+  (SSBUSC, DMACMAN, THREADMAN, VBLANK, IOMAN, MODLOAD, **SIFCMD**,
+  REBOOT, LOADFILE, CDVDMAN, CDVDFSV, **SIFINIT**, FILEIO - confirmed
+  by name via a temporary, reverted trace this session), always at
+  the same fixed real address `0x80000080` (the genuine R3000A
+  general-exception-vector address, BEV=0).
+- This session's 39th/40th findings independently traced a DIFFERENT
+  entry path into what is very likely the SAME underlying real
+  structure: LOADCORE's own post-registration-walk code (reached via
+  its OWN direct execution flow, not exception re-entry) performs a
+  4-pass tag-based dispatch over an 8-byte-stride table, then a
+  bounded backward scan, before falling into the same class of real
+  "write status, spin forever" trap - recognized by this project's
+  separate `is_registration_walk_panic_loop()` (task #157), firing
+  once, for LOADCORE itself.
+- **Working hypothesis connecting both:** the 8-byte-stride table
+  this session found IS (or is closely related to) "LOADCORE's own
+  internal module/library registration list" the 31st finding
+  referred to only conceptually. Both access paths - LOADCORE's own
+  post-walk dispatch, and LOADCORE's exception handler re-entered by
+  other modules' syscalls - very plausibly consult this SAME real
+  structure, and both fail for the same underlying reason: this
+  project's simulated boot never populates a matching entry in it.
+  This would mean fixing this ONE structure could resolve BOTH
+  symptoms (SIFCMD/SIFINIT's trap-stub bypass AND LOADCORE's own
+  registration-walk-panic bypass) simultaneously.
+
+**Honest caveat:** this connecting hypothesis is plausible and
+well-motivated by the newly-reopened ability to read real code, but
+NOT yet empirically verified - unlike this project's usual standard,
+this round ran out of time to confirm it by tracing forward from
+`is_unconditional_trap_stub()`'s real re-entry point (INTRMANP's
+ExitCriticalSection syscall) to see whether it reaches the SAME
+8-byte-stride-table code this session already disassembled, or a
+structurally-similar-but-distinct copy of the same real idiom
+elsewhere in LOADCORE. This is the single most valuable next step for
+whoever continues task #151, now that the "all-zero memory" obstacle
+that stopped the 31st finding no longer applies.
+
+No source code changed - pure investigation and documentation
+reconciliation.

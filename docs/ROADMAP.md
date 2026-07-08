@@ -1464,6 +1464,19 @@ already documented, rather than truly returning from the syscall.
    independent reconfirmation that task #158's jalr-dispatch theory is
    unrelated. Next: identify the scanned structure, the fp+0x48 flag,
    and what the shared subroutine does. See STATUS.md's 40th finding.
+   UPDATE (Round 29 continued, 41st finding, task #151): reconciled
+   this session's 39th/40th findings with the ORIGINAL task #151
+   history (29th/30th/31st findings) - the 31st finding's stated
+   blocker ("LOADCORE's code reads back all-zero") no longer applies;
+   this session read fully valid real code there via both our emulator
+   and the live debugger. Confirmed SIFCMD/SIFINIT are among the 13
+   modules hitting is_unconditional_trap_stub() at the real R3000A
+   exception vector 0x80000080 - the ORIGINAL retry-loop mechanism.
+   Working hypothesis (not yet verified): the 8-byte-stride table this
+   session traced is the same "internal registration list" that
+   mechanism consults - one fix could resolve both bypasses. Next:
+   trace forward from INTRMANP's ExitCriticalSection syscall to
+   confirm. See STATUS.md's 41st finding.
    next concrete target (the new, deeper dead end this round found).
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the

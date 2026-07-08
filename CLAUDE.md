@@ -2540,3 +2540,27 @@ simultaneously. NOT yet empirically confirmed - the next concrete step
 is tracing forward from INTRMANP's ExitCriticalSection syscall to see
 if it reaches the same table-scanning code. See docs/STATUS.md's 41st
 finding. No source changed - pure investigation.
+
+## Update (Round 29 continued, 42nd finding): EXCEPMAN completes normally but never patches the exception vector (Task #151)
+
+Two sharp new facts this round: (1) the "always trap" stub at the
+exception vector (0x80000080) is baked in via ELF segment loading
+(iop_elf_load uses iop_mem_write8, not iop_mem_write32 - my earlier
+write-trace missed it), meaning it's a real early module's (likely
+SYSMEM's) own segment data, not something patched at runtime. (2)
+EXCEPMAN (Exception_Manager) IS in this project's real boot list and
+runs to FULL, un-bypassed completion (confirmed via reverted trace:
+15 modules reach the trampoline-return path, EXCEPMAN among them) -
+yet the vector still holds the default stub afterward. This means
+EXCEPMAN's real init does NOT patch the vector directly; the real
+design almost certainly requires each individual module (SIFCMD,
+SIFINIT, THREADMAN, etc.) to actively register its own handler via a
+real syscall/RPC call into Exception_Manager as part of its OWN init -
+and if that registration call itself falls through to the still-
+default vector (since this project runs each module's entry to
+completion in isolation, so each is effectively "the first" to try),
+nothing ever gets registered, self-reinforcing the gap. Next: trace
+EXCEPMAN's real internal data structure (likely the same 8-byte-stride
+table from the 39th/40th findings) and what real syscall a module like
+SIFCMD makes right before hitting the trap stub. See docs/STATUS.md's
+42nd finding. No source changed - pure investigation.

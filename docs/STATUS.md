@@ -6569,3 +6569,90 @@ that stopped the 31st finding no longer applies.
 
 No source code changed - pure investigation and documentation
 reconciliation.
+
+## Round 29 continued (42nd finding, task #151): EXCEPMAN completes normally but never patches the exception vector - the real fix target is narrowed to "what installs the real dispatcher"
+
+Continuing the 41st finding's open question (does the exception-vector
+trap-stub path connect to the 8-byte-stride table?), traced two more
+concrete facts that sharpen task #151 considerably:
+
+**1. The "always trap" content at the exception vector is baked in via
+module loading, not written by any running code.** A temporary trace
+on `iop_mem_write32()` (reverted, diff-verified) showed ZERO writes to
+`0x80000080`-`0x800000B0` across an entire real-BIOS boot, yet that
+range unambiguously contains the real ten-instruction
+"save-registers-then-unconditionally-TGE" stub (confirmed identical to
+the live pcsx2-mcp reference debugger's own resident copy). The
+resolution: `iop_elf.c`'s segment loader writes via `iop_mem_write8()`
+byte-by-byte (`iop_elf_load()`, lines ~84-87), which my write-trace on
+the 32-bit path didn't cover. This means the stub is literally part of
+some early-loaded real module's own ELF/IRX segment data, physically
+placed at the fixed R3000A exception-vector address by that module's
+own real (not fabricated) program-header `p_vaddr` - almost certainly
+a foundational module (SYSMEM, loaded earliest) installing a minimal
+"default/fallback" handler as real, standard PS2 kernel bootstrap
+behavior, intended to be replaced later.
+
+**2. EXCEPMAN (Exception_Manager) is in this project's own real boot
+list and runs to full, un-bypassed completion** - confirmed via a
+temporary trace (reverted, diff-verified) on every module that reaches
+this project's trampoline-return path (the normal "ran real code,
+returned normally" outcome, as opposed to any panic/trap-stub bypass):
+`SYSMEM, EXCEPMAN, INTRMANP, INTRMANI, TIMEMANP, TIMEMANI, SYSCLIB,
+HEAPLIB, EECONF, ROMDRV, STDIO, SIFMAN, IGREETING, SECRMAN, EESYNC`
+(15 modules, matching `modules_run_to_completion=15` exactly).
+EXCEPMAN's real entry point genuinely executes start to finish in this
+project's interpreter - no bypass needed, no shortcuts taken - yet the
+exception vector still holds the unmodified default stub immediately
+afterward (confirmed by re-reading `0x80000080` after boot completes).
+
+**This narrows task #151 considerably:** the real PS2 kernel's design
+almost certainly does NOT have Exception_Manager patch the shared
+vector directly as a side effect of its own init - if it did, and
+EXCEPMAN's real code runs uninterrupted in this project's emulator
+(which it does), the patch would already be visible. The much more
+likely real design (consistent with the "Exception_Manager" name and
+real PS2 kernel conventions): EXCEPMAN's init only sets up its OWN
+internal bookkeeping (very plausibly the 8-byte-stride table this
+session already found via LOADCORE's post-walk dispatch code, or a
+sibling structure), and each INDIVIDUAL module (SIFCMD, SIFINIT, and
+the other 11 that hit the trap-stub bypass) is expected to actively
+REGISTER its own handler via a real kernel API call (a syscall or
+SIF/RPC call INTO Exception_Manager) as part of ITS OWN init - and
+if those registration calls aren't happening correctly in this
+project's simulation (e.g. because the calling module's own init gets
+bypassed via `is_unconditional_trap_stub()` BEFORE it reaches its own
+"register my handler" call, or because the syscall/RPC mechanism used
+to reach Exception_Manager isn't fully wired up), the real dispatcher
+table never gets populated, and the shared vector's fallback "always
+trap" stub is all that's ever consulted.
+
+**This also would explain the exact module list precisely:** THREADMAN,
+IOMAN, MODLOAD, SIFCMD, CDVDMAN, CDVDFSV, SIFINIT, FILEIO, etc. are all
+modules whose real init plausibly needs to register interrupt/exception
+handling for their own hardware/service (timer ticks, DMA completion,
+device interrupts) - exactly the kind of module that would call INTO
+Exception_Manager's real registration API early in its own init, before
+doing anything else. If that very first call already falls through to
+the still-default vector (because NO earlier module successfully
+registered anything yet, and this project's own architecture runs
+these modules' entry points to completion one at a time - so each
+module IS the first to try, in isolation), this is a self-reinforcing
+gap: no module ever gets past its own first registration attempt to
+reach the rest of its real init code, so nothing "downstream" that
+might otherwise populate the table ever executes either.
+
+**Next concrete step (unchanged goal, most precisely scoped yet):**
+trace EXCEPMAN's own real init code (now readable, since the "all-zero
+memory" obstacle no longer applies - see the 41st finding) to identify
+its real internal data structure (very possibly the same 8-byte-stride
+table), and separately trace what a module like SIFCMD's real init
+code does immediately before it hits the trap stub - specifically
+whether it makes a real syscall/RPC call whose target is EXCEPMAN's
+registration entry point, and whether that call's expected real
+argument/return convention is being faithfully emulated (this project
+already implements real IOP syscalls per module - the specific
+registration syscall's number/semantics may not yet be covered).
+
+No source code changed - pure investigation, following the same
+byte-signature/trace-and-revert discipline as the 39th-41st findings.

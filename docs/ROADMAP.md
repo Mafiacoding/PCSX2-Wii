@@ -1477,6 +1477,18 @@ already documented, rather than truly returning from the syscall.
    mechanism consults - one fix could resolve both bypasses. Next:
    trace forward from INTRMANP's ExitCriticalSection syscall to
    confirm. See STATUS.md's 41st finding.
+   UPDATE (Round 29 continued, 42nd finding, task #151): sharpened the
+   target considerably. The exception-vector "always trap" stub is
+   baked in via ELF segment loading (a real early module's own data,
+   not runtime-patched). EXCEPMAN (Exception_Manager) IS in this
+   project's boot list and runs to FULL completion - yet never patches
+   the vector, meaning the real design requires each module (SIFCMD,
+   SIFINIT, etc.) to actively register its own handler via a real
+   syscall/RPC into EXCEPMAN as part of its own init, which never
+   succeeds since each module runs in isolation to completion. Next:
+   trace EXCEPMAN's real internal structure and the real syscall a
+   module like SIFCMD makes right before hitting the trap. See
+   STATUS.md's 42nd finding.
    next concrete target (the new, deeper dead end this round found).
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the

@@ -1555,6 +1555,27 @@ yet). Next step: trace forward from the clear-loop's own return address
 to find whether/how RAM[0x100]/RAM[0x108] get re-established before the
 dispatcher runs.
 
+**Update (Round 29 continued, 3rd finding, same session)**: user said
+"mach weiter" (continue). Traced the clear-loop's own caller (return
+address 0xbfc52b4c) and found - live-decoded straight from the ROM
+bytes - it compares a name against the literal string "LOGO" (with a
+"CD001" ISO9660 signature nearby), matching this project's own already-
+understood ROMDIR mechanism (task #33), and calls into a loaded IRX
+module at RAM 0x00030000 (task #92's real module loader placed it
+there) via jalr. This is almost certainly the real BIOS's own logo-
+decompression/rendering routine. It runs largely self-contained (no
+further A0/B0/C0 calls) for ~2.8 million instructions - only 2
+FlushCache calls - before the previously-chased dispatcher wall. This
+reframes the investigation: the exception-handler gap sits AFTER the
+real logo code chronologically, not before it, so it may not currently
+block a splash screen from displaying at all. Getting a real splash
+screen likely depends more on wiring the GS/display driver path into
+the real boot flow (task #126) than on further exception-dispatcher
+work. Not yet checked whether the logo module's output reaches
+GS-visible memory - that's the natural next step. Pure diagnostic
+finding, no code changes this round (see docs/STATUS.md's "Round 29
+continued (3rd finding)" section).
+
 ## Reference material
 
 `README.md` names the exact upstream PCSX2 commit/branch used as the

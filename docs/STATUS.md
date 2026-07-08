@@ -3478,6 +3478,70 @@ not go through the B0/C0 vector mechanism this project intercepts -
 worth tracing directly from the clear-loop's own return address forward,
 rather than backward from the dispatcher, as the next concrete step).
 
+### Round 29 continued (3rd finding, 2026-07-07): the "clear-loop wall" is real BIOS LOGO-loading code, not a bug - reframes the whole investigation
+
+Direct continuation of the same session, per the user's "mach weiter"
+after being shown that the clear-loop wiping RAM[0x100]/RAM[0x110]
+(found in this round's earlier fixes) still blocks the exception
+dispatcher. Pure diagnostic tracing this round - no code changes.
+
+**Traced the clear-loop's own caller** (return address `0xbfc52b4c`,
+captured live) and disassembled the surrounding function
+(`0xbfc52afc`-`0xbfc52b98`). It compares a name against two ROM string
+constants - **live-decoded from the actual ROM bytes**: both compares
+are against the literal string `"LOGO"` (null-padded, 8-byte aligned),
+with a `"CD001"` string (the ISO9660 volume-descriptor signature)
+immediately adjacent in ROM. This is a real, direct textual match, not
+inference - read straight out of the loaded BIOS image. The function's
+shape (compare against candidate name -> on match, look up and call a
+function pointer via `jalr`) matches this project's own already-
+understood ROMDIR mechanism (task #33) applied to find and invoke the
+BIOS's own boot-logo resource handler.
+
+**Confirmed live**: at the `jalr $v1` call site (instr 221,572), `$v1`
+holds `0x00030000` - a RAM address, not a ROM address, meaning this is
+a call into a **loaded module** (this project's own real IOP IRX
+loader, task #92, is what would have placed it there) - almost
+certainly the BIOS's real logo-decompression/rendering module.
+Execution enters `0x00030000` at instr 221,575 and runs largely self-
+contained (no further BIOS A0/B0/C0 calls at all) until instr 367,227,
+when it calls `A0(0x44) FlushCache` - typical after writing freshly
+decompressed image data - then continues running self-contained again
+all the way to instr 3,050,446 (another FlushCache), followed by a
+tight cluster of calls (`A0(0x13)`, `B0(0x19)`, `B0(0x5B)`, `C0(0x0A)`,
+`A0(0x72)`) right before the previously-identified dispatcher/garbage-
+jalr wall at instr ~3,055,000.
+
+**Why this matters**: this strongly suggests the ~2.8-million-
+instruction stretch this project has been treating as an opaque
+"pre-wall" gap is not idle or wasted execution, nor a stuck loop - it
+is the REAL BIOS's own logo-loading and (very likely) rendering code,
+running for real, self-contained, exactly as real hardware would. The
+"wall" investigated over the last two fixes this round (RAM[0x100]
+clear, missing C(01h)/C(0Ch) handlers) sits chronologically AFTER this
+real logo routine, not before it - meaning it is not currently known to
+block the logo from displaying at all. This reframes the practical
+priority: getting a real, BIOS-driven splash screen (the user's
+originally stated goal) may depend far more on task #126 (wiring the
+GS/display driver path into the real boot flow, so that whatever this
+logo module writes actually reaches the Wii's framebuffer) than on
+further exception-dispatcher archaeology, since the logo module itself
+does not appear to need working priority-chain dispatch to run.
+
+**Not yet determined this round**: whether the logo module's output
+actually reaches GS-visible memory (would require watching GS register
+and VRAM writes during this exact instruction window - not done yet),
+what module name/IRX this corresponds to, and whether `main.c`'s
+current demo-driven boot path would even reach this code path as
+currently wired. These are the natural next steps, and directly serve
+task #126 rather than task #124.
+
+No code changes this round - purely diagnostic, using disposable
+`/tmp/diagNN.c` harnesses (not committed) against the user's own real
+BIOS dump, per the established convention. Existing 64-test suite and
+Wii build are unaffected and were not re-run this round since nothing
+in `source/`/`include/` changed.
+
 ## GS Round 23: alpha test + alpha blending (TEST_1/ALPHA_1)
 
 

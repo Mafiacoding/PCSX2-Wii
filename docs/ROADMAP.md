@@ -672,6 +672,20 @@ instead of fully emulating the real IOP BIOS ROM.
       (2nd fix) section for the precise next step (trace forward from
       the clear-loop's own return address rather than backward from
       the dispatcher).
+- [ ] **Reframing finding (3rd, same round)**: traced the clear-loop's
+      own caller and found it's the real BIOS's own LOGO-loading
+      dispatch (matches ROM string "LOGO", ROMDIR-style lookup, calls
+      into a loaded IRX module at RAM 0x00030000 - task #92's real
+      module loader). This module runs largely self-contained for
+      ~2.8M instructions (only 2 FlushCache calls) BEFORE the
+      exception-dispatcher wall this section has been chasing. This
+      means the wall sits chronologically AFTER the real logo code,
+      not before it - getting a real splash screen likely depends more
+      on wiring the GS/display path into the real boot flow (section 8
+      below / the "GS-Treiberpfad" task) than on further exception-
+      dispatcher work. Not yet checked: whether the logo module's
+      output reaches GS-visible memory. See docs/STATUS.md's "Round 29
+      continued (3rd finding)" section.
 
 ## 3. DMA controller
 

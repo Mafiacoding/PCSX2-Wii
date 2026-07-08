@@ -1351,6 +1351,23 @@ already documented, rather than truly returning from the syscall.
    productive next targets for the still-blocked entry-struct
    reverse-engineering work. See STATUS.md's 33rd finding for the
    full module-by-module breakdown.
+   UPDATE (Round 29 continued, 34th finding, task #154): confirmed the
+   connected live PCSX2 reference debugger (pcsx2-mcp, a real
+   fully-booted instance, not this project's own emulator) can read
+   real IOP memory via `pcsx2_disassemble(cpu="iop")` as a raw-word
+   workaround (pcsx2_read_memory/pcsx2_evaluate cannot reach IOP
+   space). Walked the real ModuleInfo_t chain from IOP address 0x800
+   to confirm SIFMAN (entry=0x16930) and SIFCMD (entry=0x17e00) real
+   addresses. Found the real cross-module import-table format (magic
+   0x41e00000 + header + 8-byte library name + j-stub pairs) embedded
+   in SIFMAN's own text - a different mechanism from LOADCORE's own
+   internal registration list. Confirmed LOADCORE's real entry
+   function reads boot_info at exactly the offsets this project's own
+   struct already models (independent real-hardware confirmation of
+   task #134's fix). Found a candidate real list-search function at
+   0x1c70 matching the 27th finding's "phase-tagged list" description,
+   not yet confirmed as the actual gate on task #151. No source
+   changed - pure investigation. See STATUS.md's 34th finding.
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the
    register-block entry in section 7 above. Register-level scaffold

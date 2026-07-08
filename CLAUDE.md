@@ -2275,3 +2275,41 @@ EE handshake depends on. No new code change this round - this sets a
 concrete, prioritized target (SIFCMD/SIFINIT's real init code) for
 whoever picks up the still-blocked entry-struct reverse-engineering
 work described in the 31st finding.
+
+## Update (Round 29 continued, 34th finding): live PCSX2 reference debugger reads real SIFMAN/SIFCMD + reveals real import-table format (Task #154)
+
+User asked whether SIFCMD/SIFINIT could be extracted from the
+connected PCSX2 debugger instead of this project's own (already
+zeroed-out, per the 31st finding) emulated IOP memory.
+
+Confirmed yes. The connected pcsx2-mcp DebugServer is attached to a
+live, fully-booted real PCSX2 instance (not this project's emulator).
+`pcsx2_read_memory`/`pcsx2_evaluate` can't reach IOP space, but
+`pcsx2_disassemble(cpu="iop")` can and echoes the raw hex word per
+address - reused as a raw-memory-read workaround.
+
+Walked the real ModuleInfo_t chain from IOP address 0x800 through 17
+real modules, confirming SIFMAN (entry=0x16930) and SIFCMD
+(entry=0x17e00) by their real name strings. Ps2sdk has no separate
+"SIFINIT" module - `sceSifInit` is exported by SIFMAN itself.
+
+Three real structural findings from disassembling their code live:
+1. Real cross-module import-table format found in SIFMAN's text:
+   magic 0x41e00000 + header + 8-byte library name + j-stub pairs
+   resolving into LOADCORE's and INTRMAN's real text ranges. Distinct
+   from LOADCORE's own internal registration list.
+2. LOADCORE's real entry function (0x1630) reads boot_info at exactly
+   the offsets (0x00-0x1C) this project's own struct already models -
+   independent real-hardware confirmation of task #134's fix.
+3. A candidate real list-search function at 0x1c70 (linked-list nodes
+   keyed by a byte tag) structurally matching the 27th finding's
+   "phase-tagged list" description - not yet confirmed as the actual
+   gate on task #151, caller/populator not yet traced.
+
+No source code changed (pure investigation, like the 33rd finding).
+Nothing from the live reference instance's real memory is reproduced
+verbatim in this project - only structural facts, cited like prior
+upstream references. Task #151 remains open; next step would be
+tracing 0x1c70's caller to determine if it's really LOADCORE's
+registration-list walker, which would finally supply the real entry-
+struct format needed to close task #151 at its root.

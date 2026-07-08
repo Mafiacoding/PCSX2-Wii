@@ -5932,3 +5932,84 @@ engineering work (still blocked - see the 31st finding) with a
 concrete, prioritized target: SIFCMD and SIFINIT's own real init code
 would be the two most productive candidates to trace next, since they
 are what the EE is actually waiting on.
+
+## 34th finding (Round 29 continued, task #154): live PCSX2 reference debugger confirms SIFMAN/SIFCMD addresses and reveals the real IOP import-table format
+
+User question: can SIFCMD/SIFINIT be read directly from the connected
+PCSX2 debugger (pcsx2-mcp), instead of continuing to rely on this
+project's own emulated IOP memory (already found, in the 31st finding,
+to be zeroed out by the time it would be needed)?
+
+Answer: yes, confirmed concretely. The connected pcsx2-mcp DebugServer
+is attached to a LIVE, fully-booted, real PCSX2 instance running an
+actual commercial game (not this project's own emulator). Its
+`pcsx2_read_memory`/`pcsx2_evaluate` tools cannot reach IOP address
+space (no `cpu` param / no pointer-dereference support respectively),
+but `pcsx2_disassemble(cpu="iop")` can, and conveniently echoes the
+raw hex word for every address alongside its (often nonsensical, since
+much of it is struct data rather than code) decoded mnemonic - reused
+here as a raw-memory-read workaround, same technique already noted in
+this round's earlier work.
+
+Walked the real `ModuleInfo_t` singly-linked list starting at IOP
+address `0x800` (ps2sdk's own loadcore.h documents this as the usual
+start) through all 17 real kernel modules up to and including id=16
+(`IOP_SIF_manager` = SIFMAN) and id=17 (`IOP_SIF_rpc_interface` =
+SIFCMD) - confirming both by reading their name-string bytes directly
+out of memory, not just inferring from list position. Per ps2sdk's
+real module set there is no separate "SIFINIT" module - `sceSifInit`
+is a function exported by SIFMAN itself, so SIFMAN + SIFCMD together
+are the complete real answer to "SIFCMD/SIFINIT". Real addresses
+found: SIFMAN entry=0x16930 (text 0x16930-0x17800), SIFCMD
+entry=0x17e00 (text 0x17d30-0x19490).
+
+Three concrete, non-fabricated structural discoveries came out of
+disassembling their real code on this live instance:
+
+1. **Real IOP import-table format**, found embedded in SIFMAN's own
+   text (called from its entry function at 0x169a0's `jal 0x17794`):
+   a magic word `0x41e00000`, two header words, an 8-byte
+   null-terminated imported-library name (e.g. `"intrman\0"`), followed
+   by a run of `j <target>` / delay-slot-`li $zero,N` stub pairs whose
+   jump targets land inside the real, already-confirmed text ranges of
+   LOADCORE (0x1630-0x3260) and INTRMAN (0x3d30-0x52a0) - i.e. these
+   are patched-in real call stubs to those two modules' real exported
+   functions, resolved by the time this reference instance reached its
+   current running state. This is a DIFFERENT mechanism from LOADCORE's
+   own internal per-phase registration list (the 27th finding's still-
+   open gap) - it's the ordinary cross-module import/export linkage,
+   not LOADCORE's own bookkeeping.
+
+2. **LOADCORE's real entry function** (0x1630) reads real boot_info
+   fields at every offset this project's own `boot_info` struct already
+   models (0x00/0x04/0x08/0x0C/0x10/0x14/0x18/0x1C) in that exact
+   order - independent, real-hardware confirmation that this project's
+   boot_info layout (including task #134's offset-0x0C fix) is
+   structurally correct, not a guess. It also zeroes a fixed 17-entry
+   (0x44-byte) table at real address 0x32C0 during init - a LOADCORE-
+   internal table whose purpose is not yet determined.
+
+3. **A candidate real registration-list-walk function** at 0x1c70:
+   a singly-linked-list search over nodes shaped
+   `{next(u32) @+0, ??? @+2 (u8), a key byte @+2 read for comparison,
+   a count byte @+3, then count*4 bytes of trailing u32 data}`,
+   searching for a node whose byte-at-offset-2 matches a caller-
+   supplied key - structurally consistent with this project's
+   pre-session 27th-finding language of a "phase-tagged" registration
+   list, though this has NOT yet been confirmed as THE list gated by
+   boot_info[0x18]/[0x1C], nor has its caller/populator been traced.
+
+No source code was changed for this finding (pure investigation, same
+category as the 33rd finding/task #153). Per the project's standing
+rule, nothing from this live reference instance's real BIOS/game
+memory is reproduced verbatim anywhere in this project's own source or
+tests - only the structural/format facts above, cited the same way
+prior findings cited ps2sdk/PCSX2 upstream headers and source.
+
+Task #151 remains open. The most promising next step is tracing who
+calls into 0x1c70 and with what key values, to determine whether it is
+in fact LOADCORE's real per-phase registration-list walker referenced
+since the 27th finding - which would finally give this project the
+real entry-struct format needed to populate LOADCORE's list with real
+(not fabricated) entries, resolving task #151 at its root instead of
+via the current safe bypass.

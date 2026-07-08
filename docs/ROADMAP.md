@@ -1423,6 +1423,27 @@ already documented, rather than truly returning from the syscall.
    LOADCORE's own jalr-based walk become the real sequencer with this
    project's external loader stepping back after invoking it. No
    source changed - pure investigation. See STATUS.md's 37th finding.
+
+   UPDATE (Round 29 continued, 38th finding, task #158): implemented
+   and wired in mark_module_dispatched() per the 37th finding's
+   hypothesis - patches a module's own registration-list slot from a
+   real pointer to an inert tag word the instant it starts executing,
+   preventing LOADCORE's real jalr-based walk from re-invoking an
+   already-run module. Verified correct via: full 87-test regression
+   suite (all pass), a temporary trace confirming all 29 modules'
+   slots get patched during a real boot run, and a direct A/B
+   comparison (git stash) against the pre-fix commit. HONEST RESULT:
+   the real-BIOS diagnostic's output is byte-for-byte IDENTICAL before
+   and after this fix - modules_run_to_completion=15,
+   registration_walk_panics_bypassed=1 (same count, same place),
+   SIFCMD/SIFINIT unchanged. The double-execution mechanism is real
+   (confirmed via live debugger) but is NOT the actual SIF-handshake
+   blocker - task #157's registration-walk panic fires identically
+   regardless of slot content. Fix kept (architecturally correct, zero
+   regressions) but does NOT close task #151. See STATUS.md's 38th
+   finding for the full verification chain and the next concrete step
+   (trace exactly what real condition triggers the panic pattern, not
+   slot content).
    next concrete target (the new, deeper dead end this round found).
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the

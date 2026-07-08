@@ -2431,3 +2431,36 @@ LOADCORE, instead of continuing to run its own separate one-at-a-time
 sequence in parallel. Neither attempted this session (intentionally -
 this is left as a clearly-scoped, well-evidenced starting point, not a
 rushed fix). No source changed - pure investigation.
+
+## Update (Round 29 continued, 38th finding): mark_module_dispatched() fix implemented, verified NOT to resolve task #151 (Task #158)
+
+Implemented the 37th finding's hypothesis: `mark_module_dispatched()`
+patches a module's own registration-list slot from a real header
+pointer (bit0=0) to an inert tag word `0x00000003` (bit0=1, nibble=3 -
+confirmed inert per the walk's own `andi/bne` check) the instant that
+module starts executing, wired into both `iop_module_loader_boot()`
+and `advance_to_next_module()`.
+
+**Verification chain:** compile-check clean; full 87-test host-native
+regression suite passes (one test updated to assert the new correct
+behavior - see STATUS.md's 38th finding); temporary trace
+instrumentation (added, exercised, then reverted and diff-verified
+byte-identical) confirmed all 29 real-BIOS-loaded modules' slots get
+patched during an actual boot run, at valid, distinct addresses, in
+boot order; a direct `git stash`-based A/B comparison against the
+pre-fix commit showed the real-BIOS diagnostic's output
+(`modules_run_to_completion`, `registration_walk_panics_bypassed`,
+all four SIF registers, etc.) is **byte-for-byte identical** before
+and after this fix.
+
+**Honest result: this fix does NOT close task #151.** The double-
+execution mechanism (LOADCORE's real jalr dispatch) is genuinely
+confirmed via the live debugger, but neutralizing it changed nothing -
+`registration_walk_panics_bypassed` stays at exactly 1 either way,
+meaning the real walk hits the exact same dead end regardless of slot
+content. The actual SIFCMD/SIFINIT blocker is still unidentified. Fix
+kept (architecturally correct, zero regressions, matches the real
+bit0 pointer/tag distinction) but is not by itself the root fix.
+Next step for whoever continues: single-step trace exactly what real
+condition (not slot content) triggers the `is_registration_walk_panic_loop()`
+byte pattern every time. See STATUS.md's 38th finding for full detail.

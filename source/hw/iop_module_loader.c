@@ -151,6 +151,16 @@ static struct {
     iop_elf_load_result_t elf_results[MODLIST_MAX];
     int all_loaded;
 
+    /* Round 29 continued (task #158): registration_list_slot_addr[i]
+     * is the IOP RAM address of modlist[i]'s own word slot inside the
+     * real registration list build_real_registration_list() builds
+     * (0 if modlist[i] failed to load and so has no slot). Used by
+     * mark_module_dispatched() to patch a module's own slot from a
+     * real header pointer to an inert tag word the INSTANT it starts
+     * executing - see that function's header comment for the full
+     * reasoning (docs/STATUS.md's 38th finding). */
+    uint32_t registration_list_slot_addr[MODLIST_MAX];
+
     iop_module_loader_stats_t stats;
 } g;
 
@@ -487,12 +497,13 @@ static void build_real_registration_list(iop_state_t *st)
     iop_mem_write32(st, list_addr + w * 4u, 0u); w++; /* leading word 0 - real meaning not determined this round */
     iop_mem_write32(st, list_addr + w * 4u, 0u); w++; /* leading word 1 - real meaning not determined this round */
     for (int i = 0; i < g.modlist_count; i++) {
-        if (g.entry_points[i] == 0) continue;
+        if (g.entry_points[i] == 0) { g.registration_list_slot_addr[i] = 0u; continue; }
         /* elf_results[i].load_addr is always 16-byte aligned
          * (bump_alloc()'s own guarantee, above) so bit0 is
          * naturally 0 - a real header pointer, per the format
          * derivation above, not a phase-tag word. */
         iop_mem_write32(st, list_addr + w * 4u, g.elf_results[i].load_addr);
+        g.registration_list_slot_addr[i] = list_addr + w * 4u; /* task #158 */
         w++;
     }
     iop_mem_write32(st, list_addr + w * 4u, 0u); w++; /* terminator */
@@ -501,6 +512,56 @@ static void build_real_registration_list(iop_state_t *st)
     iop_mem_write32(st, g.boot_info_addr + BOOT_INFO_OFF_LIST_PTR, list_addr);
 
     g.stats.registration_list_entries = (uint32_t)n;
+}
+
+/* Round 29 continued (task #158): see docs/STATUS.md's 38th finding
+ * for the full derivation. The 37th finding established that
+ * LOADCORE's real registration-list walk directly `jalr`s into each
+ * recognized entry's real module entry point - it is an ACTIVE call-
+ * dispatch mechanism, not passive bookkeeping. This project's own
+ * external sequencer (advance_to_next_module(), below, and this
+ * function's caller in iop_module_loader_boot()) ALSO independently
+ * runs every module's entry point once. Left unpatched, the real
+ * list build_real_registration_list() supplies still shows a module
+ * as a live, callable pointer entry even after this project's own
+ * sequencer has already started or finished running it - meaning
+ * LOADCORE's own walk could call that module's real entry a SECOND
+ * time (already-run modules, e.g. SYSMEM, always first) or
+ * recursively call itself (the module currently mid-execution, e.g.
+ * LOADCORE reaching its own slot in its own list).
+ *
+ * This function patches a module's own slot in the real list from a
+ * real header POINTER (bit0=0) to an inert TAG word (bit0=1) the
+ * INSTANT that module starts executing - whether it is module 0
+ * starting for the first time (iop_module_loader_boot()) or any
+ * later module advance_to_next_module() is about to jump into. A
+ * module's slot is therefore a live pointer ONLY while it has not
+ * yet started - exactly matching the real bit0=1/bit0=0 tag/pointer
+ * distinction already reverse-engineered (34th/35th findings): once
+ * a module has started (is running or has finished), it is no longer
+ * something LOADCORE's own walk should actively dispatch into again.
+ *
+ * The tag word chosen is 0x00000003 (bit0=1, low nibble=3): the real
+ * walk loop only takes any further action on a tag word when its low
+ * NIBBLE (not just bit0) equals decimal 1 (see the loop's own
+ * `andi v0,v1,0xF; bne v0,s3` check, s3=1, traced in the 37th
+ * finding's disassembly) - any other nibble value is a pure no-op,
+ * inert marker. 0x00000003's nibble is 3, deliberately avoiding the
+ * one nibble value (1) known to trigger extra, not-yet-understood
+ * side effects (saving `word>>2` into a variable this round's tracing
+ * never determined the use of). */
+static void mark_module_dispatched(int modlist_idx)
+{
+    if (modlist_idx < 0 || modlist_idx >= g.modlist_count) return;
+    uint32_t slot = g.registration_list_slot_addr[modlist_idx];
+    if (slot == 0u) return; /* module never loaded - no slot exists */
+    /* iop_core_get_state() is declared via core/iop/iop_core.h,
+     * already included transitively through this file's own header -
+     * safe to call here since this address always comes from
+     * bump_alloc(), always within plain IOP RAM, never an MMIO-
+     * mapped address. */
+    iop_state_t *st = iop_core_get_state();
+    iop_mem_write32(st, slot, 0x00000003u);
 }
 
 int iop_module_loader_boot(iop_state_t *st)
@@ -568,6 +629,7 @@ int iop_module_loader_boot(iop_state_t *st)
     st->gpr[31] = g.trampoline_addr;
     st->gpr[29] = INITIAL_SP; /* $sp - see INITIAL_SP's comment above */
     st->gpr[4]  = g.boot_info_addr; /* $a0 - see BOOT_INFO_RAM_MB's comment above */
+    mark_module_dispatched(g.modlist_index); /* task #158 - see that function's header comment */
     st->pc = g.entry_points[g.modlist_index];
     st->next_pc = st->pc + 4;
     g.booted_ok = 1;
@@ -773,6 +835,7 @@ static int advance_to_next_module(iop_state_t *st)
     st->gpr[31] = g.trampoline_addr;
     st->gpr[29] = INITIAL_SP; /* $sp - see INITIAL_SP's comment above */
     st->gpr[4]  = g.boot_info_addr; /* $a0 - see BOOT_INFO_RAM_MB's comment above */
+    mark_module_dispatched(g.modlist_index); /* task #158 - see that function's header comment */
     st->pc = g.entry_points[g.modlist_index];
     st->next_pc = st->pc + 4;
     return 1;

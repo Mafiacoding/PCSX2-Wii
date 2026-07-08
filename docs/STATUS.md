@@ -6251,3 +6251,91 @@ reference instance's real memory is reproduced verbatim in this
 project's own source - only the structural facts above, cited the
 same way prior findings cited ps2sdk/PCSX2 upstream and this
 project's own already-existing iop_elf.h citations.
+
+## Round 29 continued (38th finding, task #158): mark_module_dispatched() fix
+implemented, wired in, verified via trace to execute correctly - but
+CONFIRMED to produce ZERO observable change in real-BIOS boot behavior.
+
+Following the 37th finding's well-supported double-execution
+hypothesis (LOADCORE's real registration-list walk directly `jalr`s
+into each recognized module's real entry point, which would re-invoke
+already-run modules like SYSMEM a second time since this project's own
+external sequencer independently runs every module once already),
+implemented `mark_module_dispatched()`: patches a module's own slot in
+the real list this project builds (`build_real_registration_list()`,
+task #155) from a real header pointer (bit0=0) to an inert tag word
+`0x00000003` (bit0=1, nibble=3 - confirmed inert per the 37th finding's
+own disassembly of the walk's `andi/bne` check) the INSTANT that
+module starts executing - wired into both `iop_module_loader_boot()`
+(module 0's first start) and `advance_to_next_module()` (every
+subsequent module's start).
+
+**Verification performed, in order:**
+1. Compile-check: clean.
+2. Full 87-test host-native regression suite: all pass (one test,
+   `test_iop_module_loader_bootinfo.c`, was updated to assert the NEW
+   correct behavior - the synthetic single-module test's own module
+   gets its slot patched to the inert tag immediately, since it starts
+   inside `iop_module_loader_boot()` itself - rather than asserting
+   the old, now-intentionally-changed "real pointer" behavior).
+3. Real-BIOS diagnostic (`/tmp/diag101.c`'s existing module-completion-
+   breakdown pattern), run in a fresh build against the fixed code.
+4. **Trace-confirmed the fix actually executes**: added temporary
+   `fprintf` tracing to `mark_module_dispatched()` (reverted afterward,
+   verified via `diff` byte-identical to before), re-ran the same
+   real-BIOS diagnostic, and confirmed all 29 loaded modules'
+   `mark_module_dispatched()` calls fire in boot order with valid,
+   distinct slot addresses (`0x00145CA8` through `0x00145D18`) - the
+   wiring is correct and the patching genuinely happens during a real
+   boot run, not just in unit tests.
+5. **Direct A/B comparison against the pre-fix commit** (`git stash` to
+   temporarily revert to commit `213f959`, rebuild, re-run the
+   identical diagnostic, `git stash pop` to restore): the real-BIOS
+   diagnostic's output is **byte-for-byte identical** before and after
+   this fix - `modules_run_to_completion=15`, `trap_stubs_bypassed=13`,
+   `registration_walk_panics_bypassed=1`, `imports_unresolved=0`,
+   `SIF_MSCOM=0x00000000`, `SIF_SMCOM=0x00000000`,
+   `SIF_MSFLG=0x00010000`, `SIF_SMFLG=0x00000000` - matching the 36th
+   finding's numbers exactly, in every field.
+
+**Honest conclusion: this fix does NOT resolve task #151.** The
+`registration_walk_panics_bypassed` count staying at exactly 1 in both
+the pre-fix and post-fix runs is the key evidence: task #157's real
+registration-walk panic bypass is firing at the same point, the same
+number of times, regardless of whether module slots hold real pointers
+or inert tags. This means real LOADCORE's own registration-list walk
+is hitting the SAME dead end (the exact byte pattern
+`is_registration_walk_panic_loop()` recognizes) every time, and never
+gets far enough - or never depends on slot content in the way this
+fix assumed - for the slot-patching to matter. The 37th finding's
+double-execution mechanism (the `jalr` dispatch itself) is real and
+structurally confirmed via the live debugger, but it is NOT the actual
+blocker standing between the current state and SIFCMD/SIFINIT
+completing. Some other, still-unidentified mechanism inside (or before)
+that same walk is the real limiter.
+
+**Decision: keep the fix rather than revert it.** It is architecturally
+more correct (a module's registration-list slot should not remain a
+live, jalr-able pointer once that module has already started, matching
+the real bit0=0/bit0=1 pointer/tag distinction this project already
+reverse-engineered), it is fully regression-tested and does not
+regress any of the 87 host-native tests or the real-BIOS module-
+completion count, and it removes a known-incorrect state (stale
+pointers to already-run modules) even though it does not, by itself,
+unblock further boot progress. Consistent with this project's
+established practice (e.g. the 36th finding's honest "no progress on
+SIFCMD/SIFINIT" report), this is documented as a confirmed NEGATIVE
+result for task #151's actual blocker, not oversold as a fix.
+
+**What this implies for whoever continues task #151:** the real dead
+end code is not "LOADCORE double-invokes an already-run module,"
+since neutralizing that exact mechanism changed nothing. The next
+concrete step is to determine WHERE, precisely, in the walk the
+`is_registration_walk_panic_loop()` byte pattern is reached from -
+i.e. single-step from the start of LOADCORE's real list-walk loop
+up to the exact panic-pattern bytes, on either the live pcsx2-mcp
+reference debugger or this project's own host-native diagnostic with
+instruction-level tracing, to see what real condition (not slot
+content) actually triggers the panic path every time. This was not
+attempted this session due to time constraints (session limit
+approaching) - left as the clearly-scoped next step.

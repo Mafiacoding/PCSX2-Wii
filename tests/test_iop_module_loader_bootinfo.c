@@ -227,7 +227,19 @@ int main(void)
         uint32_t w2 = iop_mem_read32(st, off1c + 8);  /* the one real module pointer entry */
         uint32_t w3 = iop_mem_read32(st, off1c + 12); /* terminator */
         CHECK(w0 == 0 && w1 == 0, "the two leading placeholder words are honestly zero (real meaning not determined this round)");
-        CHECK(w2 != 0 && (w2 & 1u) == 0, "the one real entry is a non-zero, bit0=0 (real header pointer, not a phase-tag) word");
+        /* Round 29 continued (task #158): this synthetic test's single
+         * module (SYSMEM, modlist index 0) is dispatched immediately by
+         * iop_module_loader_boot() itself, so by the time we read the
+         * list back here, mark_module_dispatched() has already patched
+         * this module's own slot from a real header pointer (bit0=0)
+         * to the inert tag word 0x00000003 (bit0=1, nibble=3 - see
+         * mark_module_dispatched()'s header comment and docs/STATUS.md's
+         * 38th finding). This is the whole point of the fix: a module's
+         * slot is a live, jalr-able pointer only until that module has
+         * started, preventing LOADCORE's own registration-list walk from
+         * re-invoking an already-running/already-run module's real entry
+         * point a second time. */
+        CHECK(w2 == 0x00000003u, "the one entry is the inert tag word 0x00000003 (bit0=1,nibble=3) - patched by mark_module_dispatched() the instant SYSMEM started, task #158 fix");
         CHECK(w3 == 0, "the array is zero-terminated");
     }
 

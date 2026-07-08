@@ -1977,3 +1977,16 @@ checks, all passing). Full 80-block regression suite passes, clean
 Wii rebuild verified. Remaining VU0 gaps down to three: VCLIPw (needs
 new flag register), VDIV/VSQRT/VRSQRT/VWAITQ (Q busy timing),
 VRNEXT/VRGET/VRINIT/VRXOR (R-register LCG).
+
+## Update (Round 29 continued, 24th change - EE COP2 SPECIAL2 R-register LCG)
+
+Implemented VRINIT(idx66)/VRGET(idx65)/VRNEXT(idx64)/VRXOR(idx67) -
+the VU0 R-register (24-bit LFSR pseudo-random generator, always kept
+in float-bit-pattern range [1.0,2.0)). REG_R = control register 20,
+no new state needed. Ported bit-exact from real PCSX2 upstream's
+VUops.cpp AdvanceLFSR/_vuRINIT/_vuRGET/_vuRNEXT/_vuRXOR. New test
+tests/test_ee_cop2_rreg.c (5 checks, all passing, verified against a
+host-side reference AdvanceLFSR model). Full 81-block regression
+suite passes, clean Wii rebuild verified. VU0 gaps now down to two:
+VCLIPw (needs new flag register) and VDIV/VSQRT/VRSQRT/VWAITQ (Q busy
+timing).

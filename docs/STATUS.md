@@ -5246,3 +5246,36 @@ Remaining VU0 macro-mode gaps, now down to three well-scoped items:
 `VWAITQ` (would need to model the `Q`/`P` register's real "busy"
 timing), and `VRNEXT`/`VRGET`/`VRINIT`/`VRXOR` (the VU0 R-register LCG
 pseudo-random generator - entirely separate state).
+
+## Round 29 continued (24th change: EE COP2 SPECIAL2 - VU0 R-register LCG)
+
+Implemented the VU0 "R register" LFSR pseudo-random generator:
+`VRINIT` (idx66), `VRGET` (idx65), `VRNEXT` (idx64), `VRXOR` (idx67),
+ported bit-exact from a real PCSX2 upstream reference clone's
+`VUops.cpp` `_vuRINIT`/`_vuRGET`/`AdvanceLFSR`/`_vuRNEXT`/`_vuRXOR`.
+`R` is control register index 20 (PCSX2's `VU.h` `REG_R=20`) - no new
+state needed, it's already reachable via the existing
+`vu0_vi_read`/`write` helpers this file already uses for `I`(21)/
+`Q`(22). `R` is always kept in the float-bit-pattern range
+`[1.0,2.0)` (exponent/sign bits fixed at `0x3F800000`, only the low
+23 mantissa bits actually vary). `VRINIT` seeds `R`'s mantissa from a
+single VF lane's raw bits (`Fsf` reuses destmask's low 2 bits as a
+lane index, same convention as `VMTIR`). `VRGET` broadcasts `R`'s
+current value into destmask-selected `VF[ft]` lanes without advancing
+it. `VRNEXT` advances the LFSR first (shift-left-1, XOR bit0 with
+bit4^bit22, re-clamp to the float-bit-pattern range), then broadcasts
+the new value. `VRXOR` XORs `R`'s mantissa with a VF lane's raw bits.
+
+New test `tests/test_ee_cop2_rreg.c` (5 checks, verified against a
+host-side reference `AdvanceLFSR` model rather than hand-derived bit
+patterns): `VRINIT`+`VRGET` round-trip a seed unchanged; `VRNEXT`
+advances the LFSR once and broadcasts correctly; a second `VRNEXT`
+proves the LFSR keeps advancing (not idempotent); `VRXOR` matches the
+reference model's XOR-and-reclamp result. Full 81-block regression
+suite passes (80 pre-existing + this new one); clean Wii rebuild
+verified (only the pre-existing, harmless `strncpy` truncation
+warning in `iop_module_loader.c`).
+
+VU0 macro-mode gaps now down to two: `VCLIPw` (needs a new CLIP flag
+register) and `VDIV`/`VSQRT`/`VRSQRT`/`VWAITQ` (would need to model
+the `Q`/`P` register's real "busy" timing).

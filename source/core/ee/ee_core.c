@@ -2047,6 +2047,57 @@ static int ee_step(void)
                         uint32_t lo16 = (uint32_t)st->vu0_mem[off] | ((uint32_t)st->vu0_mem[off + 1] << 8);
                         vu0_vi_write(st, ft, lo16);
                     }
+                } else if (idx == 64 || idx == 65) {
+                    /* VRNEXT(64)/VRGET(65) (Round 29 continued, 24th
+                     * change): the VU0 "R register" - a real 24-bit
+                     * LFSR pseudo-random generator, always kept in
+                     * float-bit-pattern range [1.0,2.0) (exponent/sign
+                     * fixed at 0x3F800000, only the low 23 mantissa
+                     * bits actually vary). REG_R is control register
+                     * index 20 (PCSX2's VU.h REG_R=20) - no new state
+                     * needed, already reachable via the existing
+                     * vu0_vi_read/write helpers this file already uses
+                     * for I(21)/Q(22). VRGET just broadcasts R's
+                     * CURRENT value into every destmask-selected lane
+                     * of VF[ft] (guarded ft!=0); VRNEXT advances the
+                     * LFSR FIRST (ported bit-exact from PCSX2's
+                     * AdvanceLFSR: x=bit4, y=bit22, shift left 1, xor
+                     * bit0 with x^y, then re-clamp to the [1.0,2.0)
+                     * bit pattern), then broadcasts the NEW value the
+                     * same way. */
+                    if (idx == 64) {
+                        uint32_t r = vu0_vi_read(st, 20);
+                        uint32_t x = (r >> 4) & 1u;
+                        uint32_t y = (r >> 22) & 1u;
+                        r <<= 1;
+                        r ^= (x ^ y);
+                        r = (r & 0x7FFFFFu) | 0x3F800000u;
+                        vu0_vi_write(st, 20, r);
+                    }
+                    if (ft != 0) {
+                        uint32_t r = vu0_vi_read(st, 20);
+                        for (int lane = 0; lane < 4; lane++) {
+                            if (!(destmask & (0x8u >> lane))) continue;
+                            vu0_vf_write_lane(st, ft, (uint32_t)lane, r);
+                        }
+                    }
+                } else if (idx == 66) {
+                    /* VRINIT: R = 0x3F800000 | (VF[fs][Fsf] &
+                     * 0x7FFFFF) - seeds R's mantissa from a single VF
+                     * lane's raw bits. Fsf reuses destmask's low 2
+                     * bits as a lane index, the same convention
+                     * VMTIR/VRXOR use. */
+                    uint32_t fsf_lane = destmask & 0x3u;
+                    uint32_t raw = vu0_vf_read_lane(st, fs, fsf_lane);
+                    vu0_vi_write(st, 20, 0x3F800000u | (raw & 0x7FFFFFu));
+                } else if (idx == 67) {
+                    /* VRXOR: R = 0x3F800000 | ((R ^ VF[fs][Fsf]) &
+                     * 0x7FFFFF) - XORs R's mantissa with a single VF
+                     * lane's raw bits. */
+                    uint32_t fsf_lane = destmask & 0x3u;
+                    uint32_t raw = vu0_vf_read_lane(st, fs, fsf_lane);
+                    uint32_t r = vu0_vi_read(st, 20);
+                    vu0_vi_write(st, 20, 0x3F800000u | ((r ^ raw) & 0x7FFFFFu));
                 } else {
                     halt("unimplemented COP2 SPECIAL2 sub-opcode (VU0 vector datapath not implemented)");
                     return 1;

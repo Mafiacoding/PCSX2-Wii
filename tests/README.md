@@ -1854,3 +1854,24 @@ back a planted 16-bit value from a specific VU0 mem lane.
 gcc -I../include -I../source -o test_ee_cop2_mtir tests/test_ee_cop2_mtir.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_mtir
 ```
+
+`test_ee_cop2_rreg.c` covers Round 29 continued's 24th change - the
+VU0 "R register" LFSR pseudo-random generator: `VRINIT` (idx66),
+`VRGET` (idx65), `VRNEXT` (idx64), `VRXOR` (idx67), ported bit-exact
+from a real PCSX2 upstream reference clone's `VUops.cpp`
+`_vuRINIT`/`_vuRGET`/`AdvanceLFSR`/`_vuRNEXT`/`_vuRXOR`. `R` is
+control register index 20 - no new state needed, already reachable
+via the existing `vu0_vi_read`/`write` helpers - and is always kept
+in the float-bit-pattern range `[1.0,2.0)` (exponent/sign fixed at
+`0x3F800000`, only the low 23 mantissa bits vary). 5 checks (against
+a host-side reference `AdvanceLFSR` model, not hand-derived bit
+patterns): `VRINIT` seeds `R` and `VRGET` reads it back unchanged;
+`VRNEXT` advances the LFSR once and broadcasts the new value into all
+4 lanes; a second `VRNEXT` advances again (proving it's not
+idempotent); `VRXOR` XORs `R`'s mantissa with a VF lane's raw bits and
+re-clamps to the `[1.0,2.0)` pattern.
+
+```sh
+gcc -I../include -I../source -o test_ee_cop2_rreg tests/test_ee_cop2_rreg.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
+./test_ee_cop2_rreg
+```

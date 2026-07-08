@@ -272,6 +272,22 @@ static int try_handle_a0_real_function(iop_state_t *st, uint32_t function)
     case IOP_HLE_A0_FLUSHCACHE:
         /* Correct no-op: this project has no IOP cache model. */
         return 1;
+    case IOP_HLE_A0_ADDCDROMDEVICE:
+        /* Round 29 continued (6th change): real device registration -
+         * see the IOP_HLE_A0_ADDCDROMDEVICE header comment for the
+         * full design rationale (real, queryable state; no fabricated
+         * in-RAM DCB struct since this project has no citable, verified
+         * byte layout for it). Idempotent, like real hardware. */
+        g_hle.cdrom_device_registered = 1;
+        g_hle.add_cdrom_device_calls++;
+        st->gpr[2] = 0;
+        return 1;
+    case IOP_HLE_A0_ADDMEMCARDDEVICE:
+        /* Round 29 continued (6th change): see IOP_HLE_A0_ADDMEMCARDDEVICE. */
+        g_hle.memcard_device_registered = 1;
+        g_hle.add_memcard_device_calls++;
+        st->gpr[2] = 0;
+        return 1;
     default:
         return 0;
     }

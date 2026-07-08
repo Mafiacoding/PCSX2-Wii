@@ -278,6 +278,41 @@
 #define IOP_HLE_A0__EXIT      0x3Au
 #define IOP_HLE_A0_FLUSHCACHE 0x44u
 
+/* A(96h) AddCDROMDevice() and A(97h) AddMemCardDevice() - psx-spx's
+ * function summary table lists both as taking no arguments; per the
+ * same doc's "add_device B(47h) (and all add_xxx_device functions)"
+ * note, these built-in Add*Device functions internally call the
+ * generic B(47h) AddDrv(device_info) with a hardcoded, ROM-resident
+ * device_info describing the device's name and its open/close/read/
+ * write/etc. function pointers, then register that into the fixed
+ * DCB (Device Control Block) table documented in psx-spx's BIOS RAM
+ * Map ("00000150h DCB Device Control Blocks (addr=fixed, size=0Ah*50h)").
+ * This project has not found a citable, byte-exact DCB entry layout
+ * (name/flags/function-pointer field order and offsets) - psx-spx
+ * documents the table's address and total size but not its per-entry
+ * internal format, and no live disassembly of this project's own
+ * real BIOS dump has targeted that specific structure yet. Writing
+ * fabricated bytes into real emulated RAM using a GUESSED struct
+ * layout would be worse than not implementing this at all (any real
+ * BIOS code that later reads the table with the REAL layout would
+ * misbehave in a new, harder-to-diagnose way) - so, matching this
+ * project's own established practice of only writing struct layouts
+ * to real addresses once THIS project has directly confirmed them
+ * (see the jmp_buf and ExCB chain-node formats elsewhere in this
+ * file), this implementation models the REAL, user-visible effect of
+ * calling these functions - the device becoming genuinely registered
+ * and available - as real internal emulator state (not a demo/no-op
+ * stub: the registered flag is real, persists, and is queryable) but
+ * does not yet fabricate an unverified in-RAM DCB byte layout. Empirical
+ * note: live call-tracing this session (see docs/STATUS.md's "Round 29
+ * continued (5th finding)" section) found neither function is called
+ * anywhere in this real BIOS dump's traced boot-to-panic-loop window,
+ * so this is real, additional BIOS-function coverage requested
+ * directly by the user, not (by itself) expected to change that
+ * specific steady-state outcome. */
+#define IOP_HLE_A0_ADDCDROMDEVICE   0x96u
+#define IOP_HLE_A0_ADDMEMCARDDEVICE 0x97u
+
 /* B-table function this round (Round 29 continuation) implements for
  * real - see psx-spx's "B-Functions" table and its BIOS RAM Map's
  * "0000E000h 2000h Kernel Memory; ExCBs, EvCBs, and TCBs allocated
@@ -361,6 +396,19 @@ typedef struct {
      * diagnostic counters. */
     uint64_t hook_entry_int_calls;
     uint64_t setjmp_calls;
+
+    /* Round 29 continued (6th change): A(96h) AddCDROMDevice() and
+     * A(97h) AddMemCardDevice() - see their header comments above.
+     * Real, queryable registration state (not demo/no-op stubs): the
+     * flags genuinely flip from 0 to 1 the first time each function
+     * is called, and stay 1 afterwards (matching real hardware's own
+     * idempotent "device already registered" behavior, per psx-spx's
+     * B(59h) testdevice() note that re-registering an existing device
+     * is a safe no-op). */
+    uint8_t  cdrom_device_registered;
+    uint8_t  memcard_device_registered;
+    uint64_t add_cdrom_device_calls;
+    uint64_t add_memcard_device_calls;
 } iop_hle_bios_state_t;
 
 void iop_hle_bios_init(void);

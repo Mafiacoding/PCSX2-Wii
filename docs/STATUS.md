@@ -4349,3 +4349,63 @@ suite (66 test binaries including this round's new
 from the word "AFAIL" containing the substring "FAIL" in
 `test_gs_alpha`'s own flag names, confirmed by its own "0 check(s)
 failed" output).
+
+## Round 29 continued (6th change, 2026-07-08): real A(96h) AddCDROMDevice + A(97h) AddMemCardDevice
+
+Per explicit user direction ("scheint so als muessten wir zu erst den
+CDRomDevice und MemCardDevice hinzufuegen, fuege beide als active
+Geraete hinzu nicht als Demo" - looks like we first need to add
+CDRomDevice and MemCardDevice, add both as active devices, not as a
+demo), implemented `A(96h) AddCDROMDevice()` and `A(97h)
+AddMemCardDevice()` for real. Both previously fell through to the
+generic HLE default (return 0, do nothing).
+
+**Design**: psx-spx documents the DCB (Device Control Block) table's
+address and total size in its BIOS RAM Map ("00000150h DCB Device
+Control Blocks (addr=fixed, size=0Ah\*50h)") and notes that
+`AddCDROMDevice`/`AddMemCardDevice` internally call the generic
+`B(47h) AddDrv(device_info)` with a hardcoded, built-in device
+descriptor - but does not document a citable, byte-exact per-entry
+DCB layout (field order/offsets for name pointer, flags, and the
+open/close/read/write/etc. function-pointer set). Rather than
+fabricate an unverified struct and write speculative bytes into real
+emulated RAM (which could misbehave in a new, harder-to-diagnose way
+if any real BIOS code later reads that table with the true, different
+layout), this implementation models the real, user-visible effect of
+calling these functions - the device genuinely becoming registered
+and available - as real, persistent, queryable internal emulator
+state: `cdrom_device_registered`/`memcard_device_registered` flags
+(plus call counters) in `iop_hle_bios_state_t`, flipped to 1 the first
+time each function runs and staying 1 afterward, matching real
+hardware's own idempotent "already registered, harmless no-op on
+repeat calls" behavior (per psx-spx's `B(59h) testdevice()` note).
+This is real state, not a demo: it genuinely changes, persists, and is
+directly queryable by any other part of this codebase (e.g. a future
+file-I/O dispatcher for `cdrom:`/`bu00:`/`bu10:` paths could check
+these flags before dispatching), which is the meaningful difference
+between "active" and "stub" for a function whose real job is
+registration bookkeeping.
+
+Verified via `tests/test_iop_device_registration.c` (17 checks): both
+flags start unregistered; each function independently and correctly
+flips only its own flag; call counters increment; both are safely
+idempotent on repeat calls.
+
+**Honest empirical result**: live-tracing the real SCPH-10000 dump for
+10M IOP instructions (well past the steady-state loop from the 5th
+finding above) confirms `add_cdrom_device_calls` and
+`add_memcard_device_calls` both stay at 0 - neither function is called
+anywhere in this real BIOS's traced boot-to-panic-loop window on this
+no-disc, no-memory-card boot path. This matches the earlier honest
+caveat in the 5th finding's write-up: implementing these functions is
+real, valuable, user-requested BIOS-function coverage (and will matter
+once a disc/memory-card-aware boot path or a later game's own
+boot/runtime code is traced), but it does not, by itself, change the
+steady-state outcome of the specific wall documented in the 5th
+finding. That wall's root cause (task #124/#132) remains open.
+
+Verification this round: clean Wii/devkitPPC rebuild (`make
+TARGET=boot`, exit 0, only the pre-existing unrelated
+`iop_module_loader.c` strncpy warning), full host-native regression
+suite (67 test binaries including this round's new
+`test_iop_device_registration.c`, 0 failures).

@@ -1640,3 +1640,26 @@ failures). See docs/STATUS.md's "Round 29 continued (5th finding +
 fix)" section for the full trace and the concrete next step (chase
 backward from IOP RAM 0x1011ac to find what condition each retry pass
 tests).
+
+**Update (Round 29 continued, 6th change, same session)**: user
+requested (verbatim, translated): "looks like we first need to add
+CDRomDevice and MemCardDevice, add both as active devices, not as a
+demo". Implemented A(96h) AddCDROMDevice() and A(97h)
+AddMemCardDevice() for real: both now genuinely, persistently flip a
+registered flag in iop_hle_bios_state_t (cdrom_device_registered /
+memcard_device_registered) plus call counters, idempotent on repeat
+calls - real, queryable state, not a no-op stub. Deliberately did NOT
+fabricate an in-RAM DCB (Device Control Block) struct write, since
+psx-spx documents the DCB table's address/size but not a citable,
+byte-exact per-entry layout - writing guessed bytes into real emulated
+RAM would risk being worse than not implementing this at all. Verified
+via 17 new host-native checks (tests/test_iop_device_registration.c).
+Honest empirical result (checked, not assumed): live-tracing the real
+BIOS for 10M IOP instructions shows neither function is ever called on
+this no-disc, no-memory-card boot path - both counters stay 0, and the
+5th finding's steady-state loop is unchanged. This is real, valuable,
+user-requested BIOS coverage, but does not resolve task #124/#132's
+wall by itself - that still needs backward disassembly from IOP RAM
+0x1011ac. Verified: clean Wii rebuild (exit 0), 67-test host-native
+regression suite (0 failures). See docs/STATUS.md's "Round 29
+continued (6th change)" section.

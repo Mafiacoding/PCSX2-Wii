@@ -693,6 +693,23 @@ instead of fully emulating the real IOP BIOS ROM.
       continued (5th finding + fix)" section for the full trace and
       the concrete next step (disassemble backward from 0x1011ac to
       find what condition each retry pass actually tests).
+- [x] **6th change (2026-07-08)**: real A(96h) AddCDROMDevice() and
+      A(97h) AddMemCardDevice(), per explicit user request ("add both
+      as active devices, not as demo"). Implemented as real, queryable
+      internal registration state (flags genuinely flip 0->1 and
+      persist, idempotent on repeat calls) rather than a fabricated
+      in-RAM DCB struct write, since psx-spx documents the DCB table's
+      address/size but not a citable, byte-exact per-entry layout.
+      Verified via `tests/test_iop_device_registration.c` (17 checks).
+      **Honest empirical result**: live-tracing the real BIOS for 10M
+      IOP instructions confirms neither function is ever called on
+      this no-disc, no-memory-card boot path - both registration
+      counters stay at 0, and the steady-state loop from the 5th
+      finding is unchanged. This is real, valuable BIOS-function
+      coverage (matters for disc/memory-card-aware paths and later
+      game code), but does not resolve task #124/#132's wall by
+      itself. See docs/STATUS.md's "Round 29 continued (6th change)"
+      section.
 - [x] **Reframing finding (3rd, same round)**: traced the clear-loop's
       own caller and found it's the real BIOS's own LOGO-loading
       dispatch (matches ROM string "LOGO", ROMDIR-style lookup, calls

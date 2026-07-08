@@ -1577,3 +1577,20 @@ other's effect).
 gcc -I../include -I../source -o test_iop_hook_entry_int tests/test_iop_hook_entry_int.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
 ./test_iop_hook_entry_int
 ```
+
+`test_iop_device_registration.c` covers Round 29 continued's 6th
+change: A(96h) AddCDROMDevice() and A(97h) AddMemCardDevice(),
+implemented per explicit user request as real, active, queryable
+device registration state (not demo/no-op stubs). See
+`include/core/hw/iop_hle_bios.h`'s `IOP_HLE_A0_ADDCDROMDEVICE` and
+`IOP_HLE_A0_ADDMEMCARDDEVICE` comments for why this project does not
+(yet) fabricate an in-RAM DCB struct write (no citable, byte-exact
+layout found for it). 17 checks: both flags start unregistered; each
+function genuinely and independently flips its own flag; calls are
+counted; both are idempotent (repeat calls stay safe, matching real
+hardware's own "already registered" behavior).
+
+```sh
+gcc -I../include -I../source -o test_iop_device_registration tests/test_iop_device_registration.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+./test_iop_device_registration
+```

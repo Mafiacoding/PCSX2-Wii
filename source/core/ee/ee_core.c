@@ -2178,6 +2178,48 @@ static int ee_step(void)
                     uint32_t raw = vu0_vf_read_lane(st, fs, fsf_lane);
                     uint32_t r = vu0_vi_read(st, 20);
                     vu0_vi_write(st, 20, 0x3F800000u | ((r ^ raw) & 0x7FFFFFu));
+                } else if (idx == 31) {
+                    /* VCLIPw (Round 29 continued, 26th change): judges
+                     * |VF[fs].x|,|VF[fs].y|,|VF[fs].z| against
+                     * |VF[ft].w|, treating the raw 32-bit bit patterns
+                     * as SIGNED INTEGERS with a sign-flip XOR trick
+                     * (NOT a float comparison) - ported bit-exact from
+                     * a real PCSX2 upstream reference clone's
+                     * VUops.cpp _vuCLIP. No Fsf/Ftf lane selector at
+                     * all - xyz vs w is hardwired, confirmed via
+                     * DisR5900asm.cpp's P_VCLIPw formatter ("vclip
+                     * %sxyz, %sw"). Shifts 6 new judgment bits into
+                     * the CLIP flag register each call (this project's
+                     * cop2_ctrl[18], reusing the existing generic VI
+                     * array the same way R(20)/I(21)/Q(22) already do
+                     * - REG_CLIP_FLAG=18 in PCSX2's VU.h, and just
+                     * like the Q-register unification decision in the
+                     * 25th change, this project writes directly into
+                     * that single slot rather than modeling PCSX2's
+                     * separate clipflag/SYNCCLIPFLAG() split), masked
+                     * to the low 24 bits (4 calls' worth of judgment
+                     * history, matching real hardware). This is the
+                     * only VU0 macro-mode op this session that needed
+                     * genuinely new reachable state - resolved by
+                     * reusing control-register slot 18, which this
+                     * decoder's CFC2/MTC2/QMTC2 paths already handle
+                     * generically for any register index. */
+                    uint32_t ftw = vu0_vf_read_lane(st, ft, 3);
+                    int32_t value = (int32_t)ftw;
+                    value = (ftw & 0x7f800000u) ? (value & 0x7fffffff) : 0x007fffff;
+                    uint32_t fsx = vu0_vf_read_lane(st, fs, 0);
+                    uint32_t fsy = vu0_vf_read_lane(st, fs, 1);
+                    uint32_t fsz = vu0_vf_read_lane(st, fs, 2);
+                    uint32_t clip = vu0_vi_read(st, 18);
+                    clip <<= 6;
+                    if ((int32_t)(fsx ^ 0x00000000u) > value) clip |= 0x01u;
+                    if ((int32_t)(fsx ^ 0x80000000u) > value) clip |= 0x02u;
+                    if ((int32_t)(fsy ^ 0x00000000u) > value) clip |= 0x04u;
+                    if ((int32_t)(fsy ^ 0x80000000u) > value) clip |= 0x08u;
+                    if ((int32_t)(fsz ^ 0x00000000u) > value) clip |= 0x10u;
+                    if ((int32_t)(fsz ^ 0x80000000u) > value) clip |= 0x20u;
+                    clip &= 0xFFFFFFu;
+                    vu0_vi_write(st, 18, clip);
                 } else {
                     halt("unimplemented COP2 SPECIAL2 sub-opcode (VU0 vector datapath not implemented)");
                     return 1;

@@ -1897,3 +1897,22 @@ clamp; `VWAITQ` provably changes nothing.
 gcc -I../include -I../source -o test_ee_cop2_div tests/test_ee_cop2_div.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_div
 ```
+
+`test_ee_cop2_clip.c` covers Round 29 continued's 26th change -
+`VCLIPw` (idx31), the last remaining VU0 macro-mode gap identified
+this session. Judges `|VF[fs].x|`, `|VF[fs].y|`, `|VF[fs].z|` against
+`|VF[ft].w|` via a raw 32-bit signed-integer sign-flip XOR trick (not
+a float comparison), ported bit-exact from a real PCSX2 upstream
+reference clone's `VUops.cpp` `_vuCLIP`. Unlike every other VU0 op
+this session, `VCLIPw` needed genuinely new reachable state - the
+CLIP flag register - resolved by reusing control-register slot 18
+(`REG_CLIP_FLAG` in PCSX2's `VU.h`), which this decoder's generic
+`CFC2`/`MTC2`/`QMTC2` paths already handle for any register index, so
+no new field was required. 3 checks: a `VCLIPw` call producing a
+known 6-bit judgment pattern, and a second call proving the 6-bit
+shift-in history behavior (`clipflag = (old << 6) | new_bits`).
+
+```sh
+gcc -I../include -I../source -o test_ee_cop2_clip tests/test_ee_cop2_clip.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
+./test_ee_cop2_clip
+```

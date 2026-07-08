@@ -2008,3 +2008,24 @@ New test tests/test_ee_cop2_div.c (6 checks, all passing). Full
 the pre-existing harmless strncpy warning). VU0 macro-mode gaps now
 down to just one: VCLIPw (idx31), needing a new CLIP flag register -
 the first VU0 op this session requiring genuinely new state.
+
+## Update (Round 29 continued, 26th change - EE COP2 SPECIAL2 VCLIPw, final VU0 gap closed)
+
+Implemented VCLIPw(idx31) - judges |VF[fs].x/y/z| against |VF[ft].w|
+via a raw-bit signed-int sign-flip XOR trick (no float compare, no
+Fsf/Ftf lane selector - xyz vs w hardwired). Ported bit-exact from
+real PCSX2 upstream's VUops.cpp _vuCLIP. Needed genuinely new state
+(the CLIP flag register) but resolved with zero new fields - it's
+control register 18 (REG_CLIP_FLAG), already reachable via this
+project's existing generic CFC2/MTC2/QMTC2 cop2_ctrl[] array (same
+array used for R/I/Q). Shifts 6 new judgment bits into cop2_ctrl[18]
+each call, masked to 24 bits. New test tests/test_ee_cop2_clip.c (3
+checks, all passing). Full 83-block regression suite passes, clean
+Wii rebuild verified.
+
+This closes out every VU0 macro-mode gap identified this session -
+the entire SPECIAL1 arithmetic/broadcast space and the full SPECIAL2
+128-entry table are now implemented and tested. VU0 macro mode is
+fully "ready" per the user's instruction, pending real BIOS boot
+progress reaching code that actually exercises it (current boot trace
+is still steady-state SIF-polling, has not reached VU0 usage yet).

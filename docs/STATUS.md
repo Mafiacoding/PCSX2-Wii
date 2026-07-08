@@ -5321,3 +5321,48 @@ VU0 macro-mode gaps now down to just one: `VCLIPw` (idx31), which
 needs a new CLIP flag register this project doesn't currently model
 at all - the first VU0 op this session that can't simply reuse
 existing state.
+
+## Round 29 continued (26th change: EE COP2 SPECIAL2 - VCLIPw, the final VU0 macro-mode gap)
+
+Implemented `VCLIPw` (idx31), the last remaining VU0 macro-mode
+instruction identified this session. Judges `|VF[fs].x|`,
+`|VF[fs].y|`, `|VF[fs].z|` against `|VF[ft].w|` via a raw 32-bit
+signed-integer sign-flip XOR trick (comparing bit patterns as signed
+ints with the sign bit flipped for the "negative" judgment, exploiting
+IEEE 754's monotonic ordering for same-signed floats) rather than an
+actual float comparison, ported bit-exact from a real PCSX2 upstream
+reference clone's `VUops.cpp` `_vuCLIP`. There is no `Fsf`/`Ftf` lane
+selector at all for this op - `xyz` vs `w` is hardwired, confirmed via
+`DisR5900asm.cpp`'s `P_VCLIPw` formatter (`"vclip %sxyz, %sw"`).
+
+Unlike every other VU0 op implemented this session, `VCLIPw` needed
+genuinely new reachable state: the CLIP flag register. This was
+resolved without adding any new field - the CLIP flag lives at control
+register index 18 (`REG_CLIP_FLAG=18` in PCSX2's `VU.h`), and this
+project's `CFC2`/`MTC2`/`QMTC2` instruction paths already handle any
+control-register index generically via the existing `cop2_ctrl[]`
+array (the same array already used for `R`(20), `I`(21), `Q`(22)), so
+slot 18 was simply already reachable. Each `VCLIPw` call shifts the
+existing clip value left by 6 bits and ORs in 6 new judgment bits
+(one pos/neg pair per `x`/`y`/`z`), masked to the low 24 bits -
+matching real hardware's 4-calls'-worth-of-history behavior. Consistent
+with the Q-register unification decision from the 25th change, this
+project writes directly into the single `cop2_ctrl[18]` slot rather
+than modeling PCSX2's separate `clipflag`/`SYNCCLIPFLAG()` split.
+
+New test `tests/test_ee_cop2_clip.c` (3 checks): a `VCLIPw` call
+producing a known 6-bit judgment pattern from hand-picked VF values,
+and a second call proving the 6-bit shift-in history behavior
+(`clipflag = (old << 6) | new_bits`). Full 83-block regression suite
+passes (82 pre-existing + this new one); clean Wii rebuild verified
+(only the pre-existing, harmless `strncpy` truncation warning in
+`iop_module_loader.c`).
+
+This completes every VU0 macro-mode instruction identified across
+this entire session's research (SPECIAL1 funct 0x00-0x2F arithmetic +
+broadcast rows, and the full SPECIAL2 128-entry table). Real BIOS
+boot code very likely uses VU0 macro mode for splash-screen transform/
+lighting math - NOT YET REACHED by the current boot trace (EE is
+still steady-state SIF-polling) - so this remains readiness work
+rather than a wall-clearing fix, but the VU0 macro-mode datapath is
+now complete and ready for whenever the real boot trace reaches it.

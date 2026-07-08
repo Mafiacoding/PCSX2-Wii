@@ -1832,3 +1832,25 @@ through a follow-up `VLQI`.
 gcc -I../include -I../source -o test_ee_cop2_lqisqd tests/test_ee_cop2_lqisqd.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_lqisqd
 ```
+
+`test_ee_cop2_mtir.c` covers Round 29 continued's 23rd change - the
+integer<->float raw-bit-move family: `VMTIR` (idx60), `VMFIR`
+(idx61), `VILWR` (idx62), ported from a real PCSX2 upstream reference
+clone's `VUops.cpp` `_vuMTIR`/`_vuMFIR`/`_vuILWR`. `VMTIR` truncates
+the raw 32-bit bit pattern of `VF[fs][Fsf]` to its low 16 bits into
+`VI[ft]` - `Fsf` is not a separate field, confirmed via
+`DisR5900asm.cpp`'s `dest_fsf()` macro to live in the same two bits
+as this decoder's `destmask` value's low 2 bits, just reinterpreted
+as a lane index. `VMFIR` broadcasts the sign-extended 16-bit `VI[fs]`
+value (raw bits, not a float conversion) into destmask-selected
+`VF[ft]` lanes. `VILWR` reads the low 16 bits of VU0 mem at quadword
+index `VI[fs]` into `VI[ft]`, single lane selected by destmask (same
+convention as `VISWR`). 4 checks: `VMTIR` truncates a planted raw bit
+pattern; `VMFIR.xz` broadcasts a sign-extended negative 16-bit value
+into exactly the X and Z lanes, leaving Y untouched; `VILWR.z` reads
+back a planted 16-bit value from a specific VU0 mem lane.
+
+```sh
+gcc -I../include -I../source -o test_ee_cop2_mtir tests/test_ee_cop2_mtir.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
+./test_ee_cop2_mtir
+```

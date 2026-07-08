@@ -1964,3 +1964,16 @@ new ops and the destmask fix. Full 79-block regression suite passes,
 clean Wii rebuild verified. Remaining VU0 gaps: VCLIPw, VMTIR/VMFIR/
 VILWR (different field decode), VDIV/VSQRT/VRSQRT/VWAITQ (Q busy
 timing), VRNEXT/VRGET/VRINIT/VRXOR (R-register LCG).
+
+## Update (Round 29 continued, 23rd change - EE COP2 SPECIAL2 VMTIR/VMFIR/VILWR)
+
+Implemented the integer<->float raw-bit-move family: VMTIR(idx60,
+truncates a VF lane's raw bits to 16 bits into a VI register - Fsf
+lane selector reuses destmask's low 2 bits, confirmed via real PCSX2
+upstream's dest_fsf() macro), VMFIR(idx61, broadcasts sign-extended VI
+raw bits into VF lanes), VILWR(idx62, single-lane 16-bit load from VU0
+mem, same convention as VISWR). New test tests/test_ee_cop2_mtir.c (4
+checks, all passing). Full 80-block regression suite passes, clean
+Wii rebuild verified. Remaining VU0 gaps down to three: VCLIPw (needs
+new flag register), VDIV/VSQRT/VRSQRT/VWAITQ (Q busy timing),
+VRNEXT/VRGET/VRINIT/VRXOR (R-register LCG).

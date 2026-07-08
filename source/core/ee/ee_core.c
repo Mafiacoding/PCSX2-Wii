@@ -1995,6 +1995,58 @@ static int ee_step(void)
                             }
                         }
                     }
+                } else if (idx == 60) {
+                    /* VMTIR (Round 29 continued, 23rd change): VI[ft]
+                     * = low 16 bits of the RAW bit pattern of
+                     * VF[fs][Fsf] (a plain truncation of the 32-bit
+                     * float's bit pattern, NOT a numeric conversion -
+                     * ported from PCSX2's own VUops.cpp _vuMTIR:
+                     * "VI[_It_].US[0] = *(u16*)&VF[_Fs_].F[_Fsf_]",
+                     * which reads the low 16 bits of the selected
+                     * lane's 32-bit storage on a little-endian
+                     * machine). Fsf is NOT a new field - confirmed
+                     * against a real PCSX2 upstream reference clone's
+                     * DisR5900asm.cpp dest_fsf() macro
+                     * ("(disasmOpcode>>21)&3"), Fsf lives in the exact
+                     * same two bits as this decoder's own destmask
+                     * value's low 2 bits, just reinterpreted as a lane
+                     * INDEX here instead of a per-lane bitmask. */
+                    if (ft != 0) {
+                        uint32_t fsf_lane = destmask & 0x3u;
+                        uint32_t raw = vu0_vf_read_lane(st, fs, fsf_lane);
+                        vu0_vi_write(st, ft, raw & 0xFFFFu);
+                    }
+                } else if (idx == 61) {
+                    /* VMFIR: broadcasts the sign-extended 16-bit
+                     * VI[fs] value (raw bit pattern, not a float
+                     * conversion) into every destmask-selected lane of
+                     * VF[ft] - ported from PCSX2's _vuMFIR
+                     * ("VF[_Ft_].SL[i] = (s32)VI[_Is_].SS[0]" - a
+                     * signed 16-to-32 sign-extension of the RAW
+                     * bits). */
+                    if (ft != 0) {
+                        int16_t vi16 = (int16_t)(vu0_vi_read(st, fs) & 0xFFFFu);
+                        uint32_t sval = (uint32_t)(int32_t)vi16;
+                        for (int lane = 0; lane < 4; lane++) {
+                            if (!(destmask & (0x8u >> lane))) continue;
+                            vu0_vf_write_lane(st, ft, (uint32_t)lane, sval);
+                        }
+                    }
+                } else if (idx == 62) {
+                    /* VILWR: VI[ft] = the low 16 bits of VU0 mem at
+                     * quadword index VI[fs], single lane selected by
+                     * destmask (the same single-bit-only convention
+                     * VISWR already uses - X=0x8,Y=0x4,Z=0x2,W=0x1) -
+                     * ported from PCSX2's _vuILWR (reads a u16* at
+                     * byte offsets 0/4/8/12, i.e. the low half-word of
+                     * each 32-bit lane). */
+                    if (ft != 0) {
+                        int lane = (destmask == 0x8u) ? 0 : (destmask == 0x4u) ? 1 : (destmask == 0x2u) ? 2 : 3;
+                        uint32_t addr_vi = vu0_vi_read(st, fs);
+                        uint32_t off = vu0_mem_addr(addr_vi, (uint32_t)lane);
+                        uint32_t lo16 = (uint32_t)st->vu0_mem[off] | ((uint32_t)st->vu0_mem[off + 1] << 8);
+                        vu0_vi_write(st, ft, lo16);
+                    }
                 } else {
                     halt("unimplemented COP2 SPECIAL2 sub-opcode (VU0 vector datapath not implemented)");
                     return 1;

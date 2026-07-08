@@ -5208,3 +5208,41 @@ this codebase), `VDIV`/`VSQRT`/`VRSQRT`/`VWAITQ` (would need to model
 the `Q` register's real "busy" timing), and `VRNEXT`/`VRGET`/
 `VRINIT`/`VRXOR` (the VU0 R-register LCG pseudo-random generator -
 entirely separate state).
+
+## Round 29 continued (23rd change: EE COP2 SPECIAL2 - VMTIR/VMFIR/VILWR)
+
+Implemented the integer<->float raw-bit-move family: `VMTIR`
+(idx60), `VMFIR` (idx61), `VILWR` (idx62), ported from a real PCSX2
+upstream reference clone's `VUops.cpp` `_vuMTIR`/`_vuMFIR`/`_vuILWR`.
+
+`VMTIR`: `VI[ft]` = the low 16 bits of the RAW 32-bit bit pattern of
+`VF[fs][Fsf]` - a plain truncation, not a numeric conversion. `Fsf`
+is not a separate instruction field: confirmed via
+`DisR5900asm.cpp`'s `dest_fsf()` macro (`(disasmOpcode>>21)&3`) that
+it lives in the exact same two bits as this decoder's `destmask`
+value's low 2 bits - just reinterpreted here as a lane INDEX instead
+of a per-lane bitmask.
+
+`VMFIR`: broadcasts the sign-extended 16-bit `VI[fs]` value (raw
+bits, not a float conversion) into every destmask-selected lane of
+`VF[ft]`.
+
+`VILWR`: `VI[ft]` = the low 16 bits of VU0 mem at quadword index
+`VI[fs]`, single lane selected by destmask (the same single-bit-only
+convention `VISWR` already uses).
+
+New test `tests/test_ee_cop2_mtir.c` (4 checks): `VMTIR` truncates a
+planted raw bit pattern (`VF1.y = 0x56780002` -> `VI10 = 0x0002`);
+`VMFIR.xz` broadcasts a sign-extended negative 16-bit value
+(`0xBEEF` -> `0xFFFFBEEF`) into exactly the X and Z lanes, leaving Y
+untouched (proving destmask is honored); `VILWR.z` reads back a
+planted 16-bit value from a specific VU0 mem lane. Full 80-block
+regression suite passes (79 pre-existing + this new one); clean Wii
+rebuild verified (only the pre-existing, harmless `strncpy` truncation
+warning in `iop_module_loader.c`).
+
+Remaining VU0 macro-mode gaps, now down to three well-scoped items:
+`VCLIPw` (needs a new CLIP flag register), `VDIV`/`VSQRT`/`VRSQRT`/
+`VWAITQ` (would need to model the `Q`/`P` register's real "busy"
+timing), and `VRNEXT`/`VRGET`/`VRINIT`/`VRXOR` (the VU0 R-register LCG
+pseudo-random generator - entirely separate state).

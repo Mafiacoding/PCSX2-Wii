@@ -1242,16 +1242,17 @@ already documented, rather than truly returning from the syscall.
    opcodes) added Round 29 continued's 21st change; VLQI/VLQD/VSQD
    (the pre/post increment/decrement memory-access siblings of
    VSQI, plus a VSQI destmask bugfix) added Round 29 continued's
-   22nd change) are wired up and
+   22nd change; VMTIR/VMFIR/VILWR added Round 29 continued's 23rd
+   change) are wired up and
    tested. Real BIOS boot code very likely uses VU0 macro mode for the
    splash screen's transform/lighting math - NOT YET REACHED by the
    current boot trace (EE is still steady-state SIF-polling), so this
-   remains readiness work rather than a wall-clearing fix. Open:
-   VCLIPw (needs a new CLIP flag register), VMTIR/VMFIR/VILWR (a
-   different sub-field decode, not yet researched), VDIV/VSQRT/VRSQRT/
-   VWAITQ (would need to model the Q register's real "busy" timing,
-   not just its value), and VRNEXT/VRGET/VRINIT/VRXOR (the VU0
-   R-register LCG pseudo-random generator - separate state).
+   remains readiness work rather than a wall-clearing fix. Open, now
+   down to three well-scoped items: VCLIPw (needs a new CLIP flag
+   register), VDIV/VSQRT/VRSQRT/VWAITQ (would need to model the Q
+   register's real "busy" timing, not just its value), and
+   VRNEXT/VRGET/VRINIT/VRXOR (the VU0 R-register LCG pseudo-random
+   generator - separate state).
 
 4. **VIF UNPACK** (section 4) - DONE (Round 20). Real vertex/
    texture/attribute data now flows from EE RAM into VU0/VU1 local

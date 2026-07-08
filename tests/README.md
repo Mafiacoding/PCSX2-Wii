@@ -36,6 +36,28 @@ gcc -I../include -I../source -o test_iop tests/test_iop_core.c ../source/hw/sif.
 ./test_iop
 ```
 
+`test_iop_module_loader_bootinfo.c` covers Round 29 continued's 12th
+change: `iop_module_loader.c`'s boot_info struct (the `$a0` argument
+every loaded module's entry point receives). A live-traced
+disassembly of the real SCPH-10000 BIOS's own SYSMEM init code found
+it reads a LARGER struct than the single RAM-MB word previously
+allocated, and actively dereferences offset 0x0C as a pointer
+(`sw $zero,(a0)` where a0 == that field's value) - before this fix,
+offset 0x0C was always 0 (out of bounds of the old 4-byte
+allocation), so that store's real target was RAM address 0. This test
+uses an entirely synthetic ROMDIR + ELF module image (same convention
+as `test_bios_loader.c`/`test_iop_elf.c` - no real BIOS bytes) to
+drive `iop_module_loader_boot()` end to end and verify the fix: offset
+0x0C now holds a valid, non-null, dedicated scratch address distinct
+from the struct itself, while the still-unknown offsets
+(0x04/0x08/0x10/0x14/0x18/0x1C) stay honestly zero rather than being
+fabricated. 7 checks.
+
+```sh
+gcc -I../include -I../source -o test_iop_module_loader_bootinfo tests/test_iop_module_loader_bootinfo.c ../source/core/iop/iop_core.c ../source/hw/iop_elf.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_cdvd.c ../source/hw/iop_spu2.c
+./test_iop_module_loader_bootinfo
+```
+
 
 `test_dma_core.c` covers the DMA register skeleton
 (`source/hw/dma.c`) - channel address decoding and register roundtrip.

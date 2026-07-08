@@ -1208,7 +1208,13 @@ already documented, rather than truly returning from the syscall.
    entry is registered (needs a citable reference, not a guess), and
    (b) why `Status.IEc` (global interrupt enable) never gets set to 1
    anywhere in the traced execution. See docs/STATUS.md's "Round 19"
-   section for the full trace.
+   section for the full trace. UPDATE (Round 29 continued, 12th
+   change): the boot_info struct offset-0x0C fix moved the IOP steady
+   state from pc=0x00101284 to pc=0x001012A8 (real forward progress
+   through a function-pointer-table dispatch loop, not a relocated
+   identical wall) - the panic loop itself is still eventually hit.
+   Task #124/#132 remains open and is still being actively chased per
+   the user's explicit direction.
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the
    register-block entry in section 7 above. Register-level scaffold

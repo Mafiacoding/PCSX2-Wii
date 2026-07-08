@@ -74,6 +74,39 @@
  * by that citation, not fabricated further. */
 #define BOOT_INFO_RAM_MB 2u
 
+/* Round 29 continued (12th change): a live-traced disassembly of
+ * SYSMEM's own real init code (docs/STATUS.md's "Round 29 continued
+ * (12th change)" section - RAM 0x100D00-0x100D8C) shows it reads a
+ * LARGER boot-info struct than just the single RAM-MB word: offsets
+ * 0x04/0x08/0x10/0x14/0x18/0x1C are copied into local stack slots
+ * (not otherwise used in the disassembled span), but offset 0x0C is
+ * actively DEREFERENCED - stored into a fixed global slot, read back,
+ * and then written through as a pointer (`sw $zero,($a0)`, i.e. "zero
+ * out whatever this points to"). Before this change, this project
+ * left offsets 0x04 onward at 0 (the bump allocator only ever
+ * reserved the first 4 bytes - see BOOT_INFO_RAM_MB's original
+ * comment), so offset 0x0C's value was 0, making that final store
+ * write to real RAM ADDRESS 0 - an actively observed, real bug, not a
+ * hypothetical one (confirmed via live tracing, the same way the
+ * INITIAL_SP bug immediately below was confirmed).
+ *
+ * No citable real value for what offset 0x0C *should* point to was
+ * found (same search as the 9th finding: psx-spx, ps2tek, PCSX2
+ * upstream, an independent PS2-boot write-up, and a live pcsx2-mcp
+ * reference instance - see the 10th finding). Rather than guess a
+ * fabricated "real" target, this project applies the exact same
+ * honest mitigation already precedented by INITIAL_SP below: point
+ * offset 0x0C at a dedicated, zero-initialized scratch word this
+ * project itself bump-allocates, so the observed real write-through
+ * lands somewhere safe instead of stomping on RAM address 0. This is
+ * explicitly a defensive choice, not a verified real hardware value -
+ * exactly like INITIAL_SP's own comment says of itself. Offsets
+ * 0x04/0x08/0x10/0x14/0x18/0x1C remain honestly zero (their real
+ * values, if any, are still unknown - not fabricated). */
+#define BOOT_INFO_STRUCT_SIZE 0x20u /* offsets 0x00-0x1C, 8 words */
+#define BOOT_INFO_OFF_RAM_MB     0x00u
+#define BOOT_INFO_OFF_SCRATCH_PTR 0x0Cu
+
 typedef struct {
     char name[10 + 1];
     uint32_t payload_off;
@@ -335,8 +368,19 @@ int iop_module_loader_boot(iop_state_t *st)
      * address unexpectedly. */
     iop_mem_write32(st, g.trampoline_addr, 0x08000000u | ((g.trampoline_addr >> 2) & 0x03FFFFFFu));
 
-    g.boot_info_addr = bump_alloc(4);
-    iop_mem_write32(st, g.boot_info_addr, BOOT_INFO_RAM_MB);
+    g.boot_info_addr = bump_alloc(BOOT_INFO_STRUCT_SIZE);
+    for (uint32_t off = 0; off < BOOT_INFO_STRUCT_SIZE; off += 4)
+        iop_mem_write32(st, g.boot_info_addr + off, 0u);
+    iop_mem_write32(st, g.boot_info_addr + BOOT_INFO_OFF_RAM_MB, BOOT_INFO_RAM_MB);
+    {
+        /* Dedicated, zero-initialized scratch word offset 0x0C points
+         * at - see BOOT_INFO_STRUCT_SIZE's comment above. Allocated
+         * separately (not as part of the struct itself) so it isn't
+         * disturbed if the struct's own size/layout changes later. */
+        uint32_t scratch = bump_alloc(4);
+        iop_mem_write32(st, scratch, 0u);
+        iop_mem_write32(st, g.boot_info_addr + BOOT_INFO_OFF_SCRATCH_PTR, scratch);
+    }
 
     g.modlist_index = 0;
     while (g.modlist_index < g.modlist_count) {

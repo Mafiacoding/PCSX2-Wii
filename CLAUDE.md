@@ -1769,3 +1769,23 @@ the EE's current boot trace does not yet reach any of these ops (still
 steady-state SIF-polling) - this is real, tested, roadmap-directed
 readiness work (docs/ROADMAP.md section 5 item 3), not a fix that
 advances the current observed boot state.
+
+## Update (Round 29 continued, 12th change - real fix, per user's
+"process the tasks causing the blockade, then continue chasing the
+device-driver retry loop root cause" instruction)
+
+Live-traced SYSMEM's real init disassembly (RAM 0x100D00-0x100D8C):
+found it actively dereferences boot_info offset 0x0C as a pointer
+(`sw zero,(a0)` where a0 = offset 0x0C's value) - previously 0 (this
+project's loader only ever allocated the struct's first 4 bytes), so
+that write's real target was RAM address 0. Fixed by allocating the
+full 0x20-byte struct and pointing offset 0x0C at dedicated,
+zero-initialized scratch (same honest "defensive value, not a
+verified real constant" precedent as INITIAL_SP). Empirically verified
+real forward progress: IOP steady-state pc moved from 0x00101284 to
+0x001012A8 (a genuine function-pointer-table dispatch loop now
+executes, not just the same wall at a new address) - the panic loop
+is still eventually hit, so task #124/#132 stays open, but this is
+real measurable progress, not a dead end. New test (7 checks, all
+passing), full 70-block regression passes, clean Wii rebuild
+verified, all docs updated.

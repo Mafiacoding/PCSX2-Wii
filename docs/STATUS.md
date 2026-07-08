@@ -4703,3 +4703,83 @@ readiness work (docs/ROADMAP.md section 5 item 3), not a fix that
 moves the current boot further - consistent with this session's
 practice of being explicit about what does and doesn't change the
 observed steady state.
+
+## Round 29 continued (12th change: REAL FIX - boot_info offset 0x0C, genuine forward progress)
+
+Continuing task #124/#132's chase (per the user's explicit instruction
+to keep pursuing it), a live-traced disassembly of the real
+SCPH-10000 BIOS's own SYSMEM init code (IOP RAM 0x100D00-0x100D8C, via
+a targeted single-step diagnostic capturing every instruction in that
+range plus a raw-bytes dump fed to Capstone) reads:
+
+```
+lw   v0, (a0)        ; offset 0x00 -> fp+0x38  (RAM_MB, already correct)
+lw   v0, 4(a0)       ; offset 0x04 -> fp+0x3c
+lw   v0, 8(a0)       ; offset 0x08 -> fp+0x40
+lw   a1, 0xc(a0)     ; offset 0x0C -> a1 (ACTIVELY USED, not just copied)
+lw   v0, 0x10(a0)    ; offset 0x10 -> fp+0x48
+lw   v0, 0x14(a0)    ; offset 0x14 -> fp+0x4c
+lw   v0, 0x18(a0)    ; offset 0x18 -> fp+0x50
+lw   a2, 0x1c(a0)    ; offset 0x1C -> a2, -> fp+0x54
+lui  v1, 0x10 ; addiu v1, v1, 0x2924   ; v1 = 0x00102924
+sw   a1, -4(v1)      ; RAM[0x00102920] = a1 (offset 0x0C's value)
+lui  a0, 0x10 ; lw a0, 0x2920(a0)     ; a0 = RAM[0x00102920] (== a1, round-tripped)
+...
+sw   zero, (a0)      ; *** writes zero through offset 0x0C's value ***
+```
+
+Every other offset (0x04/0x08/0x10/0x14/0x18/0x1C) is only ever copied
+into a local stack slot within this disassembled span - not
+dereferenced. Offset 0x0C is the one exception: its value is used
+directly as a pointer, and something gets zeroed through it.
+
+**The bug**: this project's loader (`source/hw/iop_module_loader.c`)
+only ever `bump_alloc(4)`'d and wrote the FIRST word of this struct
+(see the 10th finding). Offset 0x0C therefore read as 0, making
+`sw zero,(a0)` above write to REAL RAM ADDRESS 0 - an actively
+observed, real bug (confirmed via live tracing), not a hypothetical
+one - structurally identical to the earlier INITIAL_SP bug (a
+near-zero pointer walking into and corrupting low RAM, that time the
+exception vector at 0x80).
+
+**The fix**: `iop_module_loader_boot()` now allocates the FULL
+0x20-byte boot_info struct (not just 4 bytes), keeps offset 0x00 =
+`BOOT_INFO_RAM_MB` (unchanged, already correct), and sets offset 0x0C
+to point at a dedicated, separately-allocated, zero-initialized
+scratch word - so the observed real write-through lands somewhere
+safe instead of RAM address 0. This is an explicitly DEFENSIVE choice
+(no citable real value for what offset 0x0C should "really" point to
+was found - same exhausted search as the 9th/10th findings), applying
+the exact same honest precedent `INITIAL_SP`'s own comment already
+established: not a verified real hardware constant, but a reasoned
+mitigation for an actively-observed bug. Offsets 0x04/0x08/0x10/0x14/
+0x18/0x1C remain honestly zero - their real values, if any, are still
+unknown, not fabricated.
+
+**Empirical result - genuine forward progress, not just a relocated
+wall**: a fresh 20M-slice interleaved diagnostic against the real
+SCPH-10000 dump shows the IOP steady-state pc advanced from
+`0x00101284` (before this fix) to `0x001012A8` (after) - traced and
+disassembled: this is REAL additional code executing (a list-walk
+loop at 0x101200-0x101278 doing `lw t0,-4(s1)`/`jalr v0` - a real
+function-pointer-table dispatch - followed by the same bounded 4-pass
+retry loop documented in earlier rounds), not the same instruction at
+a shifted address. The panic loop itself (`lui v1,0x8000; addiu
+v0,zero,2; sb v0,(v1); j`) is still eventually reached - this fix
+moves the boot further into real BIOS code, it does not clear the
+wall outright. EE pc is unchanged (still steady-state SIF-polling at
+0x80005E90), as expected since the IOP hasn't progressed far enough
+yet to signal it.
+
+New test: `tests/test_iop_module_loader_bootinfo.c` (7 checks) -
+entirely synthetic ROMDIR + ELF module image (same convention as
+`test_bios_loader.c`/`test_iop_elf.c`, no real BIOS bytes), drives
+`iop_module_loader_boot()` end-to-end and verifies offset 0x0C is now
+a valid, distinct, zero-initialized scratch pointer. Full 70-block
+regression suite passes (69 pre-existing + this new one); clean Wii
+rebuild verified.
+
+Task #124/#132 remains open (the panic loop is still eventually hit),
+but this is real, verified, measurable progress along that thread,
+not readiness work - continuing per the user's explicit instruction
+to keep chasing this specific root cause.

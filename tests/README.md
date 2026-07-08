@@ -1722,3 +1722,24 @@ verified against hand-computed values.
 gcc -I../include -I../source -o test_ee_cop2_arith4 tests/test_ee_cop2_arith4.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_arith4
 ```
+
+`test_ee_cop2_broadcast.c` covers Round 29 continued's 18th change -
+the FT-lane-broadcast forms of the already-implemented full-vector
+arithmetic row: `VADDx/y/z/w` (funct 0x00-0x03), `VSUBx/y/z/w`
+(0x04-0x07), `VMAXx/y/z/w` (0x10-0x13), `VMINIx/y/z/w` (0x14-0x17),
+`VMULx/y/z/w` (0x18-0x1B). Confirmed against a real PCSX2 upstream
+reference clone's `R5900OpcodeTables.cpp` (SPECIAL1 table's first 4
+rows) and `VUops.cpp`'s `applyBinaryMACOpBroadcast`: `FD[lane] =
+FS[lane] OP FT.<bc-lane>` for every lane selected by destmask, where
+`<bc-lane>` is fixed by the specific opcode (not by destmask). 7
+checks: one representative op from each of the 5 families (VADDy,
+VSUBx, VMULz, VMAXw, VMINIx) verified against hand-computed broadcast
+results; a single-lane destmask (`VADDy.x`) only writes that one
+lane. `VMADDx/y/z/w`/`VMSUBx/y/z/w` (ACC-based broadcast) and
+`VMULq`/`VMAXi`/`VMULi`/`VMINIi` (Q/I-register broadcast) remain out
+of scope - a separate follow-up.
+
+```sh
+gcc -I../include -I../source -o test_ee_cop2_broadcast tests/test_ee_cop2_broadcast.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
+./test_ee_cop2_broadcast
+```

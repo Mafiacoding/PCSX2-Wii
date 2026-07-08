@@ -1880,3 +1880,19 @@ clean Wii rebuild verified (only the pre-existing, harmless strncpy
 truncation warning). Broadcast forms, the accumulator-writing family
 (VADDA/VMULA/VMADDA/VMSUBA/VOPMULA), and the memory-access family
 beyond VISWR/VSQI remain open.
+
+## Update (Round 29 continued, 18th change - EE COP2 broadcast-form arithmetic ops)
+
+Added the FT-lane-broadcast forms of the already-implemented
+full-vector row: VADDx/y/z/w, VSUBx/y/z/w, VMAXx/y/z/w, VMINIx/y/z/w,
+VMULx/y/z/w (funct 0x00-0x1B minus the ACC-based 0x08-0x0F range) -
+20 opcodes total, confirmed against real PCSX2 upstream's
+R5900OpcodeTables.cpp/VUops.cpp. Same shape as the full-vector forms
+but the second operand is always one fixed lane of FT (selected by
+the opcode itself, not destmask), broadcast to every destmask lane.
+Single dispatch branch, reusing existing vu0_vf_read_lane/write_lane
+helpers. New test tests/test_ee_cop2_broadcast.c (7 checks, all
+passing). Full 75-block regression suite passes, clean Wii rebuild
+verified (only the pre-existing strncpy warning). VMADDx/y/z/w
+/VMSUBx/y/z/w (ACC-based broadcast) and VMULq/VMAXi/VMULi/VMINIi
+(Q/I-register broadcast) remain open, scoped follow-ups.

@@ -1575,6 +1575,43 @@ static int ee_step(void)
                     memcpy(&ur, &r, 4);
                     vu0_vf_write_lane(st, fd, (uint32_t)lane, ur);
                 }
+            } else if (funct <= 0x07 || (funct >= 0x10 && funct <= 0x1B)) {
+                /* Broadcast-form row (funct 0x00-0x1B, excluding
+                 * 0x08-0x0F which are the ACC-based VMADD/VMSUB
+                 * broadcast forms - not implemented yet, a scoped
+                 * follow-up): VADDx/y/z/w(0x00-0x03), VSUBx/y/z/w
+                 * (0x04-0x07), VMAXx/y/z/w(0x10-0x13), VMINIx/y/z/w
+                 * (0x14-0x17), VMULx/y/z/w(0x18-0x1B). Confirmed
+                 * against PCSX2's R5900OpcodeTables.cpp SPECIAL1
+                 * table's first 4 rows (funct 0-31 laid out as 8
+                 * columns x 4 rows, x/y/z/w cycling every 4 entries)
+                 * and VUops.cpp's applyBinaryMACOpBroadcast: same
+                 * shape as the full-vector forms above, but FT is
+                 * replaced by a SINGLE broadcast lane of FT (fixed by
+                 * which specific opcode - the low 2 bits of funct
+                 * select x/y/z/w - not by destmask), applied to every
+                 * lane selected by destmask: FD[lane] = FS[lane] OP
+                 * FT.<bc-lane>. VMULq/VMAXi/VMULi/VMINIi (funct
+                 * 0x1C-0x1F, which broadcast the Q/I registers
+                 * instead of an FT lane) are a separate, still-open
+                 * gap - not added this round. */
+                uint32_t bc_lane = funct & 0x3u;
+                uint32_t base_op = (funct >> 2) & 0x7u; /* 0=VADD,1=VSUB,4=VMAX,5=VMINI,6=VMUL (0x08-0x0F/2=3 handled above, excluded) */
+                uint32_t ub = vu0_vf_read_lane(st, ft, bc_lane);
+                float b; memcpy(&b, &ub, 4);
+                for (int lane = 0; lane < 4; lane++) {
+                    if (!(destmask & (0x8u >> lane))) continue;
+                    uint32_t ua = vu0_vf_read_lane(st, fs, (uint32_t)lane);
+                    float a, r; uint32_t ur;
+                    memcpy(&a, &ua, 4);
+                    if (base_op == 0) r = a + b;
+                    else if (base_op == 1) r = a - b;
+                    else if (base_op == 4) r = (a > b) ? a : b;
+                    else if (base_op == 5) r = (a < b) ? a : b;
+                    else r = a * b; /* base_op == 6, VMULx/y/z/w */
+                    memcpy(&ur, &r, 4);
+                    vu0_vf_write_lane(st, fd, (uint32_t)lane, ur);
+                }
             } else if (funct == 0x29 || funct == 0x2D) {
                 /* VMADD(0x29)/VMSUB(0x2D): FD[lane] = ACC[lane] +-
                  * FS[lane]*FT[lane], per destmask lane - the same

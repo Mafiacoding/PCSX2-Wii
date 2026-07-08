@@ -4990,3 +4990,39 @@ family (VADDA/VMULA/VMADDA/VMSUBA/VOPMULA), and the memory-access
 family beyond VISWR/VSQI remain open - not seen in the traced boot
 path, scoped future work like this project's other still-open VU0
 gaps.
+
+## Round 29 continued (18th change: EE COP2 broadcast-form arithmetic ops added)
+
+Extended VU0 macro mode with the FT-lane-broadcast forms of the
+already-implemented full-vector row: `VADDx/y/z/w` (funct 0x00-0x03),
+`VSUBx/y/z/w` (0x04-0x07), `VMAXx/y/z/w` (0x10-0x13), `VMINIx/y/z/w`
+(0x14-0x17), `VMULx/y/z/w` (0x18-0x1B) - 20 opcodes total. Confirmed
+against a real PCSX2 upstream reference clone's
+`R5900OpcodeTables.cpp` (the SPECIAL1 table's first 4 rows, laid out
+as 8 opcodes x 4 rows with x/y/z/w cycling every 4 funct values) and
+`VUops.cpp`'s `applyBinaryMACOpBroadcast`: same shape as the
+full-vector forms (`FD[lane] = FS[lane] OP FT[lane]`), except the
+second operand is always a single fixed lane of FT (selected by which
+specific opcode - the low 2 bits of funct - not by destmask),
+broadcast to every lane the destmask selects.
+
+Implemented as a single dispatch branch keyed on `funct <= 0x07 ||
+(funct >= 0x10 && funct <= 0x1B)`, decoding `bc_lane = funct & 0x3`
+and `base_op = (funct >> 2) & 0x7` to select the arithmetic operator -
+reuses the exact same `vu0_vf_read_lane`/`vu0_vf_write_lane` helpers
+and float-reinterpretation approach as every other arithmetic op in
+this file.
+
+New test `tests/test_ee_cop2_broadcast.c` (7 checks): one
+representative op per family (VADDy, VSUBx, VMULz, VMAXw, VMINIx)
+verified against hand-computed broadcast results; a single-lane
+destmask (VADDy.x) verified to only write that one lane. Full
+75-block regression suite passes (74 pre-existing + this new one);
+clean Wii rebuild verified (only the pre-existing, harmless `strncpy`
+truncation warning in `iop_module_loader.c`).
+
+Explicitly out of scope this round: `VMADDx/y/z/w`/`VMSUBx/y/z/w`
+(funct 0x08-0x0F, the ACC-based broadcast forms) and
+`VMULq`/`VMAXi`/`VMULi`/`VMINIi` (funct 0x1C-0x1F, which broadcast the
+Q/I registers instead of an FT lane) - both scoped, well-understood
+follow-ups reusing this same dispatch shape.

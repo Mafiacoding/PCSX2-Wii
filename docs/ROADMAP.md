@@ -1230,11 +1230,15 @@ already documented, rather than truly returning from the syscall.
    added Round 29 continued's 16th change; VMADD/VMSUB/VOPMSUB added
    Round 29 continued's 17th change, completing the full
    VADD/VMADD/VMUL/VMAX/VSUB/VMSUB/VOPMSUB/VMINI SPECIAL1 arithmetic
-   row) are wired up and tested. Real BIOS boot code very likely uses
-   VU0 macro mode for the splash screen's transform/lighting math -
-   NOT YET REACHED by the current boot trace (EE is still steady-state
-   SIF-polling), so this remains readiness work rather than a
-   wall-clearing fix. Open: the broadcast forms (VADDx/y/z/w etc), the
+   row; VADDx/y/z/w, VSUBx/y/z/w, VMAXx/y/z/w, VMINIx/y/z/w,
+   VMULx/y/z/w (the FT-lane-broadcast forms, 20 opcodes) added Round
+   29 continued's 18th change) are wired up and tested. Real BIOS boot
+   code very likely uses VU0 macro mode for the splash screen's
+   transform/lighting math - NOT YET REACHED by the current boot
+   trace (EE is still steady-state SIF-polling), so this remains
+   readiness work rather than a wall-clearing fix. Open: VMADDx/y/z/w
+   /VMSUBx/y/z/w (the ACC-based broadcast forms) and
+   VMULq/VMAXi/VMULi/VMINIi (the Q/I-register broadcast forms), the
    accumulator-writing family (VADDA/VMULA/VMADDA/VMSUBA/VOPMULA), and
    the memory-access family beyond VISWR/VSQI (VILWR/VLQI/VLQD/VSQD/
    VDIV/etc).

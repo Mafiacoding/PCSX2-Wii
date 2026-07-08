@@ -1762,3 +1762,24 @@ against hand-computed values.
 gcc -I../include -I../source -o test_ee_cop2_broadcast2 tests/test_ee_cop2_broadcast2.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_broadcast2
 ```
+
+`test_ee_cop2_unary.c` covers Round 29 continued's 20th change - the
+COP2SPECIAL2 unary/data-movement cluster: `VABS` (idx=29),
+`VITOF0/4/12/15` (idx=16-19), `VFTOI0/4/12/15` (idx=20-23), `VMOVE`
+(idx=48), `VMR32` (idx=49). Confirmed against a real PCSX2 upstream
+reference clone that these ops encode the DESTINATION in the FT field
+position and the SOURCE in FS (`DisR5900asm.cpp`'s `P_VABS`/etc print
+`FT, FS` - the opposite of the arithmetic row's FD/FS/FT roles).
+`VITOF`/`VFTOI` are ported bit-exact from PCSX2's `VUops.cpp`
+`intToFloat<Offset>`/`floatToInt<Offset>` templates (including
+`floatToInt`'s denormal-range saturation), not a plain C cast. 8
+checks: `VABS` computes `|VF1|`; `VMOVE` copies unchanged; `VMR32`
+rotates lanes (`FT.x=FS.y`, etc); `VITOF4`/`VITOF12` scale raw int32
+bit patterns by 2^-4/2^-12; `VFTOI0`/`VFTOI4` truncate floats to int
+(optionally pre-scaled); a single-lane destmask (`VABS.x`) only writes
+that one lane.
+
+```sh
+gcc -I../include -I../source -o test_ee_cop2_unary tests/test_ee_cop2_unary.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
+./test_ee_cop2_unary
+```

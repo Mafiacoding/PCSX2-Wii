@@ -1725,6 +1725,112 @@ static int ee_step(void)
                         memcpy(st->vu0_mem + off, &val, 4);
                     }
                     vu0_vi_write(st, ft, addr_vi + 1);
+                } else if (idx == 29 || (idx >= 16 && idx <= 23) || idx == 48 || idx == 49) {
+                    /* Unary/data-movement cluster (Round 29 continued,
+                     * 20th change): VABS(idx=29), VITOF0/4/12/15
+                     * (idx=16-19), VFTOI0/4/12/15(idx=20-23),
+                     * VMOVE(idx=48), VMR32(idx=49). IMPORTANT: unlike
+                     * every arithmetic op above (dest=FD), a real
+                     * PCSX2 upstream reference clone's DisR5900asm.cpp
+                     * disassembly formatters (P_VABS/P_VITOF0/
+                     * P_VFTOI0/etc: "vabs.%s FT, FS") confirm these
+                     * ops encode the DESTINATION in the FT field
+                     * position and the SOURCE in FS - the opposite of
+                     * the arithmetic row's FD/FS/FT roles (VUops.cpp's
+                     * _vuABS, _vuITOFn, _vuFTOIn, _vuMOVE, _vuMR32 all
+                     * write VU->VF[_Ft_] from VU->VF[_Fs_], guarded by
+                     * "if (_Ft_ == 0) return"). This decoder already
+                     * extracts ft/fs at the same bit positions for
+                     * every CO-format instruction, so no new field
+                     * extraction was needed - just using them with
+                     * their roles swapped for this cluster. fd (the
+                     * bits-6-10 field) is unused/ignored here, per
+                     * real hardware. */
+                    if (ft == 0) {
+                        /* writes to VF00 are discarded, same rule as
+                         * every other VF write in this file */
+                    } else if (idx == 29) {
+                        /* VABS: FT[lane] = |FS[lane]| (bit-level abs -
+                         * clear the sign bit - ported from PCSX2's
+                         * vuOpABS: "fs & 0x7fffffff"), per destmask
+                         * lane. */
+                        for (int lane = 0; lane < 4; lane++) {
+                            if (!(destmask & (0x8u >> lane))) continue;
+                            uint32_t v = vu0_vf_read_lane(st, fs, (uint32_t)lane) & 0x7FFFFFFFu;
+                            vu0_vf_write_lane(st, ft, (uint32_t)lane, v);
+                        }
+                    } else if (idx == 48) {
+                        /* VMOVE: FT[lane] = FS[lane], plain per-lane
+                         * copy, per destmask lane. */
+                        for (int lane = 0; lane < 4; lane++) {
+                            if (!(destmask & (0x8u >> lane))) continue;
+                            vu0_vf_write_lane(st, ft, (uint32_t)lane, vu0_vf_read_lane(st, fs, (uint32_t)lane));
+                        }
+                    } else if (idx == 49) {
+                        /* VMR32: 32-bit lane rotate - FT.x=FS.y,
+                         * FT.y=FS.z, FT.z=FS.w, FT.w=FS.x (ported from
+                         * PCSX2's _vuMR32, which reads FS.x into a
+                         * temporary FIRST so a VMOVE-to-self (Ft==Fs)
+                         * still rotates correctly even though the
+                         * lanes are written in x/y/z/w order). Per
+                         * destmask lane, same as every other op. */
+                        uint32_t tx = vu0_vf_read_lane(st, fs, 0);
+                        uint32_t ty = vu0_vf_read_lane(st, fs, 1);
+                        uint32_t tz = vu0_vf_read_lane(st, fs, 2);
+                        uint32_t tw = vu0_vf_read_lane(st, fs, 3);
+                        if (destmask & 0x8u) vu0_vf_write_lane(st, ft, 0, ty);
+                        if (destmask & 0x4u) vu0_vf_write_lane(st, ft, 1, tz);
+                        if (destmask & 0x2u) vu0_vf_write_lane(st, ft, 2, tw);
+                        if (destmask & 0x1u) vu0_vf_write_lane(st, ft, 3, tx);
+                    } else {
+                        /* VITOF0/4/12/15(idx16-19)/VFTOI0/4/12/15
+                         * (idx20-23) - fixed-point <-> float
+                         * conversion, ported bit-exact from PCSX2's
+                         * VUops.cpp intToFloat<Offset>/
+                         * floatToInt<Offset> templates (including the
+                         * denormal-range saturation floatToInt
+                         * applies) rather than a plain C cast, since
+                         * the real hardware quirk (scaling by a
+                         * bit-constructed power-of-two float constant
+                         * before/after the int<->float conversion,
+                         * and saturating to INT32_MIN/MAX above a
+                         * fixed exponent threshold) is directly
+                         * portable and not worth re-deriving. */
+                        int is_ftoi = (idx >= 20);
+                        uint32_t offset_n = (idx & 0x3u) == 0 ? 0u : (idx & 0x3u) == 1 ? 4u : (idx & 0x3u) == 2 ? 12u : 15u;
+                        for (int lane = 0; lane < 4; lane++) {
+                            if (!(destmask & (0x8u >> lane))) continue;
+                            uint32_t uval = vu0_vf_read_lane(st, fs, (uint32_t)lane);
+                            uint32_t uresult;
+                            if (!is_ftoi) {
+                                /* intToFloat<Offset> */
+                                int32_t ival; memcpy(&ival, &uval, 4);
+                                float fval = (float)ival;
+                                if (offset_n) {
+                                    uint32_t scale_bits = 0x3F800000u - (offset_n << 23);
+                                    float scale; memcpy(&scale, &scale_bits, 4);
+                                    fval *= scale;
+                                }
+                                memcpy(&uresult, &fval, 4);
+                            } else {
+                                /* floatToInt<Offset> */
+                                float fval; memcpy(&fval, &uval, 4);
+                                if (offset_n) {
+                                    uint32_t scale_bits = 0x3F800000u + (offset_n << 23);
+                                    float scale; memcpy(&scale, &scale_bits, 4);
+                                    fval *= scale;
+                                }
+                                uint32_t fbits; memcpy(&fbits, &fval, 4);
+                                if ((fbits & 0x7F800000u) >= 0x4F000000u) {
+                                    uresult = (fbits & 0x80000000u) ? 0x80000000u : 0x7FFFFFFFu;
+                                } else {
+                                    int32_t iv = (int32_t)fval;
+                                    memcpy(&uresult, &iv, 4);
+                                }
+                            }
+                            vu0_vf_write_lane(st, ft, (uint32_t)lane, uresult);
+                        }
+                    }
                 } else {
                     halt("unimplemented COP2 SPECIAL2 sub-opcode (VU0 vector datapath not implemented)");
                     return 1;

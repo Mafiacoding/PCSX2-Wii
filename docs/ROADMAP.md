@@ -1235,14 +1235,16 @@ already documented, rather than truly returning from the syscall.
    29 continued's 18th change; VMADDx/y/z/w/VMSUBx/y/z/w and
    VMULq/VMAXi/VMULi/VMINIi added Round 29 continued's 19th change,
    completing the entire funct 0x00-0x2F COP2 CO-format arithmetic
-   space) are wired up and tested. Real BIOS boot code very likely
-   uses VU0 macro mode for the splash screen's transform/lighting
-   math - NOT YET REACHED by the current boot trace (EE is still
-   steady-state SIF-polling), so this remains readiness work rather
-   than a wall-clearing fix. Open: the accumulator-writing family
-   (VADDA/VMULA/VMADDA/VMSUBA/VOPMULA/etc - COP2SPECIAL2, a separate
-   64-entry table), VABS/VCLIPw, VMOVE/VMR32, the memory-access family
-   beyond VISWR/VSQI (VLQI/VLQD/VSQD/VILWR), and VDIV/VSQRT/VRSQRT
+   space; VABS/VITOF0/4/12/15/VFTOI0/4/12/15/VMOVE/VMR32 added Round
+   29 continued's 20th change, the first COP2SPECIAL2 opcodes besides
+   VISWR/VSQI) are wired up and tested. Real BIOS boot code very
+   likely uses VU0 macro mode for the splash screen's transform/
+   lighting math - NOT YET REACHED by the current boot trace (EE is
+   still steady-state SIF-polling), so this remains readiness work
+   rather than a wall-clearing fix. Open: the accumulator-writing
+   family (VADDA/VMULA/VMADDA/VMSUBA/VOPMULA/etc - COP2SPECIAL2's
+   remaining rows), VCLIPw, the memory-access family beyond VISWR/
+   VSQI (VLQI/VLQD/VSQD/VMTIR/VMFIR/VILWR), and VDIV/VSQRT/VRSQRT
    (would also need to model the Q register's real "busy" timing, not
    just its value).
 

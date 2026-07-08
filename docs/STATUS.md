@@ -5073,3 +5073,51 @@ family beyond `VISWR`/`VSQI` (`VLQI`/`VLQD`/`VSQD`/`VILWR`), and
 `VDIV`/`VSQRT`/`VRSQRT` (which would also need to model the `Q`
 register's real "busy" timing, not just its value - not attempted
 yet).
+
+## Round 29 continued (20th change: EE COP2 SPECIAL2 unary/data-movement cluster - VABS, VITOF/VFTOI, VMOVE, VMR32)
+
+Extended the COP2SPECIAL2 sub-dispatch (previously only VISWR
+idx=63/VSQI idx=53) with a coherent cluster of 11 opcodes: `VABS`
+(idx=29), `VITOF0/4/12/15` (idx=16-19), `VFTOI0/4/12/15` (idx=20-23),
+`VMOVE` (idx=48), `VMR32` (idx=49).
+
+Important field-role discovery, confirmed against a real PCSX2
+upstream reference clone: unlike the entire arithmetic row (dest=FD),
+these ops encode their DESTINATION in the FT field position and read
+their SOURCE from FS - `DisR5900asm.cpp`'s disassembly formatters
+(`P_VABS`/`P_VITOF0`/`P_VFTOI0`/etc) all print `FT, FS` with no FD at
+all, and `VUops.cpp`'s `_vuABS`/`_vuITOF*`/`_vuFTOI*`/`_vuMOVE`/
+`_vuMR32` all write `VU->VF[_Ft_]` from `VU->VF[_Fs_]`, guarded by
+`if (_Ft_ == 0) return`. This decoder already extracted `ft`/`fs` at
+the same bit positions for every CO-format instruction, so no new
+field extraction was needed - just reusing them with roles swapped
+for this cluster (the `fd` bits-6-10 field is unused here).
+
+`VABS`: bit-level absolute value (clear the sign bit), per destmask
+lane. `VMOVE`: plain per-lane copy. `VMR32`: 32-bit lane rotate
+(`FT.x=FS.y`, `FT.y=FS.z`, `FT.z=FS.w`, `FT.w=FS.x`) - reads all 4
+source lanes into locals first so a self-move (`Ft==Fs`) still
+rotates correctly. `VITOF0/4/12/15`/`VFTOI0/4/12/15`: fixed-point
+int<->float conversion, ported bit-exact from PCSX2's own `VUops.cpp`
+`intToFloat<Offset>`/`floatToInt<Offset>` templates (scale by a
+bit-constructed power-of-two float constant; `floatToInt` also
+saturates to `INT32_MIN`/`MAX` above a fixed exponent threshold)
+rather than a plain C cast, since the real-hardware quirk is directly
+portable.
+
+New test `tests/test_ee_cop2_unary.c` (8 checks): `VABS` computes
+`|VF1|`; `VMOVE` copies unchanged; `VMR32` rotates lanes correctly;
+`VITOF4`/`VITOF12` scale raw int32 bit patterns by 2^-4/2^-12
+(verified against hand-computed values, e.g. `-32768` at offset 4 =
+`-2048.0`); `VFTOI0`/`VFTOI4` truncate floats to int (optionally
+pre-scaled, e.g. `0.0625 * 16 = 1.0 -> 1`); a single-lane destmask
+(`VABS.x`) only writes that one lane. Full 77-block regression suite
+passes (76 pre-existing + this new one); clean Wii rebuild verified
+(only the pre-existing, harmless `strncpy` truncation warning in
+`iop_module_loader.c`).
+
+Remaining COP2SPECIAL2 gaps: the accumulator-writing family
+(`VADDA`/`VMULA`/`VMADDA`/`VMSUBA`/`VOPMULA`/etc), `VCLIPw`, the
+memory-access family beyond `VISWR`/`VSQI` (`VLQI`/`VLQD`/`VSQD`/
+`VMTIR`/`VMFIR`/`VILWR`), and `VDIV`/`VSQRT`/`VRSQRT` (which would
+also need to model the `Q`/`P` register's real "busy" timing).

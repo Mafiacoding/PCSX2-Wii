@@ -1912,3 +1912,20 @@ passing) sets Q/I via real CTC2, pokes vu0_acc directly. Full
 VU0 macro-mode gaps now: the accumulator-writing family (COP2SPECIAL2
 table), VABS/VCLIPw, VMOVE/VMR32, memory-access beyond VISWR/VSQI,
 and VDIV/VSQRT/VRSQRT.
+
+## Update (Round 29 continued, 20th change - EE COP2 SPECIAL2 unary/data-movement cluster)
+
+Extended COP2SPECIAL2 (previously only VISWR/VSQI) with VABS(idx=29),
+VITOF0/4/12/15(idx=16-19), VFTOI0/4/12/15(idx=20-23), VMOVE(idx=48),
+VMR32(idx=49) - 11 opcodes. Key discovery: these ops encode dest in
+the FT field and source in FS (opposite of the arithmetic row's
+FD/FS/FT), confirmed via real PCSX2 upstream's DisR5900asm.cpp/
+VUops.cpp. VITOF/VFTOI ported bit-exact from PCSX2's
+intToFloat<Offset>/floatToInt<Offset> templates including denormal
+saturation. New test tests/test_ee_cop2_unary.c (8 checks, all
+passing) - required fixing a test-encoding bug along the way (SPECIAL2
+dispatch needs instr bits 2-5 forced to 0xF for the outer funct check,
+independent of the idx formula which only uses bits 0-1/6-10). Full
+77-block regression suite passes, clean Wii rebuild verified. Open:
+accumulator-writing family, VCLIPw, memory-access beyond VISWR/VSQI,
+VDIV/VSQRT/VRSQRT.

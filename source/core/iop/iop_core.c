@@ -276,6 +276,7 @@ static void iop_check_hw_interrupt(iop_state_t *st, uint32_t next_pc)
     st->cop0[12] = (st->cop0[12] & ~0x3Fu) | ((st->cop0[12] & 0x0Fu) << 2); /* Status stack push */
     st->pc = vector;
     st->next_pc = vector + 4u;
+    st->exception_pending = 1; /* task #156 - see iop_core.h's field comment */
 }
 
 static int iop_step(void)
@@ -422,6 +423,7 @@ static int iop_step(void)
             st->pc = vector;
             st->next_pc = vector + 4;
             st->cop0[12] = (st->cop0[12] & ~0x3Fu) | ((st->cop0[12] & 0x0Fu) << 2); /* Status stack push */
+            st->exception_pending = 1; /* task #156 - see iop_core.h's field comment */
         }
         break;
         case 0x0D: /* BREAK */
@@ -453,14 +455,33 @@ static int iop_step(void)
              * project's own test suite's long-established direct
              * clean-halt-for-testing convention, which never first
              * executes a real syscall) is completely unaffected and
-             * still halts exactly as before. */
-            if ((st->cop0[13] & 0x7Cu) == 0x20u) { /* Cause.ExcCode == 8 (Syscall) */
+             * still halts exactly as before.
+             *
+             * Task #156 fix: this check now ALSO requires
+             * exception_pending (see iop_core.h's field comment) -
+             * i.e. that this Cause.ExcCode==8 reflects a syscall
+             * exception that hasn't been handled (RFE'd) yet, not a
+             * stale leftover value from an EARLIER syscall whose
+             * handler already ran RFE and returned. Without this,
+             * a genuinely-real, distinct BREAK reached later (e.g.
+             * this project's own test suite's clean-halt convention,
+             * or any real BREAK downstream of an unrelated, already-
+             * completed syscall) was wrongly treated as "still
+             * unhandled" and resumed at the OLD, already-stale EPC+4
+             * instead of halting - a real, reproducible infinite loop
+             * (see tests/test_iop_rfe.c: SYSCALL, then RFE at the
+             * bootstrap vector, then BREAK - Cause still read 8 since
+             * RFE never touches Cause, so this fired incorrectly and
+             * resumed execution back near the reset vector's own
+             * zeroed/NOP-equivalent memory, which never halts). */
+            if (st->exception_pending && (st->cop0[13] & 0x7Cu) == 0x20u) { /* Cause.ExcCode == 8 (Syscall), not yet RFE'd */
                 uint32_t epc = st->cop0[14];
                 st->gpr[2] = 0; /* $v0 = 0 - same default-return convention as iop_hle_bios.c's unimplemented A0/B0/C0 calls */
                 /* RFE-equivalent Status stack pop, identical formula
                  * to this file's own real RFE (COP0 CO-format
                  * funct=0x10) implementation above. */
                 st->cop0[12] = (st->cop0[12] & ~0x0Fu) | ((st->cop0[12] & 0x3Cu) >> 2);
+                st->exception_pending = 0; /* task #156 - this exception is now considered handled */
                 st->pc = epc + 4u;
                 st->next_pc = epc + 8u;
                 break;
@@ -527,6 +548,7 @@ static int iop_step(void)
                 st->pc = vector;
                 st->next_pc = vector + 4;
                 st->cop0[12] = (st->cop0[12] & ~0x3Fu) | ((st->cop0[12] & 0x0Fu) << 2); /* Status stack push */
+                st->exception_pending = 1; /* task #156 - see iop_core.h's field comment */
             }
             break;
         default:
@@ -604,6 +626,10 @@ static int iop_step(void)
             switch (funct) {
             case 0x10: /* RFE */
                 st->cop0[12] = (st->cop0[12] & ~0x0Fu) | ((st->cop0[12] & 0x3Cu) >> 2);
+                /* Task #156: this exception is now considered handled
+                 * - see iop_core.h's exception_pending field comment
+                 * and BREAK's own updated check below. */
+                st->exception_pending = 0;
                 break;
             default:
             {

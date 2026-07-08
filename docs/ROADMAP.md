@@ -1385,6 +1385,27 @@ already documented, rather than truly returning from the syscall.
    is the natural next step, replacing the current safe bypass. Not
    yet implemented - investigation only. See STATUS.md's 35th
    finding.
+   UPDATE (Round 29 continued, 36th finding, tasks #151/#155/#156/
+   #157): implemented and real-BIOS-tested the registration list
+   (task #155). Along the way, fixed an unrelated pre-existing hang
+   in tests/test_iop_rfe.c (task #156: BREAK's syscall-fallback
+   heuristic fired on a stale Cause value left over from an already-
+   RFE'd exception; added an exception_pending flag to gate it
+   correctly). Real-BIOS result: LOADCORE now genuinely walks the
+   real 29-entry list (panic_loops_bypassed dropped to 0 - the
+   original empty-list panic never fires now), but this exposed a
+   NEW, distinct real dead end deeper in the walk (a second panic
+   idiom, different call site); added is_registration_walk_panic_loop()
+   (task #157) to bypass it and restore modules_run_to_completion to
+   15. HONEST NET RESULT: the exact same 14 modules are bypassed as
+   before, including SIFCMD and SIFINIT specifically - still hitting
+   the identical dead end, unchanged. The real registration-list
+   format is a genuine, kept improvement (real data, demonstrably
+   changes LOADCORE's real code path) but does NOT resolve the actual
+   SIF handshake blocker on its own. Full 87-block regression suite
+   passes (0 hangs); clean Wii rebuild verified. Task #151 remains
+   open - see STATUS.md's 36th finding for the full result and the
+   next concrete target (the new, deeper dead end this round found).
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the
    register-block entry in section 7 above. Register-level scaffold

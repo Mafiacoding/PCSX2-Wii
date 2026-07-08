@@ -34,6 +34,22 @@ typedef struct {
     uint64_t instructions_executed;
     uint8_t  halted;
     char     halt_reason[128];
+
+    /* Round 29 continued (task #156): set to 1 by every real
+     * exception-entry site (hardware interrupt, SYSCALL, TGE - see
+     * iop_core.c's own cop0[14]/EPC-writing sites), cleared to 0 by
+     * RFE. Distinguishes "Cause.ExcCode still reads 8 because this
+     * exception hasn't been handled yet" from "Cause.ExcCode still
+     * reads 8 merely because RFE (which only restores Status, not
+     * Cause - see RFE's own header comment) already handled and
+     * returned from an EARLIER syscall, and nothing has overwritten
+     * the now-stale Cause register since". Needed because BREAK's
+     * own "unimplemented syscall fallback" heuristic (task #149, the
+     * 29th change) checks Cause.ExcCode==8 alone, which fires on
+     * stale Cause values left over from an already-RFE-handled
+     * exception - a real, reproducible hang found while regression-
+     * testing task #155 (see docs/STATUS.md). */
+    uint8_t  exception_pending;
 } iop_state_t;
 
 int  iop_core_init(const bios_image_t *bios);

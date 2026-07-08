@@ -117,6 +117,30 @@ typedef struct {
                                      * see iop_module_loader.c's
                                      * is_unconditional_trap_stub()
                                      * header comment (task #151/#152) */
+    uint32_t registration_list_entries; /* Round 29 continued (task
+                                     * #151/#155): number of real
+                                     * pointer entries written into
+                                     * the boot_info[0x18]/[0x1C]
+                                     * registration list this round
+                                     * newly populates - see
+                                     * build_real_registration_list()'s
+                                     * header comment. One entry per
+                                     * successfully front-loaded
+                                     * module, each pointing at that
+                                     * module's own real, already-
+                                     * loaded ELF header - not
+                                     * fabricated data. */
+    uint32_t registration_walk_panics_bypassed; /* Round 29 continued
+                                     * (task #157): see
+                                     * is_registration_walk_panic_loop()'s
+                                     * header comment in
+                                     * iop_module_loader.c - a second,
+                                     * distinct real panic tail reached
+                                     * from within LOADCORE's real
+                                     * registration-list walk itself
+                                     * (task #155's newly-populated
+                                     * real list), not the original
+                                     * empty-list panic (task #148). */
 } iop_module_loader_stats_t;
 
 iop_module_loader_stats_t *iop_module_loader_get_stats(void);

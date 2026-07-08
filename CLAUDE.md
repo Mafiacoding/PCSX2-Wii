@@ -2343,3 +2343,52 @@ boot_info accordingly - replacing the current safe bypass with a real
 fix. Not implemented yet - this round was investigation only, no
 source changed. Nothing from the live reference instance's real memory
 is reproduced verbatim in this project.
+
+## Update (Round 29 continued, 36th finding): real registration list implemented + tested (honest result), unrelated hang fixed along the way (Tasks #151/#155/#156/#157)
+
+Implemented `build_real_registration_list()` per the 35th finding's
+reverse-engineered format: real, zero-terminated array (2 placeholder
+words + one real pointer per loaded module, pointing at that module's
+own already-loaded real ELF header) written into boot_info[0x18]/
+[0x1C]. No fabricated bytes - only real addresses of real, already-
+loaded data.
+
+While getting the mandatory regression suite to pass, found and fixed
+an UNRELATED pre-existing hang (task #156): `test_iop_rfe.c` hung
+forever, reproducing identically against the pre-session HEAD's
+`iop_module_loader.c` too (confirmed via bisection, not caused by this
+round). Root cause: `iop_core.c`'s BREAK handler (task #149) treats
+`Cause.ExcCode==8` alone as "unresolved syscall, resume at EPC+4" -
+but RFE never touches Cause, so a BREAK reached after an RFE-
+terminated syscall handler wrongly re-triggered this and resumed at a
+stale EPC+4, marching through zeroed memory forever. Fixed with a new
+`exception_pending` flag (set at exception entry, cleared by RFE),
+gating the BREAK fallback correctly. Both the original task #149
+scenario and the newly-found one now behave correctly.
+
+Real-BIOS test of the registration list itself: LOADCORE now
+genuinely walks the real 29-entry list (the ORIGINAL empty-list panic
+never fires anymore - real, measurable progress in getting real
+LOADCORE code to execute for real), but this exposed a NEW, different
+real dead end deeper in the walk (a second "write status byte, spin
+forever" idiom, different call site than the original). Without a
+bypass, modules_run_to_completion REGRESSED from 15 to 1. Added
+`is_registration_walk_panic_loop()` (task #157, same safe technique as
+the other two bypasses) - restored modules_run_to_completion to 15.
+
+HONEST NET RESULT (re-traced module-by-module, same methodology as
+the 33rd finding): the exact same 14 modules are bypassed as before -
+SIFCMD and SIFINIT specifically still hit the identical trap-stub
+dead end, completely unchanged. The real registration-list format is
+kept as a genuine, defensible improvement (real data, demonstrably
+changes LOADCORE's real code path taken - not a claim it fixes
+anything on its own), but it does NOT resolve the actual SIF handshake
+blocker. One incidental, unexplained difference: SIF_MSFLG now reads
+0x00010000 instead of 0x0 (other SIF registers unchanged at 0; EE
+still in its known steady state).
+
+Full 87-block regression suite passes (0 hangs, 0 failures); clean
+Wii rebuild verified. Task #151 remains open - next concrete target
+is tracing the new, deeper dead end (likely needs the same live-
+debugger approach that found the registration-list format in the
+first place).

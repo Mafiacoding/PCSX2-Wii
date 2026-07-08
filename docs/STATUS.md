@@ -6090,3 +6090,82 @@ open, but is now unblocked in the sense that matters most: the real
 target format is fully known. Implementing it is real, nontrivial
 work (constructing valid COFF/ELF-shaped headers this project's own
 loader can point to) and is the natural next step.
+
+## 36th finding (Round 29 continued, tasks #151/#155/#156/#157): real registration list implemented and tested - honest empirical result, plus an unrelated pre-existing hang fixed along the way
+
+Following the 35th finding's fully-reverse-engineered real
+boot_info[0x18]/[0x1C] format, implemented `build_real_registration_list()`
+in `iop_module_loader.c`: after front-loading every module, builds a
+real, zero-terminated array in IOP RAM (2 leading placeholder words +
+one bit0=0 pointer word per successfully-loaded module, each pointing
+at that module's own real, already-loaded ELF header - no fabricated
+bytes, just real addresses) and points boot_info[0x18]/[0x1C] at it.
+
+**Fixing the mandatory regression suite first uncovered an unrelated,
+pre-existing bug (task #156):** `tests/test_iop_rfe.c` hung
+indefinitely. Bisected against the pre-session HEAD (confirmed the
+hang reproduces identically with the OLD `iop_module_loader.c` too -
+not caused by this round's work). Root cause: `iop_core.c`'s BREAK
+handler (task #149's 29th change) treats any BREAK reached while
+`Cause.ExcCode==8` as an "unresolved syscall, resume at EPC+4"
+fallback - but RFE never touches Cause (by design, only Status), so a
+BREAK reached AFTER an RFE-terminated syscall handler, where Cause
+merely still happens to read a stale 8 from the earlier, already-
+handled exception, wrongly re-triggers the same fallback and resumes
+at the old, stale EPC+4 - which in `test_iop_rfe.c`'s case marched
+through zeroed/NOP-equivalent memory forever. Fixed by adding an
+`exception_pending` flag (set at every real exception-entry site, hw
+interrupt / SYSCALL / TGE; cleared by RFE) and gating the BREAK
+fallback on it, precisely capturing "has this exception actually been
+handled yet". Verified both the original task #149 scenario (BREAK
+immediately after an unhandled syscall, no RFE - `test_iop_syscall.c`)
+and the newly-found one (SYSCALL then RFE then BREAK -
+`test_iop_rfe.c`) now behave correctly. Full 87-block regression suite
+passes (0 hangs, 0 failures); clean Wii rebuild verified.
+
+**Real-BIOS empirical result for the registration list itself (task
+#151/#155):** genuinely different and more real than before - LOADCORE
+now walks the real 29-entry list this project supplies (confirmed via
+`registration_list_entries=29`), rather than being rejected
+immediately (`panic_loops_bypassed` dropped to 0 - the ORIGINAL empty-
+list panic literally never fires anymore). However, this exposed a
+NEW, distinct real dead end deeper in LOADCORE's own registration-walk
+code: a second "write a status byte, then spin forever" panic idiom
+(`sb $v0,($v1)` / `j <self>` / nop), reached from a different real
+call site than the original panic sequence (no inline `lui`/`addiu`
+setup immediately before it - just the tail 3 words). Without a
+bypass for this, `modules_run_to_completion` REGRESSED from 15 to 1 -
+i.e. the more architecturally-honest list construction was, on its
+own, practically WORSE. Added `is_registration_walk_panic_loop()`
+(task #157, same safe byte-signature-plus-external-sequencer-advance
+technique as the other two bypasses) to restore forward progress.
+
+**Net honest result with all three changes combined:**
+`modules_run_to_completion` is back to 15 (matching the pre-#155
+milestone); `registration_list_entries=29`; `panic_loops_bypassed=0`
+(down from 1); `trap_stubs_bypassed=13` (down from 14);
+`registration_walk_panics_bypassed=1` (new). Critically, per-module
+breakdown (re-traced via temporary, non-committed instrumentation,
+same as the 33rd finding's methodology) shows the exact SAME 14
+modules bypassed as before, including **SIFCMD and SIFINIT
+specifically still hitting the identical trap-stub dead end,
+unchanged** - the real registration-list format understanding did NOT
+get the actual target modules (SIFCMD/SIFINIT) any closer to
+completing. One incidental, unexplained difference was observed:
+SIF_MSFLG now reads `0x00010000` instead of `0x0` (SIF_MSCOM/SIF_SMCOM
+/SIF_SMFLG remain 0; EE remains in its known SIF-polling steady state
+even after 160M further instructions).
+
+**Conclusion for task #151:** the real boot_info[0x18]/[0x1C] format
+(34th/35th findings) is now implemented, tested, and kept (a genuine,
+defensible improvement: real data instead of an honest-zero
+placeholder, and it demonstrably changes LOADCORE's real code path
+taken). But it does NOT, on its own, resolve the actual SIF handshake
+blocker - SIFCMD/SIFINIT still dead-end at the exact same trap-stub
+point as before task #155. Task #151 remains open. The new,
+deeper real dead-end this round found (the registration-walk panic at
+a different call site) would be the next concrete target for whoever
+continues this investigation - likely requiring the same kind of live-
+debugger tracing this round used to find LOADCORE's list format in
+the first place, this time aimed at whatever validation step rejects
+the real ELF headers this project already supplies.

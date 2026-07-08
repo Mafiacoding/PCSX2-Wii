@@ -106,6 +106,8 @@
 #define BOOT_INFO_STRUCT_SIZE 0x20u /* offsets 0x00-0x1C, 8 words */
 #define BOOT_INFO_OFF_RAM_MB     0x00u
 #define BOOT_INFO_OFF_SCRATCH_PTR 0x0Cu
+#define BOOT_INFO_OFF_LIST_COUNT 0x18u /* see build_real_registration_list() */
+#define BOOT_INFO_OFF_LIST_PTR   0x1Cu /* see build_real_registration_list() */
 
 typedef struct {
     char name[10 + 1];
@@ -407,6 +409,100 @@ static void load_all_modules(iop_state_t *st)
     g.all_loaded = 1;
 }
 
+/* Round 29 continued (task #151/#155): populates boot_info[0x18]/
+ * [0x1C] with a REAL registration list, in the exact real format
+ * this round's live pcsx2-mcp reference-debugger investigation
+ * reverse-engineered from real LOADCORE init code (see docs/
+ * STATUS.md's 34th/35th findings) - replacing the previous honest
+ * "always zero" placeholder (see BOOT_INFO_STRUCT_SIZE's own comment
+ * above) with real, structurally-verified content, instead of the
+ * safe bypass this project has relied on since task #148/#152.
+ *
+ * THE REAL FORMAT (traced instruction-by-instruction on a live,
+ * real, fully-booted PCSX2 reference instance, not fabricated):
+ * LOADCORE's real init code reloads boot_info[0x1C] as a source
+ * pointer and boot_info[0x18] as a word count minus one, memcpy's
+ * (boot_info[0x18]+1) words from that pointer into a local buffer,
+ * SKIPS the first two words unconditionally (their real meaning was
+ * not determined by this round's tracing - the walk loop's own first
+ * action is to peek at word index 2 and advance past word 0/1
+ * regardless of what it finds there), then walks the remaining words
+ * one at a time: bit0=1 is a "phase tag" (tag = word>>2, no further
+ * effect this round could trace); bit0=0 is a REAL POINTER to a
+ * module image header, which real LOADCORE code validates as either
+ * a real MIPS COFF header (magic 0x162, "MIPSELMAGIC") or - the path
+ * this project's already-loaded modules actually satisfy - a
+ * standard Elf32_Ehdr: byte offset +4 (the combined EI_CLASS/EI_DATA
+ * bytes) == 0x0101 (ELFCLASS32 | ELFDATA2LSB<<8), +0x12 (e_machine)
+ * == 8 (EM_MIPS), +0x2A (e_phentsize) == 0x20 (real Elf32_Phdr size),
+ * +0x2C (e_phnum) == 2 (matches this project's own iop_elf.h's cited
+ * real Sony IOP convention of exactly 2 program headers: PT_LOAD +
+ * the vendor PT_MIPS_IOPMOD segment). The list is zero-terminated
+ * (walk continues while the current word is nonzero).
+ *
+ * WHAT THIS BUILDS: since every module iop_elf_load() front-loads
+ * (load_all_modules(), above) is a real ELF32/MIPS image copied
+ * byte-for-byte from the real BIOS into IOP RAM at elf_results[i]
+ * .load_addr - and a standard Elf32_Ehdr always starts at byte 0 of
+ * that image, per the ELF format itself - this function does NOT
+ * fabricate any header bytes. It only writes POINTERS: one real
+ * bit0=0 pointer word per successfully-loaded module, each pointing
+ * straight at that module's own already-resident, already-real
+ * Elf32_Ehdr (elf_results[i].load_addr itself, which iop_elf.h's own
+ * loader already validated has real e_machine=8/e_phnum=2 fields -
+ * see that file's citations). Preceded by two placeholder words this
+ * round could not determine the real meaning of (set to 0, matching
+ * this project's own established precedent - see
+ * BOOT_INFO_OFF_SCRATCH_PTR's comment - of using a safe, explicitly-
+ * labeled placeholder rather than a fabricated "real" value when a
+ * genuine unknown remains), and followed by one zero terminator word.
+ *
+ * HONEST SCOPE: this is a well-supported, but NOT yet empirically
+ * confirmed, hypothesis about what boot_info[0x18]/[0x1C] must
+ * contain - unlike, say, the ELF loader's own citations (iop_elf.h),
+ * this exact array shape (particularly the two skipped leading
+ * words, and whether "phase tag" entries are also expected somewhere
+ * in a real boot) was inferred from tracing ONE real LOADCORE build
+ * on ONE live reference instance running ONE game, not cross-checked
+ * against a second independent public source. Task #151's own
+ * regression/host-native testing (see docs/STATUS.md) reports
+ * whether this actually changes real-BIOS IOP behavior for the
+ * better, on the same honest, empirical footing as the front-loading
+ * refactor's own "implemented, tested, found not to fix it" result -
+ * this is not assumed to work merely because it is well-reasoned.
+ * The existing panic-loop/trap-stub bypasses (task #148/#152) are
+ * deliberately left in place regardless of outcome, as a safety net
+ * for whatever this doesn't resolve. */
+static void build_real_registration_list(iop_state_t *st)
+{
+    int n = 0;
+    for (int i = 0; i < g.modlist_count; i++) {
+        if (g.entry_points[i] != 0) n++;
+    }
+
+    uint32_t total_words = (uint32_t)n + 3u; /* 2 leading placeholder words + n pointers + 1 terminator */
+    uint32_t list_addr = bump_alloc(total_words * 4u);
+
+    uint32_t w = 0;
+    iop_mem_write32(st, list_addr + w * 4u, 0u); w++; /* leading word 0 - real meaning not determined this round */
+    iop_mem_write32(st, list_addr + w * 4u, 0u); w++; /* leading word 1 - real meaning not determined this round */
+    for (int i = 0; i < g.modlist_count; i++) {
+        if (g.entry_points[i] == 0) continue;
+        /* elf_results[i].load_addr is always 16-byte aligned
+         * (bump_alloc()'s own guarantee, above) so bit0 is
+         * naturally 0 - a real header pointer, per the format
+         * derivation above, not a phase-tag word. */
+        iop_mem_write32(st, list_addr + w * 4u, g.elf_results[i].load_addr);
+        w++;
+    }
+    iop_mem_write32(st, list_addr + w * 4u, 0u); w++; /* terminator */
+
+    iop_mem_write32(st, g.boot_info_addr + BOOT_INFO_OFF_LIST_COUNT, total_words - 1u);
+    iop_mem_write32(st, g.boot_info_addr + BOOT_INFO_OFF_LIST_PTR, list_addr);
+
+    g.stats.registration_list_entries = (uint32_t)n;
+}
+
 int iop_module_loader_boot(iop_state_t *st)
 {
     if (g.attempted) return 0;
@@ -455,6 +551,15 @@ int iop_module_loader_boot(iop_state_t *st)
      * module before running any entry point - see load_all_modules()'s
      * header comment above. */
     load_all_modules(st);
+
+    /* Round 29 continued (task #151/#155): populate boot_info[0x18]/
+     * [0x1C] with a real registration list - see
+     * build_real_registration_list()'s header comment above. Must run
+     * AFTER load_all_modules() (needs every module's real load_addr)
+     * and before the first entry point runs (LOADCORE's real init,
+     * wherever it sits in the boot list, re-reads boot_info fresh
+     * from $a0 every time it runs - see the 34th/35th findings). */
+    build_real_registration_list(st);
 
     g.modlist_index = 0;
     while (g.modlist_index < g.modlist_count && g.entry_points[g.modlist_index] == 0) g.modlist_index++;
@@ -608,6 +713,52 @@ static int is_unconditional_trap_stub(iop_state_t *st, uint32_t pc)
     return 1;
 }
 
+/* Round 29 continued (task #157): a THIRD, distinct real panic tail -
+ * see docs/STATUS.md's 36th finding for the full derivation. Reached
+ * from WITHIN LOADCORE's own real registration-list-walk code once
+ * task #151/#155's build_real_registration_list() supplies a real,
+ * non-empty boot_info[0x18]/[0x1C] list: live real-BIOS testing
+ * showed LOADCORE genuinely walks the real entries this project now
+ * provides (no immediate rejection - directionally confirms the 34th/
+ * 35th findings' format understanding), but some deeper validation
+ * this round didn't fully characterize ultimately still fails,
+ * landing in a SECOND real "write a status byte, then spin forever"
+ * idiom - structurally the same shape as is_loadcore_panic_loop()'s
+ * own target (task #148), but reached via a different real call site:
+ * here only the tail 3 words repeat (`sb $v0,($v1)` / `j <self>` /
+ * NOP delay slot) - the $v1 "panic status address" and $v0 "status
+ * code" registers are already set up by whatever earlier, real,
+ * call-site-specific code led here, unlike the original 4-word
+ * sequence's own inline `lui $v1,0x8000; addiu $v0,zero,2` setup - so
+ * is_loadcore_panic_loop() (which matches those specific 4 words)
+ * does not and should not recognize this one; this is a genuinely
+ * separate detector, not a generalization of that one.
+ *
+ * WHY THIS IS SAFE (identical reasoning to the other two bypasses):
+ * matches the exact real SB+J+NOP bytes at their literal encoded
+ * values (register operands v0/v1 fixed, since that's what's
+ * observed; the runtime VALUES those registers hold are whatever
+ * upstream real code computed and are not required to be any
+ * specific value - only the instruction encoding is matched); the
+ * store target and stored byte are never read back by anything this
+ * project's interpreter or later modules depend on (same class of
+ * argument as the original panic-loop bypass: a real, dead-end status
+ * write, not live state). */
+static int is_registration_walk_panic_loop(iop_state_t *st, uint32_t pc)
+{
+    if (iop_mem_read32(st, pc) != 0xA0620000u) return 0; /* sb $v0, 0($v1) */
+
+    uint32_t j_addr = pc + 4u;
+    uint32_t j_instr = iop_mem_read32(st, j_addr);
+    if ((j_instr >> 26) != 0x02u) return 0; /* must be a real J-type opcode */
+    uint32_t j_target = ((j_instr & 0x03FFFFFFu) << 2) | ((j_addr + 8u) & 0xF0000000u);
+    if (j_target != pc) return 0; /* must jump back to the sb instruction (self-loop) */
+
+    if (iop_mem_read32(st, j_addr + 4u) != 0x00000000u) return 0; /* delay slot nop */
+
+    return 1;
+}
+
 /* Shared by both advance paths below: moves g.modlist_index forward
  * to the next module that actually has a valid (front-loaded) entry
  * point, and if found, sets up registers/pc exactly like
@@ -657,6 +808,22 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
                  (unsigned)g.stats.modules_run_to_completion, (unsigned)g.stats.trap_stubs_bypassed);
         st->halted = 1;
         strncpy(st->halt_reason, trap_msg, sizeof(st->halt_reason) - 1);
+        st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';
+        return 1;
+    }
+
+    if (g.booted_ok && is_registration_walk_panic_loop(st, pc)) {
+        g.stats.registration_walk_panics_bypassed++;
+        if (advance_to_next_module(st)) return 1;
+
+        static char reg_panic_msg[192];
+        snprintf(reg_panic_msg, sizeof(reg_panic_msg),
+                 "module boot sequence complete (via registration-walk panic bypass): "
+                 "%u/%u real modules loaded, %u run to completion, %u registration-walk panic bypass(es) (task #151/#155/#157)",
+                 (unsigned)g.stats.modules_loaded, (unsigned)g.modlist_count,
+                 (unsigned)g.stats.modules_run_to_completion, (unsigned)g.stats.registration_walk_panics_bypassed);
+        st->halted = 1;
+        strncpy(st->halt_reason, reg_panic_msg, sizeof(st->halt_reason) - 1);
         st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';
         return 1;
     }

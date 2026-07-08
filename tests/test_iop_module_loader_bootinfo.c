@@ -204,10 +204,32 @@ int main(void)
     uint32_t off08 = iop_mem_read32(st, boot_info_addr + 0x08);
     uint32_t off10 = iop_mem_read32(st, boot_info_addr + 0x10);
     uint32_t off14 = iop_mem_read32(st, boot_info_addr + 0x14);
+    CHECK(off04 == 0 && off08 == 0 && off10 == 0 && off14 == 0,
+          "boot_info offsets 0x04/0x08/0x10/0x14 stay honestly zero (real values still unknown, not fabricated)");
+
+    /* Round 29 continued (task #151/#155): offsets 0x18/0x1C are no
+     * longer honestly-zero placeholders - see
+     * build_real_registration_list()'s header comment in
+     * iop_module_loader.c for the full derivation (docs/STATUS.md's
+     * 34th/35th findings). 0x18 is a real word count minus one;
+     * 0x1C is a real pointer to the registration-list array this
+     * loader now builds (2 leading placeholder words, one pointer
+     * per successfully-loaded module, one zero terminator). This
+     * synthetic single-module test only loads one module (SYSMEM),
+     * so the array is exactly 2+1+1 = 4 words: count-1 = 3. */
     uint32_t off18 = iop_mem_read32(st, boot_info_addr + 0x18);
     uint32_t off1c = iop_mem_read32(st, boot_info_addr + 0x1C);
-    CHECK(off04 == 0 && off08 == 0 && off10 == 0 && off14 == 0 && off18 == 0 && off1c == 0,
-          "boot_info offsets 0x04/0x08/0x10/0x14/0x18/0x1C stay honestly zero (real values still unknown, not fabricated)");
+    CHECK(off18 == 3, "boot_info[0x18] == 3 (real word count minus one: 2 placeholder + 1 pointer + 1 terminator, THE FIX task #151/#155)");
+    CHECK(off1c != 0, "boot_info[0x1C] is a real, non-zero pointer to the registration-list array");
+    if (off1c != 0) {
+        uint32_t w0 = iop_mem_read32(st, off1c + 0);
+        uint32_t w1 = iop_mem_read32(st, off1c + 4);
+        uint32_t w2 = iop_mem_read32(st, off1c + 8);  /* the one real module pointer entry */
+        uint32_t w3 = iop_mem_read32(st, off1c + 12); /* terminator */
+        CHECK(w0 == 0 && w1 == 0, "the two leading placeholder words are honestly zero (real meaning not determined this round)");
+        CHECK(w2 != 0 && (w2 & 1u) == 0, "the one real entry is a non-zero, bit0=0 (real header pointer, not a phase-tag) word");
+        CHECK(w3 == 0, "the array is zero-terminated");
+    }
 
     uint32_t scratch_ptr = iop_mem_read32(st, boot_info_addr + BOOT_INFO_OFF_SCRATCH_PTR);
     CHECK(scratch_ptr != 0, "boot_info[0x0C] (the field the real BIOS's SYSMEM init code dereferences and writes through) is non-zero - THE FIX");

@@ -2033,3 +2033,62 @@ natural, honest end-of-list halt instead of spinning forever.
 gcc -I../include -I../source -o test_iop_trap_stub_bypass tests/test_iop_trap_stub_bypass.c ../source/core/iop/iop_core.c ../source/hw/iop_elf.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_cdvd.c ../source/hw/iop_spu2.c
 ./test_iop_trap_stub_bypass
 ```
+
+`test_iop_module_loader_bootinfo.c` was updated for task #151/#155:
+boot_info[0x18]/[0x1C] are no longer honest-zero placeholders - see
+`build_real_registration_list()`'s header comment in
+`iop_module_loader.c` and docs/STATUS.md's 35th finding. The test now
+checks the real word-count-minus-one/pointer-array format this round
+reverse-engineered from a live PCSX2 reference debugger, instead of
+asserting these offsets stay zero.
+
+`test_iop_registration_walk_panic_bypass.c` covers task #157:
+`is_registration_walk_panic_loop()`, a THIRD distinct real panic-tail
+detector (see docs/STATUS.md's 36th finding). Once task #155's real
+registration list is in place, live real-BIOS testing showed LOADCORE
+genuinely walks the real entries (no immediate rejection - directional
+confirmation of the 34th/35th findings' format understanding) but
+still lands in a second, different "write a status byte, then spin
+forever" idiom reached from a different real call site than the
+original panic loop (task #148) - only the tail 3 words repeat here
+(`sb $v0,($v1)` / `j <self>` / nop), without the original's own inline
+`lui $v1,0x8000`/`addiu $v0,zero,2` setup, so the two detectors are
+correctly non-overlapping (verified by an explicit check that
+`is_loadcore_panic_loop()` does NOT fire on this new tail). 10 checks:
+recognition of the real signature; three negative controls (wrong SB
+base register; jump to a different address; non-nop delay slot); the
+distinctness check against the original detector; and confirmation
+that `iop_module_loader_try_handle()` advances to the next module
+without halting.
+
+Real-BIOS result (see docs/STATUS.md's 36th finding): net effect on
+the actual task #151 goal is neutral, honestly - SIFCMD and SIFINIT
+still hit the exact same (now differently-named) dead end as before;
+modules_run_to_completion is back to 15 (matching the pre-task-155
+milestone, since without this bypass it had regressed to 1). One
+incidental, unexplained difference was observed: SIF_MSFLG now reads
+0x00010000 instead of 0x0, though SIF_MSCOM/SIF_SMCOM/SIF_SMFLG remain
+0 and the EE remains in its known SIF-polling steady state.
+
+```sh
+gcc -I../include -I../source -o test_iop_registration_walk_panic_bypass tests/test_iop_registration_walk_panic_bypass.c ../source/core/iop/iop_core.c ../source/hw/iop_elf.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_cdvd.c ../source/hw/iop_spu2.c
+./test_iop_registration_walk_panic_bypass
+```
+
+`test_iop_rfe.c` was updated for task #156: `iop_core.c`'s BREAK
+"unimplemented syscall fallback" heuristic (task #149, the 29th
+change) now also requires `st->exception_pending` (see `iop_core.h`'s
+field comment) to be set, not just `Cause.ExcCode==8` alone - fixing a
+real, reproducible infinite loop this project's own regression testing
+found: any BREAK reached after an RFE-terminated syscall handler,
+where Cause still happened to read 8 from the OLD, already-handled
+exception (RFE never touches Cause - only Status), previously
+mis-fired this fallback and resumed at the stale old EPC+4 instead of
+halting. `exception_pending` is set at every real exception-entry
+site (hardware interrupt, SYSCALL, TGE) and cleared by RFE, precisely
+capturing "has this Cause value been acknowledged yet". `test_iop_rfe`
+now additionally verifies the SYSCALL-then-RFE-then-BREAK sequence
+halts cleanly on BREAK instead of hanging; `test_iop_syscall.c` (the
+task #149 scenario: BREAK immediately after an UNHANDLED syscall, no
+intervening RFE) continues to verify the fallback still correctly
+fires in that case.

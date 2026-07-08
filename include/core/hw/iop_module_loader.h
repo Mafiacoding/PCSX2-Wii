@@ -113,6 +113,10 @@ typedef struct {
                                      * see iop_module_loader.c's
                                      * is_loadcore_panic_loop() header
                                      * comment (task #124/#132/#148) */
+    uint32_t trap_stubs_bypassed;   /* Round 29 continued, 32nd change -
+                                     * see iop_module_loader.c's
+                                     * is_unconditional_trap_stub()
+                                     * header comment (task #151/#152) */
 } iop_module_loader_stats_t;
 
 iop_module_loader_stats_t *iop_module_loader_get_stats(void);

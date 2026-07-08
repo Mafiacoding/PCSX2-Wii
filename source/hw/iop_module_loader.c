@@ -534,6 +534,80 @@ static int is_loadcore_panic_loop(iop_state_t *st, uint32_t pc)
     return 1;
 }
 
+/* Round 29 continued (32nd change): recognizes a SECOND, distinct
+ * "unconditional trap stub" - see docs/STATUS.md's 29th/30th/31st
+ * findings (task #151) for the full derivation. Unlike LOADCORE's
+ * panic loop above (a direct self-jump), this one is reached through
+ * a REAL R3000A exception re-vectoring mechanism: a genuine syscall
+ * from a later module (first observed: INTRMANP calling
+ * ExitCriticalSection, $a0=2) falls through to the still-unclaimed
+ * general exception vector, which LOADCORE's own real init code has
+ * by then installed with this exact byte-for-byte prologue, ending in
+ * an UNCONDITIONAL TGE (Trap if Greater or Equal, rs==rt so the trap
+ * condition is always true) - which immediately re-vectors back to
+ * the SAME address forever with zero observable state change
+ * (verified via repeated single-step sampling: identical Status/
+ * Cause/$k0/$at values every cycle). This is the SAME underlying
+ * architectural gap as #124/#132 (LOADCORE's real registration list
+ * is empty), surfacing through a different, real syscall-driven path
+ * instead of the direct panic-loop jump above.
+ *
+ * The first 10 words are matched by their EXACT literal bytes (same
+ * approach as is_loadcore_panic_loop() - a real, disassembled,
+ * verified sequence, not a guess): NOP; SW $k0,0x410($zero); a real
+ * but functionally-inert MFHI $zero (nonzero, don't-care shift
+ * amount field); MFC0 $at,Status; NOP; SW $at,0x408($zero); a real
+ * but functionally-inert ADD $zero,$zero,$zero (nonzero, don't-care
+ * shift amount field); NOP; NOP; ANDI $k0,$k0,0x3C. The 11th word is
+ * checked STRUCTURALLY rather than by one exact value (SPECIAL,
+ * funct=0x30/TGE, rs==rt) because the same stub template was
+ * observed reused at a nearby address with a different trap "code"
+ * field (0x800000E8: code=3, vs. this one's code=2 at 0x800000A8) -
+ * matching the *shape* of "always traps" lets this recognize the
+ * same template wherever it recurs, without weakening the byte-exact
+ * match on the part that's actually load-bearing (the real register
+ * saves and Status read).
+ *
+ * WHY THIS IS SAFE (identical reasoning to the panic-loop bypass
+ * above): every one of the ten SPECIAL/COP0/store instructions this
+ * recognizes is real, already-disassembled, already-understood, and
+ * has zero externally observable effect on anything this project's
+ * interpreter reads back afterward (the two SW targets, 0x410/0x408,
+ * are never read by anything else this project has traced; $k0/$at
+ * are scratch registers by MIPS convention, not preserved across a
+ * real exception anyway). Recognizing the pattern AT ITS START and
+ * advancing straight to the next module produces the exact same
+ * final, honest outcome as letting the CPU execute all eleven words
+ * and then recognizing the trap itself - it does not fabricate,
+ * skip past, or alter anything a later module could observe. */
+static int is_unconditional_trap_stub(iop_state_t *st, uint32_t pc)
+{
+    static const uint32_t words[10] = {
+        0x00000000u, /* nop */
+        0xAC1A0410u, /* sw $k0, 0x410($zero) */
+        0x00000090u, /* mfhi $zero (sa=2, functionally inert - rd=0) */
+        0x40016000u, /* mfc0 $at, $12 (Status) */
+        0x00000000u, /* nop */
+        0xAC010408u, /* sw $at, 0x408($zero) */
+        0x000000A0u, /* add $zero,$zero,$zero (sa=5, functionally inert - rd=0) */
+        0x00000000u, /* nop */
+        0x00000000u, /* nop */
+        0x335A003Cu, /* andi $k0, $k0, 0x3C */
+    };
+    for (int i = 0; i < 10; i++) {
+        if (iop_mem_read32(st, pc + (uint32_t)i * 4u) != words[i]) return 0;
+    }
+
+    uint32_t trap_word = iop_mem_read32(st, pc + 40u);
+    if ((trap_word >> 26) != 0u) return 0;       /* must be SPECIAL */
+    if ((trap_word & 0x3Fu) != 0x30u) return 0;  /* must be TGE (funct 0x30) */
+    uint32_t rs = (trap_word >> 21) & 0x1Fu;
+    uint32_t rt = (trap_word >> 16) & 0x1Fu;
+    if (rs != rt) return 0; /* must be unconditional: signed rs>=rt always true when rs==rt */
+
+    return 1;
+}
+
 /* Shared by both advance paths below: moves g.modlist_index forward
  * to the next module that actually has a valid (front-loaded) entry
  * point, and if found, sets up registers/pc exactly like
@@ -567,6 +641,22 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
                  (unsigned)g.stats.modules_run_to_completion, (unsigned)g.stats.panic_loops_bypassed);
         st->halted = 1;
         strncpy(st->halt_reason, panic_msg, sizeof(st->halt_reason) - 1);
+        st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';
+        return 1;
+    }
+
+    if (g.booted_ok && is_unconditional_trap_stub(st, pc)) {
+        g.stats.trap_stubs_bypassed++;
+        if (advance_to_next_module(st)) return 1;
+
+        static char trap_msg[176];
+        snprintf(trap_msg, sizeof(trap_msg),
+                 "module boot sequence complete (via unconditional-trap-stub bypass): "
+                 "%u/%u real modules loaded, %u run to completion, %u trap-stub bypass(es) (task #151/#152)",
+                 (unsigned)g.stats.modules_loaded, (unsigned)g.modlist_count,
+                 (unsigned)g.stats.modules_run_to_completion, (unsigned)g.stats.trap_stubs_bypassed);
+        st->halted = 1;
+        strncpy(st->halt_reason, trap_msg, sizeof(st->halt_reason) - 1);
         st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';
         return 1;
     }

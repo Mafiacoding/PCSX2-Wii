@@ -1314,6 +1314,30 @@ already documented, rather than truly returning from the syscall.
    limitation, not a hardware constraint); full 85-block regression
    suite passes; clean Wii rebuild verified. Task #151 remains open -
    see STATUS.md's 31st finding for the complete investigation.
+   UPDATE (Round 29 continued, 32nd change): implemented a second,
+   structurally-similar safe bypass -
+   `is_unconditional_trap_stub()` in `iop_module_loader.c` - for a
+   NEW recursive dead end reached via a real syscall (INTRMANP's
+   ExitCriticalSection) re-entering LOADCORE's real-installed
+   exception-vector prologue, which ends in an unconditional TGE.
+   Matches the exact real ten-instruction prologue by literal bytes
+   (same approach as the LOADCORE panic-loop bypass) plus a
+   STRUCTURAL check on the trap itself (SPECIAL/funct=0x30/rs==rt,
+   not one hardcoded trap code - the same stub recurs nearby with a
+   different code field). When recognized, advances to the next
+   module exactly like the panic-loop bypass. MEASURED REAL RESULT
+   (combined with the 31st change's front-loading): the boot sequence
+   now loads and links **29/29** real IOPBTCONF modules (up from 4
+   ever attempted), resolves 355/355 imports, runs 15 modules' entry
+   points to full completion, safely bypasses 14 dead-end recursions,
+   and reaches a clean, honest end-of-list halt instead of spinning
+   forever. New test `tests/test_iop_trap_stub_bypass.c` (10 checks,
+   including 3 negative controls). Full 86-block regression suite
+   passes; clean Wii rebuild verified. See STATUS.md's 32nd finding
+   for full detail, including the honest scope caveat that "15 run to
+   completion" doesn't guarantee those modules did everything real
+   hardware would - only that they executed for real until returning
+   normally or hitting a recognized, safely-bypassed dead end.
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the
    register-block entry in section 7 above. Register-level scaffold

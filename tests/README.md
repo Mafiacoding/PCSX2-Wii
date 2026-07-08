@@ -1991,3 +1991,45 @@ syscall actually expects.
 gcc -I../include -I../source -o test_iop_tge tests/test_iop_tge.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
 ./test_iop_tge
 ```
+
+`test_iop_trap_stub_bypass.c` covers Round 29 continued's 32nd change
+- `is_unconditional_trap_stub()` in `iop_module_loader.c` (task
+#151/#152, see docs/STATUS.md's 29th/30th/31st findings). Real
+syscalls from later-loaded modules (first observed: INTRMANP calling
+ExitCriticalSection) fall through to the still-unclaimed general
+exception vector, which LOADCORE's own real init installs with a
+ten-instruction real prologue ending in an unconditional TGE (Trap if
+Greater or Equal, rs==rt so it always traps) - the same underlying
+architectural gap as the LOADCORE panic loop (task #124/#132/#148),
+just reached through a real syscall path instead of a direct
+self-jump, and previously causing an infinite, non-halting recursion
+(confirmed via repeated single-step sampling showing zero state
+change cycle after cycle). This project cannot safely fabricate a
+real registration entry to fix the underlying gap (same reasoning as
+the panic-loop bypass), so instead it recognizes the exact
+byte-for-byte prologue plus the STRUCTURAL shape of "always traps"
+(not one hardcoded trap "code" value - the same stub template was
+observed reused nearby with a different code field) and treats
+reaching it exactly like the panic-loop bypass: advances to the next
+module in the boot list. 10 checks: the exact signature is recognized
+(using a deliberately different register/code choice than the real
+BIOS's own encoding, proving the match is structural); three negative
+controls (a near-miss in the prologue's base register; a CONDITIONAL
+trap, rs != rt; a different SPECIAL funct, TEQ, at the same position)
+are all correctly rejected; and the actual interpreter-facing entry
+point (`iop_module_loader_try_handle()`) advances to the next module
+without halting when the signature is reached.
+
+Real-BIOS result (see docs/STATUS.md's 32nd finding): this bypass,
+combined with the 31st change's front-loading refactor, took the real
+SCPH-10000 boot from getting permanently stuck after ~3 modules to
+successfully loading all 29/29 real IOPBTCONF modules, resolving
+355/355 imports, running 15 of them to full completion, and safely
+bypassing 14 dead-end recursions (1 via the original panic-loop
+bypass, 13 via this new one) - the boot sequence now reaches its own
+natural, honest end-of-list halt instead of spinning forever.
+
+```sh
+gcc -I../include -I../source -o test_iop_trap_stub_bypass tests/test_iop_trap_stub_bypass.c ../source/core/iop/iop_core.c ../source/hw/iop_elf.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_cdvd.c ../source/hw/iop_spu2.c
+./test_iop_trap_stub_bypass
+```

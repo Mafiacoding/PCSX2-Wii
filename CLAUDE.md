@@ -2464,3 +2464,31 @@ bit0 pointer/tag distinction) but is not by itself the root fix.
 Next step for whoever continues: single-step trace exactly what real
 condition (not slot content) triggers the `is_registration_walk_panic_loop()`
 byte pattern every time. See STATUS.md's 38th finding for full detail.
+
+## Update (Round 29 continued, 39th finding): registration-walk panic is a bounded 4-try retry loop, not the jalr double-dispatch (Task #151/#159/#162)
+
+Live pcsx2-mcp tracing (real game boot via DebugServer) plus a
+temporary, reverted trace in our own host-native diagnostic
+conclusively confirmed: our emulator's `is_registration_walk_panic_loop()`
+bypass fires on the exact SAME real dead-end LOADCORE code found live
+(`lui v1,0x8000; li v0,2; sb v0,(v1); j <self>`, byte-identical, just
+relocated to a different address - `0x001012A0` in our boot vs a low
+fixed address in the live reference game). This is reached via a
+bounded RETRY LOOP (not previously documented): ~50 instructions
+before the trap scan backward through an 8-byte-stride list looking
+for an entry whose low 2 bits match a tag register `s3`, bounded below
+by `s2`, retrying up to 4 times (counter at `fp+0x58`) before falling
+through to the fatal trap. This 8-byte stride is DIFFERENT from the
+4-byte-per-word registration list this project already builds
+(task #155) - almost certainly a separate real structure (per-thread,
+per-semaphore, or similar) that this project's kernel-init code either
+never populates, populates with the wrong tag, or populates too late
+relative to when LOADCORE's boot-time code searches for it.
+
+Task #158's jalr-dispatch fix (37th/38th findings) is independently
+reconfirmed unrelated to this specific dead end via this new trace -
+kept, but not the answer. Next step (tasks #159/#163): trace backward
+from the retry loop's entry to find what sets up `s0`/`s2`/`s3`, and
+determine what structure it's really scanning and why our boot process
+never populates a match. No source changed - pure investigation, see
+docs/STATUS.md's 39th finding for full detail.

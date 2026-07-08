@@ -6339,3 +6339,92 @@ instruction-level tracing, to see what real condition (not slot
 content) actually triggers the panic path every time. This was not
 attempted this session due to time constraints (session limit
 approaching) - left as the clearly-scoped next step.
+
+## Round 29 continued (39th finding, task #151/#159/#162): the registration-walk panic is a bounded RETRY LOOP giving up after 4 attempts, not the jalr double-dispatch mechanism
+
+Live pcsx2-mcp reference-debugger session (a real game boot, connected via
+DebugServer) confirmed something the 37th/38th findings did not fully
+pin down: the byte-for-byte real dead-end code `is_registration_walk_panic_loop()`
+recognizes (`lui v1,0x8000; li v0,2; sb v0,(v1); j <self>; nop`) is
+reached in LOADCORE's own real code via an **allocator-failure path**:
+a call through an import-table stub (observed live at address `0x3234`,
+itself a `j`+delay-slot trampoline into kernel code at `0xB1C`) that
+returns 0 when either (a) a kernel-readiness flag at absolute IOP
+address `0x14B4` is still zero, or (b) an argument-based size-class
+check fails. This call is made with an apparent allocation size of
+`0x30` (48 bytes - the real `ModuleInfo_t` struct size), immediately
+preceded by address arithmetic matching real ps2sdk's own documented
+`ModuleInfo_t` chain layout.
+
+**Directly verified this is the SAME mechanism in our own emulator,
+not a coincidentally-matching generic trap:** added temporary trace
+instrumentation (backed up via `.bak`, reverted and diff-verified
+afterward) to print the exact PC where `is_registration_walk_panic_loop()`
+fires during a real-BIOS host-native diagnostic run. It fires at
+`0x001012A0`, inside LOADCORE itself (`modlist_index=1`,
+`entry=0x00100CD0` - i.e. LOADCORE's own module, loaded at a
+different, higher RAM address in our project's boot than in the live
+reference game, since real IOP modules are position-independent and
+relocated to wherever the loader places them). Dumped the raw words
+at and before this address and found them **byte-identical** to the
+live-traced pattern: `lui v1,0x8000; li v0,2; sb v0,(v1); j <self>;
+nop` at `0x101298-0x1012A8` - conclusively the same real dead-end
+code, just relocated.
+
+**New detail the live single-glance trace hadn't shown: the ~50
+instructions immediately preceding the trap are a bounded RETRY LOOP**,
+not a one-shot allocator call:
+- Scans backward through some list, 8 bytes per step (`addiu s0,s0,-8`
+  each iteration - a DIFFERENT stride than the 4-byte-per-word
+  registration list this project's `build_real_registration_list()`
+  builds).
+- Each iteration: `lw v0,(s0)`, `andi v0,v0,3`, `beq v0,s3,+3` (branch
+  out of the retry loop on a match - `s3` holds some 2-bit tag value
+  established earlier, not yet traced back to its origin).
+- Also bounds-checks `sltu v0,s2,s0` (loop terminates early if `s0`
+  drops below some lower bound `s2`) and does `sw zero,(s0)` on the
+  no-match path (clearing something at the current scan position
+  before advancing) - real side effects not yet fully understood.
+- A retry counter at `fp+0x58` increments each full pass; only after
+  **4 failed attempts** (`slti v0,v0,4` false) does execution fall
+  through into the fatal trap.
+
+**Why this matters for task #151:** this is structurally a genuine
+"retry loop that gives up and panics" - conceptually the same shape
+as task #151's original description ("the non-halting IOP retry loop"),
+now pinned down to a specific, disassembled, real code location inside
+LOADCORE, with an exact failure condition (four failed backward scans
+through an 8-byte-stride list for a tag-matching entry) rather than a
+vague "SIF handshake blocker." The natural next hypothesis: this
+8-byte-stride list is a DIFFERENT real structure than the boot_info
+registration list this project already builds (task #155) - possibly
+a real per-thread, per-semaphore, or per-handler table LOADCORE
+expects to already contain a specific tagged entry by this point in
+boot, which this project's kernel-init code has not yet populated (or
+has populated with the wrong tag value in the low 2 bits, or at the
+wrong stride/base). Task #158's jalr-dispatch fix, while real and
+kept, is confirmed (again, independently, via this new trace) to be
+unrelated to this particular dead end - the retry loop's search
+target has nothing to do with which registration-list slots are
+pointers vs tags.
+
+**Not yet determined this round (next concrete steps for whoever
+continues, already reflected in tasks #159/#163):**
+- What real structure `s0`'s base address points into at loop entry
+  (need to trace backward from the loop's first iteration to see
+  what sets up `s0`, `s2` (lower bound), and `s3` (target tag) before
+  the loop starts).
+- Why our project's boot process never populates a matching entry
+  within the scanned range within 4 tries - is the structure entirely
+  unpopulated (this project's kernel/thread/semaphore init doesn't
+  write to it at all), populated with a wrong tag, or is the retry
+  count itself timing-dependent on something (e.g. a real interrupt
+  or scheduler tick) our project's boot sequencer doesn't yet deliver
+  before LOADCORE reaches this point?
+
+No source code was changed for this finding - pure investigation,
+combining live-debugger tracing (real game boot, DebugServer) with a
+temporary, reverted trace in our own host-native diagnostic to
+directly confirm both sides hit the identical real code. Verified via
+`diff` that the temporary instrumentation left `iop_module_loader.c`
+byte-identical to its pre-trace state afterward.

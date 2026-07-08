@@ -1444,6 +1444,17 @@ already documented, rather than truly returning from the syscall.
    finding for the full verification chain and the next concrete step
    (trace exactly what real condition triggers the panic pattern, not
    slot content).
+   UPDATE (Round 29 continued, 39th finding, task #151/#159/#162): live
+   real-game tracing plus a temporary reverted trace in our own
+   emulator conclusively confirmed the registration-walk panic bypass
+   fires on the exact same real LOADCORE dead-end code found live
+   (byte-identical trap, just relocated). New detail: it's reached via
+   a bounded 4-try RETRY LOOP scanning backward through an 8-byte-
+   stride list (different from the 4-byte registration list this
+   project builds) for a tag-matching entry, giving up after 4 failed
+   attempts. Task #158's jalr-dispatch fix reconfirmed unrelated to
+   this dead end. Next: trace what real structure is being scanned and
+   why our boot never populates a match. See STATUS.md's 39th finding.
    next concrete target (the new, deeper dead end this round found).
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the

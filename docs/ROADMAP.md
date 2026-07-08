@@ -1338,6 +1338,19 @@ already documented, rather than truly returning from the syscall.
    completion" doesn't guarantee those modules did everything real
    hardware would - only that they executed for real until returning
    normally or hitting a recognized, safely-bypassed dead end.
+   UPDATE (Round 29 continued, 33rd finding, task #153): identified
+   which modules completed vs. bypassed - SIFMAN completed, but
+   SIFCMD and SIFINIT (the higher-level SIF command/init layer the EE
+   handshake actually depends on) both hit the same trap-stub dead
+   end. Confirmed SIF registers (MSCOM/SMCOM/MSFLG/SMFLG) stay 0x0
+   after the full boot sequence halts, and the EE remains stably
+   parked in its known SIF-polling steady state even after 160M
+   further EE instructions - a genuine stable end state, not
+   undercounted patience. This is the same #124/#132 architectural
+   gap, now attributed precisely to SIFCMD/SIFINIT as the two most
+   productive next targets for the still-blocked entry-struct
+   reverse-engineering work. See STATUS.md's 33rd finding for the
+   full module-by-module breakdown.
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the
    register-block entry in section 7 above. Register-level scaffold

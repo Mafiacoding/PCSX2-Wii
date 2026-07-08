@@ -5875,3 +5875,60 @@ remains open (that would require the still-blocked reverse-engineering
 described in the 31st finding) - what this round achieves instead is
 a safe, honest way to make forward progress THROUGH it, matching the
 project's established precedent.
+
+## 33rd finding (Round 29 continued): which modules completed vs. bypassed, and confirmation the EE-side SIF wait remains blocked (task #153)
+
+Follow-up investigation after the 32nd change's headline numbers
+(29/29 loaded, 15 run to completion, 14 bypassed) - identifying WHICH
+modules fall into each category, using a temporary, non-committed
+trace instrumentation (reverted immediately after use, no permanent
+code change from this finding).
+
+**Completed normally (15)**: SYSMEM, EXCEPMAN, INTRMANP, INTRMANI,
+TIMEMANP, TIMEMANI, SYSCLIB, HEAPLIB, EECONF, ROMDRV, STDIO, SIFMAN,
+IGREETING, SECRMAN, EESYNC.
+
+**Bypassed via the panic-loop or trap-stub mechanisms (14)**:
+LOADCORE (panic-loop, task #148 - expected, already understood),
+SSBUSC, DMACMAN, THREADMAN, VBLANK, IOMAN, MODLOAD, SIFCMD, REBOOT,
+LOADFILE, CDVDMAN, CDVDFSV, SIFINIT, FILEIO (all 13 via the 32nd
+change's trap-stub bypass).
+
+**Significant for the SIF handshake specifically**: `SIFMAN` (the
+low-level SIF register/mailbox scaffold) completed normally, but both
+`SIFCMD` (the higher-level SIF command/RPC layer) and `SIFINIT`
+(explicit SIF initialization) hit the SAME unconditional-trap dead
+end and were bypassed - meaning their real init code never got the
+chance to actually set up the SIF command dispatch or announce
+readiness. Confirmed via direct register readback after the full
+29-module boot sequence completes and halts: `SIF_MSCOM`, `SIF_SMCOM`,
+`SIF_MSFLG`, and `SIF_SMFLG` (0xB000F200/F210/F220/F230) are all still
+`0x00000000` - never written by anything.
+
+**EE-side confirmation**: with the IOP halted (boot sequence
+complete, nothing left to run), the EE was stepped an additional 160
+million instructions (20M more slices at the existing 8:1 EE:IOP
+scheduler ratio) with no change: `pc` stays within the same known
+steady-state polling range (`0x80005E58`-`0x80006278`, per round
+14/15's original finding) it was already in. This is a genuinely
+stable end state, not a transient one this project simply didn't wait
+long enough for - the EE is correctly, faithfully waiting (per round
+15's disassembly) for SIF flags the IOP will now never set, since the
+IOP itself has nothing left to execute.
+
+**Conclusion**: the EE/IOP SIF handshake - and by extension, whatever
+real BIOS code path would eventually draw the boot logo - is blocked
+by the exact same root cause as #124/#132/#148/#151: LOADCORE's real
+module/library registration list is empty because this project's
+loader (even after the 31st change's front-loading) cannot safely
+populate it with a real, correctly-formatted entry, and SIFCMD/SIFINIT
+are two more real modules (in addition to LOADCORE's own init) that
+depend on registering with it to do their real job. This is not a new,
+separate bug - it is the same architectural gap surfacing for the
+Nth time, now precisely attributed to the two specific modules that
+matter for the SIF handshake. No further code change was made this
+round; this finding sets up whoever picks up the entry-struct reverse-
+engineering work (still blocked - see the 31st finding) with a
+concrete, prioritized target: SIFCMD and SIFINIT's own real init code
+would be the two most productive candidates to trace next, since they
+are what the EE is actually waiting on.

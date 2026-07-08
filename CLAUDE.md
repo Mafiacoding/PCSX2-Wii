@@ -2248,3 +2248,30 @@ claim they did everything real hardware would. Task #151 in the
 narrow "root-cause with a real registration entry" sense remains
 open; this round instead found a safe way to make real progress
 through it.
+
+## Update (Round 29 continued, 33rd finding): module-by-module breakdown, EE-side SIF wait confirmed stably blocked (Task #153)
+
+Traced (via temporary, non-committed instrumentation) exactly which
+of the 29 loaded modules completed normally vs. got bypassed:
+
+Completed (15): SYSMEM, EXCEPMAN, INTRMANP, INTRMANI, TIMEMANP,
+TIMEMANI, SYSCLIB, HEAPLIB, EECONF, ROMDRV, STDIO, SIFMAN, IGREETING,
+SECRMAN, EESYNC.
+
+Bypassed (14): LOADCORE (panic-loop), SSBUSC, DMACMAN, THREADMAN,
+VBLANK, IOMAN, MODLOAD, SIFCMD, REBOOT, LOADFILE, CDVDMAN, CDVDFSV,
+SIFINIT, FILEIO (trap-stub).
+
+Key finding: SIFMAN completed, but SIFCMD and SIFINIT - the modules
+that actually matter for the EE/IOP SIF handshake - both hit the
+trap-stub dead end. Confirmed SIF_MSCOM/SIF_SMCOM/SIF_MSFLG/SIF_SMFLG
+all stay 0x0 after the IOP halts, and the EE stays parked in its known
+polling loop even after 160M further instructions - a genuine stable
+end state, not a matter of more patience.
+
+Conclusion: this is the same #124/#132 registration-list gap,
+resurfacing for the two specific modules (SIFCMD, SIFINIT) that the
+EE handshake depends on. No new code change this round - this sets a
+concrete, prioritized target (SIFCMD/SIFINIT's real init code) for
+whoever picks up the still-blocked entry-struct reverse-engineering
+work described in the 31st finding.

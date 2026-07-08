@@ -4590,3 +4590,116 @@ No code changes this round. Task #124/#132 remains open, now traced
 three levels deep (empty-list check -> empty-parameter check ->
 SYSMEM's own under-populated boot_info struct) from where the 5th
 finding left off.
+
+## Round 29 continued (10th finding: pcsx2-mcp live reference instance investigated, inconclusive)
+
+A new tool suite (`pcsx2-mcp`) became available mid-session, connected
+to a live, paused, real PCSX2 instance via DebugServer. Given the 9th
+finding's open question (real values for SYSMEM's boot_info struct at
+`RAM[0x100010]` offsets 0x04-0x18), this live instance was investigated
+as a possible source of ground truth, per the user's explicit
+authorization to use it "im Notfall" (in an emergency).
+
+**What was checked**: `pcsx2_status()` confirmed a real, paused
+instance (EE pc=0x0061bbe0, cycle 3424132242). `pcsx2_get_modules()`
+listed 29 real IOP modules including `System_Memory_Manager` (SYSMEM,
+v257), confirming this instance had booted far past this project's own
+wall (all the way through pad/memory-card/SIO2 init). However,
+`pcsx2_read_memory(0x00100000, 64 bytes)` read back all zeros, and
+`pcsx2_disassemble(0x00100000, cpu=iop)` likewise showed nothing but
+`nop`s at the exact address this project's own diagnostics place
+SYSMEM's boot_info struct. `pcsx2_get_backtrace()` on the EE side
+showed a call stack entirely within EE addresses 0x0055xxxx-0x0061xxxx
+- ordinary userland/game-side code, not BIOS. `pcsx2_game_info()`
+failed ("Pine not connected"), so this live instance's specific
+game/BIOS identity is unknown.
+
+**Conclusion (honest, not fabricated)**: this live instance is
+conclusively unhelpful for recovering the 9th finding's transient
+boot-time struct. By EE pc=0x0061bbe0 the system has already finished
+IOP kernel boot and moved deep into userland/game code - any transient
+SYSMEM boot_info struct that existed at `RAM[0x100010]` during boot has
+long since been overwritten/reused by later IOP RAM allocations (the
+all-zero readback is consistent with reclaimed memory, not with an
+unpopulated struct). Chasing this further would require resetting the
+live instance and single-stepping to a breakpoint at SYSMEM's own real
+entry point - a much larger undertaking with its own unknowns (this
+project's own SYSMEM load address of 0x100000 is not guaranteed to
+match whatever game/BIOS this live instance is actually running,
+especially since Pine/game_info isn't available to identify it).
+
+**A second, more promising angle surfaced while investigating this**:
+re-reading `source/hw/iop_module_loader.c`'s existing
+`BOOT_INFO_RAM_MB` code shows `boot_info_addr` is allocated via
+`bump_alloc(4)` - i.e. this project's own HLE module-loader shortcut
+only ever allocates/writes the FIRST word of this struct. Offsets
+0x04-0x18 read zero simply because this project's loader never
+allocates or touches them at all, not because of some separate, only
+partially-implemented mechanism. This narrows (without yet answering)
+the 9th finding's question: it's not that a real mechanism is
+"missing a few bytes" - it's that this project's own module-loader is
+itself an HLE shortcut standing in for a real IOP kernel/EXECROM init
+phase that would normally construct this struct from real boot
+configuration (RAM size, region, EE-supplied config passed over SIF,
+etc.) before ever reaching SYSMEM. The honest next step, if this
+thread is picked up again, is disassembling what precedes this
+project's own HLE shortcut point in the real BIOS dump to find what
+(if anything) writes to this struct in the real boot sequence, rather
+than guessing plausible values or continuing to search external
+documentation (already exhausted: psx-spx, ps2tek, PCSX2 upstream
+source, an independent PS2-boot-process write-up, and now a live
+reference PCSX2 instance).
+
+**Decision**: task #124/#132 (the IOP exception-chain/boot_info wall)
+is formally deprioritized again after this tenth attempt - every
+readily-available real reference source has now been exhausted without
+a citable answer. Continuing to guess would cross into fabrication.
+Session effort moves to independent, well-scoped roadmap work instead
+(see the 11th change below), consistent with the user's standing
+instruction to keep making real, checkpointed progress rather than
+spin on one blocked thread.
+
+## Round 29 continued (11th change: EE COP2 VADD/VMUL/VIADDI)
+
+Extended round 13's VU0 macro-mode vector datapath
+(`source/core/ee/ee_core.c`'s COP2 CO-format dispatch) with three more
+real, cited opcodes, closing gaps this project's own comments had
+already flagged:
+
+- **VADD** (funct 0x28) and **VMUL** (funct 0x2A): the same 3-operand
+  full-vector arithmetic shape already implemented for VSUB (funct
+  0x2C) - `FD[lane] = FS[lane] (+|*) FT[lane]` for each lane selected
+  by destmask. Funct codes cited against a fresh PCSX2 upstream
+  reference clone's `R5900OpcodeTables.cpp`
+  (`Int_COP2SPECIAL1PrintTable` row: `VADD, VMADD, VMUL, VMAX, VSUB,
+  VMSUB, VOPMSUB, VMINI` at indices 40-47 = funct 0x28-0x2F).
+- **VIADDI** (funct 0x32): immediate integer add on VI registers,
+  `VI[ft] = VI[fs] + imm`, closing the exact gap this project's own
+  existing VIADD/VISUB/VIAND/VIOR comment flagged as a "future gap".
+  Confirmed VIADDI's real operand order differs from VIADD's sibling
+  family: dest=FT (not FD) per PCSX2's own
+  `DisR5900asm.cpp`'s `P_VIADDI` disassembly formatter
+  (`"viaddi FT, FS, 0x%x(SA)"`), with the immediate occupying the same
+  raw bit position (6-10) that FD occupies for the other CO-format ops.
+  The sign-extension itself is ported verbatim from PCSX2's own
+  `VUops.cpp` `_vuIADDI` (a real-hardware quirk - effectively a 4-bit
+  signed magnitude plus a separate sign bit, not a plain 5-bit two's
+  complement extend) rather than reinvented.
+
+Also added `tests/test_ee_cop2_arith2.c`, which - alongside the three
+new ops - gives first-time host-native test coverage to VIADD/VISUB/
+VIAND/VIOR themselves (implemented in round 13 but never actually
+tested until now). 11 checks, all passing; full 68-block regression
+suite (67 pre-existing + this new one) still passes; clean Wii rebuild
+verified.
+
+**Honest scope note**: a host-native diagnostic (`diag68`, 20M-slice
+interleaved run against the real SCPH-10000 dump) confirmed the EE's
+current boot trace does NOT reach any of these new opcodes - the EE is
+still in its long-documented steady-state SIF poll (pc=0x80005E90,
+not halted), and the IOP is still stuck at the 9th finding's panic
+loop (pc=0x00101284). This is real, tested, roadmap-directed
+readiness work (docs/ROADMAP.md section 5 item 3), not a fix that
+moves the current boot further - consistent with this session's
+practice of being explicit about what does and doesn't change the
+observed steady state.

@@ -1736,3 +1736,36 @@ scaffold, and this precise 3-level trace) with every change
 individually committed, pushed, and rsynced as its own checkpoint per
 the user's explicit "work until the limit runs out, don't forget
 checkpoints" instruction.
+
+## Update (Round 29 continued, further autonomous work per user's
+"take care of the next 10 important tasks, don't ask permission, use
+pcsx2-mcp in an emergency" instruction)
+
+10th finding: the newly-available `pcsx2-mcp` tool suite (a live,
+paused, real PCSX2 instance via DebugServer) was investigated as a
+possible source of ground truth for the 9th finding's open question
+(SYSMEM boot_info struct values). Conclusively unhelpful: that
+instance's EE is deep in userland/game code (backtrace shows ordinary
+0x0055xxxx-0x0061xxxx EE addresses), long past IOP boot, and IOP
+RAM[0x100000] reads all zero there - any transient boot_info struct
+has long since been reclaimed. Also newly clarified while
+investigating: this project's own `iop_module_loader.c` only ever
+`bump_alloc(4)`s and writes the FIRST word of this struct, so offsets
+0x04-0x18 read zero because this project's HLE loader shortcut never
+touches them - not because of a separate missing mechanism. Task
+#124/#132 is formally deprioritized again; every readily-available
+real reference source (psx-spx, ps2tek, PCSX2 upstream, an independent
+write-up, and now a live reference instance) is exhausted without a
+citable answer, and guessing further would be fabrication.
+
+11th change: extended round 13's EE COP2 VU0 macro-mode vector
+datapath with VADD/VMUL (funct 0x28/0x2A, same shape as the existing
+VSUB) and VIADDI (funct 0x32, closing a previously-flagged gap next to
+VIADD/VISUB/VIAND/VIOR). New test `tests/test_ee_cop2_arith2.c` (11
+checks, all passing) also gives first-time coverage to VIADD/VISUB/
+VIAND/VIOR themselves. Full 68-block regression suite passes; clean
+Wii rebuild verified. Honest scope note: a fresh diagnostic confirms
+the EE's current boot trace does not yet reach any of these ops (still
+steady-state SIF-polling) - this is real, tested, roadmap-directed
+readiness work (docs/ROADMAP.md section 5 item 3), not a fix that
+advances the current observed boot state.

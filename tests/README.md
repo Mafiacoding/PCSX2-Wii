@@ -1125,6 +1125,25 @@ gcc -I../include -I../source -o test_ee_cop2_vu0 tests/test_ee_cop2_vu0.c ../sou
 ./test_ee_cop2_vu0
 ```
 
+`test_ee_cop2_arith2.c` covers Round 29 continued's 10th change -
+extending round 13's VU0 macro-mode vector datapath with `VADD`/`VMUL`
+(the same 3-operand full-vector shape as the already-implemented
+`VSUB`) and `VIADDI` (an immediate integer add closing a gap
+previously flagged next to `VIADD`/`VISUB`/`VIAND`/`VIOR`'s own
+comment). Also adds first-time coverage for `VIADD`/`VISUB`/`VIAND`/
+`VIOR` themselves (implemented in round 13 but never covered by a
+host-native test until now). 11 checks: VADD/VMUL compute the correct
+per-lane float results; a single-lane destmask (`VADD.x`) only writes
+that one lane; the VI-register integer ALU family produces the correct
+results; VIADDI's real sign-extension bit-trick (ported from PCSX2's
+own `_vuIADDI`, not a plain two's-complement extend) is verified with
+both a positive and a negative immediate; VIADDI to VI0 is a no-op.
+
+```sh
+gcc -I../include -I../source -o test_ee_cop2_arith2 tests/test_ee_cop2_arith2.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+./test_ee_cop2_arith2
+```
+
 `test_ee_ldl_ldr_sdl_sdr.c` covers "round 13"'s `LDL`/`LDR`/`SDL`/`SDR`
 (64-bit unaligned load/store-left/right - the doubleword analog of
 this project's existing `LWL`/`LWR`/`SWL`/`SWR`). 6 checks: the

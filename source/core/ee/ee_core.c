@@ -1466,7 +1466,16 @@ static int ee_step(void)
                 * Round 13 adds the actual VU0 vector datapath: 128-bit
                 * QMFC2/QMTC2 transfers, plus the specific "CO"-format
                 * (rs bit 0x10 set) vector ops a real BIOS VU0 init/
-                * self-test sequence needs (VSUB, VISWR, VSQI). Field
+                * self-test sequence needs (VSUB, VISWR, VSQI). Round
+                * 29 continued (10th change) adds VADD/VMUL (same
+                * 3-operand full-vector shape as VSUB) and VIADDI
+                * (closing a previously-flagged gap next to VIADD/
+                * VISUB/VIAND/VIOR) - not yet exercised by the current
+                * boot trace (the EE is steady-state polling SIF, not
+                * halted on a missing COP2 op - see docs/STATUS.md's
+                * "Round 29 continued (10th change)" section), but
+                * real, tested, roadmap-directed forward progress on
+                * docs/ROADMAP.md section 5 item 3. Field
                 * encodings (rs=destmask|0x10, FT/FS/FD positions, the
                 * SPECIAL2 sub-index formula) were derived by decoding
                 * the exact raw instruction words from a live PCSX2
@@ -1531,10 +1540,22 @@ static int ee_step(void)
             uint32_t fs = (instr >> 11) & 0x1Fu;
             uint32_t fd = (instr >> 6) & 0x1Fu;
 
-            if (funct == 0x2C) {
-                /* VSUB: FD[lane] = FS[lane] - FT[lane] (real float
-                 * subtract on the reinterpreted bit patterns), for
-                 * each lane selected by destmask. */
+            if (funct == 0x28 || funct == 0x2A || funct == 0x2C) {
+                /* VADD(0x28)/VMUL(0x2A)/VSUB(0x2C): FD[lane] = FS[lane]
+                 * (+|*|-) FT[lane], real float arithmetic on the
+                 * reinterpreted bit patterns, for each lane selected
+                 * by destmask. Round 13 implemented VSUB only; VADD
+                 * and VMUL are the same 3-operand full-vector shape
+                 * (confirmed against PCSX2's own R5900OpcodeTables.cpp
+                 * SPECIAL1 table: funct 0x28=VADD, 0x2A=VMUL, both in
+                 * the same row as VSUB/VMAX/VMSUB/VOPMSUB/VMINI) and
+                 * are the two ops real BIOS VU0-macro transform/
+                 * lighting math (dot-products = multiply-then-add
+                 * chains) is most likely to need next - see
+                 * docs/ROADMAP.md section 5 item 3. VMAX/VMSUB/
+                 * VOPMSUB/VMINI (the rest of this row) are not added
+                 * yet - not seen in the traced boot path, a scoped
+                 * future gap like VIAND/VIOR's siblings below. */
                 for (int lane = 0; lane < 4; lane++) {
                     if (!(destmask & (0x8u >> lane))) continue;
                     uint32_t ua = vu0_vf_read_lane(st, fs, (uint32_t)lane);
@@ -1542,7 +1563,9 @@ static int ee_step(void)
                     float a, b, r; uint32_t ur;
                     memcpy(&a, &ua, 4);
                     memcpy(&b, &ub, 4);
-                    r = a - b;
+                    if (funct == 0x28) r = a + b;
+                    else if (funct == 0x2A) r = a * b;
+                    else r = a - b;
                     memcpy(&ur, &r, 4);
                     vu0_vf_write_lane(st, fd, (uint32_t)lane, ur);
                 }
@@ -1575,6 +1598,31 @@ static int ee_step(void)
                 } else {
                     halt("unimplemented COP2 SPECIAL2 sub-opcode (VU0 vector datapath not implemented)");
                     return 1;
+                }
+            } else if (funct == 0x32) {
+                /* VIADDI: VI[ft] = VI[fs] + sign_extend(imm), where
+                 * imm is the raw 5-bit field at the SAME bit position
+                 * (6-10) as FD in the other CO-format arithmetic ops
+                 * above, reused here as an immediate rather than a
+                 * register index - and unlike VIADD/VISUB/VIAND/VIOR
+                 * (dest=FD, confirmed via a live "viadd vi02,vi00,vi00"
+                 * disassembly), VIADDI's real operand order is
+                 * dest=FT, src=FS, imm=SA (confirmed against PCSX2's
+                 * own DisR5900asm.cpp P_VIADDI: "viaddi FT, FS,
+                 * 0x%x(SA)"). The sign-extension itself is ported
+                 * verbatim from PCSX2's VUops.cpp _vuIADDI rather than
+                 * reinvented: imm = (code>>6)&0x1f, then
+                 * (imm&0x10 ? 0xfff0 : 0) | (imm&0xf) - a real-hardware
+                 * quirk (effectively a signed 4-bit magnitude with a
+                 * separate sign bit, not a plain 5-bit two's-complement
+                 * sign-extend), closing the gap this project's own
+                 * VIADD/VISUB/VIAND/VIOR comment already flagged as a
+                 * "scoped future gap". */
+                uint32_t imm5 = fd; /* raw bits 6-10, reused as SA/imm here */
+                uint32_t imm = ((imm5 & 0x10u) ? 0xFFF0u : 0u) | (imm5 & 0xFu);
+                if (ft != 0) {
+                    uint32_t a = vu0_vi_read(st, fs);
+                    vu0_vi_write(st, ft, (a + imm) & 0xFFFFu);
                 }
             } else if (funct == 0x30 || funct == 0x31 || funct == 0x34 || funct == 0x35) {
                 /* VIADD/VISUB/VIAND/VIOR - plain integer ALU on VI

@@ -32,7 +32,7 @@ write32` route the IOP-side SIF mirror window (0x1D000000-0x1D0000FF)
 through it. Run it the same way:
 
 ```sh
-gcc -I../include -I../source -o test_iop tests/test_iop_core.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
+gcc -I../include -I../source -o test_iop tests/test_iop_core.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
 ./test_iop
 ```
 
@@ -384,7 +384,7 @@ simple). Needs the full EE+IOP+hardware-model dependency set linked
 in:
 
 ```sh
-gcc -I../include -I../source -o test_system_handshake tests/test_system_handshake.c ../source/core/ee/ee_core.c ../source/core/iop/iop_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
+gcc -I../include -I../source -o test_system_handshake tests/test_system_handshake.c ../source/core/ee/ee_core.c ../source/core/iop/iop_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
 ./test_system_handshake
 ```
 
@@ -510,7 +510,7 @@ pass. Needs the full IOP hardware-model dependency set linked (same
 as `test_iop_core.c`):
 
 ```sh
-gcc -I../include -I../source -o test_iop_hle_bios tests/test_iop_hle_bios.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
+gcc -I../include -I../source -o test_iop_hle_bios tests/test_iop_hle_bios.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
 ./test_iop_hle_bios
 ```
 
@@ -543,7 +543,7 @@ the core with a descriptive reason. Needs the same link set as
 `test_iop_hle_bios.c`:
 
 ```sh
-gcc -I../include -I../source -o test_iop_hle_bios_functions tests/test_iop_hle_bios_functions.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
+gcc -I../include -I../source -o test_iop_hle_bios_functions tests/test_iop_hle_bios_functions.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
 ./test_iop_hle_bios_functions
 ```
 
@@ -656,7 +656,7 @@ after it never executes) and that BEV correctly selects the
 bootstrap vector. Needs the same link set as `test_iop_core.c`:
 
 ```sh
-gcc -I../include -I../source -o test_iop_syscall tests/test_iop_syscall.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
+gcc -I../include -I../source -o test_iop_syscall tests/test_iop_syscall.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
 ./test_iop_syscall
 ```
 
@@ -700,7 +700,7 @@ reserved region in the documented BIOS RAM map. Needs the same link
 set as `test_iop_core.c`:
 
 ```sh
-gcc -I../include -I../source -o test_iop_hle_exception_install tests/test_iop_hle_exception_install.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
+gcc -I../include -I../source -o test_iop_hle_exception_install tests/test_iop_hle_exception_install.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
 ./test_iop_hle_exception_install
 ```
 
@@ -1153,7 +1153,7 @@ BIOS ROM address still works exactly as before (correct link-register
 value), proving the guard doesn't break legitimate control flow.
 
 ```sh
-gcc -I../include -I../source -o test_iop_pc_guard tests/test_iop_pc_guard.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
+gcc -I../include -I../source -o test_iop_pc_guard tests/test_iop_pc_guard.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
 ./test_iop_pc_guard
 ```
 
@@ -1229,7 +1229,7 @@ found with correct names/counts, and a malformed image (bad ELF magic)
 is rejected with a clear error rather than silently accepted.
 
 ```sh
-gcc -I../include -I../source -o test_iop_elf tests/test_iop_elf.c ../source/hw/iop_elf.c ../source/core/iop/iop_core.c ../source/hw/iop_hle_bios.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+gcc -I../include -I../source -o test_iop_elf tests/test_iop_elf.c ../source/hw/iop_elf.c ../source/core/iop/iop_core.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
 ./test_iop_elf
 ```
 
@@ -1270,7 +1270,7 @@ through `iop_core.c`'s real `iop_mem_read16`/`write16`/`read32`/
 accidentally swallowing unrelated ordinary IOP RAM addresses.
 
 ```sh
-gcc -I../include -I../source -o test_iop_spu2 tests/test_iop_spu2.c ../source/core/iop/iop_core.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+gcc -I../include -I../source -o test_iop_spu2 tests/test_iop_spu2.c ../source/core/iop/iop_core.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
 ./test_iop_spu2
 ```
 
@@ -1293,7 +1293,7 @@ following `BREAK` (proving the CO-format path no longer falls into
 the "unimplemented" halt default).
 
 ```sh
-gcc -I../include -I../source -o test_iop_rfe tests/test_iop_rfe.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+gcc -I../include -I../source -o test_iop_rfe tests/test_iop_rfe.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
 ./test_iop_rfe
 ```
 
@@ -1315,7 +1315,7 @@ marker instruction executes normally and the instruction count before
 the (expected, unrelated) halt is exact.
 
 ```sh
-gcc -I../include -I../source -o test_iop_hw_interrupt tests/test_iop_hw_interrupt.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+gcc -I../include -I../source -o test_iop_hw_interrupt tests/test_iop_hw_interrupt.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
 ./test_iop_hw_interrupt
 ```
 
@@ -1335,7 +1335,7 @@ outcome), out-of-range priority handled safely, and the real C0-table
 $a0/$a1, correct chain mutation, correct return-to-$ra).
 
 ```sh
-gcc -I../include -I../source -o test_iop_excb tests/test_iop_excb.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+gcc -I../include -I../source -o test_iop_excb tests/test_iop_excb.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
 ./test_iop_excb
 ```
 
@@ -1520,7 +1520,7 @@ constant when RAM[0x100] is still 0 (preserving every pre-Round-29
 test's assumptions).
 
 ```sh
-gcc -I../include -I../source -o test_iop_kmem_alloc tests/test_iop_kmem_alloc.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+gcc -I../include -I../source -o test_iop_kmem_alloc tests/test_iop_kmem_alloc.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
 ./test_iop_kmem_alloc
 ```
 
@@ -1553,7 +1553,7 @@ touching SR at all, matching the real dispatcher's "let the next chain
 element try" contract.
 
 ```sh
-gcc -I../include -I../source -o test_iop_syscall_handler tests/test_iop_syscall_handler.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+gcc -I../include -I../source -o test_iop_syscall_handler tests/test_iop_syscall_handler.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
 ./test_iop_syscall_handler
 ```
 
@@ -1574,7 +1574,7 @@ remaining independent of each other (calling one doesn't corrupt the
 other's effect).
 
 ```sh
-gcc -I../include -I../source -o test_iop_hook_entry_int tests/test_iop_hook_entry_int.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+gcc -I../include -I../source -o test_iop_hook_entry_int tests/test_iop_hook_entry_int.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
 ./test_iop_hook_entry_int
 ```
 
@@ -1591,6 +1591,25 @@ counted; both are idempotent (repeat calls stay safe, matching real
 hardware's own "already registered" behavior).
 
 ```sh
-gcc -I../include -I../source -o test_iop_device_registration tests/test_iop_device_registration.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+gcc -I../include -I../source -o test_iop_device_registration tests/test_iop_device_registration.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
 ./test_iop_device_registration
+```
+
+`test_iop_cdvd.c` covers the CDVD (disc drive) register scaffold -
+ROADMAP section 7's "CDVD - disc/BIOS-boot-media emulation" item. See
+`include/core/hw/iop_cdvd.h` for the full design rationale: register
+offsets and power-on defaults are ported directly from PCSX2's own
+`pcsx2/CDVD/CDVD.cpp` `cdvdReset()`/`cdvdRead()` (GPL-3.0), matching
+the specific case this project currently needs - a diskless BIOS-only
+boot. 19 checks: real power-on defaults (STATUS=tray-open,
+READY=drive-ready, TYPE=no-disc, INTR_STAT=0); ERROR's real
+read-clears-on-read behavior; BREAK always reading 0; NCMD being
+latched and triggering a plausible completion IRQ instead of staying
+busy forever; the real 4KB-page register mirroring PCSX2's own
+`psxHw4Read8/Write8` implements; and out-of-range addresses being
+correctly rejected.
+
+```sh
+gcc -I../include -o test_iop_cdvd tests/test_iop_cdvd.c ../source/hw/iop_cdvd.c
+./test_iop_cdvd
 ```

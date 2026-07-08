@@ -4476,3 +4476,66 @@ time budget. Task #124/#132 remains open with this sharpened target.
 No code changes this round (pure diagnostic/tracing work); no test,
 build, or commit needed for this specific finding, but see below for
 this session's next change.
+
+## Round 29 continued (8th change, 2026-07-08): CDVD register scaffold (no-disc boot case)
+
+Per docs/ROADMAP.md's own long-standing "Suggested near-term order"
+item 2 ("CDVD (disc) stub - even a diskless BIOS-only boot polls CDVD
+status registers; nothing at all is modeled for this yet"), added a
+real CDVD (disc drive) register block: `source/hw/iop_cdvd.c` /
+`include/core/hw/iop_cdvd.h`.
+
+**Design**: real IOP-side base address 0x1F402000, cross-checked
+against both ps2tek's public port list and, more authoritatively, real
+PCSX2 upstream source cloned fresh for this change
+(github.com/PCSX2/pcsx2, `pcsx2/IopHw.cpp`'s `psxHw4Read8`/
+`psxHw4Write8`, whose log strings literally say "[segment 0x1f40]" and
+which mask the address to its low 8 bits before dispatching - i.e.
+real hardware mirrors these byte registers across the entire
+0x1F402000-0x1F402FFF 4KB page, replicated here exactly). Register
+offsets and - critically - their real power-on-reset VALUES are
+ported directly from PCSX2's own `pcsx2/CDVD/CDVD.cpp` `cdvdReset()`
+(GPL-3.0, same "port real semantics, don't reinvent" approach already
+used for `ee_core.c`): `DiscType=CDVD_TYPE_NODISC(0x00)`,
+`Ready=CDVD_DRIVE_READY(0x40)`, `Status=CDVD_STATUS_TRAY_OPEN(0x01)` -
+these are the exact, real values a real PS2 reports when booting with
+no disc inserted, not guesses. The ERROR register's real
+read-clears-on-read behavior (`cdvdRead06`) and the BREAK register's
+real always-reads-0 behavior (`cdvdRead07`) are both replicated
+faithfully since they're simple and directly cited.
+
+**Scope, deliberately limited**: matching this project's own
+established "register scaffold, not full hardware" pattern
+(`iop_timers.c`/`iop_spu2.c`), the real N-command/S-command state
+machines (seek/read/standby/etc, `cdvdWrite04`/`cdvdWrite16` and their
+many sub-commands in real PCSX2 source) are NOT modeled - a write to
+NCMD is latched (so polling code gets a truthful readback) and
+immediately reports a plausible completion via INTR_STAT
+(`Irq_CommandComplete=0`) rather than leaving BUSY set forever, so a
+diskless boot's status-polling loop can observe "command done" instead
+of spinning indefinitely on a command this project doesn't implement
+the real behavior of - without pretending to emulate what any specific
+command actually does.
+
+Verified via `tests/test_iop_cdvd.c` (19 checks): real power-on
+defaults; ERROR's read-clears behavior; BREAK always reading 0; NCMD
+latching + triggering a completion IRQ; the real 4KB-page register
+mirroring; and correct rejection of out-of-range addresses.
+
+**Honest empirical result**: live-tracing the real BIOS for 10M IOP
+instructions shows `last_ncommand` stays 0x00 - the real BIOS never
+writes to the CDVD NCMD register within this traced window either
+(consistent with the 6th change's AddCDROMDevice/AddMemCardDevice
+finding: this specific boot path, on this specific real BIOS dump,
+doesn't touch disc-related hardware/kernel state within the ~10M
+instructions traced so far). This is real, valuable, ROADMAP-directed
+hardware coverage that will matter for any boot path that DOES probe
+CDVD status (a disc-present boot, or later BIOS/game code reached past
+the current wall) - it does not, by itself, change the steady-state
+outcome of the wall documented in the 5th/7th findings.
+
+Verification this round: clean Wii/devkitPPC rebuild (`make
+TARGET=boot`, exit 0, only the pre-existing unrelated
+`iop_module_loader.c` strncpy warning; confirmed `iop_cdvd.c` compiles
+into the Wii build too), full host-native regression suite (68 test
+binaries including this round's new `test_iop_cdvd.c`, 0 failures).

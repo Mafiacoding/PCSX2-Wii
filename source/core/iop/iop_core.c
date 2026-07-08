@@ -45,6 +45,7 @@
 #include "core/hw/iop_dma.h"
 #include "core/hw/iop_timers.h"
 #include "core/hw/iop_spu2.h" /* SPU2 register scaffold - task #95 */
+#include "core/hw/iop_cdvd.h" /* CDVD register scaffold, no-disc boot case - ROADMAP section 7 */
 #include "core/hw/iop_hle_bios.h"
 #include "core/hw/iop_hle_modules.h"
 #include "core/hw/iop_module_loader.h" /* real IOP module/IRX loader - task #92 */
@@ -79,6 +80,10 @@ static inline uint8_t *iop_mem_ptr(iop_state_t *st, uint32_t addr, uint32_t size
  * little-endian, our Wii/PowerPC build target is big-endian. */
 uint8_t iop_mem_read8(iop_state_t *st, uint32_t addr)
 {
+    uint8_t cdvd_val;
+    if (iop_cdvd_mmio_read8(addr, &cdvd_val))
+        return cdvd_val;
+
     uint8_t *p = iop_mem_ptr(st, addr, 1);
     return p ? *p : 0;
 }
@@ -124,6 +129,9 @@ uint32_t iop_mem_read32(iop_state_t *st, uint32_t addr)
 
 void iop_mem_write8(iop_state_t *st, uint32_t addr, uint8_t val)
 {
+    if (iop_cdvd_mmio_write8(addr, val))
+        return;
+
     uint8_t *p = iop_mem_ptr(st, addr, 1);
     if (p) *p = val;
 }
@@ -168,6 +176,7 @@ int iop_core_init(const bios_image_t *bios)
     iop_dma_init();  /* IOP DMA controller register block - see core/hw/iop_dma.h */
     iop_timers_init(); /* IOP counter/timer register stub - see core/hw/iop_timers.h */
     iop_spu2_init(); /* SPU2 register scaffold - task #95, see core/hw/iop_spu2.h */
+    iop_cdvd_init(); /* CDVD register scaffold, no-disc boot case - see core/hw/iop_cdvd.h */
     iop_hle_bios_init(); /* IOP BIOS syscall trap (A0/B0/C0) - see core/hw/iop_hle_bios.h */
     iop_hle_modules_init(); /* IOP module registry scaffold - see core/hw/iop_hle_modules.h */
     iop_module_loader_reset(); /* real module/IRX boot sequencer - see core/hw/iop_module_loader.h */

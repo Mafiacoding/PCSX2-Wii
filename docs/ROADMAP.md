@@ -1126,8 +1126,24 @@ programmable GPU nor any of those APIs).
 
 ## 7. Supporting pieces (lower priority for "just the splash screen")
 
-- [ ] CDVD - disc/BIOS-boot-media emulation (BIOS checks for a disc
-      even when booting to the OSD splash without one)
+- [x] CDVD - real register-block scaffold for the no-disc boot case
+      (2026-07-08). Base address (0x1F402000, mirrored across the
+      full 4KB page) and power-on-reset register VALUES
+      (Status=tray-open, Ready=drive-ready, DiscType=no-disc) are
+      ported directly from real PCSX2 upstream source
+      (`pcsx2/IopHw.cpp`, `pcsx2/CDVD/CDVD.cpp`'s `cdvdReset()`), not
+      guessed. NCMD writes are latched and trigger a plausible
+      completion IRQ rather than leaving BUSY forever, so a diskless
+      boot's status-polling loop won't spin indefinitely - real
+      N-command/S-command state machines (seek/read/etc) are
+      deliberately NOT modeled, matching the existing
+      iop_timers.c/iop_spu2.c "register scaffold" pattern. Verified
+      via `tests/test_iop_cdvd.c` (19 checks). Honest empirical
+      result: the real BIOS dump this project tests against never
+      writes to CDVD registers within the traced window on its
+      current no-disc boot path, so this doesn't (yet) change the
+      steady-state outcome documented in the 5th/7th findings - see
+      docs/STATUS.md's "Round 29 continued (8th change)" section.
 - [x] SPU2 (audio) - PARTIAL, register scaffold only (not needed for a
       visual splash screen, added this round on a "time permitting"
       basis alongside the IOP loader/VU opcode-table work).
@@ -1179,10 +1195,11 @@ already documented, rather than truly returning from the syscall.
    anywhere in the traced execution. See docs/STATUS.md's "Round 19"
    section for the full trace.
 
-2. **CDVD (disc) stub** (section 7) - even a diskless BIOS-only boot
-   polls CDVD status registers; nothing at all is modeled for this yet.
-   Likely needed before the EE's own boot path can proceed much further,
-   independent of the IOP-side work above.
+2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the
+   register-block entry in section 7 above. Register-level scaffold
+   only (no real command state machine); the real BIOS dump tested so
+   far never exercises it within the traced window, so the EE's own
+   boot path is not yet observed to depend on it.
 
 3. **COP2 (VU0 macro mode) wiring** (section 5) - VU0's vector datapath
    and microcode interpreter both exist (Round 13/14), but VU0 running

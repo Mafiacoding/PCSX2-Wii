@@ -1681,3 +1681,29 @@ section. Next step: trace backward from this routine's entry/call site
 to find the real missing data source. Pausing this specific thread
 here (diminishing returns without much more tracing) to pick up other
 ROADMAP items per the user's "as far as possible" instruction.
+
+**Update (Round 29 continued, 8th change, same session)**: continuing
+per the user's "erledige alle Aufgaben soweit wie moeglich" (do all
+tasks as far as possible) instruction, picked up docs/ROADMAP.md's own
+long-standing "CDVD (disc) stub" near-term item. Added
+source/hw/iop_cdvd.c + include/core/hw/iop_cdvd.h: a real CDVD
+register block at IOP address 0x1F402000 (mirrored across its full
+4KB page, matching real PCSX2's psxHw4Read8/Write8), with real
+power-on-reset values ported directly from a freshly-cloned PCSX2
+upstream source's pcsx2/CDVD/CDVD.cpp cdvdReset() - Status=tray-open,
+Ready=drive-ready, DiscType=no-disc - the exact values a real PS2
+reports on a diskless boot. NCMD writes are latched and trigger a
+plausible completion IRQ instead of leaving BUSY forever, so a
+diskless boot's polling loop won't spin indefinitely - real N-command
+state machines are NOT modeled, matching this project's existing
+iop_timers.c/iop_spu2.c scaffold pattern. Verified via 19 new
+host-native checks (tests/test_iop_cdvd.c). Wired into
+source/core/iop/iop_core.c's byte-level memory dispatch
+(iop_mem_read8/write8). Honest empirical result: live-tracing the real
+BIOS for 10M IOP instructions shows it never writes to CDVD registers
+on this no-disc boot path either - consistent with the 6th change's
+AddCDROMDevice/AddMemCardDevice finding. Real, ROADMAP-directed
+coverage; does not change the steady-state wall from the 5th/7th
+findings. Verified: clean Wii rebuild (exit 0, iop_cdvd.c confirmed
+compiled in), 68-test host-native regression suite (0 failures). See
+docs/STATUS.md's "Round 29 continued (8th change)" section.

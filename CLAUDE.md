@@ -1949,3 +1949,18 @@ verified. Remaining VU0 gaps: VCLIPw (new flag register needed),
 VLQI/VLQD/VSQD, VMTIR/VMFIR/VILWR (different field decode),
 VDIV/VSQRT/VRSQRT/VWAITQ (Q busy-timing), VRNEXT/VRGET/VRINIT/VRXOR
 (R-register LCG).
+
+## Update (Round 29 continued, 22nd change - VU0 memory-access family completed + VSQI destmask bugfix)
+
+Completed VU0's local-memory access family: VLQI(idx52)/VLQD(idx54)/
+VSQD(idx55), the pre/post increment/decrement siblings of VSQI.
+Field-role convention confirmed via real PCSX2 upstream's VUops.cpp:
+loads have address in FS, dest VF in FT (opposite of stores). While
+researching this, found and fixed a real pre-existing bug: VSQI was
+ignoring destmask entirely (always wrote all 4 lanes) despite
+DisR5900asm.cpp confirming it has a real xyzw suffix. New test
+tests/test_ee_cop2_lqisqd.c (8 checks, all passing) proves both the
+new ops and the destmask fix. Full 79-block regression suite passes,
+clean Wii rebuild verified. Remaining VU0 gaps: VCLIPw, VMTIR/VMFIR/
+VILWR (different field decode), VDIV/VSQRT/VRSQRT/VWAITQ (Q busy
+timing), VRNEXT/VRGET/VRINIT/VRXOR (R-register LCG).

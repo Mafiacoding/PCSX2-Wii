@@ -1715,16 +1715,81 @@ static int ee_step(void)
                     uint32_t off = vu0_mem_addr(addr_vi, (uint32_t)lane);
                     memcpy(st->vu0_mem + off, &data, 4);
                 } else if (idx == 53) {
-                    /* VSQI: store all 4 lanes of VF[fs] (data source)
-                     * to VU0 mem at quadword index VI[ft] (address),
-                     * then post-increment VI[ft] by 1 quadword. */
+                    /* VSQI: store VF[fs] (data source) lanes selected
+                     * by destmask to VU0 mem at quadword index VI[ft]
+                     * (address), then post-increment VI[ft] by 1
+                     * quadword. BUGFIX (Round 29 continued, 22nd
+                     * change): this previously ignored destmask and
+                     * always stored all 4 lanes - confirmed via a real
+                     * PCSX2 upstream reference clone's
+                     * DisR5900asm.cpp (`P_VSQI` prints `dest_string()`,
+                     * proving VSQI genuinely has an xyzw suffix like
+                     * every other CO-format op) that this was a real
+                     * gap, not a simplification; fixed here alongside
+                     * VLQI/VLQD/VSQD, which share the exact same
+                     * destmask-respecting shape. */
                     uint32_t addr_vi = vu0_vi_read(st, ft);
                     for (int lane = 0; lane < 4; lane++) {
+                        if (!(destmask & (0x8u >> lane))) continue;
                         uint32_t val = vu0_vf_read_lane(st, fs, (uint32_t)lane);
                         uint32_t off = vu0_mem_addr(addr_vi, (uint32_t)lane);
                         memcpy(st->vu0_mem + off, &val, 4);
                     }
                     vu0_vi_write(st, ft, addr_vi + 1);
+                } else if (idx == 52) {
+                    /* VLQI (Round 29 continued, 22nd change): load all
+                     * destmask-selected lanes of VF[ft] (data dest)
+                     * from VU0 mem at quadword index VI[fs] (address,
+                     * using the CURRENT value), then post-increment
+                     * VI[fs] by 1 quadword. Confirmed against PCSX2's
+                     * own VUops.cpp _vuLQI - the address register
+                     * lives in the same field position ("Is"/"Fs" in
+                     * PCSX2's naming) this decoder already calls
+                     * `fs`; the dest VF register is the same field
+                     * this decoder calls `ft` (matching VLQD/VSQD/
+                     * VSQI's shared convention: address reg = fs
+                     * field for loads/ft field for stores, dest/data
+                     * reg = the other field). */
+                    uint32_t addr_vi = vu0_vi_read(st, fs);
+                    for (int lane = 0; lane < 4; lane++) {
+                        if (!(destmask & (0x8u >> lane))) continue;
+                        uint32_t off = vu0_mem_addr(addr_vi, (uint32_t)lane);
+                        uint32_t val; memcpy(&val, st->vu0_mem + off, 4);
+                        vu0_vf_write_lane(st, ft, (uint32_t)lane, val);
+                    }
+                    vu0_vi_write(st, fs, (addr_vi + 1) & 0xFFFFu);
+                } else if (idx == 54) {
+                    /* VLQD: pre-decrement VI[fs] by 1 quadword FIRST,
+                     * then load all destmask-selected lanes of VF[ft]
+                     * from VU0 mem at the NEW (decremented) VI[fs]
+                     * index - ported from PCSX2's _vuLQD. VI is a
+                     * real 16-bit register (matching VIADD/VISUB's
+                     * existing 0xFFFF masking), so decrementing from 0
+                     * wraps to 0xFFFF rather than underflowing. */
+                    uint32_t addr_vi = (vu0_vi_read(st, fs) - 1u) & 0xFFFFu;
+                    vu0_vi_write(st, fs, addr_vi);
+                    for (int lane = 0; lane < 4; lane++) {
+                        if (!(destmask & (0x8u >> lane))) continue;
+                        uint32_t off = vu0_mem_addr(addr_vi, (uint32_t)lane);
+                        uint32_t val; memcpy(&val, st->vu0_mem + off, 4);
+                        vu0_vf_write_lane(st, ft, (uint32_t)lane, val);
+                    }
+                } else if (idx == 55) {
+                    /* VSQD: pre-decrement VI[ft] (address reg, the
+                     * SAME field VSQI/VISWR already use for their own
+                     * address) by 1 quadword FIRST, then store all
+                     * destmask-selected lanes of VF[fs] (data source)
+                     * to VU0 mem at the NEW (decremented) index -
+                     * ported from PCSX2's _vuSQD, the pre-decrement
+                     * mirror image of VSQI's post-increment. */
+                    uint32_t addr_vi = (vu0_vi_read(st, ft) - 1u) & 0xFFFFu;
+                    vu0_vi_write(st, ft, addr_vi);
+                    for (int lane = 0; lane < 4; lane++) {
+                        if (!(destmask & (0x8u >> lane))) continue;
+                        uint32_t val = vu0_vf_read_lane(st, fs, (uint32_t)lane);
+                        uint32_t off = vu0_mem_addr(addr_vi, (uint32_t)lane);
+                        memcpy(st->vu0_mem + off, &val, 4);
+                    }
                 } else if (idx == 29 || (idx >= 16 && idx <= 23) || idx == 48 || idx == 49) {
                     /* Unary/data-movement cluster (Round 29 continued,
                      * 20th change): VABS(idx=29), VITOF0/4/12/15

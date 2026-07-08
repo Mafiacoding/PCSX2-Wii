@@ -5166,3 +5166,45 @@ researched in this codebase), `VDIV`/`VSQRT`/`VRSQRT`/`VWAITQ`
 real "busy" latency), and `VRNEXT`/`VRGET`/`VRINIT`/`VRXOR` (idx64-67,
 the VU0 R-register LCG pseudo-random generator - an entirely separate
 piece of state).
+
+## Round 29 continued (22nd change: VU0 memory-access family completed - VLQI/VLQD/VSQD + VSQI destmask bugfix)
+
+Completed the VU0 local-memory access family: `VLQI` (idx52, load-
+quadword-post-increment), `VLQD` (idx54, load-quadword-pre-decrement),
+`VSQD` (idx55, store-quadword-pre-decrement) - the pre/post
+increment/decrement siblings of the already-implemented `VSQI`.
+Field-role convention, confirmed against a real PCSX2 upstream
+reference clone's `VUops.cpp` `_vuLQI`/`_vuLQD`/`_vuSQD`: for loads,
+the address VI register lives in the FS field position and the
+destination VF register lives in FT - the opposite of VSQI/VSQD,
+where the address lives in FT and the source VF register lives in FS.
+
+While researching the exact field/destmask semantics via
+`DisR5900asm.cpp`'s `P_VSQI`/`P_VLQI`/`P_VLQD`/`P_VSQD` disassembly
+formatters, found and fixed a real, pre-existing bug: `VSQI`'s
+existing implementation (from an earlier round) was unconditionally
+storing all 4 lanes regardless of destmask, but the disassembler
+confirms `VSQI` genuinely has an xyzw suffix like every other
+CO-format op. Fixed by adding the same destmask check the new
+VLQI/VLQD/VSQD implementations already use; the existing
+`test_ee_cop2_vu0.c` VSQI test was unaffected since it always used
+destmask=0xF (all lanes) already.
+
+New test `tests/test_ee_cop2_lqisqd.c` (8 checks): a full VSQI store
+followed by a single-lane VSQI store proves the destmask fix (the
+untouched lanes read back as 0, and VI10 was still post-incremented
+both times); `VLQI` reads the full store back correctly and post-
+increments its own address register; `VLQD` pre-decrements and reads
+back the single-lane store exactly (X=2, Y=0); `VSQD` pre-decrements
+and its store round-trips correctly through a follow-up `VLQI`. Full
+79-block regression suite passes (78 pre-existing + this new one);
+clean Wii rebuild verified (only the pre-existing, harmless `strncpy`
+truncation warning in `iop_module_loader.c`).
+
+Remaining VU0 macro-mode gaps: `VCLIPw` (needs a new CLIP flag
+register), `VMTIR`/`VMFIR`/`VILWR` (a different sub-field decode -
+`_It_`/`_Is_`/`_Fsf_` in PCSX2's own naming - not yet researched in
+this codebase), `VDIV`/`VSQRT`/`VRSQRT`/`VWAITQ` (would need to model
+the `Q` register's real "busy" timing), and `VRNEXT`/`VRGET`/
+`VRINIT`/`VRXOR` (the VU0 R-register LCG pseudo-random generator -
+entirely separate state).

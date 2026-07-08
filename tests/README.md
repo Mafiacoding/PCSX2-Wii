@@ -1807,3 +1807,28 @@ single FT lane.
 gcc -I../include -I../source -o test_ee_cop2_acc tests/test_ee_cop2_acc.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_acc
 ```
+
+`test_ee_cop2_lqisqd.c` covers Round 29 continued's 22nd change - the
+remaining VU0 local-memory access family: `VLQI` (idx52, load-
+quadword-post-increment), `VLQD` (idx54, load-quadword-pre-decrement),
+`VSQD` (idx55, store-quadword-pre-decrement). Also verifies a real bug
+found and fixed alongside this change: `VSQI` (idx53) was
+unconditionally storing all 4 lanes regardless of destmask - confirmed
+via a real PCSX2 upstream reference clone's `DisR5900asm.cpp` that
+`VSQI` genuinely has an xyzw suffix like every other CO-format op.
+Field-role convention (ported from PCSX2's `VUops.cpp` `_vuLQI`/
+`_vuLQD`/`_vuSQD`): for loads, the address VI register lives in the FS
+field position and the destination VF register lives in FT - the
+opposite of VSQI/VSQD, where the address lives in FT and the source
+VF register lives in FS. 8 checks: a full VSQI store followed by a
+single-lane VSQI store (proving the destmask fix - the untouched lanes
+stay 0) and confirming VI10 was post-incremented twice; `VLQI` reads
+the full store back and post-increments its own address register;
+`VLQD` pre-decrements and reads back the single-lane store exactly
+(X=2, Y=0); `VSQD` pre-decrements and its store round-trips correctly
+through a follow-up `VLQI`.
+
+```sh
+gcc -I../include -I../source -o test_ee_cop2_lqisqd tests/test_ee_cop2_lqisqd.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
+./test_ee_cop2_lqisqd
+```

@@ -1990,3 +1990,21 @@ host-side reference AdvanceLFSR model). Full 81-block regression
 suite passes, clean Wii rebuild verified. VU0 gaps now down to two:
 VCLIPw (needs new flag register) and VDIV/VSQRT/VRSQRT/VWAITQ (Q busy
 timing).
+
+## Update (Round 29 continued, 25th change - EE COP2 SPECIAL2 VDIV/VSQRT/VRSQRT/VWAITQ)
+
+Implemented VDIV(idx56)/VSQRT(idx57)/VRSQRT(idx58)/VWAITQ(idx59) -
+the Q-register-producing division/sqrt family, writing into the
+existing unified cop2_ctrl[22] Q slot (no new state). Fsf/Ftf are
+destmask's low/high 2 bits; VSQRT uses only Ftf. Divide-by-zero
+clamps to a signed FLT_MAX bit pattern (no true IEEE infinity on real
+PS2 hardware); VRSQRT's ft==0&&fs==0 case clamps to signed zero
+instead. Ported from real PCSX2 upstream's VUops.cpp
+_vuDIV/_vuSQRT/_vuRSQRT/_vuWAITQ. Researching VWAITQ confirmed real
+PCSX2's _vuWAITQ has a literally empty body - no Q "busy timing"
+model needed, resolving an earlier-flagged open concern as unfounded.
+New test tests/test_ee_cop2_div.c (6 checks, all passing). Full
+82-block regression suite passes, clean Wii rebuild verified (only
+the pre-existing harmless strncpy warning). VU0 macro-mode gaps now
+down to just one: VCLIPw (idx31), needing a new CLIP flag register -
+the first VU0 op this session requiring genuinely new state.

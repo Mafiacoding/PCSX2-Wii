@@ -5279,3 +5279,45 @@ warning in `iop_module_loader.c`).
 VU0 macro-mode gaps now down to two: `VCLIPw` (needs a new CLIP flag
 register) and `VDIV`/`VSQRT`/`VRSQRT`/`VWAITQ` (would need to model
 the `Q`/`P` register's real "busy" timing).
+
+## Round 29 continued (25th change: EE COP2 SPECIAL2 - VDIV/VSQRT/VRSQRT/VWAITQ)
+
+Implemented the Q-register-producing division/sqrt family: `VDIV`
+(idx56), `VSQRT` (idx57), `VRSQRT` (idx58), `VWAITQ` (idx59), ported
+from a real PCSX2 upstream reference clone's `VUops.cpp`
+`_vuDIV`/`_vuSQRT`/`_vuRSQRT`/`_vuWAITQ`. `Fsf`/`Ftf` are independent
+2-bit lane selectors living in destmask's low/high 2 bits
+respectively (same convention discovered for `VDIV`/`VRSQRT`/`VSQRT`
+in `dest_fsf()`/`dest_ftf()`); `VSQRT` uses only `Ftf` (no FS operand
+at all - it computes `sqrt(|VF[ft][Ftf]|)`). Divide-by-zero produces
+a signed `FLT_MAX` bit pattern (`0x7F7FFFFF`/`0xFF7FFFFF`, sign from
+XOR of the two raw operand sign bits) rather than a true IEEE
+infinity, matching real PS2 hardware's lack of infinity support.
+`VRSQRT` additionally has a genuine-zero-input case (`ft==0 &&
+fs==0`) that clamps to a signed-zero pattern instead. The result
+writes directly into `cop2_ctrl[22]` (this project's single unified
+Q-register slot, already read by the existing `VMULq`/`VADDq`/etc
+broadcast-row ops from prior rounds - no new state needed).
+
+Researching `VWAITQ` resolved an open question this project's own
+earlier docs had flagged: real PCSX2's `_vuWAITQ` has a literally
+empty function body (`{}`) - PCSX2 computes `Q` synchronously with no
+latency at all, so there is no real "Q busy timing" to model. The
+concern in earlier ROADMAP.md entries about needing latency modeling
+was unfounded; `VWAITQ` is implemented here as a true no-op,
+confirmed by a test that shows `Q` is provably unchanged across it.
+
+New test `tests/test_ee_cop2_div.c` (6 checks): `VDIV` computes a
+normal division (`20.0/4.0=5.0`) and the `0/0` divide-by-zero clamp
+to `+FLT_MAX`; `VSQRT` computes `sqrt(|-9.0|)=3.0`; `VRSQRT` computes
+a normal `fs/sqrt(ft)` (`20.0/sqrt(4.0)=10.0`) and the `ft=0,fs!=0`
+clamp to `+FLT_MAX`; `VWAITQ` provably leaves `Q` unchanged from the
+preceding `VRSQRT` result. Full 82-block regression suite passes (81
+pre-existing + this new one); clean Wii rebuild verified (only the
+pre-existing, harmless `strncpy` truncation warning in
+`iop_module_loader.c`).
+
+VU0 macro-mode gaps now down to just one: `VCLIPw` (idx31), which
+needs a new CLIP flag register this project doesn't currently model
+at all - the first VU0 op this session that can't simply reuse
+existing state.

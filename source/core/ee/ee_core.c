@@ -2047,6 +2047,86 @@ static int ee_step(void)
                         uint32_t lo16 = (uint32_t)st->vu0_mem[off] | ((uint32_t)st->vu0_mem[off + 1] << 8);
                         vu0_vi_write(st, ft, lo16);
                     }
+                } else if (idx == 56 || idx == 57 || idx == 58) {
+                    /* VDIV(56)/VSQRT(57)/VRSQRT(58) (Round 29
+                     * continued, 25th change): the division/sqrt
+                     * family that produces the Q register value.
+                     * Fsf/Ftf are independent 2-bit lane selectors
+                     * living in destmask's low/high 2 bits
+                     * respectively (destmask&3 = Fsf, (destmask>>2)&3
+                     * = Ftf - confirmed against PCSX2's own
+                     * DisR5900asm.cpp dest_fsf()/dest_ftf() macros,
+                     * "(disasmOpcode>>21)&3" / "(disasmOpcode>>23)&3"
+                     * - the same 4-bit field this decoder already
+                     * calls destmask, just split in half and
+                     * reinterpreted as two lane indices here instead
+                     * of a per-lane bitmask). VSQRT only uses Ftf (no
+                     * FS operand at all - confirmed via
+                     * DisR5900asm.cpp's P_VSQRT, which prints only
+                     * FT). Divide-by-zero produces a signed FLT_MAX
+                     * bit pattern (real PS2 hardware has no true IEEE
+                     * infinity) rather than a real float inf/nan,
+                     * ported from PCSX2's own VUops.cpp _vuDIV/
+                     * _vuRSQRT (the sign is the XOR of FT's and FS's
+                     * sign bits). Result is written directly into
+                     * cop2_ctrl[22] - this project's single source of
+                     * truth for Q (already read by VMULq/VADDq/etc
+                     * above); real PCSX2 keeps a separate VU->q field
+                     * and mirrors it into VI[22] via its own
+                     * SYNCFDIV() after every Q-producing op purely for
+                     * its broadcast helpers' convenience, so no
+                     * second piece of state is needed in this
+                     * project's simpler model. No status-flag
+                     * modeling, consistent with this project's
+                     * existing float datapath not tracking MAC/status
+                     * flags anywhere else either. */
+                    uint32_t fsf_lane = destmask & 0x3u;
+                    uint32_t ftf_lane = (destmask >> 2) & 0x3u;
+                    uint32_t uft = vu0_vf_read_lane(st, ft, ftf_lane);
+                    float ftv; memcpy(&ftv, &uft, 4);
+                    uint32_t qbits;
+                    if (idx == 57) {
+                        /* VSQRT: Q = sqrt(|FT|), no FS operand. */
+                        float r = sqrtf(fabsf(ftv));
+                        memcpy(&qbits, &r, 4);
+                    } else {
+                        uint32_t ufs = vu0_vf_read_lane(st, fs, fsf_lane);
+                        float fsv; memcpy(&fsv, &ufs, 4);
+                        if (ftv == 0.0f) {
+                            uint32_t sign_diff = (uft ^ ufs) & 0x80000000u;
+                            if (idx == 56) {
+                                /* VDIV: x/0 or 0/0 both produce the
+                                 * signed FLT_MAX clamp on real
+                                 * hardware - the distinction only
+                                 * affects the (unmodeled) status
+                                 * flag. */
+                                qbits = sign_diff ? 0xFF7FFFFFu : 0x7F7FFFFFu;
+                            } else {
+                                /* VRSQRT (idx58): fs!=0 clamps to
+                                 * signed FLT_MAX like VDIV; fs==0 (a
+                                 * genuine 0/sqrt(0)) clamps to signed
+                                 * zero instead. */
+                                if (fsv != 0.0f) qbits = sign_diff ? 0xFF7FFFFFu : 0x7F7FFFFFu;
+                                else qbits = sign_diff ? 0x80000000u : 0x00000000u;
+                            }
+                        } else if (idx == 56) {
+                            float r = fsv / ftv;
+                            memcpy(&qbits, &r, 4);
+                        } else {
+                            float temp = sqrtf(fabsf(ftv));
+                            float r = fsv / temp;
+                            memcpy(&qbits, &r, 4);
+                        }
+                    }
+                    vu0_vi_write(st, 22, qbits);
+                } else if (idx == 59) {
+                    /* VWAITQ: a true no-op - confirmed against real
+                     * PCSX2 upstream's own _vuWAITQ, which has an
+                     * empty body even there (PCSX2 itself computes Q
+                     * synchronously with no latency to wait on), so
+                     * this project needs no Q "busy" timing model at
+                     * all, resolving the concern flagged in earlier
+                     * rounds' docs. */
                 } else if (idx == 64 || idx == 65) {
                     /* VRNEXT(64)/VRGET(65) (Round 29 continued, 24th
                      * change): the VU0 "R register" - a real 24-bit

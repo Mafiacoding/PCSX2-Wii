@@ -1875,3 +1875,25 @@ re-clamps to the `[1.0,2.0)` pattern.
 gcc -I../include -I../source -o test_ee_cop2_rreg tests/test_ee_cop2_rreg.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_rreg
 ```
+
+`test_ee_cop2_div.c` covers Round 29 continued's 25th change - `VDIV`
+(idx56), `VSQRT` (idx57), `VRSQRT` (idx58), `VWAITQ` (idx59), the
+division/sqrt family that produces the Q register value (this
+project's `cop2_ctrl[22]`), ported from a real PCSX2 upstream
+reference clone's `VUops.cpp` `_vuDIV`/`_vuSQRT`/`_vuRSQRT`/
+`_vuWAITQ`. `Fsf`/`Ftf` are independent 2-bit lane selectors living in
+destmask's low/high 2 bits respectively; `VSQRT` uses only `Ftf` (no
+FS operand at all). Divide-by-zero produces a signed `FLT_MAX` bit
+pattern rather than a real IEEE infinity, matching real PS2 hardware.
+Researching this confirmed `VWAITQ` is a true no-op even in PCSX2
+itself (no latency modeled), resolving this project's own earlier-
+documented concern about needing to model the Q register's "busy"
+timing - none is needed. 6 checks: `VDIV` computes a normal division
+and also the `0/0` divide-by-zero clamp; `VSQRT` computes `sqrt(|x|)`;
+`VRSQRT` computes a normal `fs/sqrt(ft)` and also the `ft=0,fs!=0`
+clamp; `VWAITQ` provably changes nothing.
+
+```sh
+gcc -I../include -I../source -o test_ee_cop2_div tests/test_ee_cop2_div.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
+./test_ee_cop2_div
+```

@@ -2564,3 +2564,28 @@ EXCEPMAN's real internal data structure (likely the same 8-byte-stride
 table from the 39th/40th findings) and what real syscall a module like
 SIFCMD makes right before hitting the trap stub. See docs/STATUS.md's
 42nd finding. No source changed - pure investigation.
+
+## Update (Round 29 continued, 43rd finding): identified the exact real syscall numbers blocking SIFCMD/SIFINIT (Task #151)
+
+Traced the exact fault point for all 13 trap-stub-bypassed modules:
+every one hits a genuine MIPS `syscall` instruction (opcode 0, funct
+0x0C), confirmed via `$k0==8` (Cause.ExcCode=Syscall). The real IOP
+syscall number (convention: number in $v0, args in $a0/$a1) is 0x10
+for 9 modules (SSBUSC, DMACMAN, THREADMAN, VBLANK, IOMAN, MODLOAD,
+SIFCMD, CDVDMAN, SIFINIT) and 0x08 for the other 4 (REBOOT, LOADFILE,
+CDVDFSV, FILEIO). The 0x10 calling convention (a0=pointer to a
+module-local struct, a1=fixed address 0x100030 or 0xBF801528) is
+consistent with a real `RegisterLibraryEntries`-style kernel call.
+This project's existing syscall HLE (task #31) only covers the OLDER
+A0/B0/C0 jump-based BIOS convention - this is a different, genuine
+CPU-exception-based syscall this project doesn't yet specially
+handle, so it falls through to the still-default exception vector
+(42nd finding) and traps.
+
+Concrete next step (task #164, new): implement real or
+precedented-plausible handling for IOP syscalls 0x10/0x08 in
+iop_core.c, matching the established BREAK-as-syscall-fallback
+pattern (tasks #149/#156), then empirically verify via a real-BIOS
+diagnostic whether SIFCMD/SIFINIT progress further. See
+docs/STATUS.md's 43rd finding for full detail. No source changed this
+round - implementation deliberately deferred to a dedicated follow-up.

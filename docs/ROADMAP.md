@@ -1489,6 +1489,16 @@ already documented, rather than truly returning from the syscall.
    trace EXCEPMAN's real internal structure and the real syscall a
    module like SIFCMD makes right before hitting the trap. See
    STATUS.md's 42nd finding.
+   UPDATE (Round 29 continued, 43rd finding, task #151): found the
+   exact real syscall numbers blocking SIFCMD/SIFINIT and 11 other
+   modules - a genuine MIPS syscall instruction (Cause.ExcCode=8) with
+   real syscall number 0x10 (9 modules) or 0x08 (4 modules), matching
+   a RegisterLibraryEntries-style kernel call. This project's existing
+   syscall HLE only covers the older A0/B0/C0 convention, not this
+   real CPU-exception-based syscall - it falls through to the
+   still-default exception vector and traps. Concrete next step
+   (task #164): implement handling for these syscall numbers. See
+   STATUS.md's 43rd finding.
    next concrete target (the new, deeper dead end this round found).
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the

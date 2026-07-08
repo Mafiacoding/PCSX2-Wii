@@ -6656,3 +6656,72 @@ registration syscall's number/semantics may not yet be covered).
 
 No source code changed - pure investigation, following the same
 byte-signature/trace-and-revert discipline as the 39th-41st findings.
+
+## Round 29 continued (43rd finding, task #151): identified the exact real syscall numbers - concrete implementation target found
+
+Continuing the 42nd finding's open question (what real syscall does a
+module like SIFCMD make right before hitting the trap stub?), added a
+temporary trace (reverted, diff-verified) capturing EPC, the faulting
+instruction, and $v0/$a0/$a1/$k0 at the exact moment
+`is_unconditional_trap_stub()` fires for each of the 13 affected
+modules. Result, for every one of them:
+
+- The faulting instruction is `0x0000000C` - a genuine SPECIAL/SYSCALL
+  (opcode 0, funct 0x0C), not a BREAK or anything synthetic.
+- `$k0 == 0x00000008` for all 13 - confirms `Cause.ExcCode == 8`
+  (Syscall), exactly matching real R3000A exception semantics (`k0`
+  is conventionally used to stash the exception cause during handler
+  entry, per the `is_unconditional_trap_stub()` prologue's own
+  `andi $k0,$k0,0x3C` this project already recognizes).
+- `$v0` (the real IOP kernel syscall-number convention: syscall # in
+  `$v0`, args in `$a0`/`$a1`/...) is **0x10 (16)** for 9 of the 13
+  (SSBUSC, DMACMAN, THREADMAN, VBLANK, IOMAN, MODLOAD, SIFCMD,
+  CDVDMAN, SIFINIT), and **0x08** for the other 4 (REBOOT, LOADFILE,
+  CDVDFSV, FILEIO).
+- For the `v0==0x10` group: `$a0` is a distinct, module-local address
+  each time (e.g. `0x001FFEF0`, `0x001FFEE0`, `0x001FFEA0` for
+  SIFCMD) - consistent with a pointer to the CALLING module's own
+  local buffer/struct - and `$a1` is either the fixed value
+  `0x00100030` or `0xBF801528` (a KSEG1/BIOS-space address).
+- For the `v0==0x08` group: `$a0` is the fixed small constant `3`
+  every time, `$a1` again either `0x00100030` or `0xBF801528`.
+
+**Interpretation:** this is entirely consistent with a real IOP
+kernel syscall - most plausibly `RegisterLibraryEntries` (or a very
+close sibling) for the `v0==0x10` case, given the calling convention
+(module passes a pointer to its own real export/library-entry table
+structure - see this project's own already-documented real IOP
+import/export table format - as an argument to a kernel call that
+registers it). This project's existing IOP-BIOS-HLE-Syscall-Trap
+(task #31) covers the OLDER PS1-style `0xA0`/`0xB0`/`0xC0`
+jump-address BIOS call convention; this is a DIFFERENT, genuine MIPS
+`syscall` instruction raising a real CPU exception (`Cause.ExcCode=8`)
+that this project does not yet specially handle - it currently falls
+through to whatever real code happens to be resident at the exception
+vector, which (per the 42nd finding) is just the unreplaced default
+fallback stub, since no module's registration call has ever
+successfully reached a real dispatcher.
+
+**Concrete next step (the clearest, most actionable target this
+entire investigation has produced):** implement real (or, at minimum,
+plausible-and-precedented, matching this project's existing
+BREAK-as-syscall-fallback pattern from tasks #149/#156) handling for
+IOP syscall numbers `0x10` and `0x08` in `iop_core.c`'s SYSCALL
+exception path - either by actually processing the real
+`RegisterLibraryEntries`-style semantics (building on this project's
+already-understood real export-table format), or, as a safer first
+increment matching established precedent, returning a plausible
+success value and RFE-ing back to the caller so each affected
+module's own init code can continue past this specific call instead
+of getting stuck - then empirically verifying (via the same real-BIOS
+diagnostic technique used throughout this session) whether this
+actually lets SIFCMD/SIFINIT progress further, honestly reporting
+whatever the real result is.
+
+No source code changed this round - pure investigation, same
+byte-signature/trace-and-revert discipline as the 39th-42nd findings.
+This is intentionally left as implementation work for a dedicated
+follow-up round (task #164), rather than rushed within an already very
+long investigative session, consistent with this project's standing
+practice of not combining open-ended research with unverified
+implementation in the same breath.

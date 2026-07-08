@@ -1587,3 +1587,28 @@ rather than reimplementing from a datasheet/memory - this project's
 existing code was built that way, and it's why the bugs that do slip
 through are narrow (byte-order, addressing, fixed-offset assumptions)
 rather than semantic.
+
+**Update (Round 29 continued, 4th change, same session)**: user said
+"mach die 126 und sorg dafuer das die main.c von demo auf echten boot
+flow geht anders koennen wir die probleme nicht behebn, mach
+checkpoints, sorg das der git immer up to date ist und fuehre nach
+dieser aufgabe automatisch andere wichtige tasks durch" (do task #126:
+switch main.c from demo mode to a real boot flow - "otherwise we can't
+fix the problems" - make checkpoints, keep git always up to date, then
+automatically continue with other important tasks). Implemented:
+`run_real_boot_flow()` now runs automatically at startup instead of
+being gated behind a capped, menu-only "BIOS Boot Test" demo action -
+loops the real interleaved EE/IOP execution in chunks up to a much
+higher total cap, polls the real `pmode` GS register each iteration,
+decodes the real DISPFB1 hardware field layout when a display circuit
+is active, and calls the real `gs_blit_psmct32_to_xfb()` blit instead
+of only ever drawing a hardcoded test pattern. Verified: clean Wii
+rebuild (exit 0), full 65-test host-native regression suite (0
+failures). Honest caveat carried over from task #127's diag53 finding:
+GS registers/memory were observed to stay at power-on-zero through the
+traced instruction window, so this is correct real scaffolding, not
+yet a proven splash screen - see docs/STATUS.md's "Round 29 continued
+(4th change)" section and docs/ROADMAP.md's GS-Treiberpfad bullet.
+Next step per the user's own standing instruction: proceed
+automatically to the next most important open ROADMAP item once this
+change is committed/pushed/rsynced.

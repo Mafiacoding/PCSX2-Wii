@@ -4195,3 +4195,61 @@ even for code that only "really" runs cross-compiled on target.
 3. Treat the GS as out of scope for "boot the BIOS" - the BIOS splash
    screen alone will require at least a minimal GS-to-Wii-GX
    translation layer, which is its own project.
+
+## Round 29 continued (4th change, 2026-07-07): main.c switched from demo mode to real automatic boot flow
+
+Per explicit user direction ("mach die 126 und sorg dafuer das die
+main.c von demo auf echten boot flow geht" - do task #126, make main.c
+go from demo to real boot flow), `source/main.c` no longer gates real
+BIOS execution behind a menu action with a fixed instruction cap. The
+old `action_bios_boot_test()` ran a one-shot `system_run_interleaved()`
+capped at `DEMO_STEP_CAP` (2,000,000 slices) from a menu item labeled
+"BIOS Boot Test", printed text-only stats, and required the user to
+manually select it.
+
+Now `run_real_boot_flow()` runs automatically at startup, immediately
+after `wii_console_setup()`, before any menu is shown:
+
+- Mounts SD storage and loads the first real BIOS image found at
+  `sd:/pcsx2/bios/{SCPH39001,SCPH10000,bios}.bin`.
+- Calls `system_init()` + `gs_init()` + `gs_mem_init()` once, guarded by
+  a `g_system_started` flag so re-entry (from the "Re-run Boot Flow"
+  menu item, the old label's replacement) restarts cleanly.
+- Loops in `BOOT_CHUNK_SLICES` (200,000) increments up to a much larger
+  `BOOT_TOTAL_CAP` (2,000,000,000) instead of one fixed-size shot, so
+  the flow keeps running instead of stopping after ~2M instructions.
+- Each loop iteration polls the real GS state (`gs->pmode & 0x3`) for
+  `display_active`. If a display circuit is active, `decode_dispfb()`
+  converts the real hardware DISPFB1 register (FBP = bits 0-8 in units
+  of 2048 words, FBW = bits 9-14 in units of 64 pixels - real hardware
+  units, NOT this project's simplified `gs_mem.h` word/pixel-count
+  convention) and calls `gs_blit_psmct32_to_xfb()` to actually present
+  GS memory to the Wii's real framebuffer.
+- Draws a live HUD (`draw_boot_progress_hud()`) each iteration: EE/IOP
+  instruction counts, halted state and reason per core, whether a
+  display is active, and a "hold B to stop" hint - replacing the old
+  demo's single final text dump.
+- Breaks out on B-held, both-cores-halted, or the total cap, shows a
+  final status screen, then waits for A/B before falling through to
+  the (now secondary) menu.
+
+**Honest caveat, carried over from the diag53 finding earlier this
+session (task #127)**: as of this change, GS local memory and the
+privileged GS registers (PMODE/DISPFB1/DISPLAY1/CSR) were observed to
+stay at their power-on-zero value through 240M EE / 30M IOP real
+instructions - well past the LOGO-loading module found in the 3rd
+finding above. That means `display_active` is not currently expected
+to go true within any practically reachable instruction count yet; this
+change is correct, real scaffolding (no more demo cap, no more menu
+gate, real register decoding, real blit call wired up) but it is not
+yet proven to produce real pixels on screen. The next real blocker to
+chase is why the GS driver path never gets exercised - i.e., what real
+BIOS code is supposed to write PMODE/DISPFB1, and why the traced
+instruction window ends before that happens.
+
+Verification this round: clean Wii/devkitPPC rebuild (`make TARGET=boot`,
+exit 0, only the pre-existing unrelated `iop_module_loader.c` strncpy
+warning), full host-native regression suite re-run via the standard
+`tests/README.md` block-extraction script (65 test binaries, 0
+failures - includes this session's new `test_iop_kmem_alloc.c` and
+`test_iop_syscall_handler.c`).

@@ -672,7 +672,7 @@ instead of fully emulating the real IOP BIOS ROM.
       (2nd fix) section for the precise next step (trace forward from
       the clear-loop's own return address rather than backward from
       the dispatcher).
-- [ ] **Reframing finding (3rd, same round)**: traced the clear-loop's
+- [x] **Reframing finding (3rd, same round)**: traced the clear-loop's
       own caller and found it's the real BIOS's own LOGO-loading
       dispatch (matches ROM string "LOGO", ROMDIR-style lookup, calls
       into a loaded IRX module at RAM 0x00030000 - task #92's real
@@ -1051,6 +1051,23 @@ programmable GPU nor any of those APIs).
       screen still needs triangle rasterization and textures, plus
       eventually a proper GX-based renderer once primitives beyond
       flat rectangles are needed.
+- [x] **GS-Treiberpfad: main.c von Demo auf echten Boot-Flow umgestellt**
+      (task #126/#128) - `run_real_boot_flow()` now runs automatically
+      at startup (no menu gate, no fixed `DEMO_STEP_CAP`), loops the
+      real BIOS boot in `BOOT_CHUNK_SLICES` increments up to a much
+      larger `BOOT_TOTAL_CAP`, polls the real `pmode` register each
+      iteration to detect an active GS display circuit, decodes the
+      real hardware DISPFB1 field layout (FBP/FBW in real hardware
+      units, not `gs_mem.h`'s simplified convention) when active, and
+      calls `gs_blit_psmct32_to_xfb()` to present real GS memory to the
+      Wii framebuffer instead of a hardcoded test pattern. See
+      docs/STATUS.md's "Round 29 continued (4th change)" section.
+      **Honest caveat**: per task #127's diag53 finding, GS registers
+      stay at zero through the traced instruction window, so
+      `display_active` is not yet expected to go true in practice -
+      this is correct real scaffolding, not yet a proven splash
+      screen. The next wall to chase is why the GS driver path is
+      never exercised by the real boot code traced so far.
 
 ## 7. Supporting pieces (lower priority for "just the splash screen")
 

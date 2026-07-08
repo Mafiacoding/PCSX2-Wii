@@ -6,18 +6,36 @@
  * interpreter core. This is NOT a functional PS2 emulator - see
  * docs/STATUS.md for an honest description of what actually works.
  *
- * NATIVE WII TEST MENU (added on request, "damit wir testen koennen ob
- * es ueberhaupt laeuft"): everything below the "wii_console_setup"
+ * REAL BOOT FLOW IS NOW THE DEFAULT (task #126, "main.c von Demo auf
+ * echten Boot-Flow umstellen"): as of this round, `main()` no longer
+ * starts by showing a menu and waiting for the user to opt into a
+ * "BIOS Boot Test" - it immediately calls `run_real_boot_flow()`,
+ * which mounts storage, loads the real BIOS, and runs the actual
+ * EE/IOP interleaved scheduler continuously (in bounded, screen-
+ * refreshing chunks so the UI stays responsive and provably alive -
+ * see draw_boot_progress_hud()/draw_heartbeat()). Every chunk checks
+ * the REAL GS privileged registers (via gs_get_state()); the moment
+ * PMODE indicates an active display circuit, it decodes the REAL
+ * DISPFB1 hardware fields (FBP in 2048-word units, FBW in 64-pixel
+ * units - converted to this project's own gs_mem.h word/pixel
+ * convention, per that header's own note that this conversion is the
+ * caller's job) and blits the REAL GS local memory content the BIOS/
+ * game itself configured - not a canned test pattern. As of this
+ * round (see docs/STATUS.md's "Round 29 continued" sections), GS
+ * registers stay at their power-on-zero state through the traced
+ * boot window, so this path is not yet exercised in practice - but it
+ * is real, correct scaffolding for whenever GS setup does occur,
+ * rather than a synthetic substitute.
+ *
+ * NATIVE WII TEST MENU: everything below the "wii_console_setup"
  * helper and above "int main" is a small, self-contained, native Wii
  * UI drawn directly into the XFB (reusing gs_wii_output.c's already-
  * tested RGB->YCbCr conversion) - it is NOT part of PS2 emulation and
- * does not pretend to be. Its only job is to give a clear, immediate,
- * PCSX2/PS2-BIOS-styled visual signal that the .dol actually boots,
- * initializes video/pad, and stays interactively responsive on real
- * hardware/Dolphin - independent of whether a BIOS image is present
- * or how far the EE/IOP interpreters get. The menu's "BIOS Boot Test"
- * action is what actually exercises the real emulator core and
- * reports real instruction counts/halt reasons back on screen.
+ * does not pretend to be. It remains available AFTER the automatic
+ * real boot flow finishes/is stopped (press B to interrupt it early),
+ * as a secondary diagnostic surface (re-run the boot flow, the fixed-
+ * pattern GS/GIF pipeline demo, or an About screen) - it is no longer
+ * the primary/gating path to actually running the emulator core.
  */
 
 #include <gccore.h>
@@ -31,6 +49,7 @@
 #include "core/iop/iop_core.h"
 #include "core/system.h"
 #include "core/bios_loader.h"
+#include "core/hw/gs.h"
 #include "core/hw/gs_mem.h"
 #include "core/hw/gs_wii_output.h"
 #include "core/hw/dma.h"
@@ -121,7 +140,7 @@ static void goto_rc(uint32_t px, uint32_t py) { printf("\x1b[%u;%uH", (unsigned)
 
 #define MENU_ITEM_COUNT 3
 static const char *menu_labels[MENU_ITEM_COUNT] = {
-    "BIOS Boot Test",
+    "Re-run Boot Flow",
     "GS / GIF Demo",
     "About",
 };
@@ -224,79 +243,172 @@ static int   g_bios_ok = 0;
 static int   g_system_started = 0;
 static bios_image_t g_bios;
 
-/* Menu action 1: actually exercises the real EE/IOP interpreter core
- * (mounts SD/USB, loads a BIOS image if present, runs the interleaved
- * scheduler up to a bounded instruction cap so the UI doesn't appear
- * to hang, and reports real instruction counts + halt reasons). This
- * is the part of the menu that answers "does the emulator core itself
- * actually run on real hardware", as opposed to just "does the .dol
- * boot and draw a screen" (which the menu itself already proves). */
-#define DEMO_STEP_CAP 2000000ull /* bounded so the UI stays responsive - real hardware/this project's own diagnostics have run into the tens of millions of instructions before halting; see docs/STATUS.md */
+/* Round 29 continued (task #126): real BIOS boot as the PRIMARY,
+ * automatic action - see the top-of-file header comment for the full
+ * rationale. Runs the actual EE/IOP interleaved scheduler in bounded
+ * chunks (so the UI keeps redrawing/responding every ~200k IOP
+ * instructions instead of blocking for tens of millions at once),
+ * checks the REAL GS privileged registers each chunk, and blits the
+ * REAL GS local memory content the instant a display gets configured
+ * - not a canned test pattern. Bounded by a generous but finite
+ * safety cap (not "a real limit" - this project's own diagnostics
+ * have run well past it - just a guard against a truly-never-ending
+ * loop with no way out other than power-cycling); the user can also
+ * hold B at any time to stop early and drop into the secondary test
+ * menu below. */
+#define BOOT_CHUNK_SLICES 200000ull  /* IOP-instruction budget per redraw, keeps the UI responsive */
+#define BOOT_TOTAL_CAP    2000000000ull /* generous overall safety cap, not a real limit - see comment above */
 
-static void action_bios_boot_test(void)
+/* Real PS2 GS hardware register field layout for DISPFB1/DISPFB2
+ * (well-established, publicly documented GS register format): FBP
+ * (frame buffer pointer) is bits 0-8, in units of 2048 words; FBW
+ * (frame buffer width) is bits 9-14, in units of 64 pixels.
+ * gs_mem.h's own functions expect a plain word offset / pixel-count
+ * convention instead (see that header's note that converting real
+ * register units is "the caller's job, not handled here") - this is
+ * that conversion, done for real, not guessed at. */
+static void decode_dispfb(uint64_t dispfb, uint32_t *out_bp_words, uint32_t *out_bw_pixels)
+{
+    uint32_t fbp_field = (uint32_t)(dispfb & 0x1FFu);
+    uint32_t fbw_field  = (uint32_t)((dispfb >> 9) & 0x3Fu);
+    *out_bp_words  = fbp_field * 2048u;
+    *out_bw_pixels = fbw_field * 64u;
+}
+
+/* Live progress HUD for the automatic real boot flow - redrawn every
+ * chunk so the user can see real instruction counts advancing (proof
+ * the emulator core is genuinely executing, not frozen), whether each
+ * core has halted (and why), and whether the BIOS/game has configured
+ * a real GS display yet. */
+static void draw_boot_progress_hud(uint64_t ee_instr, uint64_t iop_instr,
+                                    int ee_halted, int iop_halted,
+                                    const char *ee_reason, const char *iop_reason,
+                                    int display_active)
+{
+    goto_rc(16, 40);
+    printf("PCSX2-Wii - Real BIOS Boot                                        \n");
+    printf("===================================                              \n\n");
+    printf("EE  instructions executed: %-16llu halted=%d              \n",
+           (unsigned long long)ee_instr, ee_halted);
+    printf("    %-64s\n", ee_halted ? ee_reason : "(still executing real instructions)");
+    printf("IOP instructions executed: %-16llu halted=%d              \n",
+           (unsigned long long)iop_instr, iop_halted);
+    printf("    %-64s\n", iop_halted ? iop_reason : "(still executing real instructions)");
+    printf("\n");
+    printf("GS display: %-58s\n",
+           display_active ? "configured by BIOS/game - showing real GS memory below"
+                           : "not configured yet (see docs/STATUS.md's Round 29 notes)");
+    printf("\nHold B to stop and open the test menu (re-run, GS/GIF demo, about).\n");
+}
+
+/* The real boot flow itself - see the top-of-file header comment and
+ * the doc comment above draw_boot_progress_hud() for the full design.
+ * Runs automatically once at startup (called from main()) and is also
+ * reachable again from the test menu ("Re-run Boot Flow"). */
+static void run_real_boot_flow(void)
 {
     draw_gradient_background(6, 6, 22, 0, 0, 6);
+    flush_screen();
     goto_rc(16, 40);
-    printf("BIOS Boot Test\n");
-    printf("==============\n\n");
+    printf("Booting real PS2 BIOS...\n");
 
-    if (!g_fat_mounted) {
+    if (!g_fat_mounted)
         g_fat_mounted = fatInitDefault() ? 1 : 0;
-    }
     if (!g_fat_mounted) {
-        printf("[!] fatInitDefault() failed - no SD/USB storage found.\n");
-        printf("    Insert an SD card with /pcsx2/bios/*.bin and try again.\n");
-    } else {
-        printf("[+] Storage mounted.\n");
-        if (!g_bios_ok) {
-            memset(&g_bios, 0, sizeof(g_bios));
-            g_bios_ok = (bios_load("sd:/pcsx2/bios/SCPH39001.bin", &g_bios) == 0 ||
-                         bios_load("sd:/pcsx2/bios/SCPH10000.bin", &g_bios) == 0 ||
-                         bios_load("sd:/pcsx2/bios/bios.bin", &g_bios) == 0);
+        printf("\n[!] fatInitDefault() failed - no SD/USB storage found.\n");
+        printf("    Insert an SD card with /pcsx2/bios/*.bin and restart to\n");
+        printf("    boot a real BIOS. Press A or B to open the test menu.\n");
+        wait_for_button(PAD_BUTTON_A | PAD_BUTTON_B);
+        return;
+    }
+
+    if (!g_bios_ok) {
+        memset(&g_bios, 0, sizeof(g_bios));
+        g_bios_ok = (bios_load("sd:/pcsx2/bios/SCPH39001.bin", &g_bios) == 0 ||
+                     bios_load("sd:/pcsx2/bios/SCPH10000.bin", &g_bios) == 0 ||
+                     bios_load("sd:/pcsx2/bios/bios.bin", &g_bios) == 0);
+    }
+    if (!g_bios_ok) {
+        printf("\n[!] Could not load a PS2 BIOS image from sd:/pcsx2/bios/\n");
+        printf("    Place a legally-dumped PS2 BIOS there (e.g. bios.bin) and\n");
+        printf("    restart. Press A or B to open the test menu.\n");
+        wait_for_button(PAD_BUTTON_A | PAD_BUTTON_B);
+        return;
+    }
+
+    printf("[+] BIOS loaded: %s  size=%u  rom_ver=%s\n",
+           g_bios.name, (unsigned)g_bios.size, g_bios.version_string);
+
+    if (!g_system_started) {
+        system_init(&g_bios, &g_bios);
+        g_system_started = 1;
+        gs_init();
+        gs_mem_init();
+    }
+
+    ee_state_t  *ee  = ee_core_get_state();
+    iop_state_t *iop = iop_core_get_state();
+    gs_state_t  *gs  = gs_get_state();
+
+    uint32_t frame = 0;
+    uint64_t total_slices = 0;
+    int stopped_by_user = 0;
+
+    for (;;) {
+        VIDEO_WaitVSync();
+        PAD_ScanPads();
+        uint16_t held = PAD_ButtonsHeld(0);
+
+        if (!(ee->halted && iop->halted)) {
+            system_run_interleaved(BOOT_CHUNK_SLICES);
+            total_slices += BOOT_CHUNK_SLICES;
         }
-        if (!g_bios_ok) {
-            printf("[!] Could not load a PS2 BIOS image from sd:/pcsx2/bios/\n");
-            printf("    Place a legally-dumped PS2 BIOS there (e.g. bios.bin).\n");
-        } else {
-            printf("[+] BIOS loaded: %s\n", g_bios.name);
-            printf("    size=%u bytes  rom_ver=%s\n", (unsigned)g_bios.size, g_bios.version_string);
 
-            if (!g_system_started) {
-                system_init(&g_bios, &g_bios);
-                g_system_started = 1;
-                printf("\n[+] EE + IOP cores initialized (interleaved scheduler).\n");
-                printf("[+] Running interleaved for up to %llu instruction-slices"
-                       " (bounded test cap, not a real limit)...\n\n", DEMO_STEP_CAP);
-
-                int both_halted = system_run_interleaved(DEMO_STEP_CAP);
-
-                ee_state_t *ee = ee_core_get_state();
-                iop_state_t *iop = iop_core_get_state();
-                printf("[+] EE : instructions_executed=%llu  halted=%d\n",
-                       (unsigned long long)ee->instructions_executed, ee->halted);
-                printf("       reason: %s\n", ee->halted ? ee->halt_reason : "(still running - hit the test cap)");
-                printf("[+] IOP: instructions_executed=%llu  halted=%d\n",
-                       (unsigned long long)iop->instructions_executed, iop->halted);
-                printf("       reason: %s\n", iop->halted ? iop->halt_reason : "(still running - hit the test cap)");
-                printf("\n%s\n", both_halted
-                       ? "Both cores halted on their own (see reasons above)."
-                       : "Test cap reached first - both cores were still executing real instructions.");
-            } else {
-                ee_state_t *ee = ee_core_get_state();
-                iop_state_t *iop = iop_core_get_state();
-                printf("\n(Already run this session.)\n");
-                printf("[+] EE : instructions_executed=%llu  halted=%d  reason: %s\n",
-                       (unsigned long long)ee->instructions_executed, ee->halted,
-                       ee->halted ? ee->halt_reason : "(cap reached)");
-                printf("[+] IOP: instructions_executed=%llu  halted=%d  reason: %s\n",
-                       (unsigned long long)iop->instructions_executed, iop->halted,
-                       iop->halted ? iop->halt_reason : "(cap reached)");
+        /* PMODE bits 0/1 = EN1/EN2 (circuit 1/2 enabled) - real,
+         * documented GS register semantics, not a guess. */
+        int display_active = (gs->pmode & 0x3u) != 0;
+        if (display_active) {
+            uint32_t bp_words, bw_pixels;
+            decode_dispfb(gs->dispfb1, &bp_words, &bw_pixels);
+            if (bw_pixels > 0) {
+                uint32_t blit_h = rmode->xfbHeight > 140 ? rmode->xfbHeight - 140 : 0;
+                gs_blit_psmct32_to_xfb(xfb, rmode->fbWidth, 0, 140,
+                                       bp_words, bw_pixels, 0, 0,
+                                       rmode->fbWidth, blit_h);
+                DCFlushRange((uint8_t *)xfb + (size_t)140 * rmode->fbWidth * VI_DISPLAY_PIX_SZ,
+                             rmode->fbWidth * blit_h * VI_DISPLAY_PIX_SZ);
             }
         }
+
+        draw_boot_progress_hud(ee->instructions_executed, iop->instructions_executed,
+                                ee->halted, iop->halted, ee->halt_reason, iop->halt_reason,
+                                display_active);
+        draw_heartbeat(frame++);
+
+        if (held & PAD_BUTTON_B) { stopped_by_user = 1; break; }
+        if (ee->halted && iop->halted) break;
+        if (total_slices >= BOOT_TOTAL_CAP) break;
     }
 
-    printf("\nPress A or B to return to the menu.\n");
+    goto_rc(16, 400);
+    if (stopped_by_user)
+        printf("Stopped by user (B held).                                          \n");
+    else if (ee->halted && iop->halted)
+        printf("Both cores halted on their own - see reasons above.                \n");
+    else
+        printf("Reached the safety instruction cap - still executing real code.    \n");
+    printf("\nPress A or B to open the test menu.\n");
     wait_for_button(PAD_BUTTON_A | PAD_BUTTON_B);
+}
+
+/* Menu entry point wrapper - "Re-run Boot Flow" just re-enters the
+ * same real boot flow above (harmless if it already ran: system_init/
+ * gs_init are only called once via the g_system_started guard, so
+ * this resumes/re-displays the SAME already-running cores rather than
+ * restarting them). */
+static void action_bios_boot_test(void)
+{
+    run_real_boot_flow();
 }
 
 /* Menu action 2: the existing pixel-pipeline demos (fixed test bars
@@ -406,12 +518,15 @@ static void action_about(void)
     printf("Experimental PS2 EE/IOP interpreter port skeleton for Wii,\n");
     printf("built on devkitPPC + libogc.\n\n");
     printf("github.com/Mafiacoding/PCSX2-Wii\n\n");
-    printf("This is NOT a functional PS2 emulator yet - it does not boot\n");
-    printf("a real BIOS to the OSD splash screen. See docs/STATUS.md and\n");
-    printf("docs/ROADMAP.md in the repo for an honest account of what\n");
-    printf("actually works today (EE/IOP interpreters, DMA/GIF/GS register\n");
-    printf("plumbing, a real IOP module/IRX loader, a real VU opcode\n");
-    printf("table, an SPU2 register scaffold) and what is still missing.\n\n");
+    printf("This is NOT a functional PS2 emulator yet - a real BIOS does\n");
+    printf("boot for real (the automatic boot flow you just saw runs the\n");
+    printf("actual EE/IOP interpreters against it), but it does not yet\n");
+    printf("reach the OSD splash screen. See docs/STATUS.md's \"Round 29\"\n");
+    printf("sections for the current, honest state of that investigation.\n");
+    printf("docs/ROADMAP.md has the full account of what actually works\n");
+    printf("today (EE/IOP interpreters, DMA/GIF/GS register plumbing, a\n");
+    printf("real IOP module/IRX loader, a real VU opcode table, an SPU2\n");
+    printf("register scaffold) and what is still missing.\n\n");
     printf("Press A or B to return to the menu.\n");
     wait_for_button(PAD_BUTTON_A | PAD_BUTTON_B);
 }
@@ -419,6 +534,14 @@ static void action_about(void)
 int main(int argc, char **argv)
 {
     wii_console_setup();
+
+    /* Task #126: the real BIOS boot flow is now the automatic,
+     * primary action - runs immediately, before any menu is shown.
+     * See the top-of-file header comment for the full rationale. The
+     * test menu below remains available afterward (or immediately, if
+     * the user holds B to stop the boot flow early) as a secondary
+     * diagnostic surface. */
+    run_real_boot_flow();
 
     int selected = 0;
     uint32_t frame = 0;

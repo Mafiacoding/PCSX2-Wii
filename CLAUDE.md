@@ -2184,3 +2184,34 @@ technique so it doesn't need rediscovery).
 
 Per user direction, documentation is now written in English going
 forward (chat itself remains in whatever language the user uses).
+
+## Update (Round 29 continued, 31st change): front-loaded module loading implemented, retry loop confirmed unaffected (Task #151/#152)
+
+Per user direction, attempted the higher-risk path for the retry loop
+from the 30th change: traced it to a real ExitCriticalSection syscall
+(`$a0=2`) from INTRMANP re-entering LOADCORE's own registration-list
+walk - the same mechanism #124/#132 already characterized and closed.
+
+Refactored `source/hw/iop_module_loader.c`: split `load_and_link_one()`
+into `load_only_one()` (ELF load/relocate/export-registration) and
+`link_imports_one()` (deferred import-stub patching). New
+`load_all_modules()` front-loads every boot-list module before any
+entry point runs, then links every module's imports in a second pass
+- so imports can now resolve regardless of list order (previously
+forward-only). `iop_module_loader_boot()`/`try_handle()` updated to
+use precomputed entry points via a shared `advance_to_next_module()`.
+
+**Honest result**: real-BIOS testing shows the retry loop is
+byte-for-byte identical to before - front-loading doesn't touch
+LOADCORE's own internal `boot_info[0x18]`/`[0x1C]` registration-list
+mechanism, which is separate from ELF import/export linking. A
+follow-up attempt to responsibly source real (non-fabricated)
+function-pointer entries from already-loaded module memory also
+failed concretely: the referenced helper-subroutine addresses, and
+even LOADCORE's own code region, read back as all-zero in IOP RAM by
+the time they'd be needed.
+
+Kept the refactor anyway - it's a genuine, real improvement
+(bidirectional import resolution) independent of the retry-loop
+question. Full 85-block regression suite passes; clean Wii rebuild
+verified. Task #151 (the retry loop itself) remains open.

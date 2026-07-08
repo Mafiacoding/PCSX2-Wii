@@ -1290,7 +1290,30 @@ already documented, rather than truly returning from the syscall.
    value). Same class of finding as #124/#132's LOADCORE closure: an
    honest architectural stop, not pursued further this round. See
    STATUS.md's 30th finding for full detail. Open follow-up: task
-   #151.
+   #151. UPDATE (Round 29 continued, 31st change, task #152): per
+   user direction, attempted the higher-risk fix - traced the retry
+   loop to a real ExitCriticalSection syscall re-entering LOADCORE's
+   own registration-list walk (same mechanism as #124/#132), then
+   refactored source/hw/iop_module_loader.c to front-load every boot-
+   list module (parse+relocate+export-registration) before running
+   any entry point, deferring import-stub linking to a second pass so
+   imports can resolve regardless of list order (previously
+   forward-only). HONEST RESULT: real-BIOS testing shows the IOP's
+   behavior is byte-for-byte IDENTICAL to before this change - the
+   retry loop is governed by LOADCORE's own internal
+   boot_info[0x18]/[0x1C] bookkeeping, a separate mechanism from ELF
+   import/export linking, so changing load order alone doesn't fix
+   it. A follow-up attempt to source REAL (non-fabricated) function-
+   pointer entries by reading them from already-loaded module memory
+   also failed concretely: the four helper-subroutine addresses cited
+   in the 27th finding, and even LOADCORE's own code region, read
+   back as all-zero in IOP RAM by the time they'd be needed - the
+   real content isn't resident at that point, regardless of load
+   order. The front-loading refactor is kept anyway (real, independent
+   improvement: forward-only import resolution was an artificial
+   limitation, not a hardware constraint); full 85-block regression
+   suite passes; clean Wii rebuild verified. Task #151 remains open -
+   see STATUS.md's 31st finding for the complete investigation.
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the
    register-block entry in section 7 above. Register-level scaffold

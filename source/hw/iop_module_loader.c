@@ -138,6 +138,17 @@ static struct {
     export_registry_entry_t exports[EXPORT_REGISTRY_MAX];
     int export_count;
 
+    /* Round 29 continued (31st change): front-loading support - see
+     * load_all_modules()'s header comment below. entry_points[i] is
+     * modlist[i]'s real entry point (0 = failed to load), computed
+     * once by load_all_modules() before any entry point runs.
+     * elf_results[i] keeps each module's iop_elf_load() output (in
+     * particular its import table list) around so the deferred
+     * second-pass linking step doesn't need to re-parse the ELF. */
+    uint32_t entry_points[MODLIST_MAX];
+    iop_elf_load_result_t elf_results[MODLIST_MAX];
+    int all_loaded;
+
     iop_module_loader_stats_t stats;
 } g;
 
@@ -264,53 +275,73 @@ static const export_registry_entry_t *export_registry_find(const char *name)
     return NULL;
 }
 
-/* Loads one module by ROMDIR name, links its imports against
- * already-registered exports, registers its own exports, and returns
- * its entry point (or 0 on any failure - missing ROMDIR entry,
- * malformed ELF, etc; the caller decides whether to skip and try the
- * next module in the list). */
-static uint32_t load_and_link_one(iop_state_t *st, const char *name)
+/* Loads one module by ROMDIR name and registers its own exports.
+ * Returns its entry point (or 0 on any failure - missing ROMDIR
+ * entry, malformed ELF, etc; the caller decides whether to skip it).
+ *
+ * Round 29 continued (31st change): this used to ALSO resolve the
+ * module's own imports inline, one module at a time, interleaved
+ * with running each one's entry point - meaning a module could only
+ * ever resolve imports against modules that happened to load EARLIER
+ * in the boot list, and any already-loaded module's own code/data
+ * (e.g. LOADCORE's real init, which the 27th finding in
+ * docs/STATUS.md traced walking its own internal registration list)
+ * only ever saw whatever partial state existed at that one moment,
+ * since nothing else had been loaded yet. Import linking is now a
+ * separate, deferred step (link_imports_one(), below) that
+ * load_all_modules() runs in its own second pass, once every listed
+ * module has already been loaded and every real export table is
+ * already known - see load_all_modules()'s own header comment for
+ * the full rationale (docs/STATUS.md's "31st finding"). */
+static uint32_t load_only_one(iop_state_t *st, const char *name, iop_elf_load_result_t *out)
 {
     g.stats.modules_attempted++;
 
     const romdir_entry_t *rd = romdir_find(name);
 #ifdef IOP_MODLOADER_DEBUG
-    fprintf(stderr, "[modloader] load_and_link_one('%s') rd=%p\n", name, (void*)rd);
+    fprintf(stderr, "[modloader] load_only_one('%s') rd=%p\n", name, (void*)rd);
 #endif
     if (!rd || rd->size == 0) return 0;
     if ((uint64_t)rd->payload_off + rd->size > st->bios->size) return 0;
 
     uint32_t load_addr = bump_alloc(rd->size + 0x1000u /* headroom for bss + tables, generous */);
 
-    iop_elf_load_result_t res;
     const char *err = NULL;
-    int rc = iop_elf_load(st, st->bios->data + rd->payload_off, rd->size, load_addr, &res, &err);
+    int rc = iop_elf_load(st, st->bios->data + rd->payload_off, rd->size, load_addr, out, &err);
 #ifdef IOP_MODLOADER_DEBUG
-    fprintf(stderr, "[modloader]   rc=%d err=%s entry=0x%x\n", rc, err ? err : "(none)", rc==0?res.entry:0);
+    fprintf(stderr, "[modloader]   rc=%d err=%s entry=0x%x\n", rc, err ? err : "(none)", rc==0?out->entry:0);
 #endif
     if (rc != 0) return 0;
 
     /* Advance the bump allocator to the module's real end (we
      * over-allocated headroom above; this reclaims the unused part
      * for the NEXT module, keeping IOP RAM usage honest). */
-    g.bump_next = (res.load_end + 15u) & ~15u;
+    g.bump_next = (out->load_end + 15u) & ~15u;
 
     g.stats.modules_loaded++;
 
-    /* Register this module's own export table(s) so LATER modules in
-     * the boot list can resolve imports against it. */
-    for (int i = 0; i < res.export_count; i++) {
-        export_registry_add(res.exports[i].name,
-                             res.exports[i].addr + 20u /* fptrs[0] - see iop_elf.h layout */,
-                             res.exports[i].fptr_count);
+    /* Register this module's own export table(s) immediately (not
+     * deferred) so EVERY module - including ones loaded earlier in
+     * the same front-loading pass - can resolve imports against it
+     * once link_imports_one() runs for everyone. */
+    for (int i = 0; i < out->export_count; i++) {
+        export_registry_add(out->exports[i].name,
+                             out->exports[i].addr + 20u /* fptrs[0] - see iop_elf.h layout */,
+                             out->exports[i].fptr_count);
     }
 
-    /* Resolve this module's OWN imports against modules already
-     * loaded earlier in the boot list (real IOPBTCONF order always
-     * lists a dependency before its dependents - see
-     * iop_module_loader.h's citation). */
-    for (int i = 0; i < res.import_count; i++) {
-        const iop_elf_import_table_t *imp = &res.imports[i];
+    return out->entry;
+}
+
+/* Resolves one already-loaded module's imports against whatever is
+ * currently in the export registry. Deferred out of load_only_one()
+ * (see that function's header comment) so this can run AFTER every
+ * listed module has been loaded, regardless of which order they
+ * appear in the boot list. */
+static void link_imports_one(iop_state_t *st, const iop_elf_load_result_t *res)
+{
+    for (int i = 0; i < res->import_count; i++) {
+        const iop_elf_import_table_t *imp = &res->imports[i];
         const export_registry_entry_t *exp = export_registry_find(imp->name);
 
         uint32_t stub_base = imp->addr + 20u; /* stubs[0] - see iop_elf.h layout */
@@ -327,15 +358,53 @@ static uint32_t load_and_link_one(iop_state_t *st, const char *name)
             } else {
                 /* Left as the original "jr $ra" (a safe, harmless
                  * no-op return) - not fabricated further. Genuinely
-                 * expected sometimes: e.g. a forward reference, or an
-                 * import this project's real-BIOS-derived boot list
-                 * doesn't actually provide. */
+                 * expected sometimes: e.g. an import this project's
+                 * real-BIOS-derived boot list doesn't actually
+                 * provide at all (as opposed to "not yet loaded" -
+                 * now that loading is front-loaded, a still-
+                 * unresolved import means the exporting module
+                 * genuinely isn't in this boot list, not just an
+                 * ordering gap). */
                 g.stats.imports_unresolved++;
             }
         }
     }
+}
 
-    return res.entry;
+/* Round 29 continued (31st change): front-loads EVERY module in the
+ * boot list - parses, relocates, and registers exports for all of
+ * them - before running ANY module's entry point, then resolves every
+ * module's imports in a separate second pass once every export table
+ * is known. This is option (b) from the 27th finding in
+ * docs/STATUS.md (task #124/#132's LOADCORE registration-list
+ * closure): the hypothesis that real hardware's own boot order loads/
+ * relocates multiple modules' images before running any entry point,
+ * letting static per-module registration data accumulate first,
+ * instead of this project's previous one-module-at-a-time interleaving
+ * (load module N, run its entry point to completion, only THEN load
+ * module N+1).
+ *
+ * WHAT THIS DOES NOT CLAIM: this does NOT fabricate any function
+ * pointer, struct layout, or registration-list entry - it only
+ * changes WHEN this project's own already-existing, already-cited
+ * ELF loading/relocation/export-registration logic runs relative to
+ * entry-point execution. Every address used is a real, computed
+ * relocation result from iop_elf_load(), exactly as before. Whether
+ * this actually changes LOADCORE's own real init code's behavior
+ * (its registration-list check is a separate, still-unreverse-
+ * engineered mechanism from the import/export linking this function
+ * touches - see the 27th finding) is an open empirical question this
+ * change lets the project actually test, rather than a claim made
+ * here. */
+static void load_all_modules(iop_state_t *st)
+{
+    for (int i = 0; i < g.modlist_count; i++) {
+        g.entry_points[i] = load_only_one(st, g.modlist[i], &g.elf_results[i]);
+    }
+    for (int i = 0; i < g.modlist_count; i++) {
+        if (g.entry_points[i] != 0) link_imports_one(st, &g.elf_results[i]);
+    }
+    g.all_loaded = 1;
 }
 
 int iop_module_loader_boot(iop_state_t *st)
@@ -382,21 +451,22 @@ int iop_module_loader_boot(iop_state_t *st)
         iop_mem_write32(st, g.boot_info_addr + BOOT_INFO_OFF_SCRATCH_PTR, scratch);
     }
 
+    /* Round 29 continued (31st change): front-load every listed
+     * module before running any entry point - see load_all_modules()'s
+     * header comment above. */
+    load_all_modules(st);
+
     g.modlist_index = 0;
-    while (g.modlist_index < g.modlist_count) {
-        uint32_t entry = load_and_link_one(st, g.modlist[g.modlist_index]);
-        if (entry != 0) {
-            st->gpr[31] = g.trampoline_addr;
-            st->gpr[29] = INITIAL_SP; /* $sp - see INITIAL_SP's comment above */
-            st->gpr[4]  = g.boot_info_addr; /* $a0 - see BOOT_INFO_RAM_MB's comment above */
-            st->pc = entry;
-            st->next_pc = entry + 4;
-            g.booted_ok = 1;
-            return 1;
-        }
-        g.modlist_index++;
-    }
-    return 0; /* not even the first module in the list could be loaded */
+    while (g.modlist_index < g.modlist_count && g.entry_points[g.modlist_index] == 0) g.modlist_index++;
+    if (g.modlist_index >= g.modlist_count) return 0; /* not even one module in the list could be loaded */
+
+    st->gpr[31] = g.trampoline_addr;
+    st->gpr[29] = INITIAL_SP; /* $sp - see INITIAL_SP's comment above */
+    st->gpr[4]  = g.boot_info_addr; /* $a0 - see BOOT_INFO_RAM_MB's comment above */
+    st->pc = g.entry_points[g.modlist_index];
+    st->next_pc = st->pc + 4;
+    g.booted_ok = 1;
+    return 1;
 }
 
 /* Round 29 continued (28th change): LOADCORE panic-loop recognition -
@@ -464,24 +534,30 @@ static int is_loadcore_panic_loop(iop_state_t *st, uint32_t pc)
     return 1;
 }
 
+/* Shared by both advance paths below: moves g.modlist_index forward
+ * to the next module that actually has a valid (front-loaded) entry
+ * point, and if found, sets up registers/pc exactly like
+ * iop_module_loader_boot() did for the first module. Returns 1 if it
+ * found one and redirected execution, 0 if the list is exhausted. */
+static int advance_to_next_module(iop_state_t *st)
+{
+    g.modlist_index++;
+    while (g.modlist_index < g.modlist_count && g.entry_points[g.modlist_index] == 0) g.modlist_index++;
+    if (g.modlist_index >= g.modlist_count) return 0;
+
+    st->gpr[31] = g.trampoline_addr;
+    st->gpr[29] = INITIAL_SP; /* $sp - see INITIAL_SP's comment above */
+    st->gpr[4]  = g.boot_info_addr; /* $a0 - see BOOT_INFO_RAM_MB's comment above */
+    st->pc = g.entry_points[g.modlist_index];
+    st->next_pc = st->pc + 4;
+    return 1;
+}
+
 int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
 {
     if (g.booted_ok && is_loadcore_panic_loop(st, pc)) {
         g.stats.panic_loops_bypassed++;
-        g.modlist_index++;
-
-        while (g.modlist_index < g.modlist_count) {
-            uint32_t entry = load_and_link_one(st, g.modlist[g.modlist_index]);
-            if (entry != 0) {
-                st->gpr[31] = g.trampoline_addr;
-                st->gpr[29] = INITIAL_SP; /* $sp - see INITIAL_SP's comment above */
-                st->gpr[4]  = g.boot_info_addr; /* $a0 - see BOOT_INFO_RAM_MB's comment above */
-                st->pc = entry;
-                st->next_pc = entry + 4;
-                return 1;
-            }
-            g.modlist_index++;
-        }
+        if (advance_to_next_module(st)) return 1;
 
         static char panic_msg[160];
         snprintf(panic_msg, sizeof(panic_msg),
@@ -498,28 +574,16 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
     if (!g.booted_ok || pc != g.trampoline_addr) return 0;
 
     g.stats.modules_run_to_completion++;
-    g.modlist_index++;
-
-    while (g.modlist_index < g.modlist_count) {
-        uint32_t entry = load_and_link_one(st, g.modlist[g.modlist_index]);
-        if (entry != 0) {
-            st->gpr[31] = g.trampoline_addr;
-            st->gpr[29] = INITIAL_SP; /* $sp - see INITIAL_SP's comment above */
-            st->gpr[4]  = g.boot_info_addr; /* $a0 - see BOOT_INFO_RAM_MB's comment above */
-            st->pc = entry;
-            st->next_pc = entry + 4;
-            return 1;
-        }
-        g.modlist_index++;
-    }
+    if (advance_to_next_module(st)) return 1;
 
     /* Every module in the real BIOS's own IOPBTCONF/IOPBTCON2 list
-     * has now been loaded, linked, and had its real entry point
-     * executed to completion by this project's actual IOP
-     * interpreter - a genuine milestone, not a real hardware halt (no
-     * public reference describes what real hardware's OWN loadcore
-     * loop does immediately after this point, so this project stops
-     * here honestly rather than guessing). */
+     * has now been front-loaded (task #92, extended by the 31st
+     * change) and had its real entry point executed to completion by
+     * this project's actual IOP interpreter - a genuine milestone,
+     * not a real hardware halt (no public reference describes what
+     * real hardware's OWN loadcore loop does immediately after this
+     * point, so this project stops here honestly rather than
+     * guessing). */
     static char msg[128];
     snprintf(msg, sizeof(msg),
              "module boot sequence complete: %u/%u real modules loaded, %u run to completion (task #92)",

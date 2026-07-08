@@ -5697,3 +5697,90 @@ been left as an open task (#151) for whoever continues this thread,
 with the exact PC range and the `diag85`-style sampling technique
 documented here so it doesn't need to be rediscovered from scratch.
 
+
+## 31st finding/change (Round 29 continued): front-loaded module loading implemented and tested empirically against the retry loop (task #151/#152)
+
+Following a deep single-step trace (task #151) that found the
+0x80000080-0x800000AC retry loop is caused by a genuine, real
+ExitCriticalSection syscall (`$a0=2`) from INTRMANP re-entering
+LOADCORE's own real init code, which walks its own internal
+module/library registration list (the same mechanism the 27th
+finding already characterized and closed for #124/#132) and finds it
+empty again, this project attempted the user-directed, higher-risk
+path: change the loader's architecture so all boot-list modules are
+loaded/relocated before any entry point runs, on the hypothesis
+(already proposed as "option (b)" in the 27th finding) that this
+might let LOADCORE's registration list end up populated by the time
+its own init reaches the check.
+
+**Implementation** (`source/hw/iop_module_loader.c`): `load_and_link_one()`
+was split into `load_only_one()` (ELF load, relocation, and export-
+table registration only) and a new `link_imports_one()` (the import-
+stub-patching step, deferred). A new `load_all_modules()` runs
+`load_only_one()` for every listed module FIRST, then runs
+`link_imports_one()` for every successfully-loaded module in a second
+pass - so a module's imports can now resolve against modules that
+load LATER in the boot list too, not just earlier ones as before.
+`iop_module_loader_boot()` and `iop_module_loader_try_handle()` were
+updated to use the precomputed `entry_points[]` array (via a new
+shared `advance_to_next_module()` helper) instead of loading one
+module at a time interleaved with running entry points. This changes
+WHEN loading happens relative to execution; it does not fabricate any
+address, struct layout, or registration entry - every address used is
+still a real, computed relocation result from `iop_elf_load()`,
+exactly as before.
+
+**Empirical result (honest, not the hoped-for outcome)**: real-BIOS
+testing (`diag92`/`diag93`, same methodology as the 30th finding's
+`diag85`) shows the IOP's behavior is **byte-for-byte identical** to
+before this change - the same PC values in the same order cycling
+through the `0x80000080`-`0x800000AC` range forever. Front-loading
+module loading and deferring import linking did NOT change LOADCORE's
+own internal registration-list outcome, because - as this round's
+tracing already established - that check is governed by
+`boot_info[0x18]`/`[0x1C]` and LOADCORE's own internal
+`lc_internals_t`-style bookkeeping, a completely separate mechanism
+from the ELF import/export linking this change touches. Simply
+changing the ORDER modules are loaded in doesn't populate those
+fields; only constructing a real, correctly-formatted registration
+entry (or otherwise making LOADCORE's own init code observe those
+fields as non-zero) would, and that entry format remains unreverse-
+engineered (see below).
+
+**Why the entry-struct route is still blocked**: an attempt was made
+to responsibly source REAL (not fabricated) function-pointer entries
+by reading them out of the already-loaded, already-relocated modules'
+own memory, rather than inventing addresses. This failed for a
+concrete, verifiable reason: dumping IOP RAM at the four helper-
+subroutine addresses the 27th finding cited (`0x1018d0`, `0x101f30`,
+`0x102120`, `0x10198c`/`0x101410`) shows all-zero content at the
+point they'd be needed, and LOADCORE's own code region
+(`0x100CD0` onward) itself reads back as all-zero by the time the
+retry loop is active - the real content genuinely isn't resident in
+IOP RAM at the moment it would be needed, regardless of load order.
+Constructing "real" entries under these conditions would still mean
+guessing at addresses, which remains the same unacceptable risk this
+project has consistently declined to take (fabricated `jalr` targets
+do not fail safely).
+
+**Kept anyway**: this change is retained despite not resolving the
+retry loop, because it is a genuine, real improvement in its own
+right - forward-only import resolution (a module could only ever
+import from earlier-loaded modules) was itself an artificial
+limitation of the old one-at-a-time interleaving, not a real hardware
+constraint, and this fixes it independently of the retry-loop
+question. Full 85-block regression suite passes (no new tests
+needed - existing `test_iop_module_loader_bootinfo.c`, `test_iop_elf.c`,
+and `test_iop_loadcore_panic_bypass.c` all still pass unchanged,
+confirming the refactor preserves existing behavior for every already-
+tested scenario); clean Wii rebuild verified.
+
+**Honest status of task #151**: still open. The retry loop at
+`0x80000080`-`0x800000AC` is now understood in full mechanistic
+detail (see the 29th/30th/31st findings) but not resolved. The
+remaining paths are the same two identified in the 27th finding:
+(a) fully reverse-engineer the registration-entry struct format with
+enough confidence to construct a real entry - now additionally
+blocked by the missing helper-subroutine code described above, or
+(b) some other, more invasive architecture change this round did not
+find (front-loading alone was insufficient).

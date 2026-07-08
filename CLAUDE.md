@@ -2075,3 +2075,50 @@ running any entry point (a bounded, revertible experiment, same
 falsifiable-hypothesis style the 13th finding already used
 successfully). No real BIOS bytes committed; all analysis stayed in
 /tmp diagnostics per the project's standing security rule.
+
+## Update (Round 29 continued, 28th change - LOADCORE-Panic-Schleife erkannt, echter Boot-Fortschritt)
+
+Auf Nutzerwunsch, nach der 27th-finding-Root-Cause-Analyse (task
+#124/#132) konkret weiterzumachen: implementierte eine sichere,
+Byte-Signatur-basierte Erkennung der exakten realen LOADCORE-Panic-
+Sequenz (`lui $v1,0x8000; addiu $v0,zero,2; sb $v0,($v1); j <self>`)
+in `iop_module_loader.c`'s neuer `is_loadcore_panic_loop()`. Beim
+Erkennen: Übergang zum nächsten Modul in der echten IOPBTCONF-Liste,
+exakt wie beim bestehenden Trampolin-Mechanismus - statt die reale
+Panic-Sequenz auszuführen und für immer zu spinnen.
+
+Warum sicher: die Phase-Dispatch-Liste (27th finding) ruft echte
+Funktionszeiger per `jalr` auf - ein Rateversuch dort wäre unsicher
+(Sprung in beliebigen Speicher als Code). Die hier erkannte Panic-
+Sequenz dagegen ist unveränderlicher, bereits vollständig
+disassemblierter, realer BIOS-Code, der nichts Neues ausführt -
+lediglich ERKANNT wird, dass LOADCORE hier absichtlich in eine
+Endlosschleife geht. Explizite, dokumentierte Entwurfsentscheidung
+über den eigenen externen Sequenzierungs-Shortcut, keine Aussage über
+reales Hardware-Verhalten.
+
+Echter Kodierungsfehler gefunden+behoben: die erste Handkodierung der
+`lui`/`sb`-Konstanten benutzte irrtümlich `$at` statt `$v1` als
+Basisregister - erst durch erneutes Disassemblieren der TATSÄCHLICHEN
+emulierten Bytes entdeckt.
+
+Gemessener echter Fortschritt (echte SCPH-10000-BIOS): vorher hing
+der IOP für immer bei `pc=0x001012A8`. Jetzt laufen echt: `SYSMEM` →
+`LOADCORE` (Panic-Schleife umgangen) → `EXCEPMAN` (eigene Panic-
+Schleife auch umgangen) → `INTRMANP` (echter Entry `0x103100`) →
+sauberer Halt bei `pc=0x00000018`, `halt_reason="BREAK"` (echter,
+sauber erkannter BREAK-Befehl, kein Absturz). Drei zusätzliche echte
+Module laufen jetzt tatsächlich statt endlos bei Modul 1/29 zu hängen.
+
+Neuer Test `tests/test_iop_loadcore_panic_bypass.c` (9 Checks, rein
+synthetisch): erkennt die exakte Signatur; zwei Negativ-Kontrollen
+(falsches Basisregister; Sprung ohne Selbstschleife) korrekt
+abgelehnt; der echte Interpreter-Pfad geht ohne Halt zum nächsten
+Modul über. Volle 84-Block-Regression besteht, sauberer Wii-Rebuild
+verifiziert.
+
+Nächster natürlicher Schritt: der neue Haltepunkt `BREAK`@`0x18` ist
+noch nicht root-caused (vermutlich INTRMANP's Interrupt-Controller-
+Init trifft auf etwas Fehlendes). Der Panic-Loop-Bypass selbst ist
+generisch (Byte-Signatur, keine feste Adresse) und greift automatisch
+überall, wo dieselbe reale Panic-Sequenz erneut auftritt.

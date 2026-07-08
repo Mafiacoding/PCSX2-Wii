@@ -399,8 +399,102 @@ int iop_module_loader_boot(iop_state_t *st)
     return 0; /* not even the first module in the list could be loaded */
 }
 
+/* Round 29 continued (28th change): LOADCORE panic-loop recognition -
+ * see docs/STATUS.md's 27th finding for the full root-cause story
+ * (task #124/#132). Real LOADCORE module-loader code reaches a
+ * genuine, deliberate real-BIOS "panic: write status code 2 to
+ * physical RAM address 0, then spin forever" sequence when its own
+ * internal multi-phase module/library self-registration list turns
+ * up empty - which happens in this project's emulation because this
+ * very loader runs exactly one module's ELF and entry point at a
+ * time, so no other module has had a chance to register anything
+ * into LOADCORE's internal table by the time LOADCORE's own init
+ * reaches this check. This is a genuine, structural difference from
+ * real hardware's own boot order (real boot almost certainly lets
+ * other modules register before LOADCORE's own init reaches this
+ * point - see STATUS.md), not a value this project can safely
+ * fabricate: the real function-pointer dispatch loop that WOULD read
+ * genuine registration entries calls through `jalr` with a real code
+ * address read from each entry - an incorrect guess there does not
+ * fail safely, it can jump into arbitrary emulated memory as code
+ * (unlike this project's earlier, safe pointer-only defensive fixes:
+ * INITIAL_SP, boot_info offset 0x0C, both of which only needed a
+ * pointer to land somewhere harmless).
+ *
+ * WHAT THIS DOES INSTEAD: recognizes the exact, distinctive 4-word
+ * instruction sequence real LOADCORE code executes at this panic
+ * point - `lui $v1,0x8000; addiu $v0,zero,2; sb $v0,($v1); j <self>`
+ * (self = a jump back to the sb instruction's own address, forming
+ * the infinite loop) - by its literal encoded bytes, not a hardcoded
+ * address, so this survives the panic sequence loading at a
+ * different address if some other real BIOS build ever shifts
+ * LOADCORE's own load offset. On recognizing it, treats reaching
+ * this exact point exactly like a module returning through this
+ * loader's own trampoline mechanism (already used to sequence every
+ * other module's boot): proceeds to the next module in the real
+ * IOPBTCONF list instead of letting the real panic sequence execute
+ * and spin forever.
+ *
+ * THIS IS AN EXPLICIT, DOCUMENTED ENGINEERING DECISION ABOUT THIS
+ * PROJECT'S OWN EXTERNAL MODULE-SEQUENCING SHORTCUT, NOT A CLAIM
+ * ABOUT REAL HARDWARE BEHAVIOR. Real hardware's own LOADCORE most
+ * likely never reaches this exact panic on a real console boot -
+ * this project simply cannot yet safely replicate the real
+ * registration mechanism that would prevent it (see above), so
+ * instead of leaving the emulated IOP stuck forever in a real,
+ * working-as-designed BIOS panic loop, this loader's own external
+ * sequencer takes over at EXACTLY this recognized point, the same
+ * honest way it already takes over at its own trampoline return
+ * address. */
+#define LOADCORE_PANIC_LUI_V1_8000 0x3C038000u /* lui $v1, 0x8000 ($v1=r3) */
+#define LOADCORE_PANIC_ADDIU_V0_2  0x24020002u /* addiu $v0, $zero, 2 */
+#define LOADCORE_PANIC_SB_V0_V1    0xA0620000u /* sb $v0, 0($v1) ($v1=r3 base) */
+
+static int is_loadcore_panic_loop(iop_state_t *st, uint32_t pc)
+{
+    if (iop_mem_read32(st, pc)      != LOADCORE_PANIC_LUI_V1_8000) return 0;
+    if (iop_mem_read32(st, pc + 4u) != LOADCORE_PANIC_ADDIU_V0_2)  return 0;
+    if (iop_mem_read32(st, pc + 8u) != LOADCORE_PANIC_SB_V0_V1)    return 0;
+
+    uint32_t j_instr = iop_mem_read32(st, pc + 12u);
+    if ((j_instr >> 26) != 0x02u) return 0; /* must be a real J-type opcode */
+    uint32_t j_target = ((j_instr & 0x03FFFFFFu) << 2) | ((pc + 16u) & 0xF0000000u);
+    if (j_target != pc + 8u) return 0; /* must jump back to the sb instruction (self-loop) */
+
+    return 1;
+}
+
 int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
 {
+    if (g.booted_ok && is_loadcore_panic_loop(st, pc)) {
+        g.stats.panic_loops_bypassed++;
+        g.modlist_index++;
+
+        while (g.modlist_index < g.modlist_count) {
+            uint32_t entry = load_and_link_one(st, g.modlist[g.modlist_index]);
+            if (entry != 0) {
+                st->gpr[31] = g.trampoline_addr;
+                st->gpr[29] = INITIAL_SP; /* $sp - see INITIAL_SP's comment above */
+                st->gpr[4]  = g.boot_info_addr; /* $a0 - see BOOT_INFO_RAM_MB's comment above */
+                st->pc = entry;
+                st->next_pc = entry + 4;
+                return 1;
+            }
+            g.modlist_index++;
+        }
+
+        static char panic_msg[160];
+        snprintf(panic_msg, sizeof(panic_msg),
+                 "module boot sequence complete (via LOADCORE panic-loop bypass): "
+                 "%u/%u real modules loaded, %u run to completion, %u panic-loop bypass(es) (task #124/#132/#148)",
+                 (unsigned)g.stats.modules_loaded, (unsigned)g.modlist_count,
+                 (unsigned)g.stats.modules_run_to_completion, (unsigned)g.stats.panic_loops_bypassed);
+        st->halted = 1;
+        strncpy(st->halt_reason, panic_msg, sizeof(st->halt_reason) - 1);
+        st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';
+        return 1;
+    }
+
     if (!g.booted_ok || pc != g.trampoline_addr) return 0;
 
     g.stats.modules_run_to_completion++;

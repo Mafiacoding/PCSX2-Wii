@@ -1916,3 +1916,28 @@ shift-in history behavior (`clipflag = (old << 6) | new_bits`).
 gcc -I../include -I../source -o test_ee_cop2_clip tests/test_ee_cop2_clip.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_clip
 ```
+
+`test_iop_loadcore_panic_bypass.c` covers Round 29 continued's 28th
+change - `is_loadcore_panic_loop()` in `iop_module_loader.c` (task
+#124/#132/#148, see docs/STATUS.md's 27th/28th findings). Real
+LOADCORE module-loader code reaches a genuine, deliberate real-BIOS
+panic sequence (`lui $v1,0x8000; addiu $v0,zero,2; sb $v0,($v1);
+j <self>`) when its own internal multi-phase module/library self-
+registration list turns up empty - a real gap this project cannot
+safely fabricate a fix for (the real dispatch that WOULD read
+registration entries calls through a genuine `jalr`, so a wrong guess
+doesn't fail safely). Instead, this recognizes the exact panic
+instruction sequence by its literal encoded bytes and treats reaching
+it exactly like a module returning through this loader's own
+trampoline: advances to the next module in the real IOPBTCONF list.
+9 checks: the exact real byte signature is recognized; two negative
+controls (wrong base register in the `sb`; a jump that doesn't loop
+back to the `sb` instruction) are correctly rejected, proving the
+match isn't overbroad; and the actual interpreter-facing entry point
+(`iop_module_loader_try_handle()`) advances to the next module without
+halting when the signature is reached.
+
+```sh
+gcc -I../include -I../source -o test_iop_loadcore_panic_bypass tests/test_iop_loadcore_panic_bypass.c ../source/core/iop/iop_core.c ../source/hw/iop_elf.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_cdvd.c ../source/hw/iop_spu2.c
+./test_iop_loadcore_panic_bypass
+```

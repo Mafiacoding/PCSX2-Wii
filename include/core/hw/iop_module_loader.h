@@ -109,6 +109,10 @@ typedef struct {
     uint32_t modules_run_to_completion; /* returned via the trampoline */
     uint32_t imports_resolved;
     uint32_t imports_unresolved;
+    uint32_t panic_loops_bypassed; /* Round 29 continued, 28th change -
+                                     * see iop_module_loader.c's
+                                     * is_loadcore_panic_loop() header
+                                     * comment (task #124/#132/#148) */
 } iop_module_loader_stats_t;
 
 iop_module_loader_stats_t *iop_module_loader_get_stats(void);

@@ -1235,7 +1235,23 @@ already documented, rather than truly returning from the syscall.
    and unacceptable risk. See docs/STATUS.md's 27th finding for the
    full disassembly, the four still-unreverse-engineered helper
    subroutines (0x1018d0/0x101f30/0x102120/0x10198c), and the two
-   scoped options for whoever pursues this further.
+   scoped options for whoever pursues this further. UPDATE (Round 29
+   continued, 28th change): implemented a safe, byte-signature-based
+   (not address-based) recognition of the exact panic instruction
+   sequence itself (`lui $v1,0x8000; addiu $v0,zero,2; sb $v0,($v1);
+   j <self>`), distinct from - and much lower-risk than - trying to
+   populate the real registration list (that would need a genuine
+   `jalr` target, this doesn't). On recognizing it, the loader
+   advances to the next module, the same way it already does at its
+   own trampoline return address. Measured, real result: `LOADCORE` →
+   `EXCEPMAN` (hits its OWN copy of the same panic sequence, also
+   bypassed) → `INTRMANP` now all load and run for real against the
+   actual SCPH-10000 BIOS, reaching a new, clean stop at
+   `pc=0x00000018`/`BREAK` (a real, cleanly recognized instruction,
+   not a crash). Tested via `tests/test_iop_loadcore_panic_bypass.c`
+   (9 checks, including 2 negative controls proving the match isn't
+   overbroad). The new `BREAK`-at-`0x18` stop is not yet root-caused -
+   that's the natural next step for whoever continues this thread.
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the
    register-block entry in section 7 above. Register-level scaffold
@@ -1272,14 +1288,15 @@ already documented, rather than truly returning from the syscall.
    needed after all; VCLIPw, the last remaining gap, added Round 29
    continued's 26th change - resolved by reusing control-register slot
    18 (REG_CLIP_FLAG) via the existing generic CFC2/MTC2/QMTC2 paths,
-   so no new field was needed after all) are wired up and tested. Real
-   BIOS boot code very likely uses VU0 macro mode for the splash
-   screen's transform/lighting math - NOT YET REACHED by the current
-   boot trace (EE is still steady-state SIF-polling), so this remains
-   readiness work rather than a wall-clearing fix. CLOSED: every VU0
-   macro-mode instruction identified this session (the full SPECIAL1
-   arithmetic/broadcast rows and the full SPECIAL2 128-entry table) is
-   now implemented and tested.
+   so no new field was needed after all) are wired up and tested.
+   CLOSED: every VU0 macro-mode instruction identified this session
+   (the full SPECIAL1 arithmetic/broadcast rows and the full SPECIAL2
+   128-entry table) is now implemented and tested. UPDATE (Round 29
+   continued, 28th change): the boot trace now progresses well past
+   "still steady-state SIF-polling" (see item 1's IOP module-
+   sequencing update below) - VU0 macro mode's real-world use may
+   become reachable sooner than previously estimated as the boot
+   trace advances further.
 
 4. **VIF UNPACK** (section 4) - DONE (Round 20). Real vertex/
    texture/attribute data now flows from EE RAM into VU0/VU1 local

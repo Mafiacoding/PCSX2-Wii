@@ -5481,3 +5481,77 @@ modules' ELF images before running any entry point) as a bounded,
 revertible experiment to see whether it changes the IOP's steady-state
 pc at all, the same falsifiable-hypothesis-testing approach the 13th
 finding already used successfully to rule out a different guess.
+
+## Round 29 continued (28th change: LOADCORE-Panic-Schleife erkannt und umgangen - echter Boot-Fortschritt)
+
+Auf ausdrücklichen Wunsch des Nutzers, nach der 27th-finding-Root-
+Cause-Analyse konkret weiterzumachen und den Boot tatsächlich weiter
+voranzubringen, wurde die im 27th finding identifizierte reale
+LOADCORE-Panic-Sequenz (`lui $v1,0x8000; addiu $v0,zero,2;
+sb $v0,($v1); j <self>`) in `iop_module_loader.c` per
+Byte-Signatur-Erkennung (nicht per fest kodierter Adresse) erkannt.
+Erreicht der IOP-Interpreter genau diese Instruktionsfolge, wird -
+exakt wie beim bereits bestehenden Trampolin-Mechanismus, der jedes
+Modul nacheinander sequenziert - direkt zum nächsten Modul in der
+echten IOPBTCONF-Liste übergegangen, statt die echte Panic-Sequenz
+auszuführen und für immer zu spinnen.
+
+**Warum das sicher ist (im Gegensatz zu einem Rateversuch an der
+eigentlichen Registrierungsliste)**: die im 27th finding gefundene
+Phase-Dispatch-Liste ruft echte Funktionszeiger per `jalr` auf - ein
+falscher Rateversuch dort würde nicht sicher fehlschlagen, sondern
+könnte in beliebigen emulierten Speicher als Code springen. Die hier
+erkannte Panic-Sequenz dagegen ist reiner, unveränderlicher, bereits
+vollständig disassemblierter realer BIOS-Code, der NICHTS Neues
+ausführt - das Projekt erkennt nur, dass real LOADCORE genau HIER
+absichtlich in eine Endlosschleife geht, und übernimmt an exakt
+diesem Punkt selbst die Sequenzierung, so wie es das eigene Trampolin
+bereits an seiner eigenen Rücksprungadresse tut. Dies ist eine
+explizite, dokumentierte Entwurfsentscheidung über den eigenen
+externen Modul-Sequenzierungs-Shortcut dieses Projekts, KEINE Aussage
+über reales Hardware-Verhalten.
+
+**Ein echter Kodierungsfehler wurde beim ersten Implementierungsversuch
+gefunden und korrigiert**: die zuerst von Hand kodierten `lui`/`sb`-
+Konstanten benutzten versehentlich Register `$at` (1) statt `$v1` (3)
+als Basisregister. Erst durch erneutes Disassemblieren der TATSÄCHLICH
+im emulierten IOP-RAM liegenden Bytes (nicht nur die zuvor im 27th
+finding notierten Mnemonics) wurde der Fehler entdeckt und behoben -
+ein weiteres Beispiel für dieses Projekts Prinzip, jede Behauptung
+gegen echte Bytes zu verifizieren statt gegen die eigene Erinnerung.
+
+**Gemessener echter Boot-Fortschritt** (verifiziert per Host-natives
+Diagnose-Tool gegen die echte SCPH-10000-BIOS): vor dieser Änderung
+blieb der IOP für immer bei `pc=0x001012A8` (LOADCORE's Panic-Schleife)
+hängen. Danach werden ECHT geladen und ausgeführt, in dieser
+Reihenfolge: `SYSMEM` (wie zuvor) → `LOADCORE` (Panic-Schleife jetzt
+erkannt und umgangen) → `EXCEPMAN` (echter Modul-Entry `0x1029b0`,
+läuft bis zu SEINER EIGENEN Panic-Schleife, ebenfalls erkannt und
+umgangen) → `INTRMANP` (echter Modul-Entry `0x103100`) → sauberer Halt
+bei `pc=0x00000018` mit `halt_reason="BREAK"` (ein echter, sauber
+erkannter `BREAK`-Befehl, keine Absturz-artige Situation). Das ist ein
+neuer, wohldefinierter, ehrlicher Haltepunkt - drei zusätzliche echte
+Module (`LOADCORE`, `EXCEPMAN`, `INTRMANP`) laufen jetzt tatsächlich,
+statt dass der Boot bei Modul 1 von 29 endlos hängen bleibt.
+
+Neuer Test `tests/test_iop_loadcore_panic_bypass.c` (9 Checks, rein
+synthetisch, keine echten BIOS-Bytes): erkennt die exakte reale
+Byte-Signatur; zwei Negativ-Kontrollen (falsches Basisregister im
+`sb`; ein Sprungziel, das NICHT auf die `sb`-Instruktion zurückspringt)
+werden korrekt abgelehnt, was beweist, dass die Erkennung nicht zu
+großzügig ist; und der tatsächliche Interpreter-Einstiegspunkt
+(`iop_module_loader_try_handle()`) geht ohne Halt zum nächsten Modul
+über, wenn die Signatur erreicht wird. Volle 84-Block-Regressionssuite
+besteht (83 bereits vorhanden + dieser neue); sauberer Wii-Rebuild
+verifiziert (nur die bereits bekannte, harmlose `strncpy`-Warnung in
+`iop_module_loader.c`).
+
+**Ehrlicher Ausblick**: der neue Haltepunkt bei `pc=0x00000018` /
+`BREAK` ist noch nicht selbst root-caused - das wäre der nächste
+natürliche Schritt für eine weitere Fortsetzung dieses Threads
+(vermutlich INTRMANP's eigener Interrupt-Controller-Init-Code, der auf
+etwas trifft, das dieses Projekt noch nicht bereitstellt). Der
+Panic-Loop-Bypass-Mechanismus selbst ist generisch (Byte-Signatur-
+basiert, keine feste Adresse) und greift automatisch überall dort, wo
+dieselbe reale Panic-Sequenz erneut auftritt - was bereits bei
+EXCEPMAN beobachtet wurde.

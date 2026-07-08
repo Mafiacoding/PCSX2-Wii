@@ -1250,8 +1250,30 @@ already documented, rather than truly returning from the syscall.
    `pc=0x00000018`/`BREAK` (a real, cleanly recognized instruction,
    not a crash). Tested via `tests/test_iop_loadcore_panic_bypass.c`
    (9 checks, including 2 negative controls proving the match isn't
-   overbroad). The new `BREAK`-at-`0x18` stop is not yet root-caused -
-   that's the natural next step for whoever continues this thread.
+   overbroad). UPDATE (Round 29 continued, 29th change): root-caused
+   and fixed. The `BREAK`@`0x18` happens because a real R3000A
+   `syscall` in `INTRMANP` vectors to the still-unclaimed general
+   exception handler (`0x80000080`), whose degenerate default content
+   falls through low RAM to a `BREAK` placeholder at `0x18` - the
+   same architectural gap as #124/#132/#148, one level deeper. Fix
+   (`source/core/iop/iop_core.c`, BREAK case): when `Cause.ExcCode==8`
+   (Syscall) is still set at the `BREAK`, return `$v0=0` to the caller
+   (same "unimplemented call returns 0" precedent as `iop_hle_bios.c`)
+   with proper RFE-equivalent Status-stack pop and `pc=EPC+4`, instead
+   of halting. Any other `BREAK` (e.g. the test suite's universal
+   clean-halt convention) is unaffected. Required updating
+   `tests/test_iop_syscall.c` into two explicit single-step phases
+   (its own SYSCALL+BREAK scenario became structurally identical to
+   the real one now handled differently) - all 9 checks still pass.
+   Measured real result (`diag83`): boot now progresses past
+   `BREAK`@`0x18` to a new, different clean stop at `pc=0x800000AC`,
+   `halt_reason="unimplemented SPECIAL funct 0x30 (pc=0x800000A8)"`
+   (an unimplemented `TGE` trap instruction - an honest architecture
+   limit, not a crash), reached via a SECOND real syscall/exception
+   deeper in `INTRMANP`'s init. Full 84-block regression suite passes;
+   clean Wii rebuild verified. The new `pc=0x800000AC`/`unimplemented
+   SPECIAL funct 0x30` stop is not yet root-caused - that's the
+   natural next step for whoever continues this thread.
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the
    register-block entry in section 7 above. Register-level scaffold

@@ -2122,3 +2122,36 @@ noch nicht root-caused (vermutlich INTRMANP's Interrupt-Controller-
 Init trifft auf etwas Fehlendes). Der Panic-Loop-Bypass selbst ist
 generisch (Byte-Signatur, keine feste Adresse) und greift automatisch
 überall, wo dieselbe reale Panic-Sequenz erneut auftritt.
+
+## Update (Round 29 continued, 29th change): BREAK@0x00000018 root-caused und behoben (Task #149)
+
+Root-Cause per Live-Trace (`diag82.c`): `INTRMANP` führt einen echten
+`syscall` aus, der zum noch unbeanspruchten allgemeinen Exception-
+Vektor (`0x80000080`) vektort, dessen degenerierter Standardinhalt
+effektiv zu Adresse 0 springt und sequenziell bis zum `BREAK`-
+Platzhalter bei `0x18` durchläuft - derselbe architektonische Fall wie
+#124/#132/#148, eine Ebene tiefer.
+
+Fix in `source/core/iop/iop_core.c`s BREAK-Case: wenn `Cause.ExcCode`
+noch 8 (Syscall) ist, wird `$v0=0` zurückgegeben (dasselbe Prinzip wie
+`iop_hle_bios.c`s unimplementierte A0/B0/C0-Aufrufe), mit RFE-
+äquivalentem Status-Stack-Pop und `pc=EPC+4`, statt zu halten. Andere
+`BREAK`s (z.B. die Test-Konvention) bleiben unverändert.
+
+`test_iop_syscall.c` musste in zwei Einzelschritt-Phasen umgeschrieben
+werden (`iop_core_step()` statt `iop_core_run()`), da sein eigenes
+SYSCALL+BREAK-Szenario sonst mit dem neu behandelten Fall kollidierte
+und hing. Alle 9 Checks bestehen jetzt.
+
+Gemessener Fortschritt (`diag83`): Boot läuft jetzt über `BREAK`@`0x18`
+hinaus zu einem neuen, andersartigen sauberen Halt bei `pc=0x800000AC`
+("unimplemented SPECIAL funct 0x30" - ein nicht implementierter `TGE`-
+Trap-Befehl), ausgelöst durch einen zweiten echten Syscall tiefer in
+INTRMANPs Init-Code.
+
+Volle 84-Block-Regressionssuite besteht; sauberer Wii-Rebuild
+verifiziert (nur die bekannte harmlose `strncpy`-Warnung).
+
+Nächster natürlicher Schritt: `pc=0x800000AC`/"unimplemented SPECIAL
+funct 0x30" root-causen (vermutlich `TGE`-Opcode implementieren oder
+ein weiteres Symptom desselben Exception-Handler-Grundproblems).

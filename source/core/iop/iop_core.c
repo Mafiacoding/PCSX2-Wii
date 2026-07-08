@@ -424,7 +424,49 @@ static int iop_step(void)
             st->cop0[12] = (st->cop0[12] & ~0x3Fu) | ((st->cop0[12] & 0x0Fu) << 2); /* Status stack push */
         }
         break;
-        case 0x0D: /* BREAK */ halt("BREAK"); return 1;
+        case 0x0D: /* BREAK */
+            /* Round 29 continued (29th change): if this exact BREAK
+             * is reached because a genuine R3000A hardware `syscall`
+             * instruction (Cause.ExcCode==8) vectored to the general
+             * exception handler and fell through its still-unclaimed
+             * default chain (see docs/STATUS.md's 29th finding - this
+             * is the SAME underlying architectural gap as task
+             * #124/#132/#148: a later module hasn't yet installed a
+             * real handler for this kernel-level syscall number,
+             * because this project's loader runs one module's ELF
+             * and entry point at a time), this project applies the
+             * EXACT SAME precedent it already established throughout
+             * iop_hle_bios.c for unimplemented A0/B0/C0 BIOS-table
+             * calls: return a generic default value (0) to the
+             * caller instead of halting. This is NOT a new pattern -
+             * it's that same "unimplemented call returns 0" default,
+             * extended from the BIOS-table mechanism to the real
+             * hardware-level syscall/exception mechanism. Unlike
+             * task #148's module-jump bypass, resuming after a
+             * syscall is well-defined, ordinary MIPS exception-return
+             * semantics (EPC+4, matching a real RFE-terminated
+             * handler) - not a jump to a different, unrelated module,
+             * so this carries none of that mechanism's own scoping
+             * caveats.
+             *
+             * Any OTHER BREAK (Cause.ExcCode != 8 - e.g. this
+             * project's own test suite's long-established direct
+             * clean-halt-for-testing convention, which never first
+             * executes a real syscall) is completely unaffected and
+             * still halts exactly as before. */
+            if ((st->cop0[13] & 0x7Cu) == 0x20u) { /* Cause.ExcCode == 8 (Syscall) */
+                uint32_t epc = st->cop0[14];
+                st->gpr[2] = 0; /* $v0 = 0 - same default-return convention as iop_hle_bios.c's unimplemented A0/B0/C0 calls */
+                /* RFE-equivalent Status stack pop, identical formula
+                 * to this file's own real RFE (COP0 CO-format
+                 * funct=0x10) implementation above. */
+                st->cop0[12] = (st->cop0[12] & ~0x0Fu) | ((st->cop0[12] & 0x3Cu) >> 2);
+                st->pc = epc + 4u;
+                st->next_pc = epc + 8u;
+                break;
+            }
+            halt("BREAK");
+            return 1;
         case 0x10: /* MFHI */ if (rd) GPR(rd) = st->hi; break;
         case 0x11: /* MTHI */ st->hi = GPR(rs); break;
         case 0x12: /* MFLO */ if (rd) GPR(rd) = st->lo; break;

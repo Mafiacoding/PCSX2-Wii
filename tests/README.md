@@ -672,10 +672,25 @@ BREAK instruction placed at the exception vector) returns before its
 own trailing `instructions_executed++`, same as every `halt()` call
 in this codebase - so a 2-instruction program (SYSCALL, then BREAK at
 the vector) reports `instructions_executed == 1`, not 2. Not a bug;
-just something to know before writing the assertion. 5/5 checks pass,
-including confirming SYSCALL has no delay slot (a NOP placed right
-after it never executes) and that BEV correctly selects the
-bootstrap vector. Needs the same link set as `test_iop_core.c`:
+just something to know before writing the assertion.
+
+UPDATED (Round 29 continued, 29th change, task #149): after
+`iop_core.c`'s BREAK case was changed to auto-return (`$v0=0`,
+RFE-equivalent Status pop, `pc=EPC+4`) whenever it's reached with
+`Cause.ExcCode==8` still set (an unresolved real syscall falling
+through to the still-unclaimed exception vector - see STATUS.md's
+29th finding), this test's original single-`iop_core_run()` scenario
+became structurally identical to that real case and started hanging
+(the BREAK it places at the vector no longer halts, and the
+auto-return then resumes into an all-zero/NOP memory region with no
+other halt condition, so `iop_core_run()`'s loop never terminates).
+Rewritten into two explicit `iop_core_step()` phases: phase 1 single-
+steps just the SYSCALL and checks the real vectoring state (Cause/EPC/
+pc/Status.BEV) before the vector's own BREAK ever runs; phase 2
+single-steps that BREAK and checks the new auto-return behavior
+(`halted==0`, `$v0==0`, `pc==0xBFC00004` i.e. EPC+4). 9/9 checks pass
+(up from 5/5 - the extra checks cover the new auto-return path
+explicitly). Needs the same link set as `test_iop_core.c`:
 
 ```sh
 gcc -I../include -I../source -o test_iop_syscall tests/test_iop_syscall.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c

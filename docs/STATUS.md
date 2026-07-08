@@ -5555,3 +5555,83 @@ Panic-Loop-Bypass-Mechanismus selbst ist generisch (Byte-Signatur-
 basiert, keine feste Adresse) und greift automatisch überall dort, wo
 dieselbe reale Panic-Sequenz erneut auftritt - was bereits bei
 EXCEPMAN beobachtet wurde.
+
+## 29th finding/change (Round 29 fortgesetzt): BREAK@0x00000018 root-caused und behoben (Task #149)
+
+**Root Cause (per Live-Einzelschritt-Trace, `diag82.c`, gegen die echte
+SCPH-10000-BIOS)**: der Haltepunkt bei `pc=0x00000018`/`BREAK` (siehe
+28th change) entsteht, weil `INTRMANP` beim echten Ausführen einen
+echten R3000A-`syscall`-Befehl ausführt (vermutlich Syscall #0x10,
+laut ps2sdk-Konvention ein "Interrupt-Manager"-Kernel-Syscall). Dieser
+`syscall` vektort korrekt zum allgemeinen Exception-Handler
+(`0x80000080`), dessen Inhalt aber noch der degenerierte Standardwert
+ist (derselbe architektonische Fall wie in #124/#132/#148: kein
+späteres Modul hat dort bisher einen echten Handler installiert, weil
+der eigene Modul-Loader dieses Projekts jeweils nur ein Modul auf
+einmal lädt und ausführt). Der degenerierte Standardinhalt dekodiert
+effektiv zu einem Sprung auf Adresse 0, gefolgt von sequenzieller
+Ausführung durch den unteren RAM-Bereich, bis er auf den dort
+liegenden `BREAK`-Platzhalter bei `0x18` trifft - exakt derselbe
+Mechanismus wie beim 27th/28th finding, nur eine Ebene tiefer (jetzt
+über den echten Syscall-Exception-Pfad statt über LOADCOREs
+Registrierungsliste).
+
+**Implementierte Lösung** (`source/core/iop/iop_core.c`, `case 0x0D`
+BREAK-Dispatch in `iop_step()`): wenn ein `BREAK` erreicht wird,
+während `Cause.ExcCode` noch auf 8 (Syscall) steht - das Zeichen dafür,
+dass ein echter, noch unbeantworteter Syscall bis zu diesem
+unclaimed Vektor durchgefallen ist - wendet dieses Projekt exakt
+dasselbe, bereits etablierte Prinzip an, das `iop_hle_bios.c` schon
+für alle nicht implementierten A0/B0/C0-BIOS-Tabellenaufrufe benutzt:
+einen generischen Standardwert (0) an den Aufrufer zurückgeben, statt
+zu halten. Konkret: `$v0` (gpr[2]) = 0, ein RFE-äquivalentes
+Zurücksetzen des Status-Stacks (dieselbe Formel wie die bereits
+existierende echte RFE-Implementierung aus Task #113), und
+`pc = EPC+4` (normale MIPS-Exception-Rücksprungsemantik). Jeder
+ANDERE `BREAK` (`Cause.ExcCode != 8`) - insbesondere die seit
+langem etablierte Testsuite-Konvention, `BREAK` als sauberen
+Test-Stopp-Marker zu benutzen, ohne vorher einen echten Syscall
+auszuführen - bleibt unverändert und hält weiterhin exakt wie zuvor.
+
+**Warum das sicher ist**: Rücksprung nach einem Syscall ist normale,
+wohldefinierte MIPS-Exception-Return-Semantik (EPC+4, wie bei einem
+echten RFE-terminierten Handler) - kein Sprung in ein anderes,
+unabhängiges Modul wie beim 28th-change-Bypass, daher ohne dessen
+Scoping-Vorbehalte.
+
+**Ein bestehender Test musste angepasst werden**: `test_iop_syscall.c`
+(ein SYSCALL gefolgt von einem BREAK am Vektor - die eigene
+Universal-Halt-Konvention der Testsuite) wurde durch diese Änderung
+strukturell ununterscheidbar vom echten, jetzt anders behandelten
+Szenario und hing (Timeout) beim ersten Testlauf. Der Test wurde in
+zwei explizite Einzelschritt-Phasen umgeschrieben (`iop_core_step()`
+statt `iop_core_run()`, da nach dem neuen Auto-Return `pc` in einen
+Bereich aus lauter Null-/NOP-Bytes ohne weitere Halt-Bedingung
+wandert, was `iop_core_run()`s Endlosschleife ebenfalls zum Hängen
+brächte): Phase 1 prüft weiterhin das reale Vektorierungsverhalten
+des SYSCALL selbst; Phase 2 prüft das neue Auto-Return-Verhalten
+des BREAK. Alle 9 Checks bestehen.
+
+**Gemessener echter Boot-Fortschritt** (verifiziert per `diag83`,
+gebaut aus `diag80.c`): vor dieser Änderung hielt der IOP für immer
+bei `pc=0x00000018`/`BREAK`. Danach läuft die Ausführung weiter und
+erreicht einen NEUEN, andersartigen sauberen Halt bei `pc=0x800000AC`
+mit `halt_reason="unimplemented SPECIAL funct 0x30 (pc=0x800000A8)"`
+(ein `TGE`-Trap-Befehl, den dieser R3000A-Interpreter noch nicht
+implementiert - ein ehrlicher Architektur-Grenzfall, kein Absturz).
+Dies geschieht, weil ein ZWEITER echter Syscall/Exception-Vorgang
+tiefer in `INTRMANP`s Init-Code auftritt und über denselben
+Standard-Vektor-Fallthrough-Bereich erneut läuft.
+
+Volle 84-Block-Regressionssuite besteht weiterhin (keine neuen Tests
+hinzugefügt, `test_iop_syscall.c` nur modifiziert); sauberer
+Wii-Rebuild verifiziert (nur die bereits bekannte, harmlose
+`strncpy`-Warnung in `iop_module_loader.c`).
+
+**Ehrlicher Ausblick**: der neue Haltepunkt bei `pc=0x800000AC`
+("unimplemented SPECIAL funct 0x30") ist der natürliche nächste
+Untersuchungsschritt für eine weitere Fortsetzung dieses Threads -
+vermutlich muss entweder `TGE` (Trap if Greater or Equal) als
+Opcode implementiert werden, oder es handelt sich um ein weiteres
+Symptom desselben architektonischen Grundproblems (fehlender echter
+Exception-Handler), das an einer neuen Stelle sichtbar wird.

@@ -1556,3 +1556,24 @@ element try" contract.
 gcc -I../include -I../source -o test_iop_syscall_handler tests/test_iop_syscall_handler.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
 ./test_iop_syscall_handler
 ```
+
+`test_iop_hook_entry_int.c` covers Round 29 continued's 5th finding/fix:
+A(13h) setjmp(buf) and B(19h) HookEntryInt(addr). See
+`include/core/hw/iop_hle_bios.h`'s `IOP_HLE_A0_SETJMP` and
+`IOP_HLE_B0_HOOK_ENTRY_INT` comments, and `docs/STATUS.md`'s "Round 29
+continued (5th finding)" section, for the full citation trail: live
+call-tracing against the user's real SCPH-10000 dump found the real
+BIOS calls these two functions back-to-back with the SAME address
+(a0=0x8004fd50 in both, confirmed live) to install its own fallback
+recovery point at RAM[0x7520] instead of leaving the kernel's default
+struct (0x00006C34) installed forever. 18 checks: setjmp's real
+12-word ra/sp/fp/s0-7/gp save; HookEntryInt's RAM[0x7520] write and
+return value; the real setjmp+HookEntryInt pairing (same address)
+correctly overriding the default; and ResetEntryInt/HookEntryInt
+remaining independent of each other (calling one doesn't corrupt the
+other's effect).
+
+```sh
+gcc -I../include -I../source -o test_iop_hook_entry_int tests/test_iop_hook_entry_int.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+./test_iop_hook_entry_int
+```

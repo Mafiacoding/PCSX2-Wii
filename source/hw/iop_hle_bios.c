@@ -511,6 +511,44 @@ int iop_hle_bios_try_handle(iop_state_t *st, uint32_t pc)
         st->pc      = ra;
         st->next_pc = ra + 4;
         return 1;
+    } else if (pc == IOP_HLE_TABLE_B0 && function == IOP_HLE_B0_HOOK_ENTRY_INT) {
+        /* Round 29 continued (5th finding): real B(19h) HookEntryInt(addr)
+         * - see the IOP_HLE_B0_HOOK_ENTRY_INT header comment for the
+         * full root-cause story (live call-tracing found the real
+         * BIOS pairs this with A(13h) setjmp(buf) using the SAME
+         * address, to install its own fallback resume point instead
+         * of the kernel default). Standard MIPS calling convention:
+         * $a0=addr. */
+        uint32_t addr = st->gpr[4];
+        iop_mem_write32(st, IOP_JMPBUF_DEFAULT_PTR_ADDR, addr);
+        st->gpr[2] = addr;
+        g_hle.hook_entry_int_calls++;
+        g_hle.known_calls_handled++;
+        st->pc      = ra;
+        st->next_pc = ra + 4;
+        return 1;
+    } else if (pc == IOP_HLE_TABLE_A0 && function == IOP_HLE_A0_SETJMP) {
+        /* Round 29 continued (5th finding): real A(13h) setjmp(buf) -
+         * see the IOP_HLE_A0_SETJMP header comment. Saves the real
+         * 12-word ra/sp/fp/s0-7/gp struct (the same layout this
+         * project already reverse-engineered from the kernel's own
+         * default struct at 0x00006C34) into the caller-supplied
+         * buffer, then returns 0 (standard C setjmp "direct call"
+         * semantics). Standard MIPS calling convention: $a0=buf. */
+        uint32_t buf = st->gpr[4];
+        iop_mem_write32(st, buf + IOP_JMPBUF_OFF_RA, st->gpr[31]); /* $ra */
+        iop_mem_write32(st, buf + IOP_JMPBUF_OFF_SP, st->gpr[29]); /* $sp */
+        iop_mem_write32(st, buf + IOP_JMPBUF_OFF_FP, st->gpr[30]); /* $fp/$s8 */
+        for (int i = 0; i < 8; i++)
+            iop_mem_write32(st, buf + IOP_JMPBUF_OFF_S0 + (uint32_t)i * 4u,
+                             st->gpr[16 + i]); /* $s0..$s7 */
+        iop_mem_write32(st, buf + IOP_JMPBUF_OFF_GP, st->gpr[28]); /* $gp */
+        st->gpr[2] = 0;
+        g_hle.setjmp_calls++;
+        g_hle.known_calls_handled++;
+        st->pc      = ra;
+        st->next_pc = ra + 4;
+        return 1;
     } else if (pc == IOP_HLE_TABLE_C0 && function == IOP_HLE_C0_ENQUEUESYSCALLHANDLER) {
         /* Round 29 continued: real C(01h) EnqueueSyscallHandler(priority)
          * - see the IOP_HLE_C0_ENQUEUESYSCALLHANDLER header comment

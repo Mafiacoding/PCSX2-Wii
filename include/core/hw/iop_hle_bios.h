@@ -206,6 +206,57 @@
 #define IOP_JMPBUF_DEFAULT_PTR_ADDR    0x00007520u
 #define IOP_JMPBUF_DEFAULT_STRUCT_ADDR 0x00006C34u
 
+/* B(19h) HookEntryInt(addr) - psx-spx's function summary table lists
+ * this as taking a single "addr" argument, immediately following
+ * B(18h) ResetEntryInt() in the table and sharing its exact
+ * mechanism: both write the POINTER VARIABLE at RAM[0x00007520] that
+ * the real dispatcher's post-priority-chain fallback code reads (see
+ * IOP_HLE_B0_RESET_ENTRY_INT's comment above for the live-disassembly
+ * citation of that fallback code at ROM 0x00000e44) - ResetEntryInt
+ * resets it back to the kernel's own default struct address
+ * (0x00006C34); HookEntryInt installs the CALLER's own address
+ * instead, letting BIOS/application code supply its own "resume here
+ * if nothing claims this exception" struct rather than the kernel
+ * default. Round 29 continued (5th finding): live call-tracing this
+ * session found the real BIOS calls A(13h) setjmp(buf) immediately
+ * followed by B(19h) HookEntryInt(addr) with the SAME address in
+ * both calls (confirmed: both saw a0=0x8004fd50 at IOP instr
+ * 3054696/3054708 in a live host-native trace) - exactly the
+ * standard "set up my own recovery point, then register it as the
+ * fallback" idiom this pairing exists for. Because this project did
+ * not previously implement either call, RAM[0x7520] was silently
+ * left at the default struct address, so the real BIOS's own,
+ * intended recovery point was never actually installed - the
+ * dispatcher's fallback kept resuming the kernel default struct
+ * instead, which is what produced the steady 3-instruction spin loop
+ * observed at IOP RAM 0x101280-0x101288. Return-value convention
+ * mirrors ResetEntryInt's documented "returns the address of that
+ * structure" - HookEntryInt returns the same addr it just installed. */
+#define IOP_HLE_B0_HOOK_ENTRY_INT 0x19u
+
+/* A(13h) setjmp(buf) - psx-spx: saves the caller's registers into a
+ * caller-supplied buffer so a later longjmp-style restore (in this
+ * kernel's case, the dispatcher's own priority-chain-exhausted
+ * fallback, which does a manual, inlined restore rather than calling
+ * a real longjmp function) can resume execution there. The buffer
+ * layout is the same 12-word (48-byte) ra/sp/fp/s0-7/gp struct this
+ * project already reverse-engineered from the kernel's own default
+ * struct at 0x00006C34 (see IOP_HLE_B0_RESET_ENTRY_INT's comment) -
+ * word 0 = $ra, word 1 = $sp, word 2 = $fp ($s8), words 3-10 =
+ * $s0-$s7, word 11 = $gp. Real MIPS o32 setjmp returns 0 on the
+ * direct call, matching standard C setjmp() semantics; this project
+ * has no real longjmp call site (the dispatcher's fallback restores
+ * registers inline rather than jumping back into a setjmp() call
+ * frame), so the "returns nonzero after longjmp" half of the contract
+ * is not modeled - only the save, which is the half needed to fix the
+ * HookEntryInt pairing above. */
+#define IOP_HLE_A0_SETJMP 0x13u
+#define IOP_JMPBUF_OFF_RA  0x00u
+#define IOP_JMPBUF_OFF_SP  0x04u
+#define IOP_JMPBUF_OFF_FP  0x08u
+#define IOP_JMPBUF_OFF_S0  0x0Cu  /* s0..s7 occupy 0x0C..0x28, 4 bytes each */
+#define IOP_JMPBUF_OFF_GP  0x2Cu
+
 /* A0-table function numbers this round implements for real - see the
  * header comment above and psx-spx's "A-Functions" table. */
 #define IOP_HLE_A0_EXIT       0x06u
@@ -304,6 +355,12 @@ typedef struct {
      * counter, no other state needed since the real fix is just
      * writing a well-evidenced constant to a fixed RAM address. */
     uint64_t reset_entry_int_calls;
+
+    /* Round 29 continued (5th finding): B(19h) HookEntryInt and
+     * A(13h) setjmp - see their header comments above. Plain
+     * diagnostic counters. */
+    uint64_t hook_entry_int_calls;
+    uint64_t setjmp_calls;
 } iop_hle_bios_state_t;
 
 void iop_hle_bios_init(void);

@@ -4253,3 +4253,99 @@ warning), full host-native regression suite re-run via the standard
 `tests/README.md` block-extraction script (65 test binaries, 0
 failures - includes this session's new `test_iop_kmem_alloc.c` and
 `test_iop_syscall_handler.c`).
+
+## Round 29 continued (5th finding + fix, 2026-07-08): real A(13h) setjmp + B(19h) HookEntryInt, and a precisely-pinpointed real BIOS panic loop
+
+Following the main.c real-boot-flow change (previous section), the
+user's standing instruction to automatically continue with other
+important tasks led directly back to the IOP exception-chain wall
+(task #124), armed with a concrete new lead: the diag53 finding that
+GS registers never get touched. A long-running host-native diagnostic
+(300M IOP / 2.4B EE instruction cap) confirmed both cores reach a
+genuine steady state almost immediately (by ~3.05M IOP instructions)
+and never progress further, no matter how long the run continues -
+this is not a "needs more instructions" situation, it is a true
+infinite loop.
+
+**Root-caused via live call-tracing**: instrumenting `iop_hle_bios_try_handle()`
+to log every A0/B0/C0 call's arguments found that, at IOP instruction
+3054696, the real BIOS calls `A(13h) setjmp(buf)` with `a0=0x8004fd50`,
+immediately followed at instruction 3054708 by `B(19h)
+HookEntryInt(addr)` with the SAME address (`a0=0x8004fd50`). Neither
+function was previously implemented (both fell through to the generic
+"return 0, do nothing" HLE default). Per psx-spx, `HookEntryInt(addr)`
+writes the same RAM[0x00007520] pointer variable that this project's
+own `ResetEntryInt` (B18h, implemented earlier this session) writes -
+the difference is `HookEntryInt` installs the CALLER's own address
+instead of the kernel's default struct (0x00006C34), letting BIOS code
+supply its own "resume here if nothing claims this exception" struct.
+Since neither call did anything, RAM[0x7520] stayed at the default
+struct address forever, even though the real BIOS's own code had
+already prepared (via `setjmp`) and tried to install (via
+`HookEntryInt`) its own, different recovery point.
+
+**Implemented for real**: `A(13h) setjmp(buf)` now saves the real
+12-word ra/sp/fp/s0-7/gp struct (the same layout already reverse-
+engineered from the kernel's default struct) into the caller's buffer
+and returns 0, matching standard MIPS o32 setjmp semantics.
+`B(19h) HookEntryInt(addr)` now writes RAM[0x7520]=addr and returns
+addr in $v0 (mirroring ResetEntryInt's documented return-value
+convention). Verified via `tests/test_iop_hook_entry_int.c` (18
+checks) that: setjmp's save is byte-for-byte correct; HookEntryInt's
+write/return are correct; the real setjmp+HookEntryInt pairing (same
+address) correctly ends with RAM[0x7520] pointing at the caller's own
+buffer, not the kernel default; and ResetEntryInt/HookEntryInt remain
+independent (calling one doesn't corrupt the other's effect). Live
+re-verification against the real BIOS confirmed RAM[0x7520] now
+correctly reads `0x8004fd50` (the real BIOS's own intended address)
+instead of `0x00006C34` (the kernel default) after this exact call
+sequence runs.
+
+**Honest result: this fix is real and correct, but does NOT clear the
+steady-state wall.** Re-running the same long diagnostic after the fix
+produced an IDENTICAL EE/IOP instruction trace, PC-for-PC - the
+dispatcher's post-priority-chain fallback path (which RAM[0x7520] now
+correctly feeds) is evidently not what's reached on this particular
+path; something else leads to the same final resting point regardless.
+
+**Precisely pinpointed the actual wall** via direct disassembly of IOP
+RAM 0x00101100-0x00101288 (the code the interpreter is actually stuck
+in): it is a bounded, 4-pass retry loop (a counter at `$fp+0x58`,
+compared against `4`) that walks a linked structure at `$s2` checking
+a 2-bit type tag (`andi $v0,$a2,3`) against the current pass number
+(0,1,2,3) and, on a match, calls through a masked function pointer via
+`jalr` - a shape strongly resembling this kernel's own multi-phase
+device-driver table walker (matching the A(96h)-A(99h)
+AddCDROMDevice/AddMemCardDevice/AddDuartTtyDevice/add_nullcon_driver
+functions documented in psx-spx, none of which were observed being
+called in this trace - so either the table is empty/unpopulated in
+this emulation, or this is a different, not-yet-identified table).
+When all 4 passes fail to make the loop's exit condition true, real
+BIOS code at 0x00101278-0x00101284 executes `lui $v1,0x8000; li
+$v0,2; sb $v0,($v1); j 0x101280` - a literal, deliberate "write status
+code 2 to physical RAM address 0, then spin forever" panic routine.
+`SR=0` at this point (all interrupts globally masked), so this loop is
+genuinely unrecoverable by design, matching this project's own earlier
+(Round 19) "real BIOS panic/halt loop" finding - this round sharpens
+that finding to the exact instruction sequence, exact panic code (2),
+and the exact bounded-retry shape that precedes it, rather than just
+"reaches a panic loop".
+
+**Next concrete step for whoever picks up task #124 next**: disassemble
+backward from 0x1011ac (the retry loop's own top) to identify what,
+specifically, is being tested against the pass-number tag at each of
+the 4 attempts, and what real hardware condition/register value this
+emulation is failing to provide that a real console would supply
+(most likely CD-ROM, memory card, or console/tty device registration
+state, given the A(96h)-A(99h) parallel above - none of those
+functions have been implemented in this project yet, which is a
+strong first thing to check).
+
+Verification this round: clean Wii/devkitPPC rebuild (`make
+TARGET=boot`, exit 0, only the pre-existing unrelated
+`iop_module_loader.c` strncpy warning), full host-native regression
+suite (66 test binaries including this round's new
+`test_iop_hook_entry_int.c`, 0 real failures - one script false-positive
+from the word "AFAIL" containing the substring "FAIL" in
+`test_gs_alpha`'s own flag names, confirmed by its own "0 check(s)
+failed" output).

@@ -1612,3 +1612,31 @@ yet a proven splash screen - see docs/STATUS.md's "Round 29 continued
 Next step per the user's own standing instruction: proceed
 automatically to the next most important open ROADMAP item once this
 change is committed/pushed/rsynced.
+
+**Update (Round 29 continued, 5th finding + fix, same session)**:
+per the user's standing instruction to continue automatically with
+other important tasks after the main.c change, picked up task #124
+(the deprioritized IOP exception-chain wall) with a concrete new lead
+from diag53 (GS registers never touched). Live call-tracing found the
+real BIOS calls A(13h) setjmp(buf) and B(19h) HookEntryInt(addr)
+back-to-back with the same address (0x8004fd50, confirmed live) -
+neither was implemented, so RAM[0x7520] never got updated to the
+BIOS's own intended fallback address. Implemented both for real;
+verified via 18 new host-native checks (tests/test_iop_hook_entry_int.c)
+and live re-tracing (RAM[0x7520] now correctly reads 0x8004fd50 after
+this call sequence). This is a genuine, well-evidenced bug fix, but it
+does NOT clear the ultimate wall - a re-run after the fix produced an
+identical PC-for-PC trace. Direct disassembly of IOP RAM
+0x101100-0x101288 (the code both cores are actually stuck in)
+precisely pinpointed the real wall: a bounded 4-pass retry loop
+resembling a device-driver table walker (matching psx-spx's
+A(96h)-A(99h) AddCDROMDevice/AddMemCardDevice/etc, none of which this
+project implements), falling into a literal "write status code 2 to
+RAM[0], spin forever, SR=0" panic routine when all 4 passes fail. This
+sharpens, but does not yet resolve, the same wall this project's Round
+19 already found and task #124 already deprioritized. Verified: clean
+Wii rebuild (exit 0), 66-test host-native regression suite (0 real
+failures). See docs/STATUS.md's "Round 29 continued (5th finding +
+fix)" section for the full trace and the concrete next step (chase
+backward from IOP RAM 0x1011ac to find what condition each retry pass
+tests).

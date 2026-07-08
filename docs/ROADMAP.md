@@ -672,6 +672,27 @@ instead of fully emulating the real IOP BIOS ROM.
       (2nd fix) section for the precise next step (trace forward from
       the clear-loop's own return address rather than backward from
       the dispatcher).
+- [x] **5th finding + fix (2026-07-08)**: real A(13h) setjmp(buf) and
+      B(19h) HookEntryInt(addr) implemented (both previously fell
+      through to the generic HLE no-op) after live call-tracing showed
+      the real BIOS calls them back-to-back with the same address to
+      install its own exception-fallback recovery point at
+      RAM[0x7520] instead of the kernel default. Verified correct via
+      `tests/test_iop_hook_entry_int.c` (18 checks) and live
+      re-tracing (RAM[0x7520] now correctly ends up at the BIOS's own
+      address). **Does not clear the wall**: re-running a long
+      diagnostic after the fix produced an identical PC-for-PC trace.
+      Precisely pinpointed the actual wall via direct disassembly: a
+      bounded 4-pass retry loop (IOP RAM ~0x1011ac-0x101270) walking a
+      linked table checking a 2-bit type tag per pass (resembling the
+      A(96h)-A(99h) device-driver registration functions, none of
+      which are implemented in this project), falling into a literal,
+      deliberate panic routine (0x101278-0x101284: write status code 2
+      to physical RAM 0, spin forever with SR=0/interrupts fully
+      masked) when all 4 passes fail. See docs/STATUS.md's "Round 29
+      continued (5th finding + fix)" section for the full trace and
+      the concrete next step (disassemble backward from 0x1011ac to
+      find what condition each retry pass actually tests).
 - [x] **Reframing finding (3rd, same round)**: traced the clear-loop's
       own caller and found it's the real BIOS's own LOGO-loading
       dispatch (matches ROM string "LOGO", ROMDIR-style lookup, calls

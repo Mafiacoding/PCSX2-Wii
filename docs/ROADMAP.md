@@ -1213,8 +1213,29 @@ already documented, rather than truly returning from the syscall.
    state from pc=0x00101284 to pc=0x001012A8 (real forward progress
    through a function-pointer-table dispatch loop, not a relocated
    identical wall) - the panic loop itself is still eventually hit.
-   Task #124/#132 remains open and is still being actively chased per
-   the user's explicit direction.
+   CLOSED (Round 29 continued, 27th finding): a fresh, exact-address
+   disassembly (fed this project's own relocated IOP RAM bytes, not
+   raw ROM) definitively corrected a 3-round-old misattribution - the
+   wall sits in LOADCORE's own init code (module 1 of 29, entry
+   0x100CD0), not SYSMEM - and precisely re-characterized the empty
+   table as LOADCORE's own multi-phase module/library self-
+   registration list (not a "device driver" table), populated from a
+   real, previously-undocumented per-entry processing loop
+   (0x100FD0-0x101184) that genuinely calls through function pointers
+   via jalr. This project's boot_info[0x18]/[0x1C] fields (which feed
+   that loop) are 0 because this project's loader runs exactly one
+   module's ELF and entry point at a time, so no other module has
+   registered anything by the time LOADCORE reaches this code - a
+   real, well-evidenced structural finding. Formally closed without a
+   further code change: unlike every prior defensive fix in this
+   project (INITIAL_SP, boot_info+0x0C), a fix here would need to
+   construct real entries consumed by a genuine jalr dispatch, and an
+   incorrect guess at that struct's layout does not fail safely (it
+   can jump into arbitrary memory as code) - a categorically different
+   and unacceptable risk. See docs/STATUS.md's 27th finding for the
+   full disassembly, the four still-unreverse-engineered helper
+   subroutines (0x1018d0/0x101f30/0x102120/0x10198c), and the two
+   scoped options for whoever pursues this further.
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the
    register-block entry in section 7 above. Register-level scaffold

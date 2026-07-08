@@ -5121,3 +5121,48 @@ Remaining COP2SPECIAL2 gaps: the accumulator-writing family
 memory-access family beyond `VISWR`/`VSQI` (`VLQI`/`VLQD`/`VSQD`/
 `VMTIR`/`VMFIR`/`VILWR`), and `VDIV`/`VSQRT`/`VRSQRT` (which would
 also need to model the `Q`/`P` register's real "busy" timing).
+
+## Round 29 continued (21st change: EE COP2 SPECIAL2 accumulator-writing family)
+
+Implemented the largest remaining VU0 macro-mode cluster: every op
+that writes `vu0_acc[4]` instead of `VF[fd]`. Full-vector forms
+`VADDA`(idx40)/`VMADDA`(41)/`VMULA`(42)/`VSUBA`(44)/`VMSUBA`(45) are
+the exact same arithmetic shape as `VADD`/`VMADD`/`VMUL`/`VSUB`/
+`VMSUB`, just redirected to write `ACC`. Broadcast forms (idx 0-15,
+24-28, 30, 32-39) cover `VADDAx/y/z/w`/`VSUBAx/y/z/w`/`VMADDAx/y/z/w`/
+`VMSUBAx/y/z/w`/`VMULAx/y/z/w`/`VMULAq`/`VMULAi`/`VADDAq`/`VMADDAq`/
+`VADDAi`/`VMADDAi`/`VSUBAq`/`VMSUBAq`/`VSUBAi`/`VMSUBAi` - the same
+broadcast shape as the funct<=0x1F row. `VOPMULA` (idx46) is the
+outer-product multiply variant of `VOPMSUB`: writes `ACC` directly
+with no existing-`ACC` read and no destmask (always exactly xyz, w
+untouched) - `ACC.x=FS.y*FT.z`, `ACC.y=FS.z*FT.x`, `ACC.z=FS.x*FT.y`.
+`VNOP` (idx47) is a true no-op. All confirmed against a real PCSX2
+upstream reference clone's `VUops.cpp` (`applyBinaryMACOp`/
+`applyTernaryMACOp` and their `Broadcast` variants, templated on
+`MACOpDst::Acc` instead of `::Fd` - the exact underlying arithmetic
+already implemented for the FD-writing rows, just redirected to a
+different destination).
+
+New test `tests/test_ee_cop2_acc.c` (7 checks across 6 independent
+fresh-core sub-tests, so `ACC` always starts zeroed): `VADDA`
+computes `ACC=VF1+VF2`; `VMULA` seeds `ACC` and `VMADDA` correctly
+round-trips through a real accumulate (reads the just-written `ACC`
+back and adds onto it); `VSUBA` computes `ACC=VF1-VF2`; `VOPMULA`
+overwrites a poked sentinel `ACC` value with the correct cross-
+product-shaped outer product (proving it does NOT accumulate);
+`VMULAq` broadcasts `Q` and a following `VNOP` provably changes
+nothing; `VADDAy` broadcasts a single FT lane. Full 78-block
+regression suite passes (77 pre-existing + this new one); clean Wii
+rebuild verified (only the pre-existing, harmless `strncpy` truncation
+warning in `iop_module_loader.c`).
+
+Remaining VU0 macro-mode gaps, narrowing fast: `VCLIPw` (idx31, needs
+a new CLIP flag register this project doesn't model yet), the
+memory-access family beyond `VISWR`/`VSQI` (`VLQI`(52)/`VLQD`(54)/
+`VSQD`(55)), `VMTIR`(60)/`VMFIR`(61)/`VILWR`(62) (use a different
+sub-field decode than every op implemented so far - not yet
+researched in this codebase), `VDIV`/`VSQRT`/`VRSQRT`/`VWAITQ`
+(idx56-59, would need to decide how to model the `Q`/`P` register's
+real "busy" latency), and `VRNEXT`/`VRGET`/`VRINIT`/`VRXOR` (idx64-67,
+the VU0 R-register LCG pseudo-random generator - an entirely separate
+piece of state).

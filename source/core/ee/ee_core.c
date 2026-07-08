@@ -1831,6 +1831,105 @@ static int ee_step(void)
                             vu0_vf_write_lane(st, ft, (uint32_t)lane, uresult);
                         }
                     }
+                } else if (idx <= 15 || (idx >= 24 && idx <= 28) || idx == 30
+                           || (idx >= 32 && idx <= 42) || idx == 44 || idx == 45
+                           || idx == 46 || idx == 47) {
+                    /* Accumulator-writing family (Round 29 continued,
+                     * 21st change) - every one of these ops writes
+                     * VU->ACC (this project's vu0_acc[4]) instead of
+                     * VF[fd], confirmed against a real PCSX2 upstream
+                     * reference clone's VUops.cpp (applyBinaryMACOp/
+                     * applyTernaryMACOp/their Broadcast variants, all
+                     * templated on MACOpDst::Acc instead of ::Fd - the
+                     * exact same underlying arithmetic already
+                     * implemented for the FD-writing rows above, just
+                     * redirected). Full-vector forms (idx 40=VADDA,
+                     * 41=VMADDA, 42=VMULA, 44=VSUBA, 45=VMSUBA) read
+                     * both operands from FS/FT directly, same shape
+                     * as VADD/VMADD/VMUL/VSUB/VMSUB. Broadcast forms
+                     * (idx 0-15, 24-28, 30, 32-39) read the second
+                     * operand from a single FT lane, or from Q
+                     * (cop2_ctrl[22]) / I (cop2_ctrl[21]), exactly
+                     * like the funct<=0x1F broadcast row. idx 46
+                     * (VOPMULA) is the outer-product multiply variant
+                     * of VOPMSUB - writes ACC directly (no existing-
+                     * ACC read, no destmask, xyz only, w untouched),
+                     * ported from PCSX2's _vuOPMULA. idx 47 (VNOP) is
+                     * a true no-op. idx 43 is COP2_Unknown on real
+                     * hardware and correctly falls through to the
+                     * halt below. */
+                    if (idx == 47) {
+                        /* VNOP: no operation. */
+                    } else if (idx == 46) {
+                        uint32_t ufsx = vu0_vf_read_lane(st, fs, 0), ufsy = vu0_vf_read_lane(st, fs, 1), ufsz = vu0_vf_read_lane(st, fs, 2);
+                        uint32_t uftx = vu0_vf_read_lane(st, ft, 0), ufty = vu0_vf_read_lane(st, ft, 1), uftz = vu0_vf_read_lane(st, ft, 2);
+                        float fsx, fsy, fsz, ftx, fty, ftz;
+                        memcpy(&fsx, &ufsx, 4); memcpy(&fsy, &ufsy, 4); memcpy(&fsz, &ufsz, 4);
+                        memcpy(&ftx, &uftx, 4); memcpy(&fty, &ufty, 4); memcpy(&ftz, &uftz, 4);
+                        float rx = fsy * ftz, ry = fsz * ftx, rz = fsx * fty;
+                        uint32_t urx, ury, urz;
+                        memcpy(&urx, &rx, 4); memcpy(&ury, &ry, 4); memcpy(&urz, &rz, 4);
+                        st->vu0_acc[0] = urx; st->vu0_acc[1] = ury; st->vu0_acc[2] = urz;
+                    } else {
+                        int is_broadcast = idx <= 15 || (idx >= 24 && idx <= 28) || idx == 30 || (idx >= 32 && idx <= 39);
+                        uint32_t op_kind = 0; /* 0=ADD,1=SUB,2=MADD(acc read+write),3=MSUB,6=MUL */
+                        if (is_broadcast) {
+                            float b; uint32_t ub;
+                            if (idx <= 7) { op_kind = (idx >= 4) ? 1u : 0u; ub = vu0_vf_read_lane(st, ft, idx & 0x3u); }
+                            else if (idx <= 15) { op_kind = (idx >= 12) ? 3u : 2u; ub = vu0_vf_read_lane(st, ft, idx & 0x3u); }
+                            else if (idx <= 27) { op_kind = 6u; ub = vu0_vf_read_lane(st, ft, idx & 0x3u); } /* VMULAx/y/z/w */
+                            else if (idx == 28) { op_kind = 6u; ub = vu0_vi_read(st, 22); } /* VMULAq */
+                            else if (idx == 30) { op_kind = 6u; ub = vu0_vi_read(st, 21); } /* VMULAi */
+                            else {
+                                switch (idx) {
+                                case 32: op_kind = 0u; ub = vu0_vi_read(st, 22); break; /* VADDAq */
+                                case 33: op_kind = 2u; ub = vu0_vi_read(st, 22); break; /* VMADDAq */
+                                case 34: op_kind = 0u; ub = vu0_vi_read(st, 21); break; /* VADDAi */
+                                case 35: op_kind = 2u; ub = vu0_vi_read(st, 21); break; /* VMADDAi */
+                                case 36: op_kind = 1u; ub = vu0_vi_read(st, 22); break; /* VSUBAq */
+                                case 37: op_kind = 3u; ub = vu0_vi_read(st, 22); break; /* VMSUBAq */
+                                case 38: op_kind = 1u; ub = vu0_vi_read(st, 21); break; /* VSUBAi */
+                                default: op_kind = 3u; ub = vu0_vi_read(st, 21); break; /* VMSUBAi (idx=39) */
+                                }
+                            }
+                            memcpy(&b, &ub, 4);
+                            for (int lane = 0; lane < 4; lane++) {
+                                if (!(destmask & (0x8u >> lane))) continue;
+                                uint32_t ua = vu0_vf_read_lane(st, fs, (uint32_t)lane);
+                                float a, r; uint32_t ur;
+                                memcpy(&a, &ua, 4);
+                                if (op_kind == 0) r = a + b;
+                                else if (op_kind == 1) r = a - b;
+                                else if (op_kind == 2) { uint32_t uacc = st->vu0_acc[lane]; float acc; memcpy(&acc, &uacc, 4); r = acc + a * b; }
+                                else if (op_kind == 3) { uint32_t uacc = st->vu0_acc[lane]; float acc; memcpy(&acc, &uacc, 4); r = acc - a * b; }
+                                else r = a * b;
+                                memcpy(&ur, &r, 4);
+                                st->vu0_acc[lane] = ur;
+                            }
+                        } else {
+                            switch (idx) {
+                            case 40: op_kind = 0u; break; /* VADDA */
+                            case 41: op_kind = 2u; break; /* VMADDA */
+                            case 42: op_kind = 6u; break; /* VMULA */
+                            case 44: op_kind = 1u; break; /* VSUBA */
+                            default: op_kind = 3u; break; /* VMSUBA (idx=45) */
+                            }
+                            for (int lane = 0; lane < 4; lane++) {
+                                if (!(destmask & (0x8u >> lane))) continue;
+                                uint32_t ua = vu0_vf_read_lane(st, fs, (uint32_t)lane);
+                                uint32_t ub2 = vu0_vf_read_lane(st, ft, (uint32_t)lane);
+                                float a, bb, r; uint32_t ur;
+                                memcpy(&a, &ua, 4); memcpy(&bb, &ub2, 4);
+                                if (op_kind == 0) r = a + bb;
+                                else if (op_kind == 1) r = a - bb;
+                                else if (op_kind == 2) { uint32_t uacc = st->vu0_acc[lane]; float acc; memcpy(&acc, &uacc, 4); r = acc + a * bb; }
+                                else if (op_kind == 3) { uint32_t uacc = st->vu0_acc[lane]; float acc; memcpy(&acc, &uacc, 4); r = acc - a * bb; }
+                                else r = a * bb;
+                                memcpy(&ur, &r, 4);
+                                st->vu0_acc[lane] = ur;
+                            }
+                        }
+                    }
                 } else {
                     halt("unimplemented COP2 SPECIAL2 sub-opcode (VU0 vector datapath not implemented)");
                     return 1;

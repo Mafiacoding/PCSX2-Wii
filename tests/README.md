@@ -1783,3 +1783,27 @@ that one lane.
 gcc -I../include -I../source -o test_ee_cop2_unary tests/test_ee_cop2_unary.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_unary
 ```
+
+`test_ee_cop2_acc.c` covers Round 29 continued's 21st change - the
+COP2SPECIAL2 accumulator-writing family: every op that writes
+`vu0_acc[4]` instead of `VF[fd]`. Full-vector forms `VADDA`(idx40)/
+`VMADDA`(41)/`VMULA`(42)/`VSUBA`(44)/`VMSUBA`(45); `VOPMULA`(46, the
+outer-product multiply variant of `VOPMSUB` - writes ACC directly, no
+existing-ACC read, xyz only); `VNOP`(47, true no-op); representative
+broadcast forms `VADDAy`(idx1)/`VMADDAx`/`VMULAq`(idx28, broadcasts
+`Q`)/`VSUBAi` (broadcasts `I`). All confirmed against a real PCSX2
+upstream reference clone's `VUops.cpp` (`applyBinaryMACOp`/
+`applyTernaryMACOp` and their `Broadcast` variants templated on
+`MACOpDst::Acc`). 7 checks across 6 independent fresh-core sub-tests
+(so `ACC` always starts at a known zeroed state): `VADDA` computes
+`ACC=VF1+VF2`; `VMULA` seeds `ACC`, then `VMADDA` accumulates onto it
+(round-trips through the real ACC read-modify-write); `VSUBA`
+computes `ACC=VF1-VF2`; `VOPMULA` overwrites a sentinel ACC value with
+the cross-product-shaped outer product; `VMULAq` broadcasts `Q`, and
+the following `VNOP` provably changes nothing; `VADDAy` broadcasts a
+single FT lane.
+
+```sh
+gcc -I../include -I../source -o test_ee_cop2_acc tests/test_ee_cop2_acc.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
+./test_ee_cop2_acc
+```

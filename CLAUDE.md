@@ -1929,3 +1929,23 @@ independent of the idx formula which only uses bits 0-1/6-10). Full
 77-block regression suite passes, clean Wii rebuild verified. Open:
 accumulator-writing family, VCLIPw, memory-access beyond VISWR/VSQI,
 VDIV/VSQRT/VRSQRT.
+
+## Update (Round 29 continued, 21st change - EE COP2 SPECIAL2 accumulator-writing family)
+
+Implemented the largest remaining VU0 macro-mode cluster (~37
+opcodes): every op that writes vu0_acc[4] instead of VF[fd].
+Full-vector VADDA/VMADDA/VMULA/VSUBA/VMSUBA (idx40-45, same shape as
+their FD-writing counterparts). Broadcast forms VADDAx/y/z/w,
+VSUBAx/y/z/w, VMADDAx/y/z/w, VMSUBAx/y/z/w, VMULAx/y/z/w/q/i,
+VADDAq/i, VMADDAq/i, VSUBAq/i, VMSUBAq/i (idx 0-15,24-28,30,32-39).
+VOPMULA (idx46, outer product into ACC directly, no existing-ACC
+read, xyz only). VNOP (idx47, true no-op). All confirmed against real
+PCSX2 upstream's VUops.cpp MACOpDst::Acc templates. New test
+tests/test_ee_cop2_acc.c (7 checks across 6 fresh-core sub-tests, all
+passing) - verifies VMADDA genuinely round-trips through a real
+accumulate, VOPMULA overwrites rather than accumulates, VNOP changes
+nothing. Full 78-block regression suite passes, clean Wii rebuild
+verified. Remaining VU0 gaps: VCLIPw (new flag register needed),
+VLQI/VLQD/VSQD, VMTIR/VMFIR/VILWR (different field decode),
+VDIV/VSQRT/VRSQRT/VWAITQ (Q busy-timing), VRNEXT/VRGET/VRINIT/VRXOR
+(R-register LCG).

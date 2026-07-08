@@ -1700,3 +1700,25 @@ writes that one lane.
 gcc -I../include -I../source -o test_ee_cop2_arith3 tests/test_ee_cop2_arith3.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_arith3
 ```
+
+`test_ee_cop2_arith4.c` covers Round 29 continued's 17th change -
+completing the VADD/VMUL/VMAX/VSUB/VMINI SPECIAL1 row (funct
+0x28-0x2F) with its three remaining, accumulator-based siblings:
+`VMADD` (funct 0x29), `VMSUB` (funct 0x2D), `VOPMSUB` (funct 0x2E).
+Confirmed against a real PCSX2 upstream reference clone's
+`R5900OpcodeTables.cpp` row (VADD, VMADD, VMUL, VMAX, VSUB, VMSUB,
+VOPMSUB, VMINI = funct 0x28..0x2F sequential) and `VUops.cpp`'s
+`_vuOpMADD`/`_vuOpMSUB`/`_vuOPMSUB` semantics. VMADD/VMSUB read the
+existing VU0 macro-mode accumulator (`vu0_acc[4]`, already wired for
+VU microcode) as a third operand: `FD[lane] = ACC[lane] +-
+FS[lane]*FT[lane]`. VOPMSUB is the cross-product-shaped outer-product
+multiply-subtract, always writing exactly xyz (no destmask field, w
+untouched). 5 checks: VMADD.xyzw and VMSUB.xyzw per-lane results
+verified against hand-computed values; VMADD.x (single-lane destmask)
+only writes that one lane; VOPMSUB's cross-product-shaped result
+verified against hand-computed values.
+
+```sh
+gcc -I../include -I../source -o test_ee_cop2_arith4 tests/test_ee_cop2_arith4.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
+./test_ee_cop2_arith4
+```

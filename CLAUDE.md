@@ -1860,3 +1860,23 @@ one), clean Wii rebuild verified (only the pre-existing, harmless
 strncpy truncation warning in iop_module_loader.c). VMSUB/VOPMSUB
 remain the two still-unimplemented ops in this row - not added this
 round.
+
+## Update (Round 29 continued, 17th change - EE COP2 VMADD/VMSUB/VOPMSUB complete the arithmetic row)
+
+Correction to the 16th change's note: the row's remaining gap was
+actually three ops (VMADD was also missing, not just VMSUB/VOPMSUB).
+This change closes all three, completing the full
+VADD/VMADD/VMUL/VMAX/VSUB/VMSUB/VOPMSUB/VMINI SPECIAL1 row (funct
+0x28-0x2F sequential, confirmed against real PCSX2 upstream's
+R5900OpcodeTables.cpp). VMADD/VMSUB read the existing vu0_acc[4]
+accumulator (already wired for VU microcode) as a third operand:
+FD[lane] = ACC[lane] +- FS[lane]*FT[lane]. VOPMSUB is the cross-
+product-shaped outer-product multiply-subtract, always writing xyz
+(no destmask, w untouched), ported from PCSX2's _vuOPMSUB. New test
+tests/test_ee_cop2_arith4.c (5 checks, all passing) pokes vu0_acc
+directly since no macro-mode "write ACC" opcode exists yet. Full
+74-block regression suite passes (73 pre-existing + this new one),
+clean Wii rebuild verified (only the pre-existing, harmless strncpy
+truncation warning). Broadcast forms, the accumulator-writing family
+(VADDA/VMULA/VMADDA/VMSUBA/VOPMULA), and the memory-access family
+beyond VISWR/VSQI remain open.

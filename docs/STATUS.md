@@ -4947,3 +4947,46 @@ destmask is honored per-lane rather than always writing the full
 vector. Full 73-block regression suite passes (72 pre-existing + this
 new one); clean Wii rebuild verified (only the pre-existing, harmless
 `strncpy` truncation warning in `iop_module_loader.c`).
+
+## Round 29 continued (17th change: EE COP2 VMADD/VMSUB/VOPMSUB complete the SPECIAL1 arithmetic row)
+
+Correction to the 16th change's note above: the row's remaining gap
+was actually three ops, not two - VMADD (funct 0x29) was also missing.
+This change closes all three, completing the full
+`VADD/VMADD/VMUL/VMAX/VSUB/VMSUB/VOPMSUB/VMINI` row (funct 0x28-0x2F
+sequential), confirmed against a real PCSX2 upstream reference
+clone's `R5900OpcodeTables.cpp` (that exact row, in that exact funct
+order) and `VUops.cpp`'s `_vuOpMADD`/`_vuOpMSUB`/`_vuOPMSUB`.
+
+`VMADD` (0x29) and `VMSUB` (0x2D) are the same 3-operand per-lane
+shape as VADD/VMUL/VMAX/VSUB/VMINI, but read a third operand from the
+VU0 macro-mode accumulator (`vu0_acc[4]`, lane order x=0/y=1/z=2/w=3 -
+already wired and used by the VU microcode interpreter in
+`source/hw/vu.c`, so no new state was needed): `FD[lane] = ACC[lane]
++- FS[lane]*FT[lane]` per destmask lane, writing FD only (matching
+PCSX2's `applyTernaryMACOp<..., MACOpDst::Fd>` - the accumulator-
+writing variants VMADDA/VMSUBA are a separate opcode family, not
+implemented here).
+
+`VOPMSUB` (0x2E) is the cross-product-shaped outer-product multiply-
+subtract - PCSX2's `_vuOPMSUB` has no destmask/`_W` branch at all, so
+it always writes exactly xyz and leaves w untouched: `FD.x =
+ACC.x - FS.y*FT.z`, `FD.y = ACC.y - FS.z*FT.x`, `FD.z = ACC.z -
+FS.x*FT.y`.
+
+New test `tests/test_ee_cop2_arith4.c` (5 checks): pokes `vu0_acc =
+(10,10,10,10)` directly (there is no macro-mode "write ACC" opcode
+implemented yet to set it via real code), loads VF1=(2,3,4,5) and
+VF2=(1,2,3,4), verifies `VMADD.xyzw` (ACC+VF1*VF2 = 12,16,22,30),
+`VMSUB.xyzw` (ACC-VF1*VF2 = 8,4,-2,-10), `VMADD.x` (single-lane
+destmask honored), and `VOPMSUB`'s cross-product-shaped result
+(1,6,6) against hand-computed values. Full 74-block regression suite
+passes (73 pre-existing + this new one); clean Wii rebuild verified
+(only the pre-existing, harmless `strncpy` truncation warning in
+`iop_module_loader.c`).
+
+Broadcast forms (VADDx/y/z/w/VMADDbc/etc), the accumulator-writing
+family (VADDA/VMULA/VMADDA/VMSUBA/VOPMULA), and the memory-access
+family beyond VISWR/VSQI remain open - not seen in the traced boot
+path, scoped future work like this project's other still-open VU0
+gaps.

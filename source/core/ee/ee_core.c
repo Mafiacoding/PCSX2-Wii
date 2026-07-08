@@ -1556,10 +1556,10 @@ static int ee_step(void)
                  * fp_min comparison - a straightforward C ternary
                  * comparison here, consistent with this project not
                  * modeling any NaN/signed-zero edge cases anywhere
-                 * else in its float datapath either). VMSUB/VOPMSUB
-                 * (the two remaining ops in this row) are not added
-                 * yet - not seen in the traced boot path, a scoped
-                 * future gap like VIAND/VIOR's siblings below. */
+                 * else in its float datapath either). VMADD(0x29)/
+                 * VMSUB(0x2D)/VOPMSUB(0x2E), this same row's three
+                 * accumulator-based siblings, are handled separately
+                 * below (Round 29 continued, 17th change). */
                 for (int lane = 0; lane < 4; lane++) {
                     if (!(destmask & (0x8u >> lane))) continue;
                     uint32_t ua = vu0_vf_read_lane(st, fs, (uint32_t)lane);
@@ -1575,6 +1575,62 @@ static int ee_step(void)
                     memcpy(&ur, &r, 4);
                     vu0_vf_write_lane(st, fd, (uint32_t)lane, ur);
                 }
+            } else if (funct == 0x29 || funct == 0x2D) {
+                /* VMADD(0x29)/VMSUB(0x2D): FD[lane] = ACC[lane] +-
+                 * FS[lane]*FT[lane], per destmask lane - the same
+                 * SPECIAL1 row as VADD/VMUL/VMAX/VSUB/VMINI above
+                 * (confirmed against PCSX2's R5900OpcodeTables.cpp:
+                 * ..., VADD, VMADD, VMUL, VMAX, VSUB, VMSUB, VOPMSUB,
+                 * VMINI, ... = funct 0x28..0x2F sequential), but
+                 * reading a third operand from the VU0 macro-mode
+                 * accumulator (st->vu0_acc[4], lane order x=0/y=1/
+                 * z=2/w=3 - the same convention source/hw/vu.c's own
+                 * ACC handling already uses for VU microcode).
+                 * Ported from PCSX2's own VUops.cpp _vuOpMADD/
+                 * _vuOpMSUB (applyTernaryMACOp<..., MACOpDst::Fd>):
+                 * writes FD, does NOT write back into ACC (that's the
+                 * separate VMADDA/VMSUBA accumulator-dest opcodes,
+                 * not modeled here - not seen in the traced boot path,
+                 * a scoped future gap like the broadcast/VMADDbc
+                 * forms). No MAC-flag modeling, consistent with this
+                 * project's existing float datapath elsewhere. */
+                for (int lane = 0; lane < 4; lane++) {
+                    if (!(destmask & (0x8u >> lane))) continue;
+                    uint32_t uacc = st->vu0_acc[lane];
+                    uint32_t ua = vu0_vf_read_lane(st, fs, (uint32_t)lane);
+                    uint32_t ub = vu0_vf_read_lane(st, ft, (uint32_t)lane);
+                    float acc, a, b, r; uint32_t ur;
+                    memcpy(&acc, &uacc, 4);
+                    memcpy(&a, &ua, 4);
+                    memcpy(&b, &ub, 4);
+                    if (funct == 0x29) r = acc + a * b;
+                    else r = acc - a * b;
+                    memcpy(&ur, &r, 4);
+                    vu0_vf_write_lane(st, fd, (uint32_t)lane, ur);
+                }
+            } else if (funct == 0x2E) {
+                /* VOPMSUB: outer-product multiply-subtract, the
+                 * cross-product-shaped sibling in the same row -
+                 * ALWAYS writes exactly xyz (never w - there is no
+                 * destmask field for this op; confirmed against
+                 * PCSX2's own VUops.cpp _vuOPMSUB, which has no _W
+                 * branch at all): FD.x=ACC.x-FS.y*FT.z,
+                 * FD.y=ACC.y-FS.z*FT.x, FD.z=ACC.z-FS.x*FT.y. */
+                uint32_t uaccx = st->vu0_acc[0], uaccy = st->vu0_acc[1], uaccz = st->vu0_acc[2];
+                uint32_t ufsx = vu0_vf_read_lane(st, fs, 0), ufsy = vu0_vf_read_lane(st, fs, 1), ufsz = vu0_vf_read_lane(st, fs, 2);
+                uint32_t uftx = vu0_vf_read_lane(st, ft, 0), ufty = vu0_vf_read_lane(st, ft, 1), uftz = vu0_vf_read_lane(st, ft, 2);
+                float accx, accy, accz, fsx, fsy, fsz, ftx, fty, ftz;
+                memcpy(&accx, &uaccx, 4); memcpy(&accy, &uaccy, 4); memcpy(&accz, &uaccz, 4);
+                memcpy(&fsx, &ufsx, 4); memcpy(&fsy, &ufsy, 4); memcpy(&fsz, &ufsz, 4);
+                memcpy(&ftx, &uftx, 4); memcpy(&fty, &ufty, 4); memcpy(&ftz, &uftz, 4);
+                float rx = accx - fsy * ftz;
+                float ry = accy - fsz * ftx;
+                float rz = accz - fsx * fty;
+                uint32_t urx, ury, urz;
+                memcpy(&urx, &rx, 4); memcpy(&ury, &ry, 4); memcpy(&urz, &rz, 4);
+                vu0_vf_write_lane(st, fd, 0, urx);
+                vu0_vf_write_lane(st, fd, 1, ury);
+                vu0_vf_write_lane(st, fd, 2, urz);
             } else if ((funct & 0x3Cu) == 0x3Cu) {
                 /* SPECIAL2 sub-dispatch - index formula confirmed
                  * against PCSX2's R5900OpcodeTables.cpp comment:

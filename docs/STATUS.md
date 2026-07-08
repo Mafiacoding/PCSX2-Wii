@@ -6725,3 +6725,74 @@ follow-up round (task #164), rather than rushed within an already very
 long investigative session, consistent with this project's standing
 practice of not combining open-ended research with unverified
 implementation in the same breath.
+
+## Round 29 continued (44th finding, task #151/#164): implemented IOP syscall 0x10/0x08/0x14 handling - real, substantial forward progress; SIF handshake still not reached
+
+Implemented the 43rd finding's concrete target: real IOP kernel
+syscall numbers `0x10`, `0x08`, and (discovered mid-implementation)
+`0x14` are now intercepted directly at the `SYSCALL` exception site in
+`iop_core.c`, BEFORE any real exception is raised - matching this
+project's existing, established precedent for unimplemented real
+kernel calls (the `A0`/`B0`/`C0` BIOS-HLE convention, and the
+BREAK-as-syscall-fallback from tasks #149/#156): return the same
+generic default value (`$v0 = 0`) already used throughout this
+project, and resume the calling module's own code at the instruction
+right after the `syscall`, instead of raising a real exception that
+falls through to the still-default, dead exception-vector stub
+(42nd finding) and gets bypassed by abandoning the module entirely.
+
+**Implementation note (mid-round discovery):** after adding 0x10/0x08
+handling and re-testing against the real BIOS, every one of the 12
+still-affected modules advanced past their first syscall to a SECOND
+real syscall, number `0x14` (`a0=0` always, `a1` varies - a small
+index/priority-like value for most modules, one larger address-like
+value for IOMAN; real semantics not yet identified, plausibly a real
+`RegisterIntrHandler`/`CpuEnableIntr`-style call). Added the same
+generic-default handling for `0x14` in the same round, since it's the
+identical mechanism and precedent - not a new, separate risk.
+
+**Verification performed:** clean compile; full 87-test host-native
+regression suite passes (no test changes needed - this touches only
+`iop_core.c`'s SYSCALL case, and every existing test's syscall
+scenarios are unaffected since none of them use syscall numbers
+0x08/0x10/0x14); clean Wii/devkitPPC rebuild (only the pre-existing
+harmless `strncpy` warning).
+
+**Real-BIOS empirical result (honest, verified via the same
+diagnostic technique used throughout this session):**
+- `modules_run_to_completion`: **15 -> 19** (a real, measurable
+  increase - LOADFILE and three others now run their real entry point
+  to completion instead of being abandoned mid-init).
+- `trap_stubs_bypassed`: **13 -> 0** (every module that previously hit
+  the dead exception-vector trap now advances past it).
+- **The IOP no longer halts/panics at all** within a 30M-instruction
+  boot budget - previously it always reached a definite "boot sequence
+  complete" halt state (via one bypass mechanism or another); now it
+  keeps running as a live, ongoing process.
+- Traced where execution actually goes: PC settles into a real,
+  legitimate polling loop (confirmed via disassembly of the resident
+  code at the final PC) - `beq $zero,$s1,<-9 words>`, spinning while
+  `$s1==0` and calling two real subroutines each pass. This is
+  structurally a genuine "wait for a condition, poll" idiom (real
+  kernel code commonly does exactly this - waiting on a semaphore,
+  hardware-ready flag, or SIF handshake state) - NOT a crash, NOT one
+  of this project's own recognized panic patterns. The IOP is doing
+  real, ongoing kernel work.
+- **Honest caveat: SIF_MSCOM/SIF_SMCOM/SIF_MSFLG/SIF_SMFLG are
+  UNCHANGED** (`0x00000000`/`0x00000000`/`0x00010000`/`0x00000000` -
+  identical to every prior round back to the 36th finding). The
+  polling loop this project's IOP now sits in has not yet been
+  satisfied by anything on the EE side or elsewhere in this project's
+  simulation, so the user-visible SIF handshake goal is NOT yet
+  reached. This is real, substantial, verified progress toward task
+  #151 (the IOP is no longer crashing during boot - a categorically
+  different and better state than every prior round), but it is
+  honestly NOT the same as task #151 being fully closed.
+
+**Next step for whoever continues:** identify what real condition the
+new polling loop (`$s1`, checked via `beq $zero,$s1,...` at the
+resident address found this round) is waiting on, and the two
+subroutines it calls each pass (same live-debugger-plus-own-emulator
+tracing technique already established this session) - very plausibly
+this is the actual final piece standing between this project's current
+state and a real, observable SIF handshake completion.

@@ -1499,6 +1499,17 @@ already documented, rather than truly returning from the syscall.
    still-default exception vector and traps. Concrete next step
    (task #164): implement handling for these syscall numbers. See
    STATUS.md's 43rd finding.
+   UPDATE (Round 29 continued, 44th finding, task #151/#164):
+   IMPLEMENTED syscall 0x10/0x08/0x14 handling (direct intercept,
+   return v0=0, matching established precedent). Real-BIOS result:
+   modules_run_to_completion 15->19, trap_stubs_bypassed 13->0, and
+   the IOP no longer halts/panics at all - it settles into a genuine
+   polling loop (beq $zero,$s1,...) instead of any recognized panic
+   pattern. Categorical improvement, but SIF_MSCOM/SIF_SMCOM/SIF_MSFLG/
+   SIF_SMFLG remain completely unchanged - the polling loop's wait
+   condition isn't yet satisfied, so the SIF handshake goal is not yet
+   reached. Next: identify what the polling loop is waiting on. See
+   STATUS.md's 44th finding.
    next concrete target (the new, deeper dead end this round found).
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the

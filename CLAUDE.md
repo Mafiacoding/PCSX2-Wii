@@ -2589,3 +2589,24 @@ pattern (tasks #149/#156), then empirically verify via a real-BIOS
 diagnostic whether SIFCMD/SIFINIT progress further. See
 docs/STATUS.md's 43rd finding for full detail. No source changed this
 round - implementation deliberately deferred to a dedicated follow-up.
+
+## Update (Round 29 continued, 44th finding): implemented syscall 0x10/0x08/0x14 handling - real progress, IOP no longer panics during boot (Task #164)
+
+Implemented direct interception (matching the established A0/B0/C0
+HLE and BREAK-as-syscall-fallback precedent: return $v0=0, resume at
+PC+4, no real exception raised) for IOP syscall numbers 0x10, 0x08,
+and 0x14 (the last discovered mid-round when 0x10/0x08 alone let every
+affected module advance to a second real syscall). Full 87-test
+regression suite passes; clean Wii rebuild.
+
+Real-BIOS result: modules_run_to_completion 15->19, trap_stubs_bypassed
+13->0, and the IOP no longer halts/panics at all within a 30M-
+instruction boot budget - it settles into a genuine polling loop
+(beq $zero,$s1,-9words, calling two real subroutines each pass) rather
+than any recognized panic pattern. This is a categorical improvement:
+the IOP is doing real, ongoing kernel work instead of crashing.
+HONEST CAVEAT: SIF_MSCOM/SIF_SMCOM/SIF_MSFLG/SIF_SMFLG are still
+completely unchanged from every prior round - the polling loop's wait
+condition has not yet been satisfied, so the actual SIF handshake goal
+is not yet reached. Next: identify what $s1 and the two called
+subroutines are waiting on. See docs/STATUS.md's 44th finding.

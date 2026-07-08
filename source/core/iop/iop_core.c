@@ -417,6 +417,66 @@ static int iop_step(void)
              * instruction (BREAK is kept as this project's own
              * clean-halt-for-testing convention, not changed here). */
         {
+            /* Round 29 continued (task #164): real IOP kernel syscall
+             * numbers 0x10 and 0x08 - see docs/STATUS.md's 43rd
+             * finding for the full derivation. Live-traced (this
+             * project's own emulator, cross-checked register state at
+             * the exact fault point) for every one of the 13 modules
+             * that previously hit is_unconditional_trap_stub()
+             * (SSBUSC, DMACMAN, THREADMAN, VBLANK, IOMAN, MODLOAD,
+             * SIFCMD, CDVDMAN, SIFINIT: v0=0x10, a0=pointer to the
+             * calling module's own local struct, a1=a fixed address
+             * 0x00100030 or 0xBF801528 - consistent with a real
+             * RegisterLibraryEntries-style kernel call; REBOOT,
+             * LOADFILE, CDVDFSV, FILEIO: v0=0x08, a0=3 always).
+             *
+             * This project's exception vector (0x80000080/0xBFC00180)
+             * has no real installed dispatcher for these - it's just
+             * a default fallback stub baked into an early module's
+             * own ELF segment data (42nd finding), which ends in an
+             * unconditional TGE trap. Previously, this project's
+             * module loader recognized that trap pattern and
+             * abandoned the CALLING module's remaining execution
+             * entirely, jumping to the NEXT module in the boot list
+             * (is_unconditional_trap_stub()/advance_to_next_module()).
+             * That bypass is kept for any OTHER syscall number that
+             * still falls through to this same dead end, but for
+             * these two specific, now-understood numbers, this
+             * project instead applies the EXACT SAME precedent
+             * already established for the A0/B0/C0 BIOS-table
+             * convention (iop_hle_bios.c) and the BREAK-as-syscall-
+             * fallback (tasks #149/#156): intercept BEFORE any real
+             * exception is raised, return the same generic default
+             * value (0) already used throughout this project for
+             * unimplemented real kernel calls, and resume the CALLING
+             * module's OWN code at the instruction right after the
+             * syscall - so its real init can continue past this call
+             * instead of being abandoned. No Cause/EPC/Status field is
+             * touched for this path (matching the A0/B0/C0 HLE
+             * convention: a pure software intercept, not a real
+             * CPU-level exception at all - safe precisely because
+             * these are scratch/kernel-internal fields the caller
+             * never observes either way). Any OTHER syscall number is
+             * completely unaffected and still raises the real
+             * exception exactly as before. */
+            uint32_t syscall_num = st->gpr[2]; /* $v0 - real IOP kernel syscall-number convention */
+            /* Round 29 continued (task #164 continued): after adding
+             * 0x10/0x08 handling above, live-traced (this project's
+             * own emulator) every one of the remaining 12
+             * trap-stub-bypassed modules and found ALL of them now
+             * advance past their first syscall to a SECOND real
+             * syscall, number 0x14 (a0=0 always; a1 varies per module
+             * - a small index/priority-like value for most, one
+             * larger address-like value for IOMAN - real semantics
+             * not yet identified, e.g. could be a real
+             * RegisterIntrHandler/CpuEnableIntr-style kernel call).
+             * Same precedent, same generic default-return convention. */
+            if (syscall_num == 0x10u || syscall_num == 0x08u || syscall_num == 0x14u) {
+                st->gpr[2] = 0; /* same generic default-return convention as iop_hle_bios.c / task #149/#156 */
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                break;
+            }
             st->cop0[13] = (st->cop0[13] & ~0x7Fu) | 0x20u; /* Cause.ExcCode = 8 (Syscall) */
             st->cop0[14] = this_pc; /* EPC */
             uint32_t vector = (st->cop0[12] & 0x400000u) ? 0xBFC00180u : 0x80000080u; /* Status.BEV */

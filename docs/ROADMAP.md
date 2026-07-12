@@ -1549,6 +1549,18 @@ already documented, rather than truly returning from the syscall.
    reached, though GS/display registers are still untouched (expected -
    this is early kernel bring-up, before any drawing). See STATUS.md's
    46th/47th findings.
+   UPDATE (Round 29 continued, 48th finding, task #172): implemented
+   syscall 119 (sceSifSetDma) for real - a genuine EE-RAM-to-IOP-RAM
+   DMA copy, confirmed matching real ps2sdk's _SifSendCmd() sending
+   its SIF_CMD_INIT_CMD packet. Caught and fixed a real regression
+   along the way: the first version gave ee_core.c a hard link-time
+   dependency on iop_core.c, breaking ~37 EE-only tests - fixed with
+   an optional function-pointer bridge wired up in system_init(),
+   left NULL (safe no-op) for EE-only tests. Verified: 87/87
+   regression tests, clean Wii rebuild. Real-BIOS result: boot
+   advances into a further real code path resembling sceSifInitCmd()'s
+   "already initialized" guard - furthest point yet reached. See
+   STATUS.md's 48th finding.
    next concrete target (the new, deeper dead end this round found).
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the

@@ -211,6 +211,15 @@ void ee_core_run(const bios_image_t *bios);
 int ee_core_step(void);
 void ee_core_shutdown(void);
 
+/* Task #172 continued: optional bridge so the SIF DMA-copy syscall
+ * handler (sceSifSetDma) can write into IOP memory without ee_core.c
+ * gaining a hard link-time dependency on iop_core.c - see the
+ * definition site in ee_core.c for the full rationale. Callers that
+ * link both cores together (main.c, combined diagnostics) should call
+ * this once after both ee_core_init() and iop_core_init(); EE-only
+ * tests simply never call it. */
+void ee_core_set_iop_write8_bridge(void *iop_ctx, void (*write8_fn)(void *ctx, uint32_t addr, uint8_t val));
+
 /* Exposed for the recompiler PoC (source/core/recompiler) to share
  * register state layout / memory access helpers. */
 ee_state_t *ee_core_get_state(void);

@@ -2680,3 +2680,27 @@ this project. GS/display registers (PMODE/DISPFB/DISPLAY) are still
 untouched - expected, since this is early kernel bring-up before any
 drawing, not a sign of a remaining bug. See docs/STATUS.md's 46th/47th
 findings.
+
+## Update (Round 29 continued, 48th finding): sceSifSetDma implemented for real; caught and fixed a real modularity regression (Task #172)
+
+Implemented syscall 119 (sceSifSetDma) for real - copies bytes from EE
+RAM to IOP RAM per the real SifDmaTransfer_t descriptor, confirmed via
+trace to be real ps2sdk's _SifSendCmd() sending its SIF_CMD_INIT_CMD
+packet (src/dest/size/attr all matched real semantics exactly).
+
+The first version of this fix called iop_core_get_state()/
+iop_mem_write8() directly from ee_core.c, which broke ~37 EE-only
+tests at link time (they deliberately link ee_core.c without any IOP
+code) - caught immediately by this project's own mandatory regression
+suite. Fixed architecturally: added an optional function-pointer bridge
+(ee_core_set_iop_write8_bridge(), generic (void*, addr, val) signature)
+that system_init() wires up once both cores exist; EE-only tests never
+call it, so the pointer stays NULL and the copy becomes a documented
+no-op instead of a link error.
+
+Verified: 87/87 regression tests pass (after the bridge fix), clean
+Wii rebuild. Real-BIOS result: boot advances past sceSifSetDma into a
+further real code path resembling sceSifInitCmd()'s "already
+initialized" guard - furthest point real-BIOS boot has ever reached.
+GS/display registers still untouched (expected - pre-drawing kernel
+work). See docs/STATUS.md's 48th finding.

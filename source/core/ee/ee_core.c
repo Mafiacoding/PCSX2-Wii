@@ -114,6 +114,28 @@
 #include "core/hw/vif.h"
 #include "core/hw/vu.h"
 #include "core/hw/sif.h"
+
+/* Task #172 continued (regression fix): the SIF DMA-copy syscall
+ * handler below needs to write into IOP memory, but ee_core.c must
+ * NOT gain a hard link-time dependency on iop_core.c - many existing
+ * tests (test_ee_core.c and friends) link ee_core.c WITHOUT any IOP
+ * code at all, by design, and a direct call to iop_mem_write8()/
+ * iop_core_get_state() broke every one of them at link time (caught
+ * by this project's own mandatory regression suite). Fixed with a
+ * small optional bridge: whoever links BOTH cores together (main.c,
+ * the interleaved host-native diagnostics, or any future combined
+ * test) calls ee_core_set_iop_write8_bridge() once after both cores
+ * are initialized; EE-only tests simply never call it, so the
+ * pointer stays NULL and the SIF DMA copy becomes a documented,
+ * honest no-op rather than a link error. */
+static void *g_ee_iop_ctx = NULL;
+static void (*g_ee_iop_write8)(void *ctx, uint32_t addr, uint8_t val) = NULL;
+
+void ee_core_set_iop_write8_bridge(void *iop_ctx, void (*write8_fn)(void *ctx, uint32_t addr, uint8_t val))
+{
+    g_ee_iop_ctx = iop_ctx;
+    g_ee_iop_write8 = write8_fn;
+}
 /* Task #172: real EE kernel "system register" bookkeeping table -
  * SIF_SYSREG_SUBADDR/MAINADDR/RPCINIT (SIF_REG_ID_SYSTEM=0x80000000 |
  * 0/1/2 per ps2sdk's sifdma.h _sif_regs enum) is a small, real,
@@ -1040,6 +1062,61 @@ static int ee_step(void)
                     if (hw_addr) sif_mmio_read32(hw_addr, &result);
                 }
                 GPR(2) = result;
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
+            if (sysnum == 119) {
+                /* 119 (0x77) sceSifSetDma/SifSetDma: a real EE-RAM-to-
+                 * IOP-RAM DMA packet transfer - confirmed via this
+                 * project's own trace to be real ps2sdk's
+                 * _SifSendCmd() (ee/kernel/src/sifcmd.c) doing its
+                 * final "return sceSifSetDma(dmat, count);" step,
+                 * sending a SIF_CMD_INIT_CMD packet: observed
+                 * dmat[0] = {src=EE RAM packet buffer,
+                 * dest=<IOP's real receive address, read back via
+                 * task #170's sceSifGetReg fix from the genuine
+                 * SIF_SMCOM value>, size=20, attr=SIF_DMA_ERT|
+                 * SIF_DMA_INT_O}, matching real ps2sdk's own
+                 * SifDmaTransfer_t field layout and attr flags
+                 * exactly. Implemented for real (not bypassed): copy
+                 * the real byte count from EE RAM at each
+                 * descriptor's src to IOP RAM at its dest, for $a1
+                 * descriptors read from the array at $a0. HONEST
+                 * CAVEAT: this models the actual data movement a real
+                 * SIF0 DMA transfer performs, but NOT the completion
+                 * interrupt (no EE-side DMA interrupt delivery is
+                 * modeled - see the 47th finding's caveat on syscalls
+                 * 18/22/120) or the IOP-side SIFCMD packet handler
+                 * actually interpreting what arrives (this project's
+                 * IOP module loader has already halted its own
+                 * modeled execution by this point in boot, so nothing
+                 * currently reads the copied bytes back) - the value
+                 * genuinely lands in IOP memory, real semantics for a
+                 * real hardware operation, just with the two ends of
+                 * the round-trip (the interrupt, and the IOP-side
+                 * handler) not yet modeled. Returns a small nonzero
+                 * transfer id (the real descriptor count), matching
+                 * real ps2sdk's convention closely enough that
+                 * negative/zero-checking callers (e.g. sceSifDmaStat)
+                 * won't misread it as a failure. */
+                uint32_t dmat_ptr = (uint32_t)GPR(4); /* $a0 */
+                uint32_t count = (uint32_t)GPR(5);    /* $a1 */
+                uint32_t i;
+                for (i = 0; i < count && i < 32u; i++) {
+                    uint32_t base = dmat_ptr + i * 16u;
+                    uint32_t src = ee_mem_read32(st, base + 0u);
+                    uint32_t dest = ee_mem_read32(st, base + 4u);
+                    uint32_t size = ee_mem_read32(st, base + 8u);
+                    if (g_ee_iop_write8) {
+                        uint32_t k;
+                        for (k = 0; k < size; k++) {
+                            uint8_t byte = ee_mem_read8(st, src + k);
+                            g_ee_iop_write8(g_ee_iop_ctx, (dest & 0x1FFFFFFFu) + k, byte);
+                        }
+                    }
+                }
+                GPR(2) = count ? count : 1u;
                 st->pc = this_pc + 4u;
                 st->next_pc = this_pc + 8u;
                 return 1;

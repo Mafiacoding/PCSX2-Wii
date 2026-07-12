@@ -22,6 +22,16 @@
  * approximation, not a claim of real timing fidelity. */
 #define EE_IOP_STEP_RATIO 8
 
+/* Task #172 continued: adapts iop_mem_write8()'s real signature to
+ * the generic (void *ctx, addr, val) shape ee_core.c's optional SIF
+ * DMA-copy bridge expects - see ee_core.h's ee_core_set_iop_write8_
+ * bridge() comment for why this indirection exists (keeping ee_core.c
+ * free of a hard link-time dependency on iop_core.c). */
+static void system_iop_write8_adapter(void *ctx, uint32_t addr, uint8_t val)
+{
+    iop_mem_write8((iop_state_t *)ctx, addr, val);
+}
+
 int system_init(const bios_image_t *ee_bios, const bios_image_t *iop_bios)
 {
     if (ee_core_init(ee_bios) != 0) {
@@ -32,6 +42,7 @@ int system_init(const bios_image_t *ee_bios, const bios_image_t *iop_bios)
         printf("[!] system_init: IOP core init failed\n");
         return -1;
     }
+    ee_core_set_iop_write8_bridge(iop_core_get_state(), system_iop_write8_adapter);
     return 0;
 }
 

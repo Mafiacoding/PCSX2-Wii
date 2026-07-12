@@ -545,8 +545,23 @@ uint32_t ee_mem_read32(ee_state_t *st, uint32_t addr)
 
 uint64_t ee_mem_read64(ee_state_t *st, uint32_t addr)
 {
+    /* Task #171/#172 (GS audit): this path was missing the same
+     * ee_hw_mmio_addr() KSEG0/1 masking the 32-bit path above already
+     * applies (added in "round 11" specifically because real BIOS/
+     * game code always addresses hardware registers through their
+     * cached/uncached mirrors, e.g. 0xB2000070, never the bare
+     * 0x12000070 literal). GS privileged registers (PMODE/DISPFB/
+     * DISPLAY, 0x12000000-0x12001FFF) are only reachable via 64-bit
+     * LD/SD, so this gap meant a real KSEG1-mirrored write/read to
+     * those registers silently missed gs_mmio_write64/read64 entirely
+     * and fell through to the generic RAM path (a no-op, since that
+     * address range isn't backed by RAM either) - independently found
+     * and confirmed via static code audit (this session's GS-path
+     * review), not yet observed live since real boot hasn't reached
+     * BIOS code that writes these registers yet, but a real,
+     * standalone bug regardless of when it's first exercised. */
     uint64_t gs_val;
-    if (gs_mmio_read64(addr, &gs_val))
+    if (gs_mmio_read64(ee_hw_mmio_addr(addr), &gs_val))
         return gs_val;
 
     uint8_t *p = ee_mem_ptr(st, addr, 8);
@@ -592,7 +607,9 @@ void ee_mem_write32(ee_state_t *st, uint32_t addr, uint32_t val)
 
 void ee_mem_write64(ee_state_t *st, uint32_t addr, uint64_t val)
 {
-    if (gs_mmio_write64(addr, val))
+    /* Task #171/#172: same KSEG0/1 masking fix as ee_mem_read64()
+     * above - see that function's comment for the full rationale. */
+    if (gs_mmio_write64(ee_hw_mmio_addr(addr), val))
         return;
 
     uint8_t *p = ee_mem_ptr(st, addr, 8);

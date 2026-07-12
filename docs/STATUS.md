@@ -7098,3 +7098,67 @@ comes after. None of this round's work touches GS/display registers
 yet (still all zero) - expected, since SIF/RPC bring-up is early
 kernel work that precedes any drawing, not evidence of a remaining
 graphics-path bug.
+
+## Round 29 continued (49th finding, task #171): GS audit finds and fixes a real, independent bug - 64-bit GS privileged-register access (PMODE/DISPFB/DISPLAY) was missing the same KSEG0/1 masking the 32-bit hardware path already has
+
+Ran a parallel, independent audit of the GS/display path (task #171)
+alongside the ongoing EE kernel syscall trace (tasks #170/#172), per
+the user's request to pursue multiple angles rather than a single
+linear thread. The audit's job was to determine whether GS privileged
+registers (PMODE/DISPFB1/DISPLAY1/DISPFB2/DISPLAY2, EE address range
+`0x12000000-0x12001FFF`) are even reachable by real EE code today, and
+whether `main.c`'s real-boot-flow entry point does anything useful with
+them once they change.
+
+**Confirmed real-boot-flow scaffolding is genuine, not dead code:**
+`main.c`'s `run_real_boot_flow()` (task #128) already calls
+`gs_get_state()` every interleaved-execution iteration, checks
+`pmode`'s display-enable bit, decodes `dispfb1`, and calls
+`gs_blit_psmct32_to_xfb()` to push real GS memory to the Wii
+framebuffer when active - genuinely wired up, just never yet observed
+to fire (because `pmode` has stayed zero through every diagnostic this
+whole project).
+
+**Root cause found for at least part of why:** GS registers are only
+reachable via 64-bit `LD`/`SD` (unlike the DMA/SIF/MCH registers, which
+use 32-bit `LW`/`SW`). `ee_mem_read64()`/`ee_mem_write64()` in
+`ee_core.c` call `gs_mmio_read64()`/`gs_mmio_write64()` with the RAW,
+unmasked address - never through `ee_hw_mmio_addr()`, the exact
+KSEG0/1-mirror-masking helper "round 11" already added specifically
+because real BIOS/game code always addresses hardware registers
+through their cached/uncached mirrors (e.g. `0xB2000070`), never the
+bare `0x12000070` literal (see docs/STATUS.md's round 10/11 sections
+and `tests/test_ee_hw_kseg_masking.c`, which - tellingly - only ever
+exercised this for SIF and MCH, never GS). Practical effect: a real
+`SD` to DISPFB1 through its KSEG1 mirror would have silently missed
+`gs_mmio_write64()` and fallen through to the generic RAM path
+(a no-op, since that address range isn't backed by RAM), even once
+real boot eventually reaches BIOS code that tries to write it.
+
+**Fix:** route both `ee_mem_read64()`/`ee_mem_write64()`'s GS dispatch
+through `ee_hw_mmio_addr()`, identical in spirit to the existing 32-bit
+fix. Minimal, two-line change plus a new regression test case
+(`tests/test_ee_hw_kseg_masking.c`, mirroring its existing SIF/MCH
+cases: `SD`/`LD` a value through DISPFB1's KSEG1 mirror,
+`0xB2000070`, and confirm it round-trips and lands in `gs_get_state()->
+dispfb1`).
+
+**Verification performed:** the new test case passes; full 87-test
+regression suite passes (0 failures); clean Wii/devkitPPC rebuild
+(only the pre-existing, unrelated `strncpy` warning).
+
+**Honest scope note:** this is a real, independently-confirmed bug
+fix, but it has NOT yet been observed to change real-BIOS boot
+behavior - real boot hasn't reached BIOS code that writes these
+registers yet (still inside EE kernel-RPC bring-up per the 46th-48th
+findings), so this fix removes a real, concrete obstacle that WOULD
+otherwise have blocked the splash screen even once boot gets there,
+rather than unblocking anything observable today. Ranked alongside
+this, the audit's other candidate hypotheses for the still-zero
+GS/display registers (documented for the next person to continue
+either thread): (1, most likely) boot simply hasn't reached
+logo/OSD-drawing code yet - still deep in kernel/RPC bring-up by
+design; (2, now fixed) this KSEG0/1 masking gap; (3, unconfirmed)
+there may be a missing HLE/syscall blocking whatever triggers the
+logo-drawing module specifically; (4) untested alternatives (e.g. GIF/
+VIF DMA never getting kicked for the logo draw itself).

@@ -29,6 +29,8 @@ static uint32_t enc_sw(int rt, int rs, int16_t imm) { return (0x2B << 26) | (rs 
 static uint32_t enc_lw(int rt, int rs, int16_t imm) { return (0x23 << 26) | (rs << 21) | (rt << 16) | (uint16_t)imm; }
 static uint32_t enc_break(void) { return 0x0D; }
 static void wle32(uint8_t *p, uint32_t v) { p[0]=v&0xFF;p[1]=(v>>8)&0xFF;p[2]=(v>>16)&0xFF;p[3]=(v>>24)&0xFF; }
+static uint32_t enc_sd(int rt, int rs, int16_t imm) { return (0x3F << 26) | (rs << 21) | (rt << 16) | (uint16_t)imm; }
+static uint32_t enc_ld(int rt, int rs, int16_t imm) { return (0x37 << 26) | (rs << 21) | (rt << 16) | (uint16_t)imm; }
 
 /* Builds+runs a tiny program: r1=0xCAFEBABE; SW r1 -> hw_addr; LW r3 <- hw_addr; BREAK. */
 static uint64_t run_roundtrip(uint32_t hw_addr)
@@ -102,6 +104,43 @@ int main(void)
         ee_state_t *st = ee_core_get_state();
         CHECK((uint32_t)st->gpr[5].ud0 == 0x1Fu,
               "real BIOS-style KSEG1 access (0xB000F430/0xB000F440) reaches MCH and returns 0x1F");
+    }
+
+    /* Task #171/#172 (GS audit): GS privileged registers (PMODE/
+     * DISPFB/DISPLAY, 0x12000000-0x12001FFF) are only reachable via
+     * 64-bit LD/SD, and ee_mem_read64/write64 were found (this
+     * session's GS-path review) to be missing the same
+     * ee_hw_mmio_addr() masking the 32-bit path above already has -
+     * meaning a real KSEG1-mirrored SD to DISPFB1 (0xB2000070) would
+     * have silently missed gs_mmio_write64() entirely. Verifies the
+     * fix the same way the SIF/MCH cases above verify theirs. */
+    {
+        bios_image_t bios;
+        memset(&bios, 0, sizeof(bios));
+        bios.data = memalign(32, BIOS_MAX_SIZE);
+        memset(bios.data, 0, BIOS_MAX_SIZE);
+        bios.size = BIOS_MAX_SIZE;
+        bios.loaded = 1;
+        uint8_t *p = bios.data;
+        int pc = 0;
+        /* r1 = 0x00001234 (an arbitrary nonzero DISPFB1-shaped value) */
+        wle32(p+pc, enc_lui(1, 0x0000)); pc += 4;
+        wle32(p+pc, enc_ori(1, 1, 0x1234)); pc += 4;
+        /* r2 = 0xB2000070 (DISPFB1, KSEG1 mirror) */
+        wle32(p+pc, enc_lui(2, 0xB200)); pc += 4;
+        wle32(p+pc, enc_ori(2, 2, 0x0070)); pc += 4;
+        wle32(p+pc, enc_sd(1, 2, 0)); pc += 4;
+        wle32(p+pc, enc_ld(3, 2, 0)); pc += 4;
+        wle32(p+pc, enc_break()); pc += 4;
+
+        ee_core_init(&bios);
+        ee_core_run(&bios);
+        ee_state_t *st = ee_core_get_state();
+        CHECK((uint64_t)st->gpr[3].ud0 == 0x1234u,
+              "KSEG1 (0xB2000070) SD/LD round-trips through GS DISPFB1, not silently dropped");
+        gs_state_t *gs = gs_get_state();
+        CHECK(gs->dispfb1 == 0x1234u,
+              "GS state actually got the write via the KSEG1 address");
     }
 
     printf("\n%d check(s) failed\n", failures);

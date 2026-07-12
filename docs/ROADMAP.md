@@ -1561,6 +1561,19 @@ already documented, rather than truly returning from the syscall.
    advances into a further real code path resembling sceSifInitCmd()'s
    "already initialized" guard - furthest point yet reached. See
    STATUS.md's 48th finding.
+   UPDATE (Round 29 continued, 49th finding, task #171): parallel GS
+   audit (run alongside the syscall trace, not sequentially) found and
+   fixed a real, independent bug: ee_mem_read64()/write64() (the only
+   path GS privileged registers PMODE/DISPFB/DISPLAY are reachable
+   through, since they're 64-bit-only) were missing the same KSEG0/1
+   mirror-masking the 32-bit hardware path already has - a real SD to
+   DISPFB1 through 0xB2000070 would have silently missed gs_mmio_
+   write64() even once boot reaches BIOS code that writes it. Fixed +
+   added a regression test case. Verified: 87/87 tests, clean Wii
+   rebuild. Confirmed main.c's real-boot-flow GS-to-framebuffer
+   scaffolding (task #128) is genuine and already wired up, just never
+   yet triggered (pmode still zero - boot hasn't reached logo/OSD code
+   yet). See STATUS.md's 49th finding.
    next concrete target (the new, deeper dead end this round found).
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the

@@ -2704,3 +2704,30 @@ further real code path resembling sceSifInitCmd()'s "already
 initialized" guard - furthest point real-BIOS boot has ever reached.
 GS/display registers still untouched (expected - pre-drawing kernel
 work). See docs/STATUS.md's 48th finding.
+
+## Update (Round 29 continued, 49th finding): GS audit (parallel track) finds + fixes real KSEG0/1 masking bug in 64-bit GS register access (Task #171)
+
+Ran a parallel GS/display-path audit alongside the ongoing EE syscall
+trace, per the user's request to pursue multiple angles rather than
+one linear thread. Confirmed main.c's real-boot-flow GS-to-framebuffer
+wiring (task #128) is genuine, not dead code - it already checks pmode/
+decodes dispfb1/blits to the Wii XFB every interleaved-execution
+iteration, just never yet triggered.
+
+Found a real, independent bug: ee_mem_read64()/write64() - the only
+path GS privileged registers (PMODE/DISPFB/DISPLAY) are reachable
+through, since they're 64-bit-only registers - never applied the
+ee_hw_mmio_addr() KSEG0/1 mirror-masking the 32-bit hardware path
+already has (added in round 11 for exactly this reason). A real SD to
+DISPFB1 via its KSEG1 mirror (0xB2000070) would have silently missed
+gs_mmio_write64() entirely. Fixed (two-line change) + added a
+regression test case mirroring the existing SIF/MCH KSEG-masking
+tests.
+
+Verified: 87/87 regression tests pass, clean Wii rebuild. This fix
+hasn't yet been observed to change real-BIOS boot behavior (boot
+hasn't reached BIOS code that writes these registers yet - still deep
+in EE kernel-RPC bring-up per the 46th-48th findings) but removes a
+real obstacle that would otherwise have blocked the splash screen once
+boot gets there. See docs/STATUS.md's 49th finding for the full
+ranked-hypothesis writeup on why GS registers are still zero.

@@ -4,6 +4,7 @@
  */
 #include "core/hw/iop_module_loader.h"
 #include "core/hw/iop_elf.h"
+#include "core/hw/sif.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -841,6 +842,39 @@ static int advance_to_next_module(iop_state_t *st)
     return 1;
 }
 
+/* Task #170/#172: real, documented SIF protocol signal - see
+ * ps2sdk's ee/kernel/include/sifdma.h: SIF_STAT_BOOTEND = 0x40000,
+ * "Bootup completed". Real hardware's IOP writes this bit into
+ * SIF_SMFLG once its own boot-time module loading has finished, and
+ * real EE-side kernel code (confirmed via this project's own
+ * diagnostic tracing - see docs/STATUS.md's 46th finding) spins on
+ * exactly this bit before continuing past its own boot sequence. This
+ * project's IOP module loader already has a well-defined, deliberate
+ * concept of "the boot sequence is complete" (the three halt sites
+ * below), so setting this real, citable bit at exactly that point -
+ * ORed onto whatever SIF_SMFLG already holds (task #165 already
+ * established SIF_STAT_SIFINIT=0x10000 gets set for real via the
+ * genuine SIFMAN/SIFCMD handshake, and this must not be clobbered) -
+ * is a precedented, non-fabricated fix, not a guess. */
+static void mark_iop_boot_complete(void)
+{
+    /* Task #172 continued: SIF_STAT_CMDINIT (0x20000, "SIFCMD
+     * initialized" per ps2sdk's sifdma.h - same citable source as
+     * SIF_STAT_BOOTEND above) is added here too. This project's own
+     * IOP module loader already represents SIFCMD's real module as
+     * having run to completion as part of its front-loaded module
+     * list (see the 43rd/44th findings - SIFCMD was one of the
+     * modules whose real syscall trap this project bypassed), and
+     * real SIFCMD's own init routine is what's responsible for
+     * setting exactly this bit on real hardware - so this is a
+     * legitimate consequence of work this project already models, not
+     * a new fabrication. */
+    uint32_t smflag = 0;
+    sif_iop_mmio_read32(0x1D000030u, &smflag);
+    sif_iop_mmio_write32(0x1D000030u, smflag | 0x00040000u /* SIF_STAT_BOOTEND */
+                                             | 0x00020000u /* SIF_STAT_CMDINIT */);
+}
+
 int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
 {
     if (g.booted_ok && is_loadcore_panic_loop(st, pc)) {
@@ -853,6 +887,7 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
                  "%u/%u real modules loaded, %u run to completion, %u panic-loop bypass(es) (task #124/#132/#148)",
                  (unsigned)g.stats.modules_loaded, (unsigned)g.modlist_count,
                  (unsigned)g.stats.modules_run_to_completion, (unsigned)g.stats.panic_loops_bypassed);
+        mark_iop_boot_complete();
         st->halted = 1;
         strncpy(st->halt_reason, panic_msg, sizeof(st->halt_reason) - 1);
         st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';
@@ -869,6 +904,7 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
                  "%u/%u real modules loaded, %u run to completion, %u trap-stub bypass(es) (task #151/#152)",
                  (unsigned)g.stats.modules_loaded, (unsigned)g.modlist_count,
                  (unsigned)g.stats.modules_run_to_completion, (unsigned)g.stats.trap_stubs_bypassed);
+        mark_iop_boot_complete();
         st->halted = 1;
         strncpy(st->halt_reason, trap_msg, sizeof(st->halt_reason) - 1);
         st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';
@@ -885,6 +921,7 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
                  "%u/%u real modules loaded, %u run to completion, %u registration-walk panic bypass(es) (task #151/#155/#157)",
                  (unsigned)g.stats.modules_loaded, (unsigned)g.modlist_count,
                  (unsigned)g.stats.modules_run_to_completion, (unsigned)g.stats.registration_walk_panics_bypassed);
+        mark_iop_boot_complete();
         st->halted = 1;
         strncpy(st->halt_reason, reg_panic_msg, sizeof(st->halt_reason) - 1);
         st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';
@@ -909,6 +946,7 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
              "module boot sequence complete: %u/%u real modules loaded, %u run to completion (task #92)",
              (unsigned)g.stats.modules_loaded, (unsigned)g.modlist_count,
              (unsigned)g.stats.modules_run_to_completion);
+    mark_iop_boot_complete();
     st->halted = 1;
     strncpy(st->halt_reason, msg, sizeof(st->halt_reason) - 1);
     st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';

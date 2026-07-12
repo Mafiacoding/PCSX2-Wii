@@ -2647,3 +2647,36 @@ it through the KSEG1 alias). SIF_MSCOM stays 0 - not yet verified
 whether that's expected steady-state. Task #151 narrows further but
 stays open pending a trace of the EE side's reaction to the new SIF
 register values. See docs/STATUS.md's 45th finding.
+
+## Update (Round 29 continued, 46th/47th findings): EE kernel syscall table implemented for real - boot advances deep into real SIF command-protocol bring-up (Task #170/#172)
+
+Tracing the EE side's reaction to the 45th finding's SIF fix (per the
+user's request) uncovered that the EE kernel's own SYSCALL handling
+had never been implemented at all (`ee_core.c` always just halted) -
+and with the IOP-side fix in place, boot now reaches real EE syscalls
+for the first time. Implemented real, cited handling (ps2sdk's public
+syscallnr.h/sifdma.h) for every syscall observed: 100 (FlushCache), 60/
+61 (SetupThread/SetupHeap) as genuine or precedented no-ops; 120
+(sceSifSetDChain), 18 (AddDmacHandler), 22 (_EnableDmac) as honest
+no-ops with a flagged caveat (real SIF0 DMA-interrupt plumbing this
+project doesn't model, out of scope for graphics); and 121/122
+(sceSifSetReg/sceSifGetReg) implemented FOR REAL against this
+project's existing SIF register model rather than bypassed - this
+caught a real bug when an initial flat bypass for 122 caused a NEW
+infinite loop (real code polls sceSifGetReg(SIF_REG_SMFLAG) directly
+waiting for SIF_STAT_CMDINIT).
+
+Also added SIF_STAT_BOOTEND (0x40000, "Bootup completed") and
+SIF_STAT_CMDINIT (0x20000, "SIFCMD initialized") signaling - both real,
+documented sifdma.h bits - to the IOP module loader's existing "boot
+sequence complete" halt sites, ORed onto SIF_SMFLG without clobbering
+the already-correct SIF_STAT_SIFINIT bit from task #165.
+
+Verified: 87/87 regression tests, clean Wii rebuild. Real-BIOS result:
+boot now correctly runs the ENTIRE real sceSifInitCmd() sequence and
+reaches syscall 119 (sceSifSetDma - a real DMA packet transfer, not yet
+implemented) - the furthest point real-BIOS boot has ever reached in
+this project. GS/display registers (PMODE/DISPFB/DISPLAY) are still
+untouched - expected, since this is early kernel bring-up before any
+drawing, not a sign of a remaining bug. See docs/STATUS.md's 46th/47th
+findings.

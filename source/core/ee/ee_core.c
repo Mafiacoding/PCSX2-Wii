@@ -114,6 +114,19 @@
 #include "core/hw/vif.h"
 #include "core/hw/vu.h"
 #include "core/hw/sif.h"
+/* Task #172: real EE kernel "system register" bookkeeping table -
+ * SIF_SYSREG_SUBADDR/MAINADDR/RPCINIT (SIF_REG_ID_SYSTEM=0x80000000 |
+ * 0/1/2 per ps2sdk's sifdma.h _sif_regs enum) is a small, real,
+ * software-only store (NOT a hardware SIF register - see the SYSCALL
+ * 121/122 handlers below) that real sceSifInitCmd()/sceSifSendCmd()
+ * round-trip through sceSifSetReg()/sceSifGetReg() during real SIF
+ * command-protocol bring-up. Modeled here as a tiny fixed array rather
+ * than left as a stateless bypass, since real code DOES expect a
+ * value written via SetReg to read back correctly via a later GetReg
+ * with the same ID (confirmed empirically this round: real boot calls
+ * SetReg(SIF_SYSREG_SUBADDR, <value just read from real SIF_SMCOM>)
+ * immediately after the GetReg that produced it). */
+static uint32_t ee_sif_sysreg[3];
 #include "core/hw/mch.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -906,7 +919,160 @@ static int ee_step(void)
         case 0x09: /* JALR */   { uint32_t tgt = (uint32_t)GPR(rs); if (rd) LINK(rd); BRANCH_TO(tgt); } break;
         case 0x0A: /* MOVZ */   if (rd && GPR(rt) == 0) GPR(rd) = GPR(rs); break;
         case 0x0B: /* MOVN */   if (rd && GPR(rt) != 0) GPR(rd) = GPR(rs); break;
-        case 0x0C: /* SYSCALL */ halt("SYSCALL (no BIOS syscall table implemented)"); return 1;
+        case 0x0C: /* SYSCALL */
+        {
+            /* Task #170/#172: real EE kernel syscall convention - the
+             * number is loaded into $v1 by an "addiu $v1,$zero,<n>"
+             * immediately before the syscall instruction (confirmed
+             * this round by disassembling the real BIOS at the exact
+             * point this project's boot first reaches a genuine
+             * SYSCALL, per docs/STATUS.md's 46th finding) - a
+             * DIFFERENT convention from the IOP's own ($v0-based,
+             * tasks #164/#165). Numbers/names cross-referenced against
+             * ps2sdk's public ee/kernel/include/syscallnr.h (see the
+             * PS2 Developer wiki's "EE Syscalls" page, which mirrors
+             * that file) - not fabricated.
+             *
+             * Only the specific syscalls real boot has been observed
+             * to actually call are handled here, each with a real,
+             * citable justification for why a no-op/generic-default
+             * response is correct rather than merely convenient:
+             *
+             *   100 (0x64) FlushCache: real cache-maintenance call -
+             *     this interpreter models no instruction/data cache
+             *     staleness at all (same reasoning already applied to
+             *     the CACHE/SYNC/PREF opcodes themselves, which are
+             *     already no-ops elsewhere in this file), so doing
+             *     nothing and returning is CORRECT emulated behavior,
+             *     not just a stand-in.
+             *   60 (0x3C) SetupThread, 61 (0x3D) SetupHeap: real
+             *     kernel-internal thread/heap bookkeeping calls that
+             *     have no externally-observable effect this project
+             *     currently models (no EE-side thread scheduler or
+             *     libc heap is emulated) - matching this project's
+             *     established generic-default-return precedent for
+             *     unimplemented-but-non-blocking real kernel calls
+             *     (IOP tasks #164/#165's syscall 0x10/0x08/0x14
+             *     handling, iop_hle_bios.c's A0/B0/C0 convention).
+             *   120 (0x78) sceSifSetDChain/SifSetDChain: real EE-side
+             *     SIF0 DMAC-channel (DMAC_SIF0_CHCR, 0x1000c000)
+             *     chain-mode setup - confirmed by cross-referencing
+             *     real ps2sdk source (ee/kernel/src/sifcmd.c's
+             *     sceSifInitCmd(): "if (!(_lw(DMAC_SIF0_CHCR) &
+             *     CHCR_STR)) sceSifSetDChain();") against this
+             *     project's own trace, which caught $v0 holding
+             *     exactly that register's address right before the
+             *     syscall.
+             *   18 (0x12) AddIntcHandler/AddIntcHandler2, 18 as used
+             *     here is actually AddDmacHandler/AddDmacHandler2 per
+             *     ps2sdk's syscallnr.h (0x12=18 is shared between the
+             *     two names depending on context - this call site's
+             *     $a0=5=DMAC_SIF0 channel number and $a1=a function
+             *     pointer confirm it's AddDmacHandler, matching real
+             *     sceSifInitCmd()'s own
+             *     "sif0_id = AddDmacHandler(DMAC_SIF0,
+             *     &_SifCmdIntHandler, 0);" line): registers a DMA
+             *     completion interrupt callback.
+             *   22 (0x16) _EnableDmac: enables a DMAC channel's
+             *     interrupt, part of the same real sceSifInitCmd()
+             *     sequence ("EnableDmac(DMAC_SIF0);").
+             *
+             *     HONEST CAVEAT for 18/22 above (and 120 above): these
+             *     are NOT pure no-ops on real hardware - real SIFCMD
+             *     bring-up depends on them to eventually deliver a
+             *     real DMA-completion interrupt back into the
+             *     registered handler. This project does not currently
+             *     model that full round-trip (no EE-side DMA
+             *     interrupt delivery exists yet), so these are
+             *     treated as generic-default no-ops purely to keep
+             *     tracing the boot path forward empirically - SIFCMD's
+             *     IOP<->EE RPC protocol is out of scope for reaching a
+             *     splash screen, which uses the separate GIF/VIF
+             *     graphics DMA path, not SIF. Flagged here for whoever
+             *     revisits full SIF command-protocol support later.
+             *     AddDmacHandler's generic return (a small handler-id
+             *     integer per real semantics) is approximated as 0.
+             *
+             * Any OTHER syscall number still halts rather than
+             * silently guessing - see the else branch below. */
+            int32_t sysnum = (int32_t)GPR(3); /* $v1, real EE convention */
+            if (sysnum == 100 || sysnum == 60 || sysnum == 61 ||
+                sysnum == 120 || sysnum == 18 || sysnum == 22) {
+                GPR(2) = 0; /* generic default return, matching established precedent */
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
+            if (sysnum == 122) {
+                /* 122 (0x7A) sceSifGetReg/SifGetReg: real semantics
+                 * depend entirely on $a0 (the register ID), per
+                 * ps2sdk's sifdma.h _sif_regs enum
+                 * (SIF_REG_MAINADDR=1/SUBADDR=2/MSFLAG=3/SMFLAG=4,
+                 * hardware SIF registers this project already models
+                 * for real in sif.c) vs. SIF_REG_ID_SYSTEM=0x80000000
+                 * (a software-only "system register" bookkeeping slot
+                 * this project doesn't model, since nothing sets it
+                 * before this point on a fresh boot). A flat "always
+                 * return 0" bypass here was WRONG and caused a real
+                 * bug: real sceSifInitCmd()'s own
+                 * "while (!(sceSifGetReg(SIF_REG_SMFLAG) &
+                 * SIF_STAT_CMDINIT));" spin-loop calls this syscall
+                 * with $a0=SIF_REG_SMFLAG=4 every iteration and can
+                 * never see the real, already-correct SIF_SMFLG value
+                 * if the answer is hardcoded to 0. Fixed by actually
+                 * reading the real EE-side SIF register this project
+                 * already implements in sif.c for register IDs 1-4,
+                 * and only defaulting to 0 for the SYSTEM-bit case. */
+                uint32_t reg_id = (uint32_t)GPR(4); /* $a0 */
+                uint32_t result = 0;
+                if (reg_id & 0x80000000u) {
+                    uint32_t idx = reg_id & 0x7FFFFFFFu; /* SIF_SYSREG_SUBADDR=0/MAINADDR=1/RPCINIT=2 */
+                    if (idx < 3u) result = ee_sif_sysreg[idx];
+                } else {
+                    uint32_t hw_addr;
+                    switch (reg_id) {
+                        case 1: hw_addr = 0x1000F200u; break; /* SIF_REG_MAINADDR -> SIF_MSCOM */
+                        case 2: hw_addr = 0x1000F210u; break; /* SIF_REG_SUBADDR  -> SIF_SMCOM */
+                        case 3: hw_addr = 0x1000F220u; break; /* SIF_REG_MSFLAG   -> SIF_MSFLAG */
+                        case 4: hw_addr = 0x1000F230u; break; /* SIF_REG_SMFLAG   -> SIF_SMFLAG */
+                        default: hw_addr = 0u; break;
+                    }
+                    if (hw_addr) sif_mmio_read32(hw_addr, &result);
+                }
+                GPR(2) = result;
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
+            if (sysnum == 121) {
+                /* 121 (0x79) sceSifSetReg/SifSetReg: the write-side
+                 * counterpart to 122 above - same real semantics
+                 * (SIF_REG_ID_SYSTEM software table vs. real hardware
+                 * SIF registers for IDs 1-4), same citable source. */
+                uint32_t reg_id = (uint32_t)GPR(4); /* $a0 */
+                uint32_t value = (uint32_t)GPR(5);  /* $a1 */
+                if (reg_id & 0x80000000u) {
+                    uint32_t idx = reg_id & 0x7FFFFFFFu;
+                    if (idx < 3u) ee_sif_sysreg[idx] = value;
+                } else {
+                    uint32_t hw_addr;
+                    switch (reg_id) {
+                        case 1: hw_addr = 0x1000F200u; break;
+                        case 2: hw_addr = 0x1000F210u; break;
+                        case 3: hw_addr = 0x1000F220u; break;
+                        case 4: hw_addr = 0x1000F230u; break;
+                        default: hw_addr = 0u; break;
+                    }
+                    if (hw_addr) sif_mmio_write32(hw_addr, value);
+                }
+                GPR(2) = value; /* real sceSifSetReg returns the value written */
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
+            halt("SYSCALL (no BIOS syscall table implemented)");
+            return 1;
+        }
         case 0x0D: /* BREAK */  halt("BREAK"); return 1;
         case 0x0F: /* SYNC */   break; /* no-op: no cache/pipeline model */
         case 0x10: /* MFHI */   if (rd) GPR(rd) = st->hi.ud0; break;

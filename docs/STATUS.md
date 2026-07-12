@@ -6894,3 +6894,138 @@ anything) once it observes the new `SIF_SMCOM=0x0011AFD0`/
 `SIF_SMFLG=0x00010000` values, and whether `SIF_MSCOM` remaining zero
 is itself another still-missing piece or genuinely expected real
 steady-state at this point in boot.
+
+## Round 29 continued (46th finding, task #170/#172): tracing the EE side's reaction to task #165's SIF fix uncovers a much bigger wall - the EE kernel's own SYSCALL handling was never implemented at all
+
+Continuing task #151/#165 per the user's request to trace the EE side's
+reaction to the newly-nonzero SIF_SMCOM/SIF_SMFLG values (45th finding):
+extending the standard diagnostic's EE-only phase revealed the EE
+interpreter now runs much further than any prior round (previously it
+simply kept looping in already-explored territory) and hits a genuine
+new wall: `halt("SYSCALL (no BIOS syscall table implemented)")` -
+`ee_core.c`'s SYSCALL case has ALWAYS just halted unconditionally
+(present since this project's very first EE interpreter skeleton), but
+until now boot never actually reached a real EE-side `syscall`
+instruction (the 4th-round investigation, cited in this same file
+around line 528, explicitly confirmed SYSCALL fired zero times in the
+first 150K instructions and correctly deferred building HLE for it as
+not-yet-motivated work). Task #165's fix changes that: boot now
+reaches real EE kernel-mode code that executes genuine `syscall`
+instructions.
+
+Decoded the exact real convention (different from the IOP's - see
+task #164/#165): the syscall number is loaded into `$v1` via an
+`addiu $v1,$zero,<n>` immediately before the `syscall` instruction.
+Cross-referenced every observed number against ps2sdk's public
+`ee/kernel/include/syscallnr.h` (mirrored readably at the PS2
+Developer wiki's "EE Syscalls" page, itself sourced from a pinned
+ps2sdk commit) - not fabricated. A full trace (temporary,
+reverted-before-commit, same discipline as every prior round) with a
+"bypass every syscall with $v0=0, resume at PC+4" strategy showed real
+boot calling exactly three distinct syscalls before running for
+hundreds of millions of instructions without hitting a fourth: 60
+(`RFU060`/`SetupThread`), 61 (`RFU061`/`SetupHeap`), 100 (`FlushCache`)
+- and then settling into ANOTHER genuine polling loop, this time on
+the EE side, structurally identical to the IOP-side SIF_MSFLG loop
+from the 43rd-45th findings: `AND $v0,$v0,$a0` / `BEQ $v0,$zero,-6`,
+reading SIF_SMFLG (this time via its real EE-side address,
+`0x1000F230`, not an alias-masking issue this time) and masking
+against a FIXED loaded constant, `0x00040000`.
+
+Cross-referencing this bit against ps2sdk's `ee/kernel/include/
+sifdma.h` (`SIF_STAT_SIFINIT=0x10000`/`SIF_STAT_CMDINIT=0x20000`/
+`SIF_STAT_BOOTEND=0x40000`, the last documented literally as "Bootup
+completed") identifies this precisely: real EE kernel boot code
+spins on `SIF_STAT_BOOTEND` before continuing - the exact, real,
+documented "IOP has finished booting" signal - and nothing in this
+project's simulation has ever set it, because nothing in this
+project's model of IOP boot completion (the module-loader's own
+"module boot sequence complete" halt states, which are this project's
+own deliberate representation of exactly the real-world event
+`SIF_STAT_BOOTEND` signals) ever wrote it.
+
+## Round 29 continued (47th finding, task #170/#172): implemented the EE syscall table gap and the SIF_STAT_BOOTEND/CMDINIT signals - real, verified, substantial further progress; boot now deep inside real SIF command-protocol bring-up
+
+Two coordinated fixes, both grounded in the 46th finding's citable
+research:
+
+**Fix 1 (`source/hw/iop_module_loader.c`):** added a
+`mark_iop_boot_complete()` helper, called from all four of the module
+loader's existing "boot sequence complete" halt sites, that ORs
+`SIF_STAT_BOOTEND` (`0x40000`) and `SIF_STAT_CMDINIT` (`0x20000`, "SIFCMD
+initialized" - also from `sifdma.h`) into `SIF_SMFLG` via the real
+IOP-side SIF mirror this project already models (`sif_iop_mmio_read32`/
+`write32`, the same functions task #165 fixed). Both bits are ORed onto
+whatever's already there (never clobbering `SIF_STAT_SIFINIT=0x10000`,
+which task #165's real SIFMAN handshake already sets for real) -
+CMDINIT specifically because this project's own module loader already
+represents SIFCMD's real module as having run to completion, so real
+SIFCMD's own real job (setting that bit) is a direct, non-fabricated
+consequence of work already modeled, not a new invention.
+
+**Fix 2 (`source/core/ee/ee_core.c`):** replaced the unconditional
+SYSCALL halt with real handling for every syscall number actually
+observed on the boot path so far, each independently justified:
+
+- 100 (`FlushCache`): a genuine no-op, since this interpreter models no
+  instruction/data cache staleness at all (same reasoning already
+  applied to this project's own CACHE/SYNC/PREF opcodes).
+- 60/61 (`SetupThread`/`SetupHeap`): generic-default no-ops, matching
+  this project's established precedent for real-but-unmodeled
+  kernel-internal bookkeeping (IOP tasks #164/#165, `iop_hle_bios.c`'s
+  A0/B0/C0 convention) - no EE-side thread scheduler or heap is
+  modeled, and neither call has an externally observable effect this
+  project tracks.
+- 120 (`sceSifSetDChain`): real EE-side SIF0 DMAC-channel setup,
+  confirmed via ps2sdk's actual `ee/kernel/src/sifcmd.c` source
+  (`sceSifInitCmd()`'s own `if (!(_lw(DMAC_SIF0_CHCR) & CHCR_STR))
+  sceSifSetDChain();`, matched against this project's trace catching
+  `$v0` holding that exact register's address beforehand) - treated as
+  a no-op with an honest caveat that real hardware DOES program a DMA
+  channel here; out of scope for reaching a splash screen (SIF
+  command-protocol DMA, not the GIF/VIF graphics DMA path).
+- 18 (`AddDmacHandler`), 22 (`_EnableDmac`): same real
+  `sceSifInitCmd()` sequence (registering/enabling a DMA completion
+  interrupt handler for SIF0) - same honest caveat, no-op since this
+  project doesn't model EE-side DMA interrupt delivery.
+- **121/122 (`sceSifSetReg`/`sceSifGetReg`): NOT bypassed - implemented
+  for real.** These read/write either a real hardware SIF register
+  (IDs 1-4, `SIF_REG_MAINADDR/SUBADDR/MSFLAG/SMFLAG` per `sifdma.h`'s
+  `_sif_regs` enum - routed to this project's own already-correct
+  `sif_mmio_read32`/`write32`) or a small software-only "system
+  register" bookkeeping slot (`SIF_REG_ID_SYSTEM=0x80000000 | 0/1/2`,
+  a real, documented but non-hardware concept) - added a 3-slot
+  `ee_sif_sysreg[]` table for the latter. **This was caught as a real
+  bug during this round's own testing**: an initial flat
+  "always return 0" bypass for 122 caused a NEW infinite loop, because
+  real `sceSifInitCmd()`'s own `while (!(sceSifGetReg(SIF_REG_SMFLAG) &
+  SIF_STAT_CMDINIT));` spin-loop calls this syscall every iteration and
+  can never observe the real (already-correct) SIF_SMFLG value if the
+  answer is hardcoded - fixed by actually reading the real register
+  instead of guessing.
+
+**Verification performed:** full 87-test host-native regression suite
+passes (0 failures); clean Wii/devkitPPC rebuild (only the
+pre-existing, unrelated `strncpy` warning).
+
+**Real-BIOS empirical result:** boot now advances through the entire
+observed real `sceSifInitCmd()` sequence (SetDChain, AddDmacHandler,
+EnableDmac, the SIF_STAT_CMDINIT wait-loop, GetReg/SetReg
+round-tripping real SIF_SMCOM's value `0x0011AFD0` end-to-end) and
+reaches a further real syscall, 119 (`sceSifSetDma`) - a genuine SIF0
+DMA packet transfer (real `_SifSendCmd()`'s final step, sending the
+`SIF_CMD_INIT_CMD` packet to the IOP) - not yet implemented, halts
+there. This is real, substantial, further-than-ever-before progress:
+from "the EE syscall table doesn't exist at all" to "deep inside a
+real, correctly-sequenced SIF command-protocol handshake, blocked only
+by an actual DMA data-transfer call." GS/display registers (PMODE,
+DISPFB1/2, DISPLAY1/2) remain zero - no splash-screen-relevant
+progress yet, since none of this round's syscalls touch the graphics
+path, but this is expected: SIFCMD bring-up runs early in kernel boot,
+before any drawing.
+
+**Next step for whoever continues:** implement `sceSifSetDma`
+(syscall 119) - read the `SifDmaTransfer_t` array (src/dest/size/attr)
+from EE RAM at `$a0`, perform the real EE-RAM-to-IOP-RAM byte copy for
+`$a1` transfer count, return a plausible transfer ID - then keep
+tracing forward the same way to find whatever wall comes after.

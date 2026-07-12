@@ -1527,6 +1527,28 @@ already documented, rather than truly returning from the syscall.
    (0->0x0011AFD0, 0->0x00010000). SIF_MSCOM stays 0 - not yet known
    if that's expected. Task #151 narrows further but stays open
    pending EE-side reaction trace. See STATUS.md's 45th finding.
+   UPDATE (Round 29 continued, 46th/47th findings, task #170/#172):
+   tracing the EE side's reaction to the 45th finding's fix uncovered a
+   much bigger gap - the EE kernel's own SYSCALL handling had NEVER
+   been implemented (always just halted), and boot now reaches it for
+   real. Implemented real handling for every syscall observed on the
+   boot path so far (numbers cross-referenced against ps2sdk's public
+   syscallnr.h/sifdma.h): 100/60/61/120/18/22 as honest no-ops
+   (cache-maintenance / unmodeled kernel bookkeeping / DMA-interrupt
+   setup this project doesn't model), and 121/122 (sceSifSetReg/
+   sceSifGetReg) implemented FOR REAL against this project's existing
+   SIF register model - catching and fixing a genuine new bug along
+   the way (a flat bypass for 122 caused ANOTHER infinite loop, since
+   real code polls sceSifGetReg(SIF_REG_SMFLAG) directly for
+   SIF_STAT_CMDINIT). Also added SIF_STAT_BOOTEND/CMDINIT signaling
+   (real, documented sifdma.h bits) to the IOP module loader's existing
+   "boot complete" halt sites. Verified: 87/87 regression tests, clean
+   Wii rebuild. Real-BIOS result: boot now runs the entire real
+   sceSifInitCmd() sequence correctly and reaches syscall 119
+   (sceSifSetDma, a real DMA packet transfer) - furthest point ever
+   reached, though GS/display registers are still untouched (expected -
+   this is early kernel bring-up, before any drawing). See STATUS.md's
+   46th/47th findings.
    next concrete target (the new, deeper dead end this round found).
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the

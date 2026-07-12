@@ -1689,3 +1689,18 @@ before hitting a NEW, undiagnosed halt at EE PC `0x80001390`
 misexecuted as code - not yet root-caused). 87/87 regression tests
 pass; clean Wii/devkitPPC rebuild. See STATUS.md's 50th finding for
 full detail and next-step guidance.
+
+**UPDATE (Round 29 continued, 51st finding, task #177):** implemented
+EE MFSA/MTSA (SPECIAL funct 0x28/0x29, real R5900-specific
+instructions per ps2tek's SPECIAL table - reserved in standard MIPS
+III), the exact instruction the 50th finding's new interrupt-handler
+code halted on. New `sa_reg` field on `ee_state_t`; new dedicated
+8-check regression test (`tests/test_ee_sa_reg.c`); 87/87 suite pass;
+clean Wii rebuild. Boot now runs the complete real interrupt-handler
+prologue (SQ-saving $s5-$s8/$t8/$t9/$gp, MFHI/MFLO/MFHI1/MFLO1/MFSA)
+and reaches a NEW halt: a real, intentional `BREAK` instruction
+physically present in the BIOS image at EE PC `0x80000DC0` (code field
+`0xFFFFF`). Whether this is expected real-hardware behavior or a
+symptom of task #176's admittedly-incomplete SIF DMA completion
+signaling (EE side only, no genuine IOP-side command processing) is
+the next open question - see STATUS.md's 51st finding.

@@ -2769,3 +2769,27 @@ regression tests pass; clean Wii/devkitPPC rebuild (only the
 pre-existing unrelated strncpy warning). See docs/STATUS.md's 50th
 finding for full detail, and the next-step guidance there for whoever
 continues this thread.
+
+## Update (Round 29 continued, 51st finding): EE MFSA/MTSA implemented (task #177) - boot reaches a real intentional BREAK trap in the BIOS image
+
+Root-caused the 50th finding's new halt precisely via raw instruction-
+field decoding: reported PC 0x80001390 (this project's halt() reports
+this_pc+4) was actually failing at 0x8000138C on SPECIAL funct 0x28 -
+confirmed via ps2tek's real SPECIAL opcode table as MFSA (0x29=MTSA),
+genuine R5900-specific instructions (reserved in standard MIPS III).
+The surrounding code is genuine real interrupt-handler prologue
+(saving $s5-$s8/$t8/$t9/$gp via SQ, then HI/LO/HI1/LO1 via MFHI/MFLO/
+MFHI1/MFLO1), not a data table as initially suspected.
+
+Implemented MFSA/MTSA (new `sa_reg` field, zero-initialized by the
+existing full-state memset), added a dedicated 8-check regression
+test. 87/87 suite pass, clean Wii rebuild.
+
+Verified via host-native diagnostic: boot now completes the full
+interrupt-handler prologue and reaches a NEW halt - a real,
+intentional `BREAK` instruction physically present in the BIOS image
+at EE PC 0x80000DC0 (20-bit code field 0xFFFFF). Open question for
+next continuation: is this expected real-hardware behavior, or does it
+mean task #176's SIF DMA completion signaling (EE-side only, no real
+IOP-side command processing) is steering boot down a path real
+hardware wouldn't take? See docs/STATUS.md's 51st finding.

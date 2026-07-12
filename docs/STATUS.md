@@ -7260,3 +7260,74 @@ NOT yet a splash screen, and the new halt at `0x80001390` is an
 open, undiagnosed wall for whoever continues this thread next:
 decode exactly what that address is supposed to contain (data table
 vs. code), and why the CPU ended up executing it.
+
+## 51st finding (task #177): implemented EE MFSA/MTSA (SPECIAL funct 0x28/0x29) - boot now advances past the interrupt-handler prologue into a real intentional BREAK trap
+
+Directly continuing the 50th finding: with real Cause.IP3 delivery
+in place, the EE started executing genuine kernel interrupt-handler
+code for the first time ever, halting on "unimplemented SPECIAL
+funct" at reported PC `0x80001390` (the actual failing instruction is
+one word earlier, `0x8000138C` - this project's halt() reports
+`this_pc+4`, already advanced past the failing instruction, matching
+the same off-by-one-instruction convention this session's later
+investigation confirmed a second time - see below).
+
+**Precisely decoded (not guessed) via a raw instruction-field dump of
+`0x80001350-0x80001394`:** this is genuine, real EE kernel
+interrupt-handler PROLOGUE code, not a data table: `SQ $s5..$s8,$t8,
+$t9,$gp` (opcode 0x1F) saving callee-saved registers into a `$k0`-
+based frame, then `MFHI`/`MFLO` (already implemented) and `MFHI1`/
+`MFLO1` (SPECIAL2, already implemented) saving the HI/LO and HI1/LO1
+register pairs, then the failing instruction - SPECIAL funct 0x28.
+
+**Real semantics cited before implementing:** fetched
+`psi-rockin.github.io/ps2tek`'s SPECIAL opcode function table, which
+shows funct 0x28=MFSA, 0x29=MTSA (row "101", real R5900-specific
+instructions - reserved/undefined in standard MIPS III, which is
+exactly why this looked like "no such instruction" until checked
+against the real R5900 table specifically). These access the R5900's
+dedicated 32-bit "SA" (Shift Amount) control register, used by the
+QFSRV instruction (not implemented, out of scope here) for a
+variable-width quadword funnel-shift; a real interrupt-handler
+prologue saving full CPU context naturally saves this alongside HI/
+LO/HI1/LO1.
+
+**Implemented:** a new `sa_reg` field on `ee_state_t` (distinct from
+the existing per-instruction shift-amount decode local also named
+`sa`), and `MFSA`/`MTSA` in the SPECIAL opcode switch
+(`ee_core.c`), zero-initialized by the existing full-state `memset()`
+in `ee_core_init()` (matching real hardware's SA-resets-to-0 behavior
+- no separate init needed).
+
+**Verified:** new dedicated regression test
+(`tests/test_ee_sa_reg.c`, 8 checks - MTSA/MFSA round-trip, a second
+MTSA proving it's a real re-write rather than an OR/append, and
+`rd=$0` staying hardwired at zero). Full suite: 87/87 pass. Clean Wii/
+devkitPPC rebuild.
+
+**Host-native diagnostic against the real BIOS confirms further real
+progress:** boot now runs the complete interrupt-handler prologue and
+continues into a NEW halt, reported at EE PC `0x80000DC4` with reason
+"BREAK". Applying the same "reported pc is this_pc+4" pattern, the
+actual instruction is at `0x80000DC0`, word `0x03FFFFCD` - decoded:
+opcode 0 (SPECIAL), funct 0x0D (BREAK), 20-bit code field `0xFFFFF`
+(all-ones). This is a REAL, intentional `BREAK` instruction physically
+present in the real BIOS image (not a bug in this project's decoder,
+not a runaway-into-blank-memory artifact - the surrounding
+`0x80000D84-0x80000DE4` region being all-zero is a separate, distinct
+observation about what comes immediately after, not what's being
+executed).
+
+**Honest open question for whoever continues this thread:** is this
+BREAK a normal, expected part of real PS2 boot (e.g. a debug-firmware
+leftover, an intentional "this path shouldn't normally execute on
+retail hardware" assertion, or a deliberate kernel panic/self-check),
+or a symptom that something upstream in this project's emulation
+(most likely the SIF DMA completion signaling from task #176, which
+is a real but incomplete simplification - only the EE side of the
+handshake is modeled, not genuine IOP-side command processing) is
+"too easy," steering the real BIOS down a code path real hardware
+would never actually take? Not yet determined either way - the code
+field `0xFFFFF` gives no further clue by itself (looks like a generic/
+placeholder value, not a specific numbered diagnostic code). This is
+the next concrete thing to resolve.

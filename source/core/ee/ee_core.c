@@ -1303,6 +1303,25 @@ static int ee_step(void)
         case 0x25: /* OR */     if (rd) GPR(rd) = GPR(rs) | GPR(rt); break;
         case 0x26: /* XOR */    if (rd) GPR(rd) = GPR(rs) ^ GPR(rt); break;
         case 0x27: /* NOR */    if (rd) GPR(rd) = ~(GPR(rs) | GPR(rt)); break;
+        case 0x28: /* MFSA - task #177: real R5900-specific instruction
+                     * (ps2tek SPECIAL table, row 101/column 000), NOT
+                     * standard MIPS III (reserved there). First
+                     * observed live: a real EE interrupt-handler
+                     * prologue (saving $s5-$s8/$t8/$t9/$gp via SQ,
+                     * then HI/LO/HI1/LO1 via MFHI/MFLO/MFHI1/MFLO1,
+                     * then SA via this instruction) that this
+                     * project's Cause.IP3 (DMAC) interrupt fix
+                     * (task #176) reached for the first time ever -
+                     * previously unreachable code, halting here with
+                     * "unimplemented SPECIAL funct" at EE PC
+                     * 0x8000138C (reported as this_pc+4=0x80001390,
+                     * this project's existing post-advance halt()
+                     * convention). */
+                    if (rd) GPR(rd) = st->sa_reg;
+                    break;
+        case 0x29: /* MTSA - see MFSA above (ps2tek: funct 0x29). */
+                    st->sa_reg = (uint32_t)GPR(rs);
+                    break;
         case 0x2A: /* SLT */    if (rd) GPR(rd) = ((int64_t)GPR(rs) < (int64_t)GPR(rt)) ? 1 : 0; break;
         case 0x2B: /* SLTU */   if (rd) GPR(rd) = (GPR(rs) < GPR(rt)) ? 1 : 0; break;
         case 0x2D: /* DADDU */  if (rd) GPR(rd) = GPR(rs) + GPR(rt); break;

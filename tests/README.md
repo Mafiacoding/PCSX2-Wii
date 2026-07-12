@@ -2092,3 +2092,18 @@ halts cleanly on BREAK instead of hanging; `test_iop_syscall.c` (the
 task #149 scenario: BREAK immediately after an UNHANDLED syscall, no
 intervening RFE) continues to verify the fallback still correctly
 fires in that case.
+
+`test_ee_sa_reg.c` covers MFSA/MTSA (SPECIAL funct 0x28/0x29, task
+#177) - real R5900-specific instructions (ps2tek's SPECIAL opcode
+table; reserved/undefined in standard MIPS III) used by a real EE
+interrupt-handler prologue to save/restore the CPU's dedicated 32-bit
+SA (Shift Amount) register, found missing ("unimplemented SPECIAL
+funct") once task #176's real Cause.IP3 delivery let boot reach that
+handler code for the first time ever. 8 checks: MTSA/MFSA round-trip,
+a second MTSA proves it's a real re-write (not OR/append), and MFSA
+with rd=$0 leaves $0 hardwired at zero.
+
+```sh
+gcc -I../include -I../source -o test_ee_sa_reg tests/test_ee_sa_reg.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+./test_ee_sa_reg
+```

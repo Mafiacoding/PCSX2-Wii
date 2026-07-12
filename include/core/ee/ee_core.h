@@ -29,6 +29,16 @@ typedef struct {
     uint32_t pc;
     uint32_t next_pc;       /* branch delay slot handling */
     ee_reg128_t hi, lo;
+    /* Task #177: the R5900's dedicated 32-bit "SA" (Shift Amount)
+     * control register - real, documented R5900-specific CPU state
+     * (ps2tek's SPECIAL opcode table: funct 0x28=MFSA, 0x29=MTSA),
+     * distinct from any single instruction's 5-bit shift-amount
+     * field. Used by QFSRV (not yet implemented) to control a
+     * variable-width quadword funnel-shift; MFSA/MTSA just need
+     * somewhere real to read/write it. Named sa_reg, not sa, to avoid
+     * clashing with ee_step()'s local per-instruction shift-amount
+     * decode variable of the same short name. */
+    uint32_t sa_reg;
     uint32_t cop0[32];      /* status/cause/EPC/config subset only */
 
     /* Set to 1 by whichever instruction executes right before a

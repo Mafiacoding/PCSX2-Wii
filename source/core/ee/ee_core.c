@@ -109,6 +109,7 @@
 
 #include "core/ee/ee_core.h"
 #include "core/hw/dma.h"
+#include "core/hw/ee_intc.h"
 #include "core/hw/gs.h"
 #include "core/hw/gif.h"
 #include "core/hw/vif.h"
@@ -397,6 +398,68 @@ static void ee_check_timer_interrupt(ee_state_t *st, uint32_t this_pc)
     ee_raise_exception(st, EE_EXC_CODE_INT, this_pc, 0);
 }
 
+/*
+ * Task #176 (splash-screen blocker investigation): the two real EE
+ * external-interrupt lines this project never modeled before now -
+ * Cause.IP2 (INTC, bit 0x400) and Cause.IP3 (DMAC, bit 0x800). Real
+ * R5900 hardware routes ALL of GS/SBUS/VBLANK/VIF/VU/IPU/Timer/SFIFO
+ * (via INTC_STAT/MASK, see ee_intc.h) through IP2, and all ten DMAC
+ * channel-completion sources (via DMAC_STAT, see dma.h) through IP3 -
+ * both funnel into the exact same "Interrupt" ExcCode/vector that
+ * ee_check_timer_interrupt() above already raises for IP7, so no new
+ * vector/offset logic is needed, only the two new pending+mask gates
+ * below. Bit positions/gating ported directly from PCSX2's own
+ * cpuTestINTCInts()/cpuTestDMACInts() (R5900.cpp) - Status.IM2/IM3
+ * live at the same bit positions as Cause.IP2/IP3 (0x400/0x800), the
+ * same "same bit position, different register" real MIPS layout
+ * ee_check_timer_interrupt() already documents for IP7/IM7. */
+#define EE_CAUSE_IP2  0x00000400u
+#define EE_CAUSE_IP3  0x00000800u
+#define EE_STATUS_IM2 0x00000400u
+#define EE_STATUS_IM3 0x00000800u
+
+static void ee_check_intc_interrupt(ee_state_t *st, uint32_t this_pc)
+{
+    const uint32_t IE  = 0x00000001u;
+    const uint32_t EXL = 0x00000002u;
+    const uint32_t ERL = 0x00000004u;
+    const uint32_t EIE = 0x00010000u;
+
+    if (st->exc_raised_this_step)
+        return;
+    if (!ee_intc_pending())
+        return; /* no INTC_STAT & INTC_MASK bit currently pending+unmasked */
+    if ((st->cop0[12] & (IE | EXL | ERL | EIE)) != (IE | EIE))
+        return;
+    if (!(st->cop0[12] & EE_STATUS_IM2))
+        return; /* this specific interrupt line (IM2) is masked */
+
+    st->cop0[13] |= EE_CAUSE_IP2;
+    st->exc_raised_this_step = 1;
+    ee_raise_exception(st, EE_EXC_CODE_INT, this_pc, 0);
+}
+
+static void ee_check_dmac_interrupt(ee_state_t *st, uint32_t this_pc)
+{
+    const uint32_t IE  = 0x00000001u;
+    const uint32_t EXL = 0x00000002u;
+    const uint32_t ERL = 0x00000004u;
+    const uint32_t EIE = 0x00010000u;
+
+    if (st->exc_raised_this_step)
+        return;
+    if (!dma_dmac_interrupt_pending())
+        return; /* no DMAC_STAT status & enable bit currently pending, or DMAE off */
+    if ((st->cop0[12] & (IE | EXL | ERL | EIE)) != (IE | EIE))
+        return;
+    if (!(st->cop0[12] & EE_STATUS_IM3))
+        return; /* this specific interrupt line (IM3) is masked */
+
+    st->cop0[13] |= EE_CAUSE_IP3;
+    st->exc_raised_this_step = 1;
+    ee_raise_exception(st, EE_EXC_CODE_INT, this_pc, 0);
+}
+
 static inline uint8_t *ee_mem_ptr(ee_state_t *st, uint32_t addr, uint32_t size)
 {
     /* R5900 Scratchpad RAM (SPR): a real, dedicated 16KB on-chip buffer
@@ -536,6 +599,8 @@ uint32_t ee_mem_read32(ee_state_t *st, uint32_t addr)
         return hw_val;
     if (mch_mmio_read32(hw_addr, &hw_val))
         return hw_val;
+    if (ee_intc_mmio_read32(hw_addr, &hw_val)) /* task #176 */
+        return hw_val;
 
     uint8_t *p = ee_mem_ptr(st, addr, 4);
     if (!p) { ee_mem_check_tlb_fault(st, addr, 0); return 0; }
@@ -596,6 +661,8 @@ void ee_mem_write32(ee_state_t *st, uint32_t addr, uint32_t val)
         return;
     if (mch_mmio_write32(hw_addr_w, val))
         return;
+    if (ee_intc_mmio_write32(hw_addr_w, val)) /* task #176 */
+        return;
 
     uint8_t *p = ee_mem_ptr(st, addr, 4);
     if (!p) { ee_mem_check_tlb_fault(st, addr, 1); return; }
@@ -623,6 +690,7 @@ int ee_core_init(const bios_image_t *bios)
     memset(&g_state, 0, sizeof(g_state));
 
     dma_init(); /* EE DMA controller register block - see core/hw/dma.h */
+    ee_intc_init(); /* task #176: EE interrupt controller (INTC_STAT/MASK) - see core/hw/ee_intc.h */
     gs_init();  /* GS privileged register block - see core/hw/gs.h */
     sif_init(); /* EE-side SIF/SBUS mailbox registers - see core/hw/sif.h */
     mch_init(); /* EE-side MCH_RICM/MCH_DRD RDRAM auto-init registers - see core/hw/mch.h */
@@ -1036,8 +1104,31 @@ static int ee_step(void)
              * silently guessing - see the else branch below. */
             int32_t sysnum = (int32_t)GPR(3); /* $v1, real EE convention */
             if (sysnum == 100 || sysnum == 60 || sysnum == 61 ||
-                sysnum == 120 || sysnum == 18 || sysnum == 22) {
+                sysnum == 120 || sysnum == 18) {
                 GPR(2) = 0; /* generic default return, matching established precedent */
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
+            if (sysnum == 22) {
+                /* 22 (0x16) _EnableDmac(channel): task #176 - this was
+                 * previously a flat no-op (batched with 18/60/61/100/
+                 * 120 above), which is exactly why sceSifInitCmd()'s
+                 * "AddDmacHandler(DMAC_SIF0,...); EnableDmac(DMAC_SIF0);"
+                 * sequence could never make dma_dmac_interrupt_pending()
+                 * true even after sceSifSetDma (syscall 119) completes
+                 * a real transfer and signals DMAC_STAT's SIF0 status
+                 * bit - the enable half of that same register was
+                 * never set. Real $a0 is the DMAC channel number
+                 * (e.g. DMA_CHANNEL_SIF0=5, matching this project's
+                 * dma.h enum and PCSX2's Hw.h D5=SIF0). See dma.h's
+                 * dma_channel_set_irq_enable() doc comment for why
+                 * this directly sets the end state rather than
+                 * replicating EnableDmac()'s internal raw toggle-write
+                 * (BIOS-internal code this project doesn't have). */
+                uint32_t channel = (uint32_t)GPR(4); /* $a0 */
+                dma_channel_set_irq_enable((int)channel, 1);
+                GPR(2) = 0;
                 st->pc = this_pc + 4u;
                 st->next_pc = this_pc + 8u;
                 return 1;
@@ -1099,24 +1190,27 @@ static int ee_step(void)
                  * exactly. Implemented for real (not bypassed): copy
                  * the real byte count from EE RAM at each
                  * descriptor's src to IOP RAM at its dest, for $a1
-                 * descriptors read from the array at $a0. HONEST
-                 * CAVEAT: this models the actual data movement a real
-                 * SIF0 DMA transfer performs, but NOT the completion
-                 * interrupt (no EE-side DMA interrupt delivery is
-                 * modeled - see the 47th finding's caveat on syscalls
-                 * 18/22/120) or the IOP-side SIFCMD packet handler
-                 * actually interpreting what arrives (this project's
-                 * IOP module loader has already halted its own
-                 * modeled execution by this point in boot, so nothing
-                 * currently reads the copied bytes back) - the value
-                 * genuinely lands in IOP memory, real semantics for a
-                 * real hardware operation, just with the two ends of
-                 * the round-trip (the interrupt, and the IOP-side
-                 * handler) not yet modeled. Returns a small nonzero
-                 * transfer id (the real descriptor count), matching
-                 * real ps2sdk's convention closely enough that
-                 * negative/zero-checking callers (e.g. sceSifDmaStat)
-                 * won't misread it as a failure. */
+                 * descriptors read from the array at $a0. UPDATE
+                 * (task #176): the completion interrupt caveat below
+                 * is now half-resolved - after the copy, this now
+                 * calls dma_channel_signal_done(DMA_CHANNEL_SIF0),
+                 * the same real DMAC_STAT-bit-setting hwDmacIrq(n)
+                 * equivalent dma_channel_kick() uses for chain-mode
+                 * transfers (PCSX2 Hw.cpp), so a real Cause.IP3
+                 * interrupt now fires IF the SIF0 channel's enable
+                 * bit is set (via EE syscall 22/_EnableDmac, also
+                 * fixed this task) and Status.IE/IM3 allow it - this
+                 * project's ee_check_dmac_interrupt() (ee_core.c)
+                 * checks this every step. STILL NOT modeled: the
+                 * IOP-side SIFCMD packet handler actually interpreting
+                 * what arrives (this project's IOP module loader has
+                 * already halted its own modeled execution by this
+                 * point in boot, so nothing currently reads the
+                 * copied bytes back on that end). Returns a small
+                 * nonzero transfer id (the real descriptor count),
+                 * matching real ps2sdk's convention closely enough
+                 * that negative/zero-checking callers (e.g.
+                 * sceSifDmaStat) won't misread it as a failure. */
                 uint32_t dmat_ptr = (uint32_t)GPR(4); /* $a0 */
                 uint32_t count = (uint32_t)GPR(5);    /* $a1 */
                 uint32_t i;
@@ -1133,6 +1227,7 @@ static int ee_step(void)
                         }
                     }
                 }
+                dma_channel_signal_done(DMA_CHANNEL_SIF0); /* task #176 */
                 GPR(2) = count ? count : 1u;
                 st->pc = this_pc + 4u;
                 st->next_pc = this_pc + 8u;
@@ -3306,8 +3401,16 @@ static int ee_step(void)
      * whether the NEXT instruction (whatever this step just set
      * st->pc to) is itself a delay slot. */
     ee_latch_timer_interrupt(st);
-    if (!st->branch_pending)
+    if (!st->branch_pending) {
         ee_check_timer_interrupt(st, st->pc);
+        /* Task #176: same instruction-boundary gating as the timer
+         * check above - IP2/IP3 are level-triggered external lines
+         * (no separate "latch" step needed the way IP7's Count/Compare
+         * match does; the pending condition is just read live off
+         * ee_intc_pending()/dma_dmac_interrupt_pending() each time). */
+        ee_check_intc_interrupt(st, st->pc);
+        ee_check_dmac_interrupt(st, st->pc);
+    }
 
     return 0;
 }

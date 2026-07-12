@@ -10,7 +10,7 @@ values (cross-checked against PCSX2's own semantics for the opcodes
 covered). Run it with:
 
 ```sh
-gcc -I../include -I../source -o test_ee tests/test_ee_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee tests/test_ee_core.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee
 ```
 
@@ -83,7 +83,7 @@ into the 64-bit register, matching real EE/PCSX2 LW semantics). Needs
 `dma.c` linked in as well as `ee_core.c`:
 
 ```sh
-gcc -I../include -I../source -o test_ee_dma tests/test_ee_dma_bus.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_dma tests/test_ee_dma_bus.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_dma
 ```
 
@@ -108,7 +108,7 @@ load/store). Needs `dma.c` and `gs.c` linked in too, since ee_core.c
 now depends on both:
 
 ```sh
-gcc -I../include -I../source -o test_ee_unaligned tests/test_ee_unaligned.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_unaligned tests/test_ee_unaligned.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_unaligned
 ```
 
@@ -128,7 +128,7 @@ DIV.S/ABS.S/NEG.S, MTC1/MFC1, C.EQ.S) with real float arithmetic.
 Needs dma.c and gs.c linked too:
 
 ```sh
-gcc -I../include -I../source -o test_ee_fpu tests/test_ee_fpu.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_fpu tests/test_ee_fpu.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_fpu
 ```
 
@@ -273,7 +273,7 @@ calling into ee_core.c/vu.c for MSCAL/MSCNT/MSCALF/MPG) - now built as
 separate translation units like `test_system_handshake.c`:
 
 ```sh
-gcc -I../include -I../source -o test_vif tests/test_vif.c ../source/core/ee/ee_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gs_mem.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/sif.c ../source/hw/mch.c ../source/hw/vu.c
+gcc -I../include -I../source -o test_vif tests/test_vif.c ../source/core/ee/ee_core.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gs_mem.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/sif.c ../source/hw/mch.c ../source/hw/vu.c
 ./test_vif
 ```
 
@@ -305,7 +305,7 @@ memory fields (from round 13) while keeping its own, separate micro-
 instruction memory.
 
 ```sh
-gcc -I../include -I../source -o test_vu_micro tests/test_vu_micro.c ../source/core/ee/ee_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gs_mem.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/sif.c ../source/hw/mch.c ../source/hw/vu.c
+gcc -I../include -I../source -o test_vu_micro tests/test_vu_micro.c ../source/core/ee/ee_core.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gs_mem.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/sif.c ../source/hw/mch.c ../source/hw/vu.c
 ./test_vu_micro
 ```
 
@@ -406,7 +406,7 @@ simple). Needs the full EE+IOP+hardware-model dependency set linked
 in:
 
 ```sh
-gcc -I../include -I../source -o test_system_handshake tests/test_system_handshake.c ../source/core/ee/ee_core.c ../source/core/iop/iop_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
+gcc -I../include -I../source -o test_system_handshake tests/test_system_handshake.c ../source/core/ee/ee_core.c ../source/core/iop/iop_core.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/iop_spu2.c
 ./test_system_handshake
 ```
 
@@ -648,7 +648,7 @@ unimplemented opcode. Needs the same link set as the other ee_core.c
 tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop0_special tests/test_ee_cop0_special.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_cop0_special tests/test_ee_cop0_special.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_cop0_special
 ```
 
@@ -754,7 +754,7 @@ are left untouched (no overrun), and the rt==$0 no-read behavior.
 Needs the same link set as the other `ee_core.c` tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_lqsq tests/test_ee_lqsq.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_lqsq tests/test_ee_lqsq.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_lqsq
 ```
 
@@ -783,7 +783,7 @@ unconditional jumps). Needs the same link set as the other `ee_core.c`
 tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_fpu2 tests/test_ee_fpu2.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_fpu2 tests/test_ee_fpu2.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_fpu2
 ```
 
@@ -809,7 +809,7 @@ difference, not just a documentation footnote. Needs the same link
 set as the other `ee_core.c` tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_fpu3 tests/test_ee_fpu3.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_fpu3 tests/test_ee_fpu3.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_fpu3
 ```
 
@@ -839,7 +839,7 @@ PADDH (rs+rt), not a uniform 8-lane op. Needs the same link set as the
 other `ee_core.c` tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_mmi_compare tests/test_ee_mmi_compare.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_mmi_compare tests/test_ee_mmi_compare.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_mmi_compare
 ```
 
@@ -861,7 +861,7 @@ original 16-bit pixel value is recovered exactly. Needs the same link
 set as the other `ee_core.c` tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_mmi_sat tests/test_ee_mmi_sat.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_mmi_sat tests/test_ee_mmi_sat.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_mmi_sat
 ```
 
@@ -886,7 +886,7 @@ silently pass the other's test). Needs the same link set as the
 other `ee_core.c` tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_mmi_permute tests/test_ee_mmi_permute.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_mmi_permute tests/test_ee_mmi_permute.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_mmi_permute
 ```
 
@@ -911,7 +911,7 @@ value stored into a GPR). Needs the same link set as the other
 `ee_core.c` tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_mmi_pvshift tests/test_ee_mmi_pvshift.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_mmi_pvshift tests/test_ee_mmi_pvshift.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_mmi_pvshift
 ```
 
@@ -937,7 +937,7 @@ spelling out the exact real-BIOS branch condition (`SLTI $at,$k0,89`)
 this fixes.
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop0_prid tests/test_ee_cop0_prid.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_cop0_prid tests/test_ee_cop0_prid.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_cop0_prid
 ```
 
@@ -966,7 +966,7 @@ handler installed, so running to a BREAK that will never come would
 hang forever).
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop0_tlb tests/test_ee_cop0_tlb.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_cop0_tlb tests/test_ee_cop0_tlb.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_cop0_tlb
 ```
 
@@ -992,7 +992,7 @@ read-then-write of the same address would otherwise raise two
 conflicting exceptions for a single guest instruction.
 
 ```sh
-gcc -I../include -I../source -o test_ee_exceptions tests/test_ee_exceptions.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_exceptions tests/test_ee_exceptions.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_exceptions
 ```
 
@@ -1016,7 +1016,7 @@ scratchpad's special, TLB-bypassing nature was known - moved to
 `0x71000000` to keep testing genuine TLB translation.
 
 ```sh
-gcc -I../include -I../source -o test_ee_scratchpad_count tests/test_ee_scratchpad_count.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_scratchpad_count tests/test_ee_scratchpad_count.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_scratchpad_count
 ```
 
@@ -1056,7 +1056,7 @@ further, more precise wall - see docs/STATUS.md and docs/ROADMAP.md's
 "round 9" sections.
 
 ```sh
-gcc -I../include -I../source -o test_ee_timer_interrupt tests/test_ee_timer_interrupt.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_timer_interrupt tests/test_ee_timer_interrupt.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_timer_interrupt
 ```
 
@@ -1102,7 +1102,7 @@ exact address forms (`0xB000F430`/`0xB000F440`) the real BIOS boot
 path that motivated this whole round uses.
 
 ```sh
-gcc -I../include -I../source -o test_ee_hw_kseg_masking tests/test_ee_hw_kseg_masking.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_hw_kseg_masking tests/test_ee_hw_kseg_masking.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_hw_kseg_masking
 ```
 
@@ -1119,7 +1119,7 @@ DADDI/DADDIU are implemented identically here too - a documented,
 consistent simplification, not a new inconsistency.
 
 ```sh
-gcc -I../include -I../source -o test_ee_daddi tests/test_ee_daddi.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_daddi tests/test_ee_daddi.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_daddi
 ```
 
@@ -1142,7 +1142,7 @@ funct field once `rs`'s top bit is set) is confirmed NOT implemented
 and is the next honest wall - see docs/STATUS.md's "round 12" section.
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop2_ctrl tests/test_ee_cop2_ctrl.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_cop2_ctrl tests/test_ee_cop2_ctrl.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_cop2_ctrl
 ```
 
@@ -1158,7 +1158,7 @@ VSQI stores all 4 VF lanes to the correct address and post-increments
 the address register afterward.
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop2_vu0 tests/test_ee_cop2_vu0.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_cop2_vu0 tests/test_ee_cop2_vu0.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_cop2_vu0
 ```
 
@@ -1177,7 +1177,7 @@ own `_vuIADDI`, not a plain two's-complement extend) is verified with
 both a positive and a negative immediate; VIADDI to VI0 is a no-op.
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop2_arith2 tests/test_ee_cop2_arith2.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_cop2_arith2 tests/test_ee_cop2_arith2.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_cop2_arith2
 ```
 
@@ -1190,7 +1190,7 @@ misaligned one that crosses an 8-byte block boundary; an `SDL`+`SDR`
 round-trip via the same idiom writes and reads back correctly.
 
 ```sh
-gcc -I../include -I../source -o test_ee_ldl_ldr_sdl_sdr tests/test_ee_ldl_ldr_sdl_sdr.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_ldl_ldr_sdl_sdr tests/test_ee_ldl_ldr_sdl_sdr.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_ldl_ldr_sdl_sdr
 ```
 
@@ -1309,7 +1309,7 @@ exists - it's a genuinely matched (if degenerate/no-effect) ADDbc/LQ
 pair.
 
 ```sh
-gcc -I../include -I../source -o test_vu_micro tests/test_vu_micro.c ../source/core/ee/ee_core.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gs_mem.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/sif.c ../source/hw/mch.c ../source/hw/vu.c
+gcc -I../include -I../source -o test_vu_micro tests/test_vu_micro.c ../source/core/ee/ee_core.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gs_mem.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/sif.c ../source/hw/mch.c ../source/hw/vu.c
 ./test_vu_micro
 ```
 
@@ -1712,7 +1712,7 @@ the correct per-lane min; a single-lane destmask (`VMAX.x`) only
 writes that one lane.
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop2_arith3 tests/test_ee_cop2_arith3.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
+gcc -I../include -I../source -o test_ee_cop2_arith3 tests/test_ee_cop2_arith3.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_arith3
 ```
 
@@ -1734,7 +1734,7 @@ only writes that one lane; VOPMSUB's cross-product-shaped result
 verified against hand-computed values.
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop2_arith4 tests/test_ee_cop2_arith4.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
+gcc -I../include -I../source -o test_ee_cop2_arith4 tests/test_ee_cop2_arith4.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_arith4
 ```
 
@@ -1755,7 +1755,7 @@ lane. `VMADDx/y/z/w`/`VMSUBx/y/z/w` (ACC-based broadcast) and
 of scope - a separate follow-up.
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop2_broadcast tests/test_ee_cop2_broadcast.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
+gcc -I../include -I../source -o test_ee_cop2_broadcast tests/test_ee_cop2_broadcast.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_broadcast
 ```
 
@@ -1774,7 +1774,7 @@ results verified; `VMULq`/`VMAXi`/`VMULi`/`VMINIi` each verified
 against hand-computed values.
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop2_broadcast2 tests/test_ee_cop2_broadcast2.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
+gcc -I../include -I../source -o test_ee_cop2_broadcast2 tests/test_ee_cop2_broadcast2.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_broadcast2
 ```
 
@@ -1795,7 +1795,7 @@ bit patterns by 2^-4/2^-12; `VFTOI0`/`VFTOI4` truncate floats to int
 that one lane.
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop2_unary tests/test_ee_cop2_unary.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
+gcc -I../include -I../source -o test_ee_cop2_unary tests/test_ee_cop2_unary.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_unary
 ```
 
@@ -1819,7 +1819,7 @@ the following `VNOP` provably changes nothing; `VADDAy` broadcasts a
 single FT lane.
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop2_acc tests/test_ee_cop2_acc.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
+gcc -I../include -I../source -o test_ee_cop2_acc tests/test_ee_cop2_acc.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_acc
 ```
 
@@ -1844,7 +1844,7 @@ the full store back and post-increments its own address register;
 through a follow-up `VLQI`.
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop2_lqisqd tests/test_ee_cop2_lqisqd.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
+gcc -I../include -I../source -o test_ee_cop2_lqisqd tests/test_ee_cop2_lqisqd.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_lqisqd
 ```
 
@@ -1866,7 +1866,7 @@ into exactly the X and Z lanes, leaving Y untouched; `VILWR.z` reads
 back a planted 16-bit value from a specific VU0 mem lane.
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop2_mtir tests/test_ee_cop2_mtir.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
+gcc -I../include -I../source -o test_ee_cop2_mtir tests/test_ee_cop2_mtir.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_mtir
 ```
 
@@ -1887,7 +1887,7 @@ idempotent); `VRXOR` XORs `R`'s mantissa with a VF lane's raw bits and
 re-clamps to the `[1.0,2.0)` pattern.
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop2_rreg tests/test_ee_cop2_rreg.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
+gcc -I../include -I../source -o test_ee_cop2_rreg tests/test_ee_cop2_rreg.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_rreg
 ```
 
@@ -1909,7 +1909,7 @@ and also the `0/0` divide-by-zero clamp; `VSQRT` computes `sqrt(|x|)`;
 clamp; `VWAITQ` provably changes nothing.
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop2_div tests/test_ee_cop2_div.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
+gcc -I../include -I../source -o test_ee_cop2_div tests/test_ee_cop2_div.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_div
 ```
 
@@ -1928,7 +1928,7 @@ known 6-bit judgment pattern, and a second call proving the 6-bit
 shift-in history behavior (`clipflag = (old << 6) | new_bits`).
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop2_clip tests/test_ee_cop2_clip.c ../source/hw/dma.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
+gcc -I../include -I../source -o test_ee_cop2_clip tests/test_ee_cop2_clip.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_clip
 ```
 

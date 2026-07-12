@@ -1670,3 +1670,22 @@ a real PS2 BIOS boot sequence is an extremely long, precisely
 sequenced process, and this project is still resolving its early
 kernel-initialization phase, well before the point real hardware would
 start issuing GS draw calls for the splash logo itself.
+
+**UPDATE (Round 29 continued, 50th finding, task #176):** implemented
+real EE external-interrupt delivery, which this project had entirely
+lacked - INTC_STAT/MASK (new `source/hw/ee_intc.c`) and DMAC_STAT
+completion+enable-mask bits (`dma.c` extended), wired into
+`ee_core.c`'s Cause.IP2/IP3 (real bit positions 0x400/0x800, cited
+from PCSX2's Hw.cpp/HwWrite.cpp), mirroring the existing Cause.IP7
+timer-interrupt pattern. EE syscalls 22 (`_EnableDmac`) and 119
+(`sceSifSetDma`) now interact with this real register model instead
+of being no-ops/partial-ops. Result: the EE no longer spins forever in
+the `~0x84330` "already initialized"-guard poll loop this project had
+been stuck on since the 48th finding - a real Cause.IP3 interrupt now
+fires and vectors into the kernel's own real interrupt-dispatch code
+for the first time ever, running further than any previous session
+before hitting a NEW, undiagnosed halt at EE PC `0x80001390`
+("unimplemented SPECIAL funct", possibly a data table being
+misexecuted as code - not yet root-caused). 87/87 regression tests
+pass; clean Wii/devkitPPC rebuild. See STATUS.md's 50th finding for
+full detail and next-step guidance.

@@ -2731,3 +2731,41 @@ in EE kernel-RPC bring-up per the 46th-48th findings) but removes a
 real obstacle that would otherwise have blocked the splash screen once
 boot gets there. See docs/STATUS.md's 49th finding for the full
 ranked-hypothesis writeup on why GS registers are still zero.
+
+## Update (Round 29 continued, 50th finding): real EE INTC/DMAC interrupt delivery implemented (task #176) - eternal sceSifInitCmd-region poll loop is unblocked, boot reaches real kernel interrupt-handler code for the first time
+
+Resumed the EE kernel-RPC trace at the `~0x84330` "already initialized"
+guard region left off by the 48th finding. Traced it precisely: a tight
+poll loop calling a getter function that reads a fixed EE RAM address
+(`0x0008C440`) and loops while it's zero. Fetched real ps2sdk
+`sifcmd.c` and confirmed `sceSifSendCmd()`/`sceSifInitCmd()` do NOT
+block like this - ruling out the previous hypothesis. Exhaustively
+proved (full 32MB address-space scan) that the paired setter function
+has zero callers anywhere in the loaded kernel image - the code path
+needed to ever satisfy this loop simply couldn't run, because this
+project had **no EE external-interrupt delivery at all** (only the
+internal COP0 Timer/Compare interrupt, Cause.IP7, existed - the
+existing code comments even said so).
+
+Researched real semantics before implementing (PCSX2's Hw.h/Hw.cpp/
+HwWrite.cpp: INTC_STAT/MASK register addresses and real clear/toggle
+write semantics, DMAC_STAT's split status/enable-mask halves,
+Cause.IP2/IP3 bit values for the two external interrupt lines) and
+implemented: a new EE INTC register model (`source/hw/ee_intc.c`),
+DMAC_STAT completion-signaling + enable-mask handling
+(`dma.c`/`dma.h`), and two new interrupt-check functions in
+`ee_core.c` mirroring the existing timer-interrupt pattern exactly.
+Made EE syscalls 22 (`_EnableDmac`) and 119 (`sceSifSetDma`) interact
+with this real model instead of being no-ops.
+
+Verified via host-native diagnostic against the real BIOS: the eternal
+poll loop is provably gone - a real Cause.IP3 interrupt now fires and
+vectors into the kernel's own interrupt-dispatch code for the first
+time ever in this project's history, running further than any
+previous session before hitting a new, undiagnosed halt
+("unimplemented SPECIAL funct" at EE PC 0x80001390 - possibly a data
+table being misexecuted as code, not yet root-caused). 87/87
+regression tests pass; clean Wii/devkitPPC rebuild (only the
+pre-existing unrelated strncpy warning). See docs/STATUS.md's 50th
+finding for full detail, and the next-step guidance there for whoever
+continues this thread.

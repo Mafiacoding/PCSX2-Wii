@@ -79,6 +79,23 @@ typedef struct {
     uint32_t d_stadr;
 } dma_state_t;
 
+/*
+ * Task #176: DMAC_STAT (0x1000E010, stored as d_stat above) real
+ * write semantics (PCSX2's HwWrite.cpp dmacWrite32<>, case DMAC_STAT):
+ * the register is split in half - the LOWER 16 bits are per-channel
+ * "transfer done" status flags (bit N = channel N, matching the
+ * DMA_CHANNEL_* enum above), and writing 1 to one of THOSE bits
+ * CLEARS it (`psHu16(0xe010) &= ~(value & 0xffff)`). The UPPER 16
+ * bits are the per-channel interrupt-ENABLE mask (also bit N = channel
+ * N), and writing 1 to one of THOSE bits TOGGLES it
+ * (`psHu16(0xe012) ^= (u16)(value >> 16)`) - a real hardware quirk,
+ * not a plain assignment (see also ee_intc.h's INTC_MASK, which has
+ * the identical toggle-on-write-1 behavior). dma_mmio_write32() below
+ * special-cases 0x1000E010 for this; dma_channel_kick() sets a
+ * channel's low (status) bit on completion via
+ * dma_channel_signal_done(), mirroring PCSX2's hwDmacIrq(n) in Hw.cpp
+ * (`psHu32(DMAC_STAT) |= 1<<n`).
+ */
 void dma_init(void);
 dma_state_t *dma_get_state(void);
 
@@ -134,5 +151,43 @@ void dma_set_sink(int channel, dma_sink_fn fn);
  * docs/ROADMAP.md.
  */
 void dma_channel_kick(int channel);
+
+/*
+ * Sets DMAC_STAT's low (status) bit for `channel` - real hardware's
+ * hwDmacIrq(n) equivalent (PCSX2 Hw.cpp). Called automatically by
+ * dma_channel_kick() when a transfer completes; also exposed so
+ * ee_core.c's sceSifSetDma (EE syscall 119) implementation - which
+ * does its own synchronous RAM-to-RAM copy rather than going through
+ * dma_channel_kick() - can signal the same real completion status
+ * (task #176).
+ */
+void dma_channel_signal_done(int channel);
+
+/*
+ * Task #176: directly sets (enabled=1) or clears (enabled=0) channel
+ * `channel`'s bit in DMAC_STAT's upper (enable-mask) half. Real
+ * hardware's EnableDmac()/DisableDmac() BIOS calls (invoked via EE
+ * syscalls 22/_EnableDmac and its DisableDmac counterpart) internally
+ * perform a raw toggle-write to DMAC_STAT (see the write-1-to-toggle
+ * semantics documented above) to reach the desired end state - this
+ * project doesn't have the exact BIOS-internal instruction sequence
+ * to replicate that raw toggle faithfully, so the syscall 22 handler
+ * in ee_core.c calls this to directly set the desired end state
+ * instead. Documented simplification, not fabricated register
+ * semantics - the STAT/MASK bit LAYOUT and its effect on
+ * dma_dmac_interrupt_pending() are real (PCSX2 Hw.cpp/HwWrite.cpp).
+ */
+void dma_channel_set_irq_enable(int channel, int enabled);
+
+/*
+ * Returns 1 if a real DMAC interrupt (Cause.IP3) should currently be
+ * pending: (status_low & enable_high) != 0, OR status_low bit 15 set
+ * (the BEIS/stall-detect bit) - matches PCSX2's dmacInterrupt() in
+ * Hw.cpp, INCLUDING the real DMAC_CTRL.DMAE (master enable, bit 0 of
+ * d_ctrl) gate it also checks. ee_core.c's ee_check_dmac_interrupt()
+ * calls this every step, mirroring ee_check_timer_interrupt()'s
+ * Cause.IP7 pattern for this new external line (task #176).
+ */
+int dma_dmac_interrupt_pending(void);
 
 #endif

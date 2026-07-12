@@ -120,6 +120,7 @@ void dma_channel_kick(int channel)
             ch->qwc = 0;
         }
         ch->chcr &= ~0x100u; /* transfer complete - clear STR */
+        dma_channel_signal_done(channel); /* task #176: real hwDmacIrq(n) equivalent */
         return;
     }
 
@@ -142,6 +143,7 @@ void dma_channel_kick(int channel)
                 if (!transfer_quadwords(channel, addr, qwc)) { ch->last_error = DMA_ERR_OUT_OF_BOUNDS; }
                 ch->tadr += 16u;
                 ch->chcr &= ~0x100u;
+                dma_channel_signal_done(channel); /* task #176 */
                 return;
 
             case DMA_TAG_CNT: /* 1: data follows the tag itself, keep going */
@@ -158,6 +160,7 @@ void dma_channel_kick(int channel)
                 if (!transfer_quadwords(channel, ch->tadr + 16u, qwc)) { ch->last_error = DMA_ERR_OUT_OF_BOUNDS; }
                 ch->tadr += 16u + qwc * 16u;
                 ch->chcr &= ~0x100u;
+                dma_channel_signal_done(channel); /* task #176 */
                 return;
 
             default: /* REF/REFS/CALL/RET - not implemented */
@@ -176,6 +179,53 @@ void dma_channel_kick(int channel)
     /* INTERLEAVE mode (SPR only) - not implemented. */
     ch->last_error = DMA_ERR_UNSUPPORTED_TAG;
     ch->chcr &= ~0x100u;
+}
+
+/*
+ * Task #176: sets DMAC_STAT's low (status) bit for `channel` - see
+ * the doc comment on this function in dma.h and PCSX2's hwDmacIrq(n)
+ * in Hw.cpp (`psHu32(DMAC_STAT) |= 1<<n`). d_stat's layout: bits 0-9
+ * are per-channel status (this function only ever sets one of
+ * those), bits 16-25 are the per-channel enable mask written via
+ * dma_mmio_write32's special-cased DMAC_STAT toggle-on-write-1 path.
+ */
+void dma_channel_signal_done(int channel)
+{
+    if (channel < 0 || channel >= DMA_CHANNEL_COUNT)
+        return;
+    g_dma.d_stat |= (1u << channel);
+}
+
+void dma_channel_set_irq_enable(int channel, int enabled)
+{
+    if (channel < 0 || channel >= DMA_CHANNEL_COUNT)
+        return;
+    uint32_t bit = 1u << (16 + channel);
+    if (enabled)
+        g_dma.d_stat |= bit;
+    else
+        g_dma.d_stat &= ~bit;
+}
+
+int dma_dmac_interrupt_pending(void)
+{
+    /* Real hardware/PCSX2 dmacInterrupt() (Hw.cpp): pending if
+     * (status_low & enable_high) != 0, or status_low bit 15 (BEIS,
+     * bus-error/stall-detect - never set by this project, no bus
+     * errors modeled, but checked here for completeness/fidelity)
+     * is set - AND the DMAC is actually enabled (DMAC_CTRL.DMAE,
+     * bit 0 of d_ctrl; real hardware also checks a "DMAC suspended"
+     * byte this project doesn't model at all, so that half of the
+     * gate is left out rather than fabricated). */
+    uint32_t status_low = g_dma.d_stat & 0xFFFFu;
+    uint32_t enable_high = (g_dma.d_stat >> 16) & 0xFFFFu;
+    if (!(g_dma.d_ctrl & 0x1u))
+        return 0; /* DMAC_CTRL.DMAE == 0: master DMA enable is off */
+    if ((status_low & enable_high) != 0u)
+        return 1;
+    if (status_low & 0x8000u)
+        return 1;
+    return 0;
 }
 
 #define DMAC_BASE       0x10008000u
@@ -275,6 +325,19 @@ int dma_mmio_write32(uint32_t addr, uint32_t val)
             if (off == 0x00 && (val & 0x100u))
                 dma_channel_kick(ch);
         }
+        return 1;
+    }
+    if (addr == 0x1000E010u) {
+        /* Task #176: DMAC_STAT real write semantics (PCSX2 HwWrite.cpp
+         * dmacWrite32<>, case DMAC_STAT) - NOT a plain overwrite:
+         * lower 16 bits (per-channel status) clear on write-1, upper
+         * 16 bits (per-channel enable mask) toggle on write-1. See the
+         * doc comment on d_stat's layout in dma.h. */
+        uint32_t status_low = g_dma.d_stat & 0xFFFFu;
+        uint32_t enable_high = (g_dma.d_stat >> 16) & 0xFFFFu;
+        status_low &= ~(val & 0xFFFFu);
+        enable_high ^= (val >> 16) & 0xFFFFu;
+        g_dma.d_stat = status_low | (enable_high << 16);
         return 1;
     }
     if (addr >= DMAC_CTRL_BASE && addr < DMAC_CTRL_END) {

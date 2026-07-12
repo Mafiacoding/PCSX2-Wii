@@ -7162,3 +7162,101 @@ design; (2, now fixed) this KSEG0/1 masking gap; (3, unconfirmed)
 there may be a missing HLE/syscall blocking whatever triggers the
 logo-drawing module specifically; (4) untested alternatives (e.g. GIF/
 VIF DMA never getting kicked for the logo draw itself).
+
+## 50th finding (task #176): real EE external-interrupt delivery (INTC/DMAC, Cause.IP2/IP3) implemented - unblocks the sceSifInitCmd-region eternal poll loop, boot reaches real kernel interrupt-handler code for the first time ever
+
+Continuing the "work on both threads" directive after the 49th finding
+(GS KSEG fix), this finding resumes the EE kernel-RPC syscall trace at
+exactly the point the 48th finding left it: the "already initialized"
+guard region around EE PC `~0x84330`.
+
+**Root cause traced and confirmed (not guessed):** that region is a
+tight polling loop - `jal 0x083B40` (a small getter function computing
+a fixed address `0x0008C440` and returning `*(u32*)0x0008C440`), then
+`beq $2,$zero,-3` looping back while the read is zero. Real ps2sdk
+source for `sceSifSendCmd()`/`sceSifInitCmd()`
+(`ee/kernel/src/sifcmd.c`, fetched and read in full this session)
+confirms neither function busy-waits like this - `sceSifSendCmd()`
+just calls `sceSifSetDma()` and returns. So this loop is NOT part of
+SIF command init as previously hypothesized; it's some other kernel
+primitive.
+
+Exhaustively proved (full 32MB EE address-space scan for the paired
+"setter" function at `0x083B58` - as a direct `JAL` target AND as a
+raw 32-bit data pointer): the setter has **zero callers anywhere** in
+the currently-loaded kernel image. Whatever normally makes this flag
+non-zero cannot run through any code path this project's interpreter
+was capable of exercising - because that path itself was missing:
+this project had **no EE external-interrupt delivery at all**. Only
+Cause.IP7 (the internal COP0 Timer/Compare interrupt, "round 9") was
+ever raised; the existing code even said so explicitly ("the only
+interrupt SOURCE modeled so far... doesn't yet raise Cause's other
+Interrupt Pending bits").
+
+**Real semantics researched and cited before implementing (no
+fabricated register behavior):**
+- PCSX2's `pcsx2/Hw.h` (`EERegisterAddresses`): `INTC_STAT=0x1000F000`,
+  `INTC_MASK=0x1000F010`, confirms DMAC channel numbering
+  (SIF0=channel 5, matching this project's existing `DMA_CHANNEL_SIF0`
+  enum).
+- PCSX2's `pcsx2/Hw.cpp`: `hwIntcIrq(n)`/`hwDmacIrq(n)` (set a status
+  bit, test the corresponding mask bit, raise Cause 0x400/0x800 = real
+  R5900 Cause.IP2/IP3 bit values for the INTC/DMAC external lines).
+- PCSX2's `pcsx2/HwWrite.cpp`: real INTC_STAT write clears
+  (`&= ~value`), real INTC_MASK write TOGGLES (`^= (u16)value`), real
+  DMAC_STAT write splits low/high halves (status clears on write-1,
+  enable-mask toggles on write-1) - all real, documented hardware
+  quirks, not reinvented.
+
+**Implemented (task #176):**
+- New `source/hw/ee_intc.c`/`include/core/hw/ee_intc.h`: EE
+  INTC_STAT/INTC_MASK register model with the real clear/toggle
+  write semantics above.
+- `dma.h`/`dma.c` extended: `dma_channel_signal_done()` (real
+  `hwDmacIrq(n)` equivalent, now called from all three of
+  `dma_channel_kick()`'s transfer-complete sites), `dma_channel_set_
+  irq_enable()`, `dma_dmac_interrupt_pending()`, and a real
+  clear/toggle DMAC_STAT write path (previously a plain overwrite).
+- `ee_core.c`: two new functions, `ee_check_intc_interrupt()` and
+  `ee_check_dmac_interrupt()`, mirroring the existing
+  `ee_check_timer_interrupt()`'s Cause.IP7 pattern exactly (same
+  Status.IE/EXL/ERL gate, same per-line IM2/IM3 mask bit, same
+  `ee_raise_exception()` call - all external/internal interrupts
+  share the same real MIPS Interrupt ExcCode/vector) - called every
+  step alongside the timer check.
+- EE syscall 22 (`_EnableDmac`) - previously a flat no-op batched with
+  18/60/61/100/120 - now actually sets the given channel's DMAC_STAT
+  enable-mask bit (documented simplification: directly sets the end
+  state rather than replicating the exact BIOS-internal raw
+  toggle-write, which this project doesn't have source for).
+- EE syscall 119 (`sceSifSetDma`) now calls
+  `dma_channel_signal_done(DMA_CHANNEL_SIF0)` after its real EE-RAM-
+  to-IOP-RAM copy completes - the "completion interrupt" half of that
+  syscall's long-standing honest caveat is now resolved.
+
+**Verified:** all 87 regression-suite binaries build and pass (0
+failures) after these changes. Clean Wii/devkitPPC rebuild (only the
+pre-existing, unrelated `strncpy` warning). Host-native diagnostic
+against the real BIOS confirms a genuine behavior change: the EE no
+longer spins forever in the `0x84330` poll loop. Instead, a real
+Cause.IP3 (DMAC) interrupt now fires for the first time, vectoring
+into the kernel's own real interrupt-dispatch code (previously 100%
+dormant/unreachable), which runs further than any previous session
+- through code around `0x00083F6C-0x00083FCC` (a real exception-
+epilogue-shaped restore sequence: `LW $ra,0x80($sp)` down to
+`LW $s0,0x20($sp)` then `JR $ra`) - before halting at EE PC
+`0x80001390` on an "unimplemented SPECIAL funct" (raw word
+`0xFF4212C0`; surrounding words at `0x80001350-0x800013B0` look more
+like a data/vector table than executable code, e.g. repeating
+`0xFF4212xx`/`0x0000xxxx`/`0x7000xxxx` patterns - possibly PC
+landed on a handler-address table rather than genuine code, which
+would itself be a distinct, not-yet-diagnosed bug).
+
+**Honest scope note / next step:** this is real, verified,
+regression-tested progress - the eternal poll loop is provably no
+longer the blocker, and real kernel interrupt-handler code now
+executes for the first time ever in this project's history. It is
+NOT yet a splash screen, and the new halt at `0x80001390` is an
+open, undiagnosed wall for whoever continues this thread next:
+decode exactly what that address is supposed to contain (data table
+vs. code), and why the CPU ended up executing it.

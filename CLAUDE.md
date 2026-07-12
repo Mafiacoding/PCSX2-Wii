@@ -2610,3 +2610,40 @@ completely unchanged from every prior round - the polling loop's wait
 condition has not yet been satisfied, so the actual SIF handshake goal
 is not yet reached. Next: identify what $s1 and the two called
 subroutines are waiting on. See docs/STATUS.md's 44th finding.
+
+## Update (Round 29 continued, 45th finding): task #165 SOLVED - SIF IOP-mirror KSEG-alias masking bug fixed; polling loop unblocked, SIF_SMCOM/SIF_SMFLG change for the first time (Task #151/#165)
+
+Corrected a mis-decode from the 44th finding: the polling loop
+actually branches on `$s0` (`beq $s0,$zero,-9`), not `$s1` - caught by
+sampling live registers at the branch site and finding `$s1`
+consistently nonzero, which contradicted the earlier assumption.
+Traced `$s0` back to a real SIF_MSFLG debounce-read (read address
+twice, retry until stable) at KSEG1 address `0xBD000020`.
+
+Root cause found: `sif_iop_mmio_read32()`/`write32()` in `source/hw/
+sif.c` checked the raw incoming address against the
+`0x1D000000-0x1D0000FF` mailbox window WITHOUT masking off KUSEG/
+KSEG0/KSEG1 segment-select bits first (`iop_mem_ptr()` already does
+this for plain RAM, but the SIF mirror never got the same treatment).
+The real KSEG1 alias `0xBD000020` therefore missed the window check,
+fell through to the RAM path, and silently returned 0 instead of the
+real, already-correct SIF_MSFLG value - the loop was reading the wrong
+location, not waiting on a genuinely unset flag.
+
+Fix: mask `addr & 0x1FFFFFFFu` before the window check in both
+functions (minimal, two-function change). Verified: 87/87 host-native
+regression tests pass (0 real regressions - all initial "failures"
+were the pre-existing, already-documented `-lm` link-order artifact in
+the README's own commands); clean Wii/devkitPPC rebuild.
+
+Real-BIOS result: the IOP no longer gets stuck in the polling loop -
+it reaches a normal "module boot sequence complete" halt via the
+existing LOADCORE panic-loop bypass. modules_run_to_completion
+19->28/29. **SIF_SMCOM and SIF_SMFLG change for the first time this
+entire session** (0->0x0011AFD0, 0->0x00010000) - every prior round
+back to the 36th finding reported these frozen. SIF_MSFLG stays
+0x00010000 (it was already correct - our own mirror just couldn't see
+it through the KSEG1 alias). SIF_MSCOM stays 0 - not yet verified
+whether that's expected steady-state. Task #151 narrows further but
+stays open pending a trace of the EE side's reaction to the new SIF
+register values. See docs/STATUS.md's 45th finding.

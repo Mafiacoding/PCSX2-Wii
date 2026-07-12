@@ -98,10 +98,21 @@ int sif_mmio_write32(uint32_t addr, uint32_t value)
 
 int sif_iop_mmio_read32(uint32_t addr, uint32_t *out)
 {
-    if (addr < 0x1D000000u || addr > 0x1D0000FFu)
+    /* Task #165 fix: the IOP has no MMU/TLB, so KUSEG (0x00000000-
+     * 0x7FFFFFFF, direct), KSEG0 (0x80000000-0x9FFFFFFF, cached
+     * mirror) and KSEG1 (0xA0000000-0xBFFFFFFF, uncached mirror) all
+     * address the SAME physical location - real IOP code reaches this
+     * mailbox window through any of the three (e.g. the boot-time
+     * SIF_MSFLG poll loop uses the KSEG1 alias 0xBD000020, not the
+     * bare 0x1D000020 this switch used to require). Mask off the
+     * segment-select bits the same way iop_mem_ptr() already does for
+     * plain RAM before doing the window check, instead of only
+     * accepting the raw KUSEG-form address. */
+    uint32_t phys = addr & 0x1FFFFFFFu;
+    if (phys < 0x1D000000u || phys > 0x1D0000FFu)
         return 0;
 
-    switch (addr & 0xFFu) {
+    switch (phys & 0xFFu) {
         case 0x00: *out = g_sif.mscom;  return 1;
         case 0x10: *out = g_sif.smcom;  return 1;
         case 0x20: *out = g_sif.msflag; return 1;
@@ -130,10 +141,14 @@ int sif_iop_mmio_read32(uint32_t addr, uint32_t *out)
 
 int sif_iop_mmio_write32(uint32_t addr, uint32_t value)
 {
-    if (addr < 0x1D000000u || addr > 0x1D0000FFu)
+    /* Task #165 fix: same KUSEG/KSEG0/KSEG1-alias masking as the read
+     * side above - see that function's comment for the full
+     * rationale. */
+    uint32_t phys = addr & 0x1FFFFFFFu;
+    if (phys < 0x1D000000u || phys > 0x1D0000FFu)
         return 0;
 
-    switch (addr & 0xFFu) {
+    switch (phys & 0xFFu) {
         case 0x00: g_sif.mscom  = value; return 1;
         case 0x10: g_sif.smcom  = value; return 1;
         case 0x20: g_sif.msflag = value; return 1; /* plain overwrite,

@@ -6796,3 +6796,101 @@ subroutines it calls each pass (same live-debugger-plus-own-emulator
 tracing technique already established this session) - very plausibly
 this is the actual final piece standing between this project's current
 state and a real, observable SIF handshake completion.
+
+## Round 29 continued (45th finding, task #151/#165): task #165 SOLVED - real root cause found and fixed (missing KUSEG/KSEG0/KSEG1 address-alias masking in the SIF IOP-side mirror); IOP polling loop unblocked, SIF_SMCOM/SIF_SMFLG change for the first time this session
+
+**Correction to the 44th finding's disassembly read:** re-decoding the
+exact branch instruction this round (`0x1200FFF7` at the resident
+address, byte-for-byte) shows it is `BEQ $s0, $zero, -9` (opcode
+`000100`, rs=16=`$s0`, rt=0=`$zero`) - NOT `beq $zero,$s1,...` as the
+44th finding assumed. The loop spins while **`$s0`** is zero; `$s1` is
+a separate, fixed compile-time constant (`lui $s1,1` loaded once at
+loop entry, giving `$s1=0x00010000`) used only as a bitmask, ANDed
+into `$s0` (`and $s0,$s0,$s1`, executed right after the second of the
+loop's two subroutine calls returns) - not the branch's own operand.
+This was caught by sampling live register values at the branch site
+across six loop iterations and finding `$s1` consistently nonzero
+(`0x00010000`), which directly contradicted the "loops while
+`$s1==0`" premise and forced a re-derivation from the raw instruction
+words instead of the earlier assumption.
+
+**Tracing what actually feeds `$s0`:** the loop's first call
+(`jal 0x1179DC`) is captured into `$s0` via `move $s0,$v0` in the
+delay slot of the second call's `jal`, so `$s0` = subroutine1's return
+value (later ANDed with the `0x00010000` mask). Disassembling
+subroutine1 (`0x1179DC`) line by line: it loads the fixed address
+`0xBD000020`, reads it, re-reads it, and only returns once the two
+reads agree (a standard "debounce a hardware register" idiom - retries
+via a `j` back to the second read if they differ) - real code
+defensively guarding against a mid-read hardware update, not anything
+syscall-related. **`0xBD000020` is a KSEG1 (uncached-mirror) address;
+masking off its segment-select bits the same way real IOP hardware
+does (`addr & 0x1FFFFFFF`, since the IOP has no MMU/TLB and KUSEG/
+KSEG0/KSEG1 are three views of the same physical memory) gives physical
+`0x1D000020` - squarely inside this project's own SIF IOP-side mailbox
+mirror window (`0x1D000000-0x1D0000FF`, `core/hw/sif.h`), specifically
+offset `0x20` = `SIF_MSFLG`.**
+
+**Root cause:** `sif_iop_mmio_read32()`/`sif_iop_mmio_write32()` in
+`source/hw/sif.c` checked the incoming address literally
+(`addr < 0x1D000000u || addr > 0x1D0000FFu`) without first masking off
+the KSEG0/KSEG1 segment-select bits the way `iop_mem_ptr()` already
+does for plain RAM (`addr & 0x1FFFFFFFu`). Real IOP code reaches this
+mailbox window through the KSEG1 uncached alias (`0xBD000020`), which
+is a completely ordinary, legitimate real R3000A addressing mode - but
+the raw, unmasked value falls outside the literal `0x1D0000FF` ceiling,
+so the check silently failed and the read fell through to the generic
+RAM path, which also misses (physical `0x1D000020` is beyond the IOP's
+2MB RAM) and returns a flat `0`. The polling loop's `$s0` could
+therefore never become nonzero, regardless of `SIF_MSFLG`'s real
+in-memory value - it was reading the wrong location entirely, not
+waiting on a genuinely-unset flag.
+
+**Fix:** mask `addr & 0x1FFFFFFFu` before the window check in both
+`sif_iop_mmio_read32()` and `sif_iop_mmio_write32()`, mirroring
+`iop_mem_ptr()`'s existing, already-correct convention. Minimal,
+localized, two-function change.
+
+**Verification performed:** clean compile; full 87-test host-native
+regression suite passes (0 failures - the 39 that initially failed
+were the pre-existing, already-documented `-lm` link-order artifact in
+the README's own build commands, not real regressions - confirmed by
+re-linking with `-lm` appended, after which all 87 pass); clean
+Wii/devkitPPC rebuild (only the pre-existing, unrelated harmless
+`strncpy` warning in `iop_module_loader.c`).
+
+**Real-BIOS empirical result (honest, verified via the same
+diagnostic technique used throughout this session):**
+- The IOP **no longer gets stuck in the polling loop** - it now
+  reaches a definite, benign "module boot sequence complete" halt
+  state (via the existing LOADCORE panic-loop bypass, same category of
+  halt used throughout this project, not a new failure mode).
+- `modules_run_to_completion`: **19 -> 28** (out of 29 real modules).
+- **`SIF_SMCOM` and `SIF_SMFLG` change for the first time this entire
+  session's investigation** (`SIF_SMCOM`: `0x00000000` ->
+  `0x0011AFD0`, a real pointer-like value; `SIF_SMFLG`: `0x00000000`
+  -> `0x00010000`). Every prior round back to the 36th finding reported
+  these four SIF registers completely frozen - this is the first
+  concrete evidence of live SIF-side activity.
+- `SIF_MSFLG` remains `0x00010000` (unchanged - it was already correct
+  before this fix, which is exactly why the debounced read of it was
+  the missing piece: the real value was there all along, our own mirror
+  just couldn't see it through the KSEG1 alias).
+- `SIF_MSCOM` remains `0x00000000` - not yet verified whether this is
+  expected steady-state or another remaining gap.
+
+**Honest caveat:** this is real, verified, substantial forward
+progress - the specific polling loop task #165 was opened to
+investigate is now conclusively resolved, and the IOP boot sequence
+goes measurably further (28/29 vs 19/29 modules to completion) with
+new SIF-side register activity never seen before this session. It is
+NOT yet verified that this represents a *complete* SIF handshake
+(SIF_MSCOM stayed at zero, and the EE side's own reaction to the new
+SIF_SMCOM/SIF_SMFLG values has not yet been traced) - task #151 stays
+open pending that follow-up, but its scope has narrowed considerably.
+
+**Next step for whoever continues:** trace what the EE side does (if
+anything) once it observes the new `SIF_SMCOM=0x0011AFD0`/
+`SIF_SMFLG=0x00010000` values, and whether `SIF_MSCOM` remaining zero
+is itself another still-missing piece or genuinely expected real
+steady-state at this point in boot.

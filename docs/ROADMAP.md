@@ -1510,6 +1510,23 @@ already documented, rather than truly returning from the syscall.
    condition isn't yet satisfied, so the SIF handshake goal is not yet
    reached. Next: identify what the polling loop is waiting on. See
    STATUS.md's 44th finding.
+   UPDATE (Round 29 continued, 45th finding, task #151/#165): task
+   #165 SOLVED. Corrected a mis-decode from the 44th finding - the
+   loop actually branches on $s0 (not $s1); $s0 is fed by a real
+   SIF_MSFLG debounce-read at KSEG1 address 0xBD000020. ROOT CAUSE:
+   sif.c's IOP-side mirror (sif_iop_mmio_read32/write32) checked the
+   raw address against its 0x1D000000-0x1D0000FF window WITHOUT
+   masking off KUSEG/KSEG0/KSEG1 segment-select bits first (unlike
+   iop_mem_ptr's existing RAM path), so the real KSEG1 alias missed
+   the window entirely and silently read back 0 instead of the real,
+   already-correct SIF_MSFLG value. FIX: mask addr & 0x1FFFFFFF before
+   the window check (two-function change). Verified: 87/87 regression
+   tests pass, clean Wii rebuild, and real-BIOS result: IOP no longer
+   stuck in the loop, modules_run_to_completion 19->28/29,
+   SIF_SMCOM/SIF_SMFLG change for the first time all session
+   (0->0x0011AFD0, 0->0x00010000). SIF_MSCOM stays 0 - not yet known
+   if that's expected. Task #151 narrows further but stays open
+   pending EE-side reaction trace. See STATUS.md's 45th finding.
    next concrete target (the new, deeper dead end this round found).
 
 2. **CDVD (disc) stub** (section 7) - DONE (2026-07-08), see the

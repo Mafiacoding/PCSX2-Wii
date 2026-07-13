@@ -8734,3 +8734,73 @@ further live-PCSX2 disassembly of the exact table this write targets
 and whatever code (if any) in this project's modeled interrupt chain
 could plausibly read and dispatch through it - not guessed at, a
 precisely scoped next investigation.
+
+## 67th finding (task #191): the real caller is confirmed to be `_SifSendCmd()` itself; the semaphore is waiting on a reply to an undocumented "system command 9" packet
+
+Continued task #191 by fully re-disassembling the caller chain past
+`CreateSema` against the real, fetched `ee/kernel/src/sifcmd.c`
+(already used for the 63rd finding). What the 64th/65th findings
+described as a mysterious "table write" at `0x00083f40`-`0x00083f74`
+is in fact byte-exact construction of a real `SifDmaTransfer_t`
+{src, dest, size, attr} entry on the stack, and the whole function
+(`0x00083edc` onward, called via `0x00083FD0`/`0x00084010` wrappers
+from `0x00084870`) is a byte-exact match for real ps2sdk's own
+`_SifSendCmd(int cid, int mode, void *pkt, int pktsize, void *src,
+void *dest, int size)`:
+
+  - `s3`/`s0` = `pkt` (the packet/header buffer)
+  - the `blez $a1` branch matches the real `if (size > 0) { ... }`
+    extra-payload branch exactly (confirmed `dmat[count] =
+    {src, dest, size, 0}; count++;` byte-for-byte)
+  - `0x00083f34`: `lui $v0,0x0009; lw $a0,-0x3CE0($v0)` reads
+    `*(0x0008C320)` = real `_sif_cmd_data.iopbuf` (struct offset 8,
+    confirmed in the 63rd finding: base address `0x0008C318`,
+    `pktbuf@0, unused@4, iopbuf@8`) - matches
+    `dmat[count].dest = _sif_cmd_data.iopbuf` exactly
+  - `0x00083f5c`: `sw $s5,8($s3)` writes `header->cid = $s5` at
+    struct offset 8 (confirmed struct layout from the 61st/63rd
+    findings) - `$s5` is the ORIGINAL first argument to the whole
+    chain, unchanged since `0x00084898`'s caller
+  - `0x00083f70`/`f74`: `li $v0,0x44; sw $v0,(a0)` writes
+    `dmat[count].attr = SIF_DMA_ERT(0x40) | SIF_DMA_INT_O(0x4) = 0x44`
+    - byte-exact match to real `_SifSendCmd`'s
+      `dmat[count].attr = SIF_DMA_ERT | SIF_DMA_INT_O;` line
+  - `0x00084168` (called twice, at `0x83f18` and `0x83f80`) is real
+    `sceSifWriteBackDCache()` (a genuine cache-flush loop using
+    `SYNC`/`CACHE` opcodes over `[a0, a0+a1)`), matching
+    `_SifSendCmd`'s own `sceSifWriteBackDCache(pkt, pktsize);` call -
+    not a generic "FlushCache" utility as earlier suspected
+
+**The one still-open, load-bearing unknown:** the `cid` value is
+`0x80000009` = `SIF_CMD_ID_SYSTEM | 9`. Real, public ps2sdk's own
+`sceSifInitCmd()` only ever sends `SIF_CMD_CHANGE_SADDR` (cid
+`0x80000000`) and `SIF_CMD_INIT_CMD` (cid `0x80000002`) - "system
+command 9" is NOT part of the public ps2sdk source at all. This
+function is being reached from a DIFFERENT, later real kernel
+subsystem's init sequence (beyond `sceSifInitCmd()`, since `CreateSema`
+type calls don't appear in that function), and there is currently no
+citable source for what real command 9 does or what IOP-side response
+(if any) is expected before the semaphore this project already
+implements-for-real (66th finding) would be legitimately signaled.
+
+**Status: genuinely unresolved, not guessed at.** This project's
+`WaitSema` correctly and safely parks (verified over 300M instructions,
+66th finding) waiting for a `SignalSema`/`iSignalSema` this project's
+currently-modeled dispatch has no grounded reason to ever call, since
+the real meaning of "system command 9" and its expected acknowledgment
+is not established from any source available so far (public ps2sdk,
+psdevwiki, ps2tek, or the user-supplied ps2sdk-master.zip - none
+document Sony-internal system command IDs beyond 0-2). Fabricating a
+synthetic response here (the way task #187 did for the WELL-DOCUMENTED
+`SIF_SREG_RPCINIT` case) would violate this project's own
+never-fabricate-register-semantics discipline, since there is no real
+source to ground it in. No source changed this round; docs-only.
+
+**Next step for task #191/#192:** search specifically for what "SIF
+system command 9" (or nearby low system-command IDs beyond
+`SIF_CMD_CHANGE_SADDR`/`SIF_CMD_INIT_CMD`) might correspond to in any
+further real source (IOP-side `sifman`/`sifcmd` modules, ps2tek's
+lower-level SIF documentation, or live PCSX2 comparison against a
+DIFFERENT real game/BIOS combination where this code path might be
+reached with Pine IPC connected for live register capture, which
+was not available this round).

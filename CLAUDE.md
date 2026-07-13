@@ -3414,3 +3414,26 @@ discover or invoke - the likely real signaling path, not yet
 implemented.
 
 See docs/STATUS.md's correction + 66th finding for full detail.
+
+## Checkpoint (Round 42, task #172/#191): confirmed byte-exact _SifSendCmd() match; blocker is now precisely an undocumented "system command 9" - genuinely unresolved
+
+Re-disassembled the caller chain past CreateSema/WaitSema against the
+real, fetched ee/kernel/src/sifcmd.c and confirmed a byte-exact match
+to real ps2sdk's _SifSendCmd(cid, mode, pkt, pktsize, src, dest, size):
+what earlier rounds described as a mysterious "handler table write" is
+actually a real SifDmaTransfer_t construction (attr=0x44=SIF_DMA_ERT|
+SIF_DMA_INT_O, dest=_sif_cmd_data.iopbuf at 0x0008C320, matching the
+63rd finding's struct layout exactly), and the repeated "0x84168" calls
+are real sceSifWriteBackDCache(), not a generic cache utility.
+
+The remaining blocker is now precisely scoped: cid=0x80000009
+(SIF_CMD_ID_SYSTEM|9) is not part of public ps2sdk's sceSifInitCmd()
+sequence (cid 0/2 only) - a real, later kernel subsystem's own
+internal SIF command with no available source for its semantics or
+expected IOP-side response. Deliberately did not fabricate a synthetic
+response here (unlike task #187's RPCINIT delivery, which was grounded
+in a fully documented struct/field) - there's no real source to ground
+one for "command 9" yet. No source changed this round (docs-only);
+task #191 stays open with this precise next question.
+
+See docs/STATUS.md's 67th finding for full detail.

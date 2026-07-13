@@ -2069,3 +2069,25 @@ finding writes a new, raw (non-syscall-registered) handler-table entry
 this project's interrupt dispatch doesn't yet know how to invoke - the
 leading hypothesis for what's still missing. See docs/STATUS.md's
 correction + 66th finding for full detail.
+
+## UPDATE (Round 42, task #172/#191): confirmed the real caller past CreateSema is byte-exact ps2sdk _SifSendCmd(); the blocker is now precisely an undocumented "system command 9" (docs-only investigation round)
+
+Re-disassembled the caller chain past CreateSema against the real,
+fetched ee/kernel/src/sifcmd.c and confirmed a byte-exact match to
+_SifSendCmd(cid, mode, pkt, pktsize, src, dest, size): the stack writes
+previously described as a mysterious "handler table" are in fact a
+real SifDmaTransfer_t {src,dest,size,attr} construction (attr=0x44=
+SIF_DMA_ERT|SIF_DMA_INT_O, dest=_sif_cmd_data.iopbuf read from
+0x0008C320, matching the 63rd finding's struct layout exactly), and
+the "0x84168" calls are real sceSifWriteBackDCache(), not a generic
+cache utility as previously guessed.
+
+The one remaining unknown: cid=0x80000009 (SIF_CMD_ID_SYSTEM|9) is not
+part of public ps2sdk's sceSifInitCmd() sequence (which only sends
+cid 0/2) - it's a real, later kernel subsystem's own internal SIF
+command with no available source describing its semantics or expected
+IOP-side response. Deliberately did NOT fabricate a synthetic response
+(unlike task #187's RPCINIT delivery, which was grounded in a fully
+documented struct/field) since there is no real source to ground one
+here. No source changed this round; docs-only. See docs/STATUS.md's
+67th finding for full detail and the precise open question.

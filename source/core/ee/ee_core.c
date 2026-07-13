@@ -735,6 +735,86 @@ void ee_mem_write64(ee_state_t *st, uint32_t addr, uint64_t val)
         p[i] = (uint8_t)((val >> (8 * i)) & 0xFF);
 }
 
+/*
+ * task #187 (docs/STATUS.md 63rd finding): synthesize the real IOP's
+ * SIF_CMD_SET_SREG(SIF_SREG_RPCINIT, 1) response packet.
+ *
+ * Grounding: the fetched, real ee/kernel/src/sifcmd.c (ps2sdk,
+ * Academic Free License 2.0) shows this project's own 57th/58th-
+ * finding "32-entry table at 0x0008C440" is REAL ps2sdk's
+ * `static int sregs[32]` (exactly 32 ints = 128 bytes, matching the
+ * real BIOS ROM's own zero-fill loop found in the 58th finding), and
+ * that 0x0008C440 (sregs[0]) is real ps2sdk's SIF_SREG_RPCINIT. The
+ * real dispatch mechanism this packet drives (_SifCmdIntHandler(),
+ * sys_cmd_handlers[1]=set_sreg performing
+ * `cmd_data->sregs[pkt->sreg] = pkt->val`) is genuine, already-
+ * resident BIOS/kernel code - this project's EE interpreter executes
+ * it for real once invoked; nothing about the EE-side handling is
+ * modeled/faked here, only the INCOMING PACKET CONTENT is synthesized
+ * (using the real, byte-exact struct sr_pkt layout: SifCmdHeader_t
+ * header + u32 sreg + int val = 24 bytes) and delivery is triggered
+ * via the SAME real SIF0 DMAC-completion-interrupt mechanism already
+ * proven working for the EE's own outgoing sends (tasks #176/#180).
+ *
+ * Honest caveat: WHEN the real IOP actually sends this packet is not
+ * confirmed from real IOP assembly (unobtainable - 61st finding).
+ * This is called from ee_core.c's syscall 119 handler on the second
+ * observed SIF_CMD_INIT_CMD send as an explicitly-labeled
+ * approximation of "the IOP responds once its own SIFCMD/RPC init
+ * completes" - not a byte-exact real timing citation. See the 63rd
+ * finding for full detail, verification, and result. */
+static void sif_cmd_iop_send_rpcinit_ready(ee_state_t *st, uint32_t ee_recvbuf)
+{
+    if (!ee_recvbuf)
+        return;
+    ee_mem_write32(st, ee_recvbuf + 0u, 24u);          /* psize=24 (sizeof struct sr_pkt), dsize=0 */
+    ee_mem_write32(st, ee_recvbuf + 4u, 0u);           /* header.dest = NULL */
+    ee_mem_write32(st, ee_recvbuf + 8u, SIF_CMD_SET_SREG); /* cid = SIF_CMD_ID_SYSTEM|1 */
+    ee_mem_write32(st, ee_recvbuf + 12u, 0u);          /* header.opt = 0 */
+    ee_mem_write32(st, ee_recvbuf + 16u, SIF_SREG_RPCINIT); /* sr_pkt.sreg = 0 */
+    ee_mem_write32(st, ee_recvbuf + 20u, 1u);          /* sr_pkt.val = 1 */
+    dma_channel_signal_done(DMA_CHANNEL_SIF0); /* real SIF0 completion IRQ - drives the real, resident _SifCmdIntHandler() */
+}
+
+/* task #187 (63rd finding): delayed-delivery state for
+ * sif_cmd_iop_send_rpcinit_ready(). Firing it immediately in the same
+ * syscall-119 call that recorded the EE's receive buffer would
+ * collide with that SAME call's own dma_channel_signal_done() for the
+ * outgoing SIF_CMD_INIT_CMD send's completion (both would set the
+ * same real, level-triggered SIF0 DMAC_STAT bit before the CPU has
+ * taken either interrupt, which this project's real, already-proven
+ * interrupt-delivery model has no reason to treat as two distinct
+ * events). Delaying by a fixed number of real EE instructions (using
+ * this project's own existing "1 instruction = 1 cycle" simplification
+ * already established for timer/VBLANK modeling - see
+ * ee_check_vblank()'s doc comment above) ensures the first interrupt
+ * is fully taken and its real handler has run to completion before
+ * this synthetic second one is raised - an explicitly-labeled
+ * approximation of IOP response timing, not a byte-exact citation
+ * (real IOP assembly remains unobtainable - 61st finding). */
+static int g_rpcinit_pending = 0;
+static uint32_t g_rpcinit_delay = 0;
+
+static void ee_arm_rpcinit_pending(void)
+{
+    g_rpcinit_pending = 1;
+    g_rpcinit_delay = 50000u; /* comfortably past the ~2-instruction
+                                 * real interrupt-taken latency
+                                 * measured in the 60th finding */
+}
+
+static void ee_check_rpcinit_pending(ee_state_t *st)
+{
+    if (!g_rpcinit_pending)
+        return;
+    if (g_rpcinit_delay > 0u) {
+        g_rpcinit_delay--;
+        return;
+    }
+    g_rpcinit_pending = 0;
+    sif_cmd_iop_send_rpcinit_ready(st, sif_cmd_iop_get_ee_recvbuf());
+}
+
 int ee_core_init(const bios_image_t *bios)
 {
     memset(&g_state, 0, sizeof(g_state));
@@ -744,6 +824,8 @@ int ee_core_init(const bios_image_t *bios)
     gs_init();  /* GS privileged register block - see core/hw/gs.h */
     sif_init(); /* EE-side SIF/SBUS mailbox registers - see core/hw/sif.h */
     sif_cmd_iop_init(); /* task #186: minimal IOP-side SIFCMD consumer model - see core/hw/sif.h */
+    g_rpcinit_pending = 0; /* task #187: reset delayed-delivery state on (re-)init */
+    g_rpcinit_delay = 0;
     mch_init(); /* EE-side MCH_RICM/MCH_DRD RDRAM auto-init registers - see core/hw/mch.h */
 
     g_state.ram = memalign(32, EE_RAM_SIZE);
@@ -1176,10 +1258,27 @@ static int ee_step(void)
              *     not guess at that table's layout.
              *
              * Any OTHER syscall number still halts rather than
-             * silently guessing - see the else branch below. */
+             * silently guessing - see the else branch below.
+             *
+             * task #187 (63rd finding): also bypass sysnum == -120
+             * (isceSifSetDChain, the real "interrupt-safe fast form"
+             * of the same syscall, per ps2sdk's syscallnr.h:
+             * "__NR_isceSifSetDChain (-0x78)"). Confirmed needed by
+             * live host-native tracing: once this project's own
+             * synthesized SIF_CMD_SET_SREG delivery (see
+             * sif_cmd_iop_send_rpcinit_ready() above) drove real,
+             * genuine BIOS code into _SifCmdIntHandler() for the
+             * first time ever, that REAL code calls
+             * "isceSifSetDChain();" (matching the fetched real
+             * ee/kernel/src/sifcmd.c exactly) - hitting this exact
+             * gap (only the positive form was bypassed) and halting.
+             * Same real justification as the positive form already
+             * documented above: this project models no SIF0 DMAC
+             * chain-mode register engine, so a no-op/generic-default
+             * return is correct emulated behavior, not a stand-in. */
             int32_t sysnum = (int32_t)GPR(3); /* $v1, real EE convention */
             if (sysnum == 100 || sysnum == 60 || sysnum == 61 ||
-                sysnum == 120) {
+                sysnum == 120 || sysnum == -120) {
                 GPR(2) = 0; /* generic default return, matching established precedent */
                 st->pc = this_pc + 4u;
                 st->next_pc = this_pc + 8u;
@@ -1357,26 +1456,53 @@ static int ee_step(void)
                     }
                     /* task #186: minimal, explicitly-labeled IOP-side
                      * SIF_CMD_INIT_CMD consumer model - see
-                     * core/hw/sif_cmd.h for full grounding/caveats.
-                     * Real IOP assembly (iop/kernel/src/sifcmd.s)
-                     * could not be fetched (61st finding); this only
-                     * models the narrowly-grounded protocol effect
-                     * (recording the EE's ca_pkt.buf reply-buffer
-                     * address), by direct symmetry with this
-                     * project's own real, byte-exact EE-side
-                     * SIF_CMD_CHANGE_SADDR handler. Decoded from the
-                     * real SifCmdHeader_t layout confirmed in the
-                     * 61st finding: offset 0 = psize:dsize, offset 4
-                     * = header.dest, offset 8 = cid, offset 12 = opt,
-                     * offset 16 = ca_pkt.buf (only present/valid for
-                     * commands that use the ca_pkt extension, which
-                     * SIF_CMD_INIT_CMD does per the real, fetched
-                     * sceSifInitCmd() source). */
+                     * core/hw/sif.h for full grounding/caveats. Real
+                     * IOP assembly (iop/kernel/src/sifcmd.s) could
+                     * not be fetched (61st finding); this only models
+                     * the narrowly-grounded protocol effect (recording
+                     * the EE's ca_pkt.buf reply-buffer address), by
+                     * direct symmetry with this project's own real,
+                     * byte-exact EE-side SIF_CMD_CHANGE_SADDR handler.
+                     * Decoded from the real SifCmdHeader_t layout
+                     * confirmed in the 61st finding: offset 0 =
+                     * psize:dsize, offset 4 = header.dest, offset 8 =
+                     * cid, offset 12 = opt, offset 16 = ca_pkt.buf
+                     * (only present/valid for commands that use the
+                     * ca_pkt extension, which SIF_CMD_INIT_CMD does
+                     * per the real, fetched sceSifInitCmd() source).
+                     *
+                     * task #187 (63rd finding): on the SECOND observed
+                     * SIF_CMD_INIT_CMD send (matching this project's
+                     * own confirmed real-hardware behavior that
+                     * sceSifInitCmd() sends this command twice),
+                     * synthesize the real IOP's SIF_CMD_SET_SREG
+                     * (RPCINIT,1) response - see
+                     * sif_cmd_iop_send_rpcinit_ready() below for full
+                     * grounding/caveats. This timing choice (2nd send)
+                     * is an explicitly-labeled approximation, not
+                     * byte-exact real IOP behavior - real IOP-side
+                     * assembly remains unobtainable. */
                     if (size >= 20u) {
                         uint32_t cid = ee_mem_read32(st, src + 8u);
                         if (cid == SIF_CMD_INIT_CMD) {
                             uint32_t ee_recvbuf = ee_mem_read32(st, src + 16u);
                             sif_cmd_iop_handle_init_cmd(ee_recvbuf);
+                            if (sif_cmd_iop_get_init_cmd_count() == 1u) {
+                                /* task #187 (63rd finding): arm a
+                                 * delayed delivery instead of firing
+                                 * immediately - see
+                                 * ee_check_rpcinit_pending() below for
+                                 * why (avoids colliding with this same
+                                 * syscall's own outgoing-completion
+                                 * dma_channel_signal_done() call a few
+                                 * lines below, and this project's own
+                                 * boot trace shows no natural second
+                                 * SIF_CMD_INIT_CMD send ever occurs
+                                 * before boot reaches its steady-state
+                                 * poll loop, so waiting for one is not
+                                 * viable). */
+                                ee_arm_rpcinit_pending();
+                            }
                         }
                     }
                 }
@@ -3618,6 +3744,7 @@ static int ee_step(void)
      * ee_check_intc_interrupt() below) is deferred to a genuine
      * instruction boundary. */
     ee_check_vblank(st);
+    ee_check_rpcinit_pending(st); /* task #187 (63rd finding) */
     if (!st->branch_pending) {
         ee_check_timer_interrupt(st, st->pc);
         /* Task #176: same instruction-boundary gating as the timer

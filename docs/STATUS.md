@@ -8414,3 +8414,111 @@ be gated by the AddDmacHandler-populated 32-entry table from the
 56th/57th findings rather than by this specific SIFCMD packet's
 handling. Investigating that table's real indexing convention is the
 natural next step.
+
+## 63rd finding (task #172/#187): MAJOR BREAKTHROUGH - the long-standing 0x0008C440 poll (blocking boot since the 57th finding) is now genuinely resolved by real, unmodified BIOS code; boot reaches a brand-new stage (CreateSema, syscall 64) never seen before
+
+Continuing directly from the 61st/62nd findings' conclusion (real IOP-side
+SIFCMD assembly unobtainable; user authorized proceeding with a
+minimal, explicitly-labeled synthetic IOP responder), fetched the FULL
+real `ee/kernel/src/sifcmd.c` (previous rounds only had fragments) via
+`raw.githubusercontent.com` (worked this time). This was a decisive,
+load-bearing citation.
+
+**Byte-exact confirmation of the 32-entry table's real identity.**
+`sceSifInitCmd()`'s real source shows `static SifCmdSysHandlerData_t
+sys_cmd_handlers[SYS_CMD_HANDLER_MAX]` (`SYS_CMD_HANDLER_MAX=32`) and
+`static int sregs[32]` - the LATTER is EXACTLY this project's own
+57th/58th-finding "32-entry table at 0x0008C440" (32 ints = 128 bytes,
+matching the real zero-fill loop found via ROM disassembly). Index 0
+(`0x0008C440` itself) is real ps2sdk's `SIF_SREG_RPCINIT`. The real
+dispatch mechanism (`_SifCmdIntHandler()`, `sys_cmd_handlers[1]=
+set_sreg` performing `cmd_data->sregs[pkt->sreg] = pkt->val`) is
+genuine, already-resident BIOS/kernel code this project's EE
+interpreter already executes correctly once invoked.
+
+**Implemented (source/hw/sif.c, source/hw/sif.h, source/core/ee/
+ee_core.c):**
+1. `sif_cmd_iop_send_rpcinit_ready()` (ee_core.c): synthesizes a real,
+   byte-exact `struct sr_pkt {SifCmdHeader_t header; u32 sreg; int
+   val;}` (24 bytes: cid=SIF_CMD_SET_SREG=0x80000001, sreg=
+   SIF_SREG_RPCINIT=0, val=1) into the EE's own recorded receive
+   buffer (`sif_cmd_iop_get_ee_recvbuf()`, from task #186), then fires
+   the real SIF0 DMAC-completion interrupt via the SAME
+   `dma_channel_signal_done(DMA_CHANNEL_SIF0)` mechanism already
+   proven working for the EE's own outgoing sends (tasks #176/#180).
+   Delivery is delayed (a fixed 50,000-EE-instruction countdown,
+   checked every step via a new `ee_check_rpcinit_pending()` hook)
+   rather than fired immediately in the same syscall-119 call that
+   records the EE's buffer address, to avoid colliding with that same
+   call's own outgoing-completion interrupt on the same level-
+   triggered SIF0 status bit.
+2. Extended the existing EE syscall bypass for 120 (`sceSifSetDChain`)
+   to also cover its negative/"interrupt-safe fast" form, `sysnum ==
+   -120` (`isceSifSetDChain`, confirmed via ps2sdk's `ee/kernel/
+   include/syscallnr.h`, also fetched successfully this round). This
+   was found to be REQUIRED, not optional: once the synthetic packet
+   above successfully drove real, genuine BIOS code into
+   `_SifCmdIntHandler()` for the very first time, that REAL code
+   (matching the fetched source exactly, confirmed via live PCSX2
+   disassembly at `0x00084050`) calls `isceSifSetDChain();` - hitting
+   a real, pre-existing gap (only the positive form was bypassed) that
+   halted the EE with "SYSCALL (no BIOS syscall table implemented)".
+   Same real justification as the already-documented positive-120
+   bypass: this project models no SIF0 DMAC chain-mode register
+   engine, so a no-op/generic-default return is correct emulated
+   behavior for either form.
+
+**Verification methodology.** Used host-native diagnostics extensively
+this round, including a live A/B test (temporarily removing an early,
+premature diagnostic memory read that was corrupting CPU state before
+boot even started - see the "diagnostic tooling hazard" noted in the
+62nd finding) and step-by-step PC/register tracing to precisely follow
+the real interrupt-delivery chain: `Cause.IP3` fires -> real general
+exception vector (`0x80000200`) -> real kernel dispatch code
+(`0x80000400`s, `0x80001300`s, including the exact PC task #177's
+MFSA/MTSA fix was needed for) -> real `AddDmacHandler`-registered
+callback lookup (observed loading `v1=0x00084050`, later confirmed via
+live PCSX2 `pcsx2_disassemble` to be `_SifCmdIntHandler()`'s real
+entry point) -> `jalr` into it for real. Cross-referenced this
+project's own live-PCSX2 disassembly of `0x00084050`-`0x00084170`
+against the fetched source instruction-by-instruction (struct offsets
+0xC/0x10 for `sys_cmd_handlers`/`nr_sys_handlers` match the real
+`struct cmd_data` layout exactly) - not inferred, directly confirmed.
+
+**Verification performed:** full 88-test host-native regression suite
+passes (0 failures); clean Wii/devkitPPC rebuild (exit 0, only the
+pre-existing, unrelated `strncpy` warning).
+
+**Real-BIOS empirical result - the headline finding:** `0x0008C440`
+(`sregs[0]`/`SIF_SREG_RPCINIT`), polled without ever resolving since
+the 57th finding (many rounds, multiple investigation dead-ends, and
+the entire task #183/#184/#185/#186 IOP-DMA/SIF-consumer investigation
+chain), now reads `0x00000001` - set by genuine, unmodified,
+byte-exact real BIOS/kernel code (`set_sreg()`), not by this project
+directly poking the value. Boot then advances PAST the `0x00083B40`
+steady-state loop for the first time ever, reaching a brand-new real
+syscall this project has never seen before: `v1=0x40=64` = ps2sdk's
+`__NR_CreateSema` (confirmed via the freshly-fetched `syscallnr.h`) -
+the EE kernel's real semaphore-creation call, presumably part of
+real thread/RPC-server setup following successful SIF RPC
+initialization. This is NOT implemented yet (halts with "SYSCALL (no
+BIOS syscall table implemented)") - a new, honestly-reported next
+wall, not a fabricated fix.
+
+**Honest caveats retained:** the exact TIMING of the synthetic
+SIF_CMD_SET_SREG delivery (a fixed 50,000-instruction delay after the
+recorded SIF_CMD_INIT_CMD send) is an explicitly-labeled approximation
+of real IOP response timing, not a byte-exact citation - real IOP-side
+assembly remains unobtainable. Everything ELSE about this increment
+(the packet's real byte layout, the real EE-side dispatch/handler code
+it drives, the real table/index semantics) is byte-exact and
+independently confirmed via live PCSX2 disassembly, not guessed.
+
+**Next for task #172:** implement or investigate `CreateSema` (syscall
+64/0x40) - the new real wall. This is a genuine EE kernel threading
+primitive (real semaphore object creation), a different category of
+work from the SIF/DMA investigation this session has focused on -
+scope it carefully (does reaching a splash screen actually require a
+working thread/semaphore subsystem, or can this be bypassed similarly
+to the FlushCache/SetupThread/SetupHeap generic-default precedent?)
+before implementing anything.

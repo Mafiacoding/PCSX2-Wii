@@ -1970,3 +1970,20 @@ finding for full detail, including a diagnostic-tooling quirk found
 and root-caused along the way (out-of-band `ee_mem_read32()` calls
 before boot execution begins can corrupt CPU state - not a shipped
 bug, just a harness hazard, documented so it isn't rediscovered).
+
+## UPDATE (Round 38, task #172/#187): MAJOR BREAKTHROUGH - 0x0008C440/SIF_SREG_RPCINIT poll resolved by real BIOS code; boot reaches CreateSema (syscall 64), a brand-new stage
+
+Fetched the full real ee/kernel/src/sifcmd.c, confirming the 32-entry
+table blocking boot since the 57th finding is real ps2sdk's
+`sregs[32]`, and index 0 is `SIF_SREG_RPCINIT`. Implemented a
+byte-exact synthetic SIF_CMD_SET_SREG(RPCINIT,1) delivery (triggering
+the REAL, already-resident _SifCmdIntHandler()/set_sreg() dispatch -
+not a direct poke), plus fixed a real gap (isceSifSetDChain's negative
+"fast" form wasn't bypassed, only its positive counterpart). Full
+88-test regression passes; clean Wii rebuild. Real-BIOS diagnostic
+confirms 0x0008C440 now genuinely becomes 1 via real BIOS code, and
+boot advances to a brand-new syscall (CreateSema, 64) never reached
+before. See docs/STATUS.md's 63rd finding for full detail, honest
+caveats (synthetic delivery TIMING is an approximation; everything
+else is byte-exact and live-disassembly-confirmed), and the new open
+task (implement or scope around CreateSema).

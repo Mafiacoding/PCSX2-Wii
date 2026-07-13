@@ -156,4 +156,47 @@ void sif_cmd_iop_init(void);
 void sif_cmd_iop_handle_init_cmd(uint32_t ee_recvbuf_addr);
 uint32_t sif_cmd_iop_get_ee_recvbuf(void);
 
+/* Returns how many times sif_cmd_iop_handle_init_cmd() has been
+ * called so far (0 if never). Used by ee_core.c to decide when to
+ * synthesize the IOP's SIF_CMD_SET_SREG(RPCINIT,1) response - see the
+ * 62nd/63rd findings in docs/STATUS.md. */
+uint32_t sif_cmd_iop_get_init_cmd_count(void);
+
+/*
+ * --- task #187 (docs/STATUS.md 63rd finding): real SIF_CMD_SET_SREG /
+ * sregs[32] / SIF_SREG_RPCINIT grounding ---
+ *
+ * Fetched the FULL real ee/kernel/src/sifcmd.c (previously only had
+ * fragments) and found byte-exact confirmation that this project's
+ * own 57th/58th-finding "32-entry table at 0x0008C440" is REAL
+ * ps2sdk's `static int sregs[32]` (exactly 32 ints = 128 bytes,
+ * matching the real zero-fill loop found via ROM disassembly in the
+ * 58th finding), and that `0x0008C440` (index 0) is real ps2sdk's
+ * `SIF_SREG_RPCINIT`. The real EE-side dispatch mechanism
+ * (`_SifCmdIntHandler()`, `sys_cmd_handlers[32]`, the `set_sreg()`
+ * handler performing `cmd_data->sregs[pkt->sreg] = pkt->val`) is ALL
+ * real, genuine BIOS/kernel code that this project's own EE
+ * interpreter ALREADY executes correctly once invoked - nothing new
+ * needs to be modeled on the EE side. The one remaining real gap is
+ * the same one this project has faced since the 59th finding: no
+ * real IOP-side code to actually SEND the `SIF_CMD_SET_SREG(sreg=
+ * SIF_SREG_RPCINIT, val=1)` packet that real hardware's IOP sends once
+ * its own SIFCMD/RPC init completes.
+ *
+ * `SIF_CMD_SET_SREG` / `SIF_SREG_RPCINIT` below are real, cited
+ * constants (SIF_CMD_ID_SYSTEM|1, and 0 respectively, per the fetched
+ * sifcmd.c and this session's earlier sifcmd-common.h citation - NOT
+ * guessed). `sif_cmd_iop_send_rpcinit_ready()`'s CONTENT (the real
+ * `struct sr_pkt` layout: header + sreg + val) is byte-exact from the
+ * fetched source. Its TRIGGER TIMING (fired synthetically on the
+ * second observed SIF_CMD_INIT_CMD send, from ee_core.c's syscall 119
+ * handler) is NOT byte-exact real IOP behavior - it is an explicitly
+ * labeled approximation, chosen because real IOP-side assembly
+ * remains unobtainable (every fetch avenue exhausted - 61st finding).
+ * See docs/STATUS.md's 63rd finding for full detail, results, and
+ * honest caveats.
+ */
+#define SIF_CMD_SET_SREG   0x80000001u /* SIF_CMD_ID_SYSTEM | 1 */
+#define SIF_SREG_RPCINIT   0u
+
 #endif

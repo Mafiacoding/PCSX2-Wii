@@ -3275,3 +3275,36 @@ harness-only hazard, not a regression in shipped source - noted here
 so a future round doesn't re-diagnose it.
 
 See docs/STATUS.md's 62nd finding for full detail.
+
+## Checkpoint (Round 38, task #172/#187): MAJOR BREAKTHROUGH - real BIOS code now sets SIF_SREG_RPCINIT; boot reaches CreateSema
+
+The 0x0008C440 poll that blocked boot since the 57th finding is now
+genuinely resolved. Fetched the full real ps2sdk ee/kernel/src/
+sifcmd.c, confirming this project's own "32-entry table" hypothesis
+was exactly real ps2sdk's `sregs[32]` (index 0 = SIF_SREG_RPCINIT).
+Implemented a byte-exact synthetic SIF_CMD_SET_SREG(RPCINIT,1) packet
+delivery (sif_cmd_iop_send_rpcinit_ready() in ee_core.c/sif.c/sif.h),
+triggering the REAL, already-resident _SifCmdIntHandler()/set_sreg()
+dispatch to perform the actual write - not a direct poke of the flag.
+Also fixed a real gap found along the way: isceSifSetDChain (syscall
+-120, the "interrupt-safe fast form" of the already-bypassed syscall
+120) wasn't handled, only its positive counterpart - confirmed
+required via host-native tracing once the synthetic delivery started
+driving real dispatch code for the first time ever.
+
+Full 88-test regression suite passes; clean Wii/devkitPPC rebuild.
+Real-BIOS diagnostic (60M-instruction cap) confirms 0x0008C440 now
+reads 0x00000001 - set by genuine, unmodified BIOS code, verified via
+live PCSX2 disassembly matching the fetched source instruction-by-
+instruction. Boot advances past the years-long 0x00083B40 plateau to
+a brand-new real syscall: CreateSema (64/0x40, ps2sdk's
+__NR_CreateSema) - not yet implemented, the new open wall.
+
+Honest caveat retained: the synthetic packet's delivery TIMING (a
+fixed 50,000-instruction delay) is an explicitly-labeled approximation
+of real IOP response timing, since real IOP-side assembly remains
+unobtainable. The packet's content, the EE-side dispatch code it
+drives, and the table/index semantics are all byte-exact and
+independently confirmed - not guessed.
+
+See docs/STATUS.md's 63rd finding for full detail.

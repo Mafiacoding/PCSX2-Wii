@@ -856,14 +856,50 @@ static void ee_check_rpcinit_pending(ee_state_t *st)
  *                             _SifCmdIntHandler() dispatches to
  *                             usr_cmd_handlers[8]=_request_end in the
  *                             first place)
- *   offset 0x24: sd          (SifRpcServerData_t* - left NULL: this
- *                             project has no real IOP-side server
- *                             data to echo back honestly, an
- *                             explicitly-labeled gap - later code that
- *                             tries to actually USE this binding, e.g.
- *                             a subsequent sceSifCallRpc() through it,
- *                             is not validated by this delivery)
- *   offset 0x28: buf, offset 0x2C: cbuf (left NULL, same caveat as sd)
+ *   offset 0x24: sd          (SifRpcServerData_t* - task #194 (70th
+ *                             finding): originally left NULL, which a
+ *                             host-native diagnostic proved WRONG -
+ *                             real _request_end() does
+ *                             "cd->server = request->sd;" for a Bind
+ *                             reply, and the real CALLER (not
+ *                             sceSifBindRpc() itself, which always
+ *                             returns 0 - confirmed by reading the
+ *                             fetched sceSifBindRpc() to its end -
+ *                             but the BIOS code that calls it) polls
+ *                             "cd->server == NULL => not registered
+ *                             yet, bind again" exactly like real
+ *                             ps2sdk-based games do while waiting for
+ *                             a target IOP module (e.g. LOADFILE) to
+ *                             finish loading and call
+ *                             sceSifRegisterRpc(). Leaving sd NULL
+ *                             therefore causes a real, infinite
+ *                             re-bind loop (confirmed via diagnostic:
+ *                             successive CreateSema ids 0,1,2,...36+
+ *                             all re-binding the SAME sid=0x80000006,
+ *                             each one "succeeding" via our REND
+ *                             delivery and immediately re-binding
+ *                             again). This project has no real
+ *                             IOP-side SifRpcServerData_t to echo back
+ *                             honestly (no real IOP module-loading/
+ *                             registration timing is modeled), so a
+ *                             non-NULL PLACEHOLDER value is used here,
+ *                             clearly NOT a real modeled IOP address -
+ *                             its only real, cited purpose is to
+ *                             satisfy the exact real inequality
+ *                             ("!= NULL") the real caller's own
+ *                             polling loop checks, matching the
+ *                             REAL protocol requirement (a non-NULL
+ *                             cd->server means "bound") without
+ *                             claiming this project emulates a real
+ *                             IOP-resident server-data struct at that
+ *                             address. Any later code that tries to
+ *                             actually dereference *sd as a real
+ *                             struct (rather than just null-checking
+ *                             it) is a known, explicitly-labeled gap.)
+ *   offset 0x28: buf, offset 0x2C: cbuf (left NULL - only relevant to
+ *                             sceSifCallRpc()'s own call/reply buffers,
+ *                             not yet reached by this project's boot
+ *                             trace; same "not yet modeled" caveat)
  *
  * As with sif_cmd_iop_send_rpcinit_ready(), only the INCOMING PACKET
  * CONTENT and its delivery trigger are synthesized; the dispatch
@@ -883,7 +919,7 @@ static void sif_cmd_iop_send_rpc_bind_rend(ee_state_t *st, uint32_t ee_recvbuf, 
     ee_mem_write32(st, ee_recvbuf + 0x18u, 0u);            /* rpc_id (unused by _request_end) */
     ee_mem_write32(st, ee_recvbuf + 0x1Cu, cd_ptr);        /* cd - echoed from the real Bind packet */
     ee_mem_write32(st, ee_recvbuf + 0x20u, SIF_CMD_RPC_BIND); /* inner cid: "this replies to a Bind" */
-    ee_mem_write32(st, ee_recvbuf + 0x24u, 0u);            /* sd = NULL (honest gap, see comment above) */
+    ee_mem_write32(st, ee_recvbuf + 0x24u, 0x00001000u);   /* sd = non-NULL PLACEHOLDER (task #194/70th finding, see comment above - NOT a real IOP address) */
     ee_mem_write32(st, ee_recvbuf + 0x28u, 0u);            /* buf = NULL */
     ee_mem_write32(st, ee_recvbuf + 0x2Cu, 0u);            /* cbuf = NULL */
     dma_channel_signal_done(DMA_CHANNEL_SIF0); /* real SIF0 completion IRQ - drives the real, resident _SifCmdIntHandler() */
@@ -1857,22 +1893,45 @@ static int ee_step(void)
                                 ee_arm_rpcinit_pending();
                             }
                         }
-                        if (cid == SIF_CMD_RPC_BIND && sif_cmd_iop_get_rpc_bind_count() == 0u) {
-                            /* task #192 (68th finding): the real
-                             * caller past CreateSema/WaitSema
-                             * (sceSifBindRpc(), byte-exact match per
-                             * the 67th finding) sends this packet;
-                             * `cd` (the SifRpcClientData_t* the real
-                             * WaitSema is blocked on, via
-                             * cd->hdr.sema_id) lives at offset 0x1C of
-                             * the real SifRpcBindPkt_t. Only arm the
-                             * synthetic REND reply on the FIRST
-                             * observed Bind (matching the RPCINIT
-                             * precedent's "count==1" gating style,
-                             * adapted since Bind is naturally only
-                             * sent once per real sceSifBindRpc() call,
-                             * unlike SIF_CMD_INIT_CMD's documented
-                             * twice-send). */
+                        if (cid == SIF_CMD_RPC_BIND) {
+                            /* task #192 (68th finding, CORRECTED in
+                             * task #194/70th finding): originally this
+                             * only armed the synthetic REND reply on
+                             * the FIRST observed Bind, on the
+                             * (INCORRECT) assumption that real boot
+                             * only calls sceSifBindRpc() once. Task
+                             * #194's diagnostic tracing (CreateSema/
+                             * WaitSema/RPC_BIND-send trace) proved
+                             * this wrong: real boot binds to a SECOND
+                             * RPC server (sid=0x80000006 observed both
+                             * times in the diagnostic - real
+                             * LOADFILE, per ps2tek's
+                             * RPC_System_services table) via a second,
+                             * fully sequential sceSifBindRpc() call -
+                             * its own fresh CreateSema (a NEW
+                             * semaphore ID, not a retry of the first),
+                             * its own RPC_BIND send, and its own
+                             * WaitSema park - only AFTER the first
+                             * bind's WaitSema had already been
+                             * unparked for real by our synthetic REND
+                             * reply. Since each Bind is followed by
+                             * its own WaitSema before the NEXT Bind is
+                             * ever sent (confirmed: only one Bind is
+                             * ever outstanding at a time in the trace),
+                             * it's correct and safe to simply re-arm
+                             * the SAME delayed-delivery mechanism for
+                             * every Bind observed, echoing back
+                             * whichever `cd` pointer (offset 0x1C of
+                             * the real SifRpcBindPkt_t) THIS send
+                             * used, rather than gating on "only the
+                             * first ever". `cd` is the
+                             * SifRpcClientData_t* the real WaitSema
+                             * blocks on via cd->hdr.sema_id (real
+                             * _request_end() reads it back out of the
+                             * REND reply we deliver), so per-call
+                             * correctness only requires echoing back
+                             * whatever this send's own cd_ptr was -
+                             * which this already does. */
                             uint32_t cd_ptr = ee_mem_read32(st, src + 0x1Cu);
                             sif_cmd_iop_handle_rpc_bind(cd_ptr);
                             ee_arm_rpc_bind_pending(cd_ptr);

@@ -8957,3 +8957,100 @@ ps2tek's RPC_System_services table: FILEIO=`0x80000001`,
 LOADFILE=`0x80000006`, PADMAN=`0x80000100`, etc. - not yet identified
 for real, no fabricated claim of which one this is). This becomes the
 next concrete blocker for task #172.
+
+---
+
+## 70th finding (task #194): generalized the RPC_BIND synthetic reply to every Bind (not just the first); found and fixed a real infinite re-bind loop caused by a NULL `cd->server`; boot now reaches a genuine `sceSifCallRpc()` (SIF_CMD_RPC_CALL) - the next real wall
+
+Following up on the 69th finding's fix (which unblocked the original
+WaitSema wall), a host-native diagnostic tracing every `CreateSema`/
+`WaitSema park`/`RPC_BIND send` confirmed the new `semid=1` wall (task
+#194's opening question) was simply a **second** `sceSifBindRpc()` call
+to the same real service ID (`sid=0x80000006`, LOADFILE per ps2tek's
+RPC_System_services table) - not a new/different mechanism. The
+existing synthetic REND delivery only armed on the FIRST observed Bind
+(`sif_cmd_iop_get_rpc_bind_count() == 0u` gate), so every subsequent
+Bind parked forever with no reply.
+
+**Fix 1**: removed the "first bind only" gate in
+`source/core/ee/ee_core.c` - every observed `SIF_CMD_RPC_BIND` send now
+re-arms the same delayed-delivery mechanism for its own `cd` pointer.
+Confirmed safe because each Bind is always followed by its own
+`WaitSema` before the next Bind is ever sent (only one Bind is ever
+outstanding at a time, per the trace).
+
+**This surfaced a second, more interesting bug**: with the gate
+removed, the diagnostic showed an apparent infinite loop - `CreateSema`
+IDs 0, 1, 2, ... 36+ all re-binding the exact same `sid=0x80000006`,
+each "succeeding" via the synthetic REND (semaphore signaled, WaitSema
+unparked) and then immediately re-binding again from the exact same
+caller address. Reading the real, fetched `ee/kernel/src/sifrpc.c` to
+the end of `sceSifBindRpc()` confirmed it always returns 0 (success) -
+it does not itself retry. The retry must therefore be happening in the
+**caller** of `sceSifBindRpc()`. Real `_request_end()`'s Bind-specific
+logic is:
+
+```
+} else if (request->cid == SIF_CMD_RPC_BIND) {
+    cd->server = request->sd;
+    cd->buf    = request->buf;
+    cd->cbuf   = request->cbuf;
+}
+```
+
+This project's synthetic REND packet left `sd`/`buf`/`cbuf` (offsets
+0x24/0x28/0x2C of `SifRpcRendPkt_t`) at 0 - an explicitly-labeled gap
+already called out in the 68th finding's own code comment
+("sd = NULL (honest gap...)"). The diagnostic proves this gap is not
+cosmetic: real ps2sdk-based boot code polls `cd->server == NULL =>
+not registered yet, bind again` while waiting for a target IOP module
+to finish loading and call `sceSifRegisterRpc()` - exactly the
+classic "wait for the service to come up" idiom. With `sd` always
+NULL, this project's boot looked "bound" (returns 0, semaphore
+signals) but never REALLY looked bound to the real caller, so it
+looped forever.
+
+**Fix 2**: `sif_cmd_iop_send_rpc_bind_rend()` now writes a non-NULL
+PLACEHOLDER value (`0x00001000`) into the `sd` field, clearly
+documented as NOT a real modeled IOP server-data address (this project
+has no real IOP-side module-loading/registration timing to echo back
+honestly) - its only cited, real purpose is to satisfy the exact
+real inequality (`!= NULL`) the real caller's own polling loop checks,
+matching the real protocol *requirement* without claiming to emulate
+a real IOP-resident `SifRpcServerData_t` struct at that address. `buf`/
+`cbuf` are left NULL (not yet reached - only relevant to
+`sceSifCallRpc()`'s own buffers).
+
+**Verified**: rebuilt regression suite (all 87 pass) and a host-native
+diagnostic against the real, fixed source shows the infinite re-bind
+loop is gone (exactly 1 `SIF_CMD_RPC_BIND` send now, versus 37+ before
+the fix within the same instruction budget), and the boot proceeds to
+real further execution: a **second, different** `CreateSema` call (a
+new caller address, `0x00084B04` - genuinely different code, not the
+bind-retry loop) is followed by a **new real SIF command,
+`cid=0x8000000A`** (`SIF_CMD_ID_SYSTEM|10`), sent with `size=64` bytes
+(matching a real `SifRpcCallPkt_t`, which is larger than the 36-byte
+`SifRpcBindPkt_t`) - this is `SIF_CMD_RPC_CALL`, i.e. a genuine
+`sceSifCallRpc()` invocation against the now-"bound" LOADFILE service.
+The diagnostic also incidentally observed a spurious "cid" misread
+(`0x306D6F72`, which decodes byte-for-byte to the ASCII string
+"rom0" - almost certainly part of a filename argument payload in a
+second DMA descriptor of the same multi-descriptor `sceSifSetDma()`
+call, not a real command ID; this project's diagnostic cid-scanning
+loop naively re-applies the "read cid at offset+8" heuristic to every
+descriptor `>=20` bytes, which is a diagnostic-only artifact, not a
+functional bug in the shipped dispatch code, which only acts on
+`cid == SIF_CMD_INIT_CMD` or `cid == SIF_CMD_RPC_BIND`).
+
+**This is a strong, real lead**: a `sceSifCallRpc()` call immediately
+after binding to LOADFILE, with a payload that appears to reference a
+"rom0:"-style path, is consistent with real PS2 boot flow loading a
+module (very plausibly the boot logo, e.g. `rom0:PS2LOGO`, or another
+early EELOAD-chain module) via the real LOADFILE RPC service - exactly
+the kind of real mechanism that would eventually produce a visible
+splash/logo. Not yet confirmed further; this becomes the next concrete
+task (task #195): trace the real `SifRpcCallPkt_t` layout, the real
+`sceSifCallRpc()` argument/return-buffer protocol, and what a genuine
+LOADFILE IOP-side response needs to contain.
+
+Clean Wii/devkitPPC rebuild verified.

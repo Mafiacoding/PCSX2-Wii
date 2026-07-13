@@ -2128,3 +2128,28 @@ real, substantial, honestly-verified progress past tasks #188-#192's
 wall, not a synthetic shortcut. See docs/STATUS.md's 68th/69th findings
 for full detail. New open item: identify what semid=1's real blocking
 condition corresponds to (task #172 continues).
+
+## UPDATE (Round 44, task #194): generalized RPC_BIND reply to every bind; fixed a real infinite re-bind loop (NULL cd->server); boot reaches a genuine sceSifCallRpc() - next wall identified
+
+Diagnostic tracing showed the semid=1 wall from Round 43 was simply a
+second sceSifBindRpc() call to the same real service (sid=0x80000006,
+LOADFILE). Removed the "first bind only" gate on the synthetic REND
+delivery so every Bind gets answered. This surfaced a deeper bug: the
+reply's `sd` field (SifRpcServerData_t*) was left NULL, an already-
+documented gap - but the diagnostic proved it causes a REAL infinite
+loop, since real ps2sdk-based callers poll `cd->server == NULL =>
+retry bind` while waiting for a target IOP module to register. Fixed
+by writing a clearly-labeled non-NULL placeholder (0x00001000, NOT a
+real modeled IOP address) into `sd`, satisfying only the real `!=
+NULL` check the caller performs.
+
+Verified: all 87 regression tests pass; diagnostic confirms the
+re-bind loop is gone and boot proceeds to a genuine, different
+CreateSema call followed by a real `SIF_CMD_RPC_CALL` (cid=0x8000000A,
+size=64 matching SifRpcCallPkt_t) - an actual sceSifCallRpc() against
+the now-bound LOADFILE service, with a payload that appears to
+reference a "rom0:"-style path (consistent with loading a real boot
+module, possibly the boot logo). Clean Wii/devkitPPC rebuild verified.
+See docs/STATUS.md's 70th finding for full detail. New task #195:
+trace the real SifRpcCallPkt_t protocol and what a genuine LOADFILE
+response needs to contain.

@@ -8606,3 +8606,55 @@ under the same output name, a pre-existing harness quirk unrelated to
 this change); clean Wii/devkitPPC rebuild (exit 0, only the
 pre-existing, unrelated `strncpy` warning in
 `iop_module_loader.c`).
+
+
+## 65th finding (task #189): WaitSema's real caller traced to a SIF-DMA-registration function; found a likely return-convention conflict in this project's own sceSifSetDma (syscall 119) - NOT fixed yet, needs careful follow-up
+
+Continued task #189 by tracing the real caller chain past `CreateSema`
+via live PCSX2 disassembly (not guessed): the function at
+`0x00084870`-`0x00084940` creates a semaphore (`max_count=1,
+init_count=0`), then calls a real kernel function
+(`0x00083FD0`/`0x00084010` argument-shuffling wrappers around a larger
+function at `0x00083E90`) that ultimately performs SIF0 interrupt/
+handler-table registration (writes a handler-table entry with a
+`0x44`-tagged record) and finishes by calling this project's own
+already-implemented `sceSifSetDma` (real syscall 119/0x77, confirmed
+via the trampoline at `0x00083A60`: `li v1,0x77; syscall; jr ra`) -
+the SAME syscall this project's task #186/#187 SIF_CMD_INIT_CMD/
+RPCINIT work already depends on and has verified working correctly
+for its own purposes.
+
+**The likely issue found:** the caller (`0x000848d0`: `beqz $v0,
+->0x84928`) branches to the success/epilogue path (skipping `WaitSema`
++ `DeleteSema` entirely) only when `sceSifSetDma`'s return value is
+ZERO. This project's current syscall 119 handler returns
+`count ? count : 1u` - i.e. always a NONZERO value for any real call
+with at least one descriptor - so this specific caller always takes
+the "else" branch, calling `WaitSema` (hence the wall) then
+`DeleteSema`, treating the nonzero return as an error/retry condition.
+This strongly suggests a return-value-convention mismatch: either (a)
+real hardware's `sceSifSetDma` returns 0 in this exact call shape
+(e.g. because the real DMA queued synchronously with no chaining, a
+different case from what this project's task #175/#176 work modeled),
+or (b) this specific caller reads a genuinely different condition than
+a straight "success/failure" check on the raw return value, which
+would mean this project's disassembly-reading here is incomplete.
+
+**Deliberately NOT changed this round:** the syscall 119 return value
+convention is load-bearing for the already-verified, hard-won SIF_CMD_
+INIT_CMD/RPCINIT boot progress (tasks #186/#187, 62nd/63rd findings).
+Changing it speculatively, without being certain of the real
+convention this NEW caller expects, risks silently regressing that
+already-confirmed progress. Per this project's own established
+"characterize before implement" discipline, this is being documented
+as an open, precisely-scoped question for the next round rather than
+guessed at. No source was changed this round for this investigation;
+docs-only.
+
+**Next step for task #189:** determine the real `sceSifSetDma`/
+`SifSetDma` return-value convention precisely (real ps2sdk header
+comments, ps2tek, or further live-hardware/PCSX2 register-state
+comparison at the exact moment of this specific call), and check
+whether a per-call-shape distinction (e.g. return value differs based
+on `count`, `attr` flags, or channel-busy state at call time) is the
+real resolution, before touching the syscall 119 handler again.

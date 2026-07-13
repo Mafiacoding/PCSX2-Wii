@@ -3353,3 +3353,28 @@ returns (`0x00083FD0`/`0x00084010` wrappers around `0x00083E90`) - not
 yet fully characterized, an honest open thread for task #189.
 
 See docs/STATUS.md's 64th finding for full detail.
+
+## Checkpoint (Round 40, task #172/#189): WaitSema's real caller traced; found (but did NOT fix) a likely sceSifSetDma return-convention conflict
+
+Continued task #189 (WaitSema investigation) via live PCSX2
+disassembly of the real caller chain reached right after CreateSema
+returns: a SIF0 interrupt/handler-registration function
+(0x00084870-0x00084940, through wrapper functions at 0x00083FD0/
+0x00084010 into a larger kernel function at 0x00083E90) that ends by
+calling this project's own already-implemented `sceSifSetDma` (real
+syscall 119/0x77). The caller branches to its success path (skipping
+WaitSema+DeleteSema) only when that call returns 0 - but this
+project's syscall 119 handler always returns a nonzero value
+(`count ? count : 1u`), so this specific caller always takes its
+"error" path instead, explaining the WaitSema wall.
+
+Deliberately did NOT touch the syscall 119 return convention this
+round: it's load-bearing for the already hard-won, verified SIF_CMD_
+INIT_CMD/RPCINIT boot progress from tasks #186/#187 (62nd/63rd
+findings), and changing it without being certain of the real
+convention this NEW caller needs risks a silent regression there. This
+is documented as a precisely-scoped open question for the next round,
+not guessed at or half-fixed. No source changed this round (docs-only
+investigation); task #189 remains open/in_progress.
+
+See docs/STATUS.md's 65th finding for full detail.

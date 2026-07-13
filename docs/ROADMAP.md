@@ -2017,3 +2017,21 @@ first. New task #189 opened for this. See docs/STATUS.md's 64th
 finding for full detail, including the live-PCSX2-disassembly-traced
 caller chain (an apparent `AddIntcHandler`-family call reached shortly
 after `CreateSema` returns, not yet fully characterized).
+
+## UPDATE (Round 40, task #172/#189): traced WaitSema's real caller - found a likely sceSifSetDma return-convention conflict, NOT fixed (docs-only investigation round)
+
+Traced the real caller chain past CreateSema via live PCSX2
+disassembly: a SIF0 interrupt/handler-registration function
+(0x00084870-0x00084940 -> 0x00083FD0/0x00084010 -> 0x00083E90) that
+finishes by calling this project's own already-implemented
+sceSifSetDma (syscall 119). Found a likely return-convention conflict:
+this caller treats a ZERO return as success (skipping WaitSema
+entirely) but this project's syscall 119 handler always returns a
+nonzero value (`count ? count : 1u`), so this caller always falls into
+its "error" path, calling WaitSema (the observed wall) then DeleteSema.
+Deliberately did NOT change the syscall 119 return convention this
+round - it's load-bearing for the already-verified SIF_CMD_INIT_CMD/
+RPCINIT boot progress (tasks #186/#187), and changing it without being
+certain of the real convention risks a silent regression. No source
+changed; docs-only investigation round. See docs/STATUS.md's 65th
+finding for full detail and the precise next step.

@@ -231,6 +231,7 @@ static inline int ee_tlb_translate(ee_state_t *st, uint32_t vaddr, uint32_t *out
 #define EE_EXC_CODE_TLBL  (2u << 2) /* TLB miss, load or instruction fetch */
 #define EE_EXC_CODE_TLBS  (3u << 2) /* TLB miss, store */
 #define EE_EXC_CODE_BP    (9u << 2) /* Breakpoint (BREAK instruction) - task #178, see the BREAK case below */
+#define EE_EXC_CODE_SYS   (8u << 2) /* Syscall - task #180 (55th finding), see the SYSCALL case below */
 
 /* Raises a real R5900 exception: updates Cause/EPC/Status and vectors
  * pc/next_pc to the correct handler address. Ported from PCSX2's own
@@ -1144,20 +1145,62 @@ static int ee_step(void)
              *     tracing the boot path forward empirically - SIFCMD's
              *     IOP<->EE RPC protocol is out of scope for reaching a
              *     splash screen, which uses the separate GIF/VIF
-             *     graphics DMA path, not SIF. Flagged here for whoever
-             *     revisits full SIF command-protocol support later.
-             *     AddDmacHandler's generic return (a small handler-id
-             *     integer per real semantics) is approximated as 0.
+             *     graphics DMA path, not SIF.
+             *
+             *   18 (0x12) AddDmacHandler: UPDATE (task #180, 55th
+             *     finding) - REMOVED from the bypass list below.
+             *     Bypassing this with a hardcoded "return 0" was
+             *     PROVEN WRONG by live host-native tracing: real BIOS
+             *     kernel code (found via a printf-format-string trace
+             *     through the boot log - see docs/STATUS.md's 55th
+             *     finding) contains a real dispatch routine that
+             *     checks an internal, kernel-owned DMAC-handler table
+             *     for the caller's channel (here, channel 5/SIF0) and
+             *     - finding it empty - prints the real diagnostic
+             *     "# DMAC(%d) Handler does not exist.." before this
+             *     project's boot falls through into the BREAK-trap
+             *     fallback at 0x80001884/0x80000DC0. That table is
+             *     only ever populated by AddDmacHandler's REAL BIOS
+             *     handler code actually running - which never
+             *     happened, because this bypass intercepted the
+             *     syscall in software instead of letting it vector
+             *     for real. Fixed below: syscall 18 now raises a
+             *     genuine EE_EXC_CODE_SYS exception (see
+             *     ee_raise_exception() and its general-vector 0x180
+             *     offset, same mechanism task #178 already proved out
+             *     for BREAK) so the real kernel syscall dispatcher and
+             *     AddDmacHandler's real handler body execute as
+             *     authentic fetched/decoded instructions and populate
+             *     their own real table themselves - this project does
+             *     not guess at that table's layout.
              *
              * Any OTHER syscall number still halts rather than
              * silently guessing - see the else branch below. */
             int32_t sysnum = (int32_t)GPR(3); /* $v1, real EE convention */
             if (sysnum == 100 || sysnum == 60 || sysnum == 61 ||
-                sysnum == 120 || sysnum == 18) {
+                sysnum == 120) {
                 GPR(2) = 0; /* generic default return, matching established precedent */
                 st->pc = this_pc + 4u;
                 st->next_pc = this_pc + 8u;
                 return 1;
+            }
+            if (sysnum == 18) {
+                /* AddDmacHandler - task #180 (55th finding): let this
+                 * vector as a real MIPS Syscall exception (ExcCode 8)
+                 * instead of being bypassed in software, so the real
+                 * BIOS kernel handler actually runs and installs its
+                 * own real per-channel DMAC-handler table entry (see
+                 * the long comment above for the concrete diagnostic
+                 * evidence this was wrong before). Do NOT return 1
+                 * here (that is this function's "core halted" signal)
+                 * and do NOT touch st->pc/next_pc ourselves -
+                 * ee_raise_exception() already points them at the real
+                 * general exception vector, exactly like the BREAK
+                 * case below (task #178) already establishes as the
+                 * correct pattern for "raise for real, then just let
+                 * the step epilogue run". */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
             }
             if (sysnum == 22) {
                 /* 22 (0x16) _EnableDmac(channel): task #176 - this was

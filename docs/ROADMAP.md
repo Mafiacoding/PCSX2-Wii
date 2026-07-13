@@ -1771,3 +1771,32 @@ independent (matching real DMA hardware, cross-checked against
 PCSX2's `Hw.cpp`), an alive IOP was never going to be sufficient on
 its own. Narrows task #172's next step to an EE-side question. See
 STATUS.md's 54th finding for full detail.
+
+**UPDATE (Round 30, 55th finding, task #172/#180):** used PCSX2's own
+live reference debugger (via `pcsx2-mcp`) against a real, legally-
+dumped Gran Turismo 3 to empirically test the 54th finding's open
+SIF2/SBUS-kick question - conclusively ruled out on real hardware too
+(DMAC_STAT/INTC_STAT/D7-CHCR are never touched even in real gameplay,
+and neither `0x8000F768`'s wait loop nor the `0x80001884` BREAK-trap
+call site is ever reached on real hardware). Tracing this project's
+own emulator's path into that same BREAK-trap fallback found it isn't
+a "bounded retry, give up" construct at all (a mis-pattern-match to
+tasks #124/#132/#148/#159, self-corrected) - it's a real kernel
+printf()-style debug-console routine (SIO putc -> CRLF putchar ->
+format-string parser, all genuine BIOS code), and extracting the
+actual format strings recovered the real boot log, ending in
+`"# DMAC(%d) Handler does not exist.."` for channel 5 (SIF0). Root
+cause: EE syscall 18 (`AddDmacHandler`) was bypassed with a hardcoded
+`return 0` instead of vectoring as a real Syscall exception, so the
+real kernel-owned DMAC-handler table this message checks was never
+populated by AddDmacHandler's own real handler code. Fixed: syscall 18
+now raises a genuine `EE_EXC_CODE_SYS` exception (same general-vector
+mechanism task #178 proved out for BREAK) instead of being intercepted
+in software - letting real BIOS code build its own table. Verified:
+the "does not exist" message and the BREAK-trap fallback are both
+completely gone post-fix; the emulator now reaches a new, deeper halt
+at EE PC `0x00081FF4` (`$v1=-5`, no matching documented syscall,
+outside the `0x8000xxxx` kernel range explored so far) - flagged as
+the concrete next blocker rather than guessed at. 87/87 regression
+pass; clean Wii/devkitPPC rebuild. See STATUS.md's 55th finding for
+full detail.

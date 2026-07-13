@@ -2944,3 +2944,65 @@ Keeping the IOP-idle change regardless (independently correct, real
 hardware behavior). Task #172's next step is now a narrower, EE-side
 question: why does EE code never reach a D7/SIF2 kick. See
 docs/STATUS.md's 54th finding for full detail.
+
+## Update (Round 30, 55th finding): live PCSX2+real-GT3 debugging ruled out SIF2/SBUS on real hardware too; root cause found via printf-string trace (AddDmacHandler bypassed instead of vectored for real) and fixed - real, verified forward boot progress to a new deeper wall
+
+User made a real, legally-dumped GT3 (SCES-50294) available and
+suggested using PCSX2's own live reference debugger (`pcsx2-mcp` tool
+bridge) to empirically check the 54th finding's open SIF2/SBUS
+question against real hardware, rather than continuing with static
+analysis alone - the first round this project has cross-verified
+against a live, real PS2 execution environment.
+
+**Live-hardware results:** DMAC_STAT/INTC_STAT/D7-CHCR are never
+touched even deep into real gameplay (ruling out SIF2/SBUS-kick as
+this loop's real unlock mechanism, not just this project's absence of
+it); a hard breakpoint at `0x8000F768` (the stuck wait loop) and at
+`0x80001884` (the call site just before this project's BREAK-trap
+fallback) were both never hit across a real boot + runtime - real
+hardware's control flow never goes there. (Two earlier "0 hits"
+readings on this were self-caught as false negatives from point-in-
+time reads and post-boot watchpoint arming, respectively, before a
+rigorous arm-before-reset methodology gave a trustworthy result.)
+Live disassembly confirmed the `0x80000DC0` BREAK bytes are genuinely
+present in real hardware's ROM too, and `0x8000FCE8` is a real dual-
+call-site kernel exception-bookkeeping handler.
+
+**Traced this project's own emulator's path into that same BREAK-trap
+fallback and found the ~19-iteration "retry loop" isn't a retry loop
+at all** - self-correcting an initial mis-pattern-match to the
+LOADCORE-style "bounded retry" precedent (tasks #124/#132/#148/#159).
+Disassembly of the loop body revealed a real hardware SIO putc routine
+(`0x800107E0`, poll `0xB000F130` then write `0xB000F180`), a CRLF-
+translating putchar wrapper (`0x80006DB0`), and a genuine printf/
+vsnprintf-style formatter (`0x80006DE8`, real `%`-specifier jump
+table). Tracing every call into the formatter and dumping its format-
+string pointer recovered the real kernel boot log - ending in
+`"# DMAC(%d) Handler does not exist.."` for channel 5 (SIF0).
+
+**Root cause:** the real kernel's DMA-interrupt dispatch code checks
+its own internal DMAC-handler table for channel 5 and finds it empty,
+because EE syscall 18 (`AddDmacHandler`) was bypassed with a hardcoded
+`return 0` (a gap this project's own task #176 comment already flagged
+honestly) instead of being allowed to vector as a real Syscall
+exception and let real BIOS handler code populate that table itself.
+
+**Fix (`source/core/ee/ee_core.c`):** added `EE_EXC_CODE_SYS` (ExcCode
+8, ported from PCSX2's `R5900.h`) and removed syscall 18 from the
+bypass list; it now calls `ee_raise_exception()` and falls through to
+the normal step epilogue, same pattern as task #178's BREAK fix. All
+other bypassed syscalls (100/60/61/120/22/119/121/122) are untouched -
+a minimal, targeted, independently testable change.
+
+**Verified:** the `"# DMAC(%d) Handler does not exist.."` message and
+the BREAK-trap fallback are both completely gone post-fix. The
+emulator now reaches a genuinely new, deeper halt at EE PC
+`0x00081FF4` (`$v1=-5`, not a documented syscall number, outside the
+`0x8000xxxx` range explored so far - possibly the BIOS's default
+logo/OSD app) - flagged as the next concrete blocker rather than
+guessed at. 87/87 regression suite pass; clean Wii/devkitPPC rebuild,
+0 errors.
+
+**Next for task #172:** identify what real convention/bug produces
+`$v1=-5` at ~`0x00081FF0` and what code region `0x00081FF4` belongs to.
+See docs/STATUS.md's 55th finding for full detail.

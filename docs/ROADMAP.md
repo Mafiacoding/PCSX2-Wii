@@ -1925,3 +1925,29 @@ semantics (already correctly implemented here). Scoped task #186's
 first concrete increment as wiring real SIF0/SIF1 sinks - smaller and
 better-grounded than attempting the full command-dispatch protocol at
 once. No source changed this round. See STATUS.md's 60th finding.
+
+## UPDATE (Round 36, task #172/#186): fetched the real ps2sdk sceSifInitCmd()/_SifSendCmd() source and confirmed byte-for-byte that this project's boot sends genuine SIF_CMD_INIT_CMD packets; real IOP-side assembly needed to complete the fix could not be fetched this round
+
+Building on Round 35's sink-wiring plan, fetched the real
+`ee/kernel/src/sifcmd.c` from ps2dev/ps2sdk and matched it field-by-
+field against this project's own diagnostic trace: confirmed the two
+captured packets are genuine `SIF_CMD_INIT_CMD` (cid=0x80000002) sends
+from the real, unmodified `sceSifInitCmd()` routine, and that real
+cross-CPU data movement for this exact path already works correctly
+via the existing `sceSifSetDma` syscall HLE. This corrected course
+before writing unneeded code - an IOP-side hardware DMA execution
+engine (Round 35's plan) would not have fixed this specific blocker,
+since real BIOS code uses the software syscall path here, not a
+hardware CHCR kick.
+
+The real missing piece is a genuine IOP-side consumer for this packet
+- something needs to notice it arrived and act on it, which never
+happens because the IOP has already gone idle by this point (per
+Round 34's finding). Could not fetch the real IOP-side SIFCMD
+assembly source this round (ps2sdk's IOP SIFCMD is .s, not .c, and all
+fetch attempts for it returned empty), nor cross-check against the
+live PCSX2 reference instance (its IOP RAM no longer has this module
+resident at the expected address, ~2 billion cycles into gameplay).
+No source changed this round. See STATUS.md's 61st finding for full
+detail and the explicit fork in next steps (further source-fetching
+vs. a labeled, protocol-symmetry-based minimal implementation).

@@ -3212,3 +3212,29 @@ for the next round, which needs to be scoped as "wire a real SIF0/SIF1
 sink first" (small, testable) rather than the full command-dispatch
 protocol at once (large, fabrication-risk if rushed). No source
 changed this round. See docs/STATUS.md's 60th finding.
+
+## Checkpoint: task #172/#186 (61st finding) - real ps2sdk sceSifInitCmd()/_SifSendCmd() source obtained and matched byte-for-byte against traced packets; confirmed cross-CPU data movement already works, real blocker is a missing IOP-side consumer; IOP-side assembly source not fetchable this round
+
+Fetched ps2dev/ps2sdk's real `ee/kernel/src/sifcmd.c` and confirmed,
+field-by-field, that this project's own boot sends two genuine
+`SIF_CMD_INIT_CMD` (cid=0x80000002) packets via the real, unmodified
+`sceSifInitCmd()` routine - the first carrying `ca_pkt{header,buf}`
+matching the EE's own receive-buffer address exactly. This corrected
+this round's own initial plan: an IOP-side hardware DMA execution
+engine would NOT have fixed this, since real BIOS code moves this
+packet via the existing `sceSifSetDma` software syscall path (already
+implemented and confirmed working), not a hardware CHCR kick.
+
+The real gap is a missing IOP-side consumer for the arrived packet -
+nothing acts on it because the IOP has gone idle (per the 59th
+finding) before this send happens. Attempted to fetch the real IOP-
+side SIFCMD assembly (ps2sdk's IOP SIFCMD is .s, no C wrapper exists)
+via several URL forms - all returned empty, a genuine tool limitation
+this round. Also tried cross-checking against the live PCSX2
+reference GT3 instance's IOP RAM at this project's own computed
+SIFCMD address - found all zeros (module no longer resident there,
+~2 billion cycles into gameplay). No source changed. Explicitly
+flagged the two-way fork for the next round: keep hunting for the
+real IOP-side source, or implement a minimal, clearly-labeled
+protocol-symmetry-based responder (real fabrication risk, needs
+explicit sign-off) - see docs/STATUS.md's 61st finding.

@@ -8233,3 +8233,88 @@ nonzero QWC) - independent of, and a prerequisite for, any real
 command dispatch on top. No source changed this round (pure
 diagnostic tracing plus citation-gathering, three throwaway `/tmp`
 scratch copies, no drift in the real repository files).
+
+## 61st finding (task #172/#186): obtained the real ps2sdk EE-side sceSifInitCmd()/_SifSendCmd() source and confirmed, byte-for-byte, that this project's traced packets are genuine SIF_CMD_INIT_CMD command sends; real cross-CPU data movement already works for this exact path via the existing sceSifSetDma HLE - the missing piece is a real IOP-side command consumer, which requires IOP-side assembly source this round's tools could not fetch
+
+Continuing directly from the 60th finding, fetched (via raw.githubusercontent.com,
+after ps2dev.github.io's rendered pages proved less complete for this
+file) the actual, real `ee/kernel/src/sifcmd.c` from ps2dev/ps2sdk
+(Academic Free License 2.0). This is a load-bearing, decisive
+citation: it lets every packet this project's own diagnostic captured
+be matched, field-by-field, against real code instead of inferred.
+
+**Byte-exact match confirmed:** the two real `EE-RAM-to-IOP-RAM`
+copies captured in the 60th finding (via the existing, already-
+implemented `sceSifSetDma`/syscall 119 HLE) both carry
+`header->cid = 0x80000002`, which is EXACTLY `SIF_CMD_INIT_CMD`
+(`SIF_CMD_ID_SYSTEM(0x80000000) | 2`, per `sifcmd-common.h`,
+independently confirmed in this same round). Reading the full packet
+bytes (not just the header) shows the FIRST send's extra word
+(`0x0008C240`) matches exactly `sceSifInitCmd()`'s real
+`struct ca_pkt { SifCmdHeader_t header; void *buf; }`, where `buf` is
+the EE's own static receive-buffer address (`_sif_cmd_data.pktbuf`) -
+i.e. this project's own boot is executing the REAL,
+unmodified `sceSifInitCmd()` routine, reaching its final
+`sceSifSendCmd(SIF_CMD_INIT_CMD, &packet, sizeof packet, NULL, NULL, 0)`
+call for the first time ever. The real source also explains why this
+project's EARLIER `sceSifGetReg(SIF_REG_SMFLAG) & SIF_STAT_CMDINIT`
+wait (tasks #165/#170's already-fixed 45th finding) had to resolve
+BEFORE this point could ever be reached - `sceSifInitCmd()`'s own code
+blocks on exactly that condition immediately before sending this
+packet.
+
+**What this conclusively rules in/out:**
+- Real, correct EE-RAM-to-IOP-RAM byte copying already happens for
+  this exact packet (`dest=0x0011AFD0` both times) - this is NOT a
+  data-movement bug. The "IOP DMA hardware execution engine" this
+  finding's investigation initially planned to build (mirroring the
+  EE's chain-mode engine) would NOT have fixed this specific blocker,
+  since the real BIOS code uses the software `sceSifSetDma` syscall
+  path for this handshake, not a hardware CHCR-kick chain transfer -
+  an important correction to this round's own initial plan, caught
+  before writing unnecessary code.
+- The real, missing piece is a genuine IOP-side CONSUMER: something
+  on the IOP side needs to notice the arrived `SIF_CMD_INIT_CMD`
+  packet at `0x0011AFD0` and act on it (by protocol symmetry with the
+  EE's own mirror-image `SIF_CMD_CHANGE_SADDR` handler - `cmd_data->
+  iopbuf = pkt->buf` - the natural real counterpart is recording the
+  EE's buffer address on the IOP's own side). This project's IOP
+  never runs this code because it has already gone idle (59th
+  finding) by the time this packet is sent.
+
+**Attempted, could not obtain this round:** the real IOP-side
+`iop/kernel/src/sifcmd.s` (ps2sdk's IOP-side SIFCMD is assembly, not
+C, per ps2dev.github.io/ps2sdk's own File List, which lists an EE-side
+`sifcmd.c` but no IOP-side C equivalent). Multiple fetch attempts
+(`raw.githubusercontent.com`, `github.com` blob view, GitHub's content
+API) all returned empty for this specific path - a genuine tool
+limitation this round, not a "file doesn't exist" finding. Also
+attempted disassembling the live PCSX2 reference GT3 instance's IOP
+RAM at this project's own computed SIFCMD module address
+(`0x001198D0`) to read the real native code directly (the same
+technique that worked for EE-side disassembly earlier this session) -
+found all zeros, meaning the live instance (now ~2 billion cycles into
+gameplay) no longer has this module resident at the address this
+project's own loader computed for it, so this cross-check did not
+work this round either.
+
+**No source code changed this round** - all instrumentation stayed in
+throwaway `/tmp` scratch copies (`ee_core_instrumented.c`,
+`iop_core_instrumented.c`, `iop_dma_instrumented.c`,
+`iop_module_loader_instrumented.c`, `dma_instrumented.c`), diff-
+verified against the real repository files (zero drift). This is
+docs-only progress, consistent with prior investigation-only rounds.
+
+**Next for task #186:** either (a) obtain the real IOP-side SIFCMD
+assembly through a different channel (a fresh WebFetch attempt, a
+different mirror, or asking the user to supply it), or (b) implement
+a minimal, explicitly-labeled IOP-side `SIF_CMD_INIT_CMD` responder
+based on well-established real protocol symmetry (record the EE's
+buffer address; the flag this project's boot is actually polling,
+`0x0008C440`, is still NOT confirmed to be the direct result of this
+specific command's handling - it may be gated by the AddDmacHandler-
+populated 32-entry table from the 56th/57th findings instead, whose
+exact real indexing convention is also still unconfirmed) - option (b)
+carries real fabrication risk this project has successfully avoided
+throughout, so is flagged for explicit user sign-off rather than
+assumed.

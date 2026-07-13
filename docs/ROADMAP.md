@@ -2333,3 +2333,22 @@ observed, so the user's relaxed goal (splash or GS write) is not yet
 met - reported honestly. See docs/STATUS.md's 75th/76th findings for
 the full live-debugging evidence trail and the narrowed next step
 (the BIND-reply vs CALL-reply dispatch branch distinction).
+
+## Round 50 (task #201, 77th finding): identify + reply to OSDSYS's real LF_F_MOD_LOAD("rom0:CLEARSPU") request
+
+Instrumented diagnostic tracing (same host-native methodology used
+throughout this project, applied to the already-fixed reply path from
+Round 49) revealed OSDSYS's own second RPC call is a real
+`LF_F_MOD_LOAD` (rpc_number=0) request to load `rom0:CLEARSPU` - a
+real, documented PS2 BIOS IOP module. Implemented a synthetic,
+real-protocol-shaped reply (citing the fetched
+`iop/system/loadfile/src/loadfile.c` and `ee/kernel/src/loadfile.c`
+sources), explicitly not claiming real CLEARSPU execution.
+
+Verified: 87/87 regression suite pass, clean Wii/devkitPPC rebuild.
+Diagnostic shows OSDSYS retries the request 6 times then moves on to
+two further RPC binds - real, deeper progress, but the boot still
+re-parks at the same WaitSema address and zero GS writes are observed.
+See docs/STATUS.md's 77th finding for the full trace and honest
+assessment. Next: trace the two new binds' own rpc_number/path using
+the same proven methodology.

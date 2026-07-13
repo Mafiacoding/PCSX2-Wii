@@ -3701,3 +3701,25 @@ again to determine which specific SifBindRpc/SifCallRpc sequence needs
 `inner_cid=SIF_CMD_RPC_CALL` (not RPC_BIND) armed at the moment of
 OSDSYS's own semid=2 wait - a narrow, well-scoped follow-up, not an
 open architectural gap.
+
+## Checkpoint (Round 50, task #201)
+
+Instrumented diagnostic tracing identified OSDSYS's real second RPC
+call as `LF_F_MOD_LOAD("rom0:CLEARSPU")` - a real, documented PS2 BIOS
+IOP module. Implemented a synthetic-but-real-protocol reply in
+`source/core/ee/ee_core.c` (explicitly not claiming real CLEARSPU
+execution - an honest, labeled gap). Verified: 87/87 regression suite
+pass, clean Wii/devkitPPC rebuild.
+
+Observed: OSDSYS retries the call 6 times then moves on to two further
+RPC binds (real, further progress) - but the boot still re-parks at
+the same WaitSema address (0x00210F84) and zero GS register writes are
+observed. Neither the splash-screen nor the GS-output relaxed goal is
+met yet.
+
+Status: this project has now mapped a genuine, multi-step real IOP
+module-loading chain inside OSDSYS's own boot path (CLEARSPU, then at
+least two more services) using a proven, repeatable diagnostic
+methodology. Next: apply the same tracing to the two new binds
+(cd=0x00441EF0, cd=0x00441F18) to find their real rpc_number/path and
+continue this same evidence-based chain.

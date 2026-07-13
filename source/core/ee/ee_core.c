@@ -2420,6 +2420,57 @@ static int ee_step(void)
                                      * miss / bad ELF) is left un-replied - an honest
                                      * gap, not a fabricated success. */
                                 }
+                            } else if (rpc_number == 0u && call_recvbuf != 0u && i >= 1u) {
+                                /* task #201 (77th finding): real
+                                 * LF_F_MOD_LOAD (=0, see the already-
+                                 * fetched common/include/loadfile-
+                                 * common.h enum, cited above for
+                                 * LF_F_ELF_LOAD=1) - live PCSX2
+                                 * debugging (task #198-#201) traced
+                                 * OSDSYS's OWN second sceSifBindRpc()+
+                                 * sceSifCallRpc() to LOADFILE
+                                 * (sid=0x80000006, the SAME real
+                                 * service, confirmed byte-exact via a
+                                 * host-native diagnostic reading the
+                                 * REAL BIOS's own request payload) and
+                                 * found its path field reads, byte-
+                                 * exact, "rom0:CLEARSPU" - a real,
+                                 * documented PS2 BIOS IOP module that
+                                 * clears SPU2 sound RAM early in boot,
+                                 * before the logo/menu is shown.
+                                 * The real IOP-side reply (see the
+                                 * fetched iop/system/loadfile/src/
+                                 * loadfile.c's loadfile_modload():
+                                 * outbuffer[0] = LoadStartModule(...)
+                                 * [the new module's id, or a negative
+                                 * error code], outbuffer[1] = the
+                                 * module's own start()-return "modres")
+                                 * is written back into the SAME 8
+                                 * bytes at the caller's recvbuf, per
+                                 * the real EE-side _SifLoadModule()'s
+                                 * own sceSifCallRpc(..., &arg, 8, ...)
+                                 * call (ee/kernel/src/loadfile.c).
+                                 * This project does NOT yet actually
+                                 * load/execute CLEARSPU's real IOP
+                                 * code (a real, separate feature -
+                                 * on-demand mid-boot IOP module
+                                 * execution, not yet built) - an
+                                 * honest, explicitly-labeled gap. Since
+                                 * CLEARSPU only zeroes SPU2 sound RAM
+                                 * (no GS/video register interaction
+                                 * whatsoever, per its real documented
+                                 * purpose), synthesizing a real-
+                                 * protocol "succeeded" reply (a
+                                 * plausible small positive module id,
+                                 * and modres=0 matching every well-
+                                 * behaved real IOP module's start()
+                                 * convention) to unblock OSDSYS's own
+                                 * WaitSema is a safe, well-scoped
+                                 * shortcut - not a claim that this
+                                 * project actually runs CLEARSPU. */
+                                ee_mem_write32(st, call_recvbuf + 0u, 1u); /* result: synthetic module id (placeholder, not tracked) */
+                                ee_mem_write32(st, call_recvbuf + 4u, 0u); /* modres: synthetic module start() return = success */
+                                ee_arm_rpc_call_pending(call_cd);
                             }
                         }
                     }

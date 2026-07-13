@@ -9538,3 +9538,69 @@ the moment `g_rpc_bind_inner_cid` is armed for OSDSYS's own semid=2 wait,
 using the same live-PCSX2 methodology now proven to work this round -
 this is now a narrow, well-scoped, well-grounded follow-up, not an open
 architectural gap.
+
+## Update (Round 50, 77th finding): identified OSDSYS's real LF_F_MOD_LOAD request for "rom0:CLEARSPU"; synthetic reply implemented - real retry-then-continue behavior observed, deeper chain still open
+
+Continuing directly from the 75th/76th findings' fix, instrumented a
+host-native diagnostic copy of `ee_core.c` to print every real
+SIF_CMD_RPC_BIND/SIF_CMD_RPC_CALL this project's interpreter observes
+while executing the REAL BIOS bytes (not a guess - this is the actual
+compiled BIOS logic running through this project's own, already-
+verified-correct EE interpreter). Result, byte-exact:
+
+```
+[RPCBIND] sid=0x80000006 cd=0x00441EC0
+[RPCCALL] rpc_number=0x00000000 call_recvbuf=0x00441CC0 call_cd=0x00441EC0 i=1 count=2
+[RPCCALL] payload_src=0x00441CC0 path="rom0:CLEARSPU"
+```
+
+`rpc_number=0` is exactly this project's newly-cited
+`LF_F_MOD_LOAD` (=0, from the already-fetched
+`common/include/loadfile-common.h`) - OSDSYS's own second bind+call to
+LOADFILE (same real sid=0x80000006 as before) is a request to load the
+real, documented PS2 BIOS IOP module **rom0:CLEARSPU** (clears SPU2
+sound RAM early in boot, before the logo/menu).
+
+Implemented a synthetic-but-real-protocol reply (task #201) in the
+`rpc_number == 0` branch of `ee_core.c`'s RPC_CALL dispatch, citing the
+fetched `iop/system/loadfile/src/loadfile.c`'s `loadfile_modload()`
+(`outbuffer[0]=LoadStartModule() result, outbuffer[1]=modres`) and the
+EE-side `_SifLoadModule()`'s own `sceSifCallRpc(..., &arg, 8, ...)`
+convention (`ee/kernel/src/loadfile.c`) - writes a plausible small
+positive "module id" and modres=0 to the caller's recvbuf, explicitly
+NOT claiming to actually load/execute CLEARSPU's real IOP code (a
+separate, unbuilt feature - on-demand mid-boot IOP module execution).
+Since CLEARSPU only touches SPU2 sound RAM (no GS/video interaction
+whatsoever, per its real documented purpose), this is a safe, honestly-
+labeled shortcut.
+
+**Observed real behavior after the fix (host-native diagnostic,
+instrumented delivery-tracing copy):** OSDSYS's real code does NOT
+accept this synthetic reply outright - it retries the SAME CLEARSPU
+call 6 times (each retry correctly re-armed and re-delivered by this
+project's mechanism) before giving up and moving on to TWO further,
+different RPC binds (`cd=0x00441EF0`, then `cd=0x00441F18`) - real,
+further forward progress, not a hang on the same request. This
+strongly suggests either (a) this project's synthetic reply values
+don't satisfy some real check this project hasn't identified yet (a
+citable next investigation, not a guess), or (b) real BIOS code has a
+bounded-retry-then-continue design for optional early modules like
+CLEARSPU, and 6 retries is simply its real, designed behavior before
+falling through regardless of reply correctness - both are plausible,
+undetermined without further live-hardware comparison.
+
+**Honest result:** the boot still ultimately re-parks at
+`0x00210F84` after these two further binds - at least one more,
+not-yet-identified real RPC_CALL further down this chain remains
+unhandled. Zero GS register writes are still observed. Neither of the
+user's target conditions (splash screen or GS output) is met yet.
+
+**Verified for real:** all 87 host-native regression tests pass (0
+failures); clean Wii/devkitPPC rebuild (`pcsx2-wii-git.dol`, 433600
+bytes). No BIOS bytes committed/pushed/rsynced (checked, as always).
+
+**Concrete next step:** repeat this same instrumented-diagnostic
+tracing methodology (now proven twice this session) for the two new
+binds (`cd=0x00441EF0`, `cd=0x00441F18`) to identify their real
+rpc_number/path, continuing the same real, evidence-based chain rather
+than guessing at what comes next.

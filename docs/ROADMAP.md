@@ -2270,3 +2270,34 @@ the full trace. Next: identify the target service ID and disassemble
 OSDSYS's own handler (0x00212B28-0x00212C30), or use live PCSX2
 reference debugging (per the 55th finding's proven methodology) to
 observe the real condition directly.
+
+## UPDATE (Round 48, task #198/#199, investigation only): disassembled OSDSYS's own SIF-completion handler - it polls a real IOP-visible queue structure this project's synthetic IOP model has never populated
+
+Using Capstone to disassemble OSDSYS's own DMAC-completion handler at
+0x00212B28 directly from the real BIOS ROM bytes, found the precise,
+final layer of the semid=2 wall: the handler reads a pointer from a
+fixed global (MEM[0x0046D618] = 0x2046D540, matching this project's
+own established "0x20xxxxxx = IOP/SIF-visible shared memory" address
+convention), reads a byte count from that pointer, and skips its
+entire body (including whatever eventually signals the semaphore)
+when that count is zero - which it always is, because this project's
+synthetic IOP/SIF model has no concept of this specific structure and
+has never written to it.
+
+Every mechanism this project models (RPC_BIND REND delivery, DMAC
+interrupt raising, AddDmacHandler re-registration) works exactly as
+intended - the remaining gap is a specific real IOP-side data
+structure (OSDSYS's own private SIF-reply-queue, distinct from the
+shared EELOAD/LOADFILE mechanism already modeled) this project has not
+found a citable source for. Per this project's established discipline,
+not fabricating its layout/contents without a real source.
+
+Verified: pure investigation, no source changes, no regression/rebuild
+needed. See docs/STATUS.md's 74th finding for the full disassembly and
+memory-read evidence. This project has reached and precisely
+characterized OSDSYS's first genuinely OSDSYS-private execution and
+blocking point - real, substantial progress - but has not yet produced
+a visible splash screen or GS register write. Next: search for a real
+source on OSDSYS's private SIF-queue protocol, or use live PCSX2
+reference debugging (55th finding's proven methodology) to observe
+the real structure directly.

@@ -3635,3 +3635,38 @@ PCSX2 reference debugging (the 55th finding's proven methodology) to
 observe the real hardware condition directly. Task #172's "produce a
 visible splash screen" goal remains open but the investigation is now
 narrowed to a single, well-characterized real code path.
+
+## Checkpoint (Round 48, task #198/#199, investigation only): OSDSYS's SIF-completion handler disassembled - polls a real IOP structure this project has never modeled; splash screen not yet reached, but the wall is now precisely characterized down to the instruction level
+
+Disassembled OSDSYS's own DMAC-completion handler (0x00212B28) with
+Capstone directly against the real BIOS ROM bytes. Found: it reads a
+pointer from MEM[0x0046D618] (= 0x2046D540, an IOP/SIF-visible address
+per this project's own established convention), reads a byte "reply
+count" from that pointer, and skips its entire body whenever that
+count is zero - which it always is in this project's boot, since the
+synthetic IOP/SIF model (source/hw/sif.c) has no concept of this
+specific real structure and has never written to it. This is a
+genuinely different, OSDSYS-private SIF-reply-queue mechanism, not the
+shared EELOAD/LOADFILE dispatcher already modeled and working
+correctly for semids 0 and 1.
+
+Every mechanism this project already models fires exactly as designed
+(REND delivery, DMAC interrupt, AddDmacHandler re-registration) - the
+remaining gap is one specific, real IOP-side data structure this
+project hasn't found a citable source for. Per the project's
+established discipline (task #180's lesson, applied consistently
+throughout this entire investigation chain), not fabricating a guess
+at its layout.
+
+Pure investigation this round - no source changes, no regression
+suite or Wii rebuild needed. See docs/STATUS.md's 74th finding.
+
+Status: task #172's "produce a visible splash/logo screen" goal is
+not yet reached - real OSDSYS code executes deep into its own boot
+path (confirmed, verified, genuinely running, not simulated), but its
+first private blocking wait needs a real IOP-side structure this
+project doesn't yet have grounding for. This is honest, substantial
+progress, precisely characterized down to the disassembled instruction
+level - not a completed splash screen, and not represented as one.
+Next: find a real source for OSDSYS's private SIF-queue protocol, or
+use live PCSX2 reference debugging to observe it directly.

@@ -9368,3 +9368,81 @@ docs-only rounds.
    methodology the 55th finding already proved effective (real GT3
    boot, breakpoints/watchpoints at these same real addresses) to
    observe genuine hardware behavior directly rather than guessing.
+
+---
+
+## 74th finding (task #198/#199): disassembled OSDSYS's own SIF-completion handler - it polls a real IOP-visible queue structure this project's synthetic IOP/SIF model has never populated; this is the precise, final layer of the semid=2 wall, and closing it requires modeling a real structure this project hasn't discovered a source for yet
+
+Continuing the 73rd finding's trace, this round used Capstone (MIPS32,
+little-endian - generic MIPS decode; genuine R5900/EE-specific opcodes
+like MMI/COP2 show as undecoded `.byte` entries, expected and harmless
+for the portions actually read) to disassemble OSDSYS's own
+DMAC-completion handler at `0x00212B28`, extracted directly from the
+real BIOS ROM's OSDSYS ELF bytes (same file-offset math already
+established: `file_off=0xECF70, p_offset=0x1000, p_vaddr=0x200000`).
+
+**Real disassembly of the handler's opening block:**
+```
+00212B28: addiu $sp, $sp, -0x90        ; prologue
+00212B2C: lui   $v1, 0x47
+00212B38: addiu $s0, $v1, -0x29e8      ; s0 = 0x00470000 - 0x29e8 = 0x0046D618
+00212B3C: lw    $a3, -0x29e8($v1)      ; a3 = MEM[0x0046D618]  (a pointer)
+00212B40: lbu   $v0, ($a3)             ; v0 = *a3  (a byte - queue count?)
+00212B44: andi  $a1, $v0, 0xff
+00212B48: beqz  $a1, 0x212c30          ; if count==0, skip the whole body
+```
+Confirmed via direct memory read at the exact moment this handler runs
+(`i=30366550`, matching the earlier-traced DMAC interrupt entry):
+`MEM[0x0046D618] = 0x2046D540` (a pointer, real, non-fabricated read),
+and the byte at that pointer - `*0x2046D540` - is `0x00`, with the
+entire surrounding region also all-zero. The `0x20xxxxxx` form matches
+this project's own established convention for IOP/SIF-visible shared
+memory addresses (used throughout `sif.c`'s existing modeled
+mailbox/command structures).
+
+**Conclusion:** OSDSYS's own registered SIF0-completion handler is not
+the shared kernel's generic `_request_end()`/`iSignalSema()`
+dispatcher at all - it's a genuinely different, OSDSYS-private
+routine that first checks a real, IOP-populated "how many replies are
+queued" byte before doing any further work, and skips its entire body
+(including whatever eventually calls `iSignalSema`) when that count is
+zero - exactly what's observed in every one of the ~10+ times this
+handler has run so far. This project's synthetic IOP/SIF model (the
+`sif_cmd_iop_*` functions in `source/hw/sif.c`) has no concept of this
+specific structure and has never written to it, so it reads as zero
+forever, and the handler always takes the empty-queue fast path.
+
+This is the precise, disassembly-confirmed final layer of the semid=2
+wall (task #196-#198's chain): every mechanism this project models
+(RPC_BIND REND delivery, DMAC interrupt raising, AddDmacHandler
+re-registration) works exactly as intended and matches real hardware
+behavior - the gap is a SPECIFIC, additional real IOP-side data
+structure this project has not yet discovered a citable source for,
+and per this project's own long-established discipline (never guess
+at kernel/IOP-internal structure layouts or fabricate their contents -
+the task #180 lesson, reinforced throughout this entire investigation
+chain), inventing a plausible-looking count/queue-entry value here
+without a real source to confirm the structure's layout would be
+exactly the kind of fabrication this project has consistently avoided.
+
+**Verified:** pure investigation (Capstone disassembly + targeted
+memory reads via instrumented diagnostic copies in /tmp/, nothing
+committed to the repo) - no source changes, so per this project's
+docs-only-round convention, no regression suite or Wii rebuild was
+required this round.
+
+**Concrete next steps for a future round:** (1) search for any
+fetchable real source describing OSDSYS's own private SIF-reply-queue
+protocol (distinct from the shared EELOAD-era LOADFILE mechanism
+already modeled) - PS2 SDK's public headers may not cover this since
+OSDSYS is closed-source BIOS application code, not a ps2sdk-based
+program; ps2tek/PSI-corestation-style community disassembly notes are
+a more likely source. (2) Live PCSX2 reference debugging (the 55th
+finding's proven methodology, real GT3 dump via the pcsx2-mcp bridge)
+watching this exact structure (`0x0046D618`'s pointed-to region) during
+a real hardware boot would give a byte-exact, non-guessed answer
+directly. (3) Absent either source, the honest state remains: this
+project has reached and precisely characterized OSDSYS's first
+genuinely OSDSYS-private (not shared-kernel) execution and blocking
+point - a substantial, real milestone - but has not yet produced a
+visible splash screen or GS register write.

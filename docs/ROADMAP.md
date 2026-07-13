@@ -1987,3 +1987,33 @@ before. See docs/STATUS.md's 63rd finding for full detail, honest
 caveats (synthetic delivery TIMING is an approximation; everything
 else is byte-exact and live-disassembly-confirmed), and the new open
 task (implement or scope around CreateSema).
+
+## UPDATE (Round 39, task #172/#188): CreateSema implemented for real (user: "implement it"); boot reaches WaitSema (syscall 68), a new wall
+
+Implemented a real (not bypass) `CreateSema` (syscall 64/0x40): a
+256-slot EE semaphore table (`g_ee_sema[]`), first-fit allocation, real
+`ee_sema_t` struct fields read from the caller (`max_count`/
+`init_count`/`attr`/`option`), returning a real slot-index ID. Grounded
+in `ee/kernel/include/kernel.h`, cross-checked against a full local
+ps2sdk source tree the user supplied (`ps2sdk-master.zip`). Full
+88-build/87-distinct-binary regression suite passes (0 failures);
+clean Wii/devkitPPC rebuild. Re-hit and re-resolved the known
+"diagnostic tooling hazard" from the 62nd finding (a stale harness
+copy briefly produced a false "regression" signal; rebuilding without
+the premature out-of-band memory read confirmed zero actual
+regression - task #187's RPCINIT fix remains fully intact).
+
+Real-BIOS empirical result: `CreateSema` is called with `max_count=1`,
+`init_count=0` (a locked binary semaphore/mutex idiom), succeeds
+(id=0), and boot immediately calls `WaitSema` on it (syscall 68/0x44) -
+a brand-new wall, honestly reported, not implemented yet. Confirmed
+via GitHub directory listing that ps2sdk ships no `WaitSema.c` (these
+are pure kernel syscalls, real BIOS-ROM-resident, like `CreateSema`) -
+real blocking semantics (decrement-if-positive, else block until
+signaled) are well-documented at the protocol level (psdevwiki, ps2sdk
+`thread.c` usage pattern) but this project has no real multi-thread
+scheduler yet, so implementing this needs careful characterization
+first. New task #189 opened for this. See docs/STATUS.md's 64th
+finding for full detail, including the live-PCSX2-disassembly-traced
+caller chain (an apparent `AddIntcHandler`-family call reached shortly
+after `CreateSema` returns, not yet fully characterized).

@@ -3308,3 +3308,48 @@ drives, and the table/index semantics are all byte-exact and
 independently confirmed - not guessed.
 
 See docs/STATUS.md's 63rd finding for full detail.
+
+## Checkpoint (Round 39, task #172/#188): CreateSema implemented for real; boot reaches WaitSema (syscall 68), new open wall
+
+User authorized implementing (not just scoping) `CreateSema`
+(syscall 64/0x40): "implement it". Added a real 256-slot EE semaphore
+table (`g_ee_sema[]` in `ee_core.c`) and a real `sysnum == 64` handler
+that reads the caller's `ee_sema_t` fields (`max_count`/`init_count`/
+`attr`/`option`), first-fit-allocates a slot, and returns a real slot
+index as the semaphore ID - grounded in `ee/kernel/include/kernel.h`,
+cross-checked this round against a full local ps2sdk source tree the
+user supplied directly (`ps2sdk-master.zip`, extracted to
+`/tmp/ps2sdk-ref` - useful for confirming e.g. that `ee/kernel/src/`
+ships no `WaitSema.c`/`thsemap.c`, since these are pure BIOS-ROM
+kernel syscalls with no distributable C source, same category as
+`CreateSema` itself).
+
+Verification hit (and quickly re-resolved) the SAME "diagnostic
+tooling hazard" documented in the 62nd finding: the first diagnostic
+run this round accidentally reused a stale pre-fix harness file (one
+with a premature out-of-band `ee_mem_read32()` call at i=0), producing
+a false "regression" (EE apparently frozen at the reset vector,
+`poll@0x0008C440` reading 0). Rebuilding the harness without that
+premature read confirmed there is NO actual regression: task #187's
+RPCINIT fix is fully intact (`poll@0x0008C440` correctly reads 1 from
+i=40,000,000 onward).
+
+Full 88-build/87-distinct-binary regression suite passes (0 failures;
+`test_vu_micro` duplicate-output-name is a pre-existing harness quirk,
+unrelated); clean Wii/devkitPPC rebuild (exit 0).
+
+Real-BIOS empirical result: `CreateSema` is called with `max_count=1`,
+`init_count=0` (locked binary semaphore/mutex idiom), succeeds (id=0),
+and boot immediately calls `WaitSema` on it (syscall 68/0x44) - a
+brand-new wall. Real `WaitSema` semantics (decrement-if-positive, else
+block until signaled by another context, typically an interrupt
+handler) are well-documented at the protocol level but this project
+has no real multi-thread scheduler, so implementing this honestly
+needs careful characterization first, not a guess. New task #189
+opened. Live PCSX2 disassembly traced the caller chain
+(`0x00084870`-`0x000848e4`) into what appears to be a real
+`AddIntcHandler`-family call reached shortly after `CreateSema`
+returns (`0x00083FD0`/`0x00084010` wrappers around `0x00083E90`) - not
+yet fully characterized, an honest open thread for task #189.
+
+See docs/STATUS.md's 64th finding for full detail.

@@ -8522,3 +8522,87 @@ scope it carefully (does reaching a splash screen actually require a
 working thread/semaphore subsystem, or can this be bypassed similarly
 to the FlushCache/SetupThread/SetupHeap generic-default precedent?)
 before implementing anything.
+
+## 64th finding (task #188): CreateSema implemented for real; boot
+   reaches WaitSema (syscall 68) as the next wall
+
+User explicitly authorized implementing `CreateSema` (syscall 64/0x40)
+rather than merely scoping it further ("implement it"). Real signature
+confirmed from `ee/kernel/include/kernel.h` (and cross-checked this
+round against a full local copy of the ps2sdk source tree the user
+supplied as `ps2sdk-master.zip`, extracted to `/tmp/ps2sdk-ref` -
+independent confirmation, not just doxygen-page summaries):
+`s32 CreateSema(ee_sema_t *sema);` where `ee_sema_t` is
+`{ int count, max_count, init_count, wait_threads; u32 attr, option; }`
+(24 bytes). The caller fills `max_count`/`init_count`/`attr`/`option`
+before the syscall; the kernel allocates a semaphore object from an
+internal table (real `MAX_SEMAPHORES=256`) and returns its ID (>=0) or
+a negative error.
+
+**Implementation** (`source/core/ee/ee_core.c`): a new 256-slot
+`g_ee_sema[]` table (`in_use`/`count`/`max_count`/`wait_threads`/
+`attr`/`option`), reset in `ee_core_init()`. The new
+`sysnum == 64` case reads the four caller-supplied fields from the
+`$a0`-pointed struct, first-fit-allocates a slot, initializes it, and
+returns the slot index (or -1 if full) in `$v0` via real EE syscall
+return convention. This is a REAL implementation (not a bypass/no-op
+stub), since the returned ID is a real value later
+`WaitSema`/`SignalSema`/etc. calls must reference correctly.
+
+**Verification methodology - re-hit and re-resolved the known
+"diagnostic tooling hazard" (documented in the 62nd finding):** the
+first diagnostic run this round accidentally reused a stale, pre-fix
+copy of the host-native harness (one that calls `ee_mem_read32()` at
+instruction i=0, before any real boot code executes), which corrupted
+CPU state and produced a false, concerning-looking "regression" (EE
+apparently frozen at the reset vector, `poll@0x0008C440` reading 0).
+Rebuilding the harness without the premature out-of-band read (per the
+same fix documented in the 62nd finding) and re-running immediately
+resolved this: `poll@0x0008C440` correctly reads `0x00000001` from
+i=40,000,000 onward (RPCINIT delivery, task #187's fix, is fully
+intact - genuinely NO regression), and `sif_cmd_iop_get_ee_recvbuf()`
+still resolves at the same instruction (i=30001031) as before.
+
+**Real-BIOS empirical result:** `CreateSema` is called with
+`max_count=1`, `init_count=0` (a locked binary semaphore/mutex idiom),
+confirmed via a temporary diagnostic print of the real struct fields
+(not fabricated - read directly from the emulated EE's memory at the
+real call site, caller return address `0x000848A0`). The call
+succeeds (returns id=0), and boot immediately proceeds to call
+`WaitSema` on that same semaphore (real EE syscall 0x44/68, confirmed
+via `syscallnr.h`), halting with "SYSCALL (no BIOS syscall table
+implemented)" - the next new, honestly-reported wall (task #189), not
+a bug introduced by this round's work.
+
+**Live PCSX2 cross-reference:** disassembled the real caller chain
+(`0x00084870`-`0x000848e4`) to confirm the `CreateSema` call site and
+its success-path branch (`bgez $v0`), and traced further into what
+appears to be a real `AddIntcHandler`-family call
+(`0x00083FD0`/`0x00084010` argument-shuffling wrappers around a larger
+kernel function at `0x00083E90`) reached shortly after. This chain is
+NOT yet fully characterized - documented honestly as an open thread
+for task #189, not claimed as understood.
+
+**Why real ps2sdk source has no C implementation to cite for
+`WaitSema`'s actual blocking semantics:** confirmed via the fetched
+GitHub directory listing of `ee/kernel/src/` that ps2sdk ships no
+`WaitSema.c`/`thsemap.c` - these are pure kernel syscalls (real
+BIOS-ROM-resident assembly, same as `CreateSema`), not library
+functions with distributable C source. Real semantics (per
+`psdevwiki.com/ps2/EE_Syscalls` and this project's own reading of
+`ps2sdk-master/ee/kernel/src/thread.c`'s `WaitSema(topSema)` usage
+pattern) are the standard counting-semaphore contract: decrement and
+return immediately if `count>0`, otherwise block the calling thread
+until another context (typically an interrupt handler) calls
+`SignalSema`/`iSignalSema`. This project has no real multi-thread
+scheduler, so honestly implementing `WaitSema` for the `init_count=0`
+case reached here needs careful characterization first (task #189) -
+not guessed at.
+
+**Verification performed:** full 88-build/87-distinct-binary
+host-native regression suite passes (0 failures;
+`test_vu_micro` appears twice in the extracted build-command list
+under the same output name, a pre-existing harness quirk unrelated to
+this change); clean Wii/devkitPPC rebuild (exit 0, only the
+pre-existing, unrelated `strncpy` warning in
+`iop_module_loader.c`).

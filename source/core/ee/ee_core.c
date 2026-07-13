@@ -132,6 +132,21 @@
 static void *g_ee_iop_ctx = NULL;
 static void (*g_ee_iop_write8)(void *ctx, uint32_t addr, uint8_t val) = NULL;
 
+/* task #188: minimal, real EE kernel semaphore object table for
+ * CreateSema (syscall 64) - see the syscall-64 case's own comment
+ * for full real-source grounding (ps2sdk's ee/kernel/include/
+ * kernel.h ee_sema_t/MAX_SEMAPHORES). */
+#define EE_MAX_SEMAPHORES 256
+typedef struct {
+    int in_use;
+    int32_t count;
+    int32_t max_count;
+    int32_t wait_threads;
+    uint32_t attr;
+    uint32_t option;
+} ee_sema_slot_t;
+static ee_sema_slot_t g_ee_sema[EE_MAX_SEMAPHORES];
+
 void ee_core_set_iop_write8_bridge(void *iop_ctx, void (*write8_fn)(void *ctx, uint32_t addr, uint8_t val))
 {
     g_ee_iop_ctx = iop_ctx;
@@ -826,6 +841,7 @@ int ee_core_init(const bios_image_t *bios)
     sif_cmd_iop_init(); /* task #186: minimal IOP-side SIFCMD consumer model - see core/hw/sif.h */
     g_rpcinit_pending = 0; /* task #187: reset delayed-delivery state on (re-)init */
     g_rpcinit_delay = 0;
+    memset(g_ee_sema, 0, sizeof(g_ee_sema)); /* task #188: reset semaphore table on (re-)init */
     mch_init(); /* EE-side MCH_RICM/MCH_DRD RDRAM auto-init registers - see core/hw/mch.h */
 
     g_state.ram = memalign(32, EE_RAM_SIZE);
@@ -1280,6 +1296,58 @@ static int ee_step(void)
             if (sysnum == 100 || sysnum == 60 || sysnum == 61 ||
                 sysnum == 120 || sysnum == -120) {
                 GPR(2) = 0; /* generic default return, matching established precedent */
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
+            if (sysnum == 64) {
+                /* 64 (0x40) CreateSema - task #188 (task #172/#187
+                 * continuation, 64th finding): the new real wall
+                 * reached once task #187's SIF_SREG_RPCINIT fix
+                 * unblocked boot past the 0x00083B40 plateau. Real
+                 * signature (ps2sdk's ee/kernel/include/kernel.h,
+                 * fetched this round): "s32 CreateSema(ee_sema_t
+                 * *sema);" where ee_sema_t is
+                 * { int count, max_count, init_count, wait_threads;
+                 *   u32 attr, option; } (24 bytes) - the caller fills
+                 * in max_count/init_count/attr/option before the
+                 * call; the kernel allocates a semaphore object from
+                 * its internal table (real MAX_SEMAPHORES=256, same
+                 * header) and returns its ID (>=0) or a negative
+                 * error code. Implemented for real (not a no-op
+                 * bypass, since the returned ID is a real value
+                 * later WaitSema/SignalSema/etc. calls would need to
+                 * reference correctly): a simple, honest slot table
+                 * (g_ee_sema[]), first-fit allocation, ID = slot
+                 * index. Honest caveat: the EXACT numeric ID real
+                 * hardware would assign (whether it reserves some low
+                 * IDs for kernel-internal patches, per the header's
+                 * own "a few will be used for the kernel patches"
+                 * comment) is NOT byte-verified - this returns a
+                 * simple sequential index, which is internally
+                 * consistent for any WaitSema/SignalSema/DeleteSema
+                 * this project also implements, but not confirmed to
+                 * match real hardware's own internal numbering
+                 * exactly. */
+                uint32_t sema_ptr = (uint32_t)GPR(4); /* $a0 */
+                int32_t max_count = (int32_t)ee_mem_read32(st, sema_ptr + 4u);
+                int32_t init_count = (int32_t)ee_mem_read32(st, sema_ptr + 8u);
+                uint32_t attr = ee_mem_read32(st, sema_ptr + 16u);
+                uint32_t option = ee_mem_read32(st, sema_ptr + 20u);
+                int32_t id = -1;
+                uint32_t i;
+                for (i = 0; i < EE_MAX_SEMAPHORES; i++) {
+                    if (!g_ee_sema[i].in_use) { id = (int32_t)i; break; }
+                }
+                if (id >= 0) {
+                    g_ee_sema[id].in_use = 1;
+                    g_ee_sema[id].count = init_count;
+                    g_ee_sema[id].max_count = max_count;
+                    g_ee_sema[id].wait_threads = 0;
+                    g_ee_sema[id].attr = attr;
+                    g_ee_sema[id].option = option;
+                }
+                GPR(2) = sext32((uint32_t)id); /* real convention: >=0 = new sema ID, negative = error (table full) */
                 st->pc = this_pc + 4u;
                 st->next_pc = this_pc + 8u;
                 return 1;

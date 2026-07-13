@@ -1898,3 +1898,30 @@ or interrupt-driven mechanism), which is presently unmodeled - a
 genuine feature gap, not a bug fix. No source changed this round
 (three throwaway `/tmp` scratch copies, diff-verified against the real
 files). See STATUS.md's 59th finding for full detail.
+
+## UPDATE (Round 35, task #172/#186): precisely traced the real interrupt-driven SIF0 kick; found two concrete, distinct gaps blocking any real SIF RPC service - no DMA channel has a registered sink, and neither side ever kicks SIF1's return transfer
+
+Traced the EE side of the SIF0/SIF1 picture to complement the 59th
+finding's IOP-side trace. Confirmed the existing Cause.IP3 (DMAC)
+interrupt delivery (task #176) still works correctly this far into
+boot: the EE's real SIF0 kick fires a genuine DMAC completion
+interrupt, which real kernel code handles by calling EE syscall 119
+(`sceSifSetDma`) or its "fast" -119 variant via simple syscall
+trampolines - twice, then never again (a drained queue, not a bug).
+
+Found two concrete, previously-undocumented gaps: (1) no DMA channel
+in this project has ever had a real sink function registered
+(`dma_register_sink()` is dead code - called from nowhere), so even a
+well-formed real transfer would silently drop its payload; (2) the EE
+prepares a real SIF1 receive chain (TADR set to a real address) but
+never kicks it, and per the 59th finding, the IOP never touches its
+own SIF0/SIF1 channel registers either - so nothing ever drives the
+return transfer.
+
+Fetched real citations for the next round: ps2sdk's actual
+`SifCmdHeader_t` struct and `SIF_CMD_*`/`SIF_SREG_RPCINIT` constants
+(common/include/sifcmd-common.h), and ps2tek's DMAC interrupt
+semantics (already correctly implemented here). Scoped task #186's
+first concrete increment as wiring real SIF0/SIF1 sinks - smaller and
+better-grounded than attempting the full command-dispatch protocol at
+once. No source changed this round. See STATUS.md's 60th finding.

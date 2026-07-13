@@ -8143,3 +8143,93 @@ architecture/feature gap, not a small bug, and should be scoped
 carefully (matching this session's established precedent of
 characterizing before implementing) rather than attempted in the same
 round as this finding.
+
+## 60th finding (task #172/#186): traced the real interrupt-driven SIF0 kick precisely - Cause.IP3 delivery (task #176) still works correctly at this later boot point, dispatches into real sceSifSetDma syscall trampolines, but stalls because (a) NO DMA channel in this project has a registered sink function at all, and (b) the EE sets up a real SIF1 receive chain (TADR) that is never kicked, because nothing IOP-side ever configures/kicks its own SIF0/SIF1 channels
+
+Following the user's direction to move toward modeling a real SIF RPC
+service (building on the 59th finding's conclusion that IOP boot-time
+module init never reaches SIF0/SIF1 DMA activity), traced the EE side
+of the picture with the same host-native diagnostic technique, adding
+a scratch-copy trace of EE-side SIF0/SIF1 register writes (base
+addresses `0x1000C000`/`0x1000C400`, per this project's own existing
+`dma.h`) alongside the existing IOP-side trace.
+
+**New concrete evidence, all from a single 60M-instruction boot:**
+
+1. The EE genuinely kicks SIF0 for the first time at `i=29930436`
+   (`CHCR=0x184` - STR bit set, mode=1/CHAIN), immediately preceded by
+   zeroing SIF0's QWC and immediately followed by setting SIF1's own
+   QWC=0 and TADR=`0x0001E140` (`i=29930468`/`29930471`) - real EE
+   kernel code setting up BOTH the outgoing (SIF0) and incoming (SIF1)
+   halves of a real SIF exchange. These are the ONLY writes to any
+   SIF0/SIF1 register anywhere in the entire 60M-instruction run.
+
+2. This SIF0 kick's completion (`dma_channel_signal_done()`, already
+   implemented) does successfully assert a real Cause.IP3 (DMAC)
+   interrupt for the first time in this later boot context - but only
+   once Status.IE/EIE/IM3 all become true, which first happens at
+   `i=30001033`, when EE code reaches `0x00083A6C` (immediately after
+   calling a syscall-119/`sceSifSetDma` trampoline at `0x00083A60`).
+   This confirms task #176's Cause.IP2/IP3 delivery mechanism (50th
+   finding) is still working correctly this far into boot - it had
+   only ever been observed once before, much earlier in a since-
+   superseded boot path.
+
+3. Traced the interrupt handler's own code precisely (PC-by-PC,
+   `0x80000200` through `0x000841xx` and back): it calls a dispatch
+   function at `0x00084168`, then branches on a flag bit to call
+   EITHER `0x00083A60` (`li v1,0x77; syscall` = **EE syscall 119,
+   `sceSifSetDma`**) or `0x00083A70` (`li v1,-0x77; syscall` = the
+   "fast" negative variant, same dual positive/negative convention
+   already seen for syscall -5 in task #181) - i.e. the interrupt
+   handler's real job is to re-arm/continue the SIF DMA sequence,
+   exactly the real, expected kernel behavior for an interrupt-driven
+   DMA queue. It fires exactly twice (`i=30001033`, `i=30001513`) then
+   never again for the rest of the 60M-instruction run - consistent
+   with the queue being fully drained/exhausted after two entries, not
+   a bug in the interrupt delivery itself.
+
+4. **Two real, concrete gaps identified, distinct from anything
+   previously documented:**
+   - `dma_register_sink()` (`dma.c`) is never called anywhere in this
+     project for ANY DMA channel, including SIF0. This means even a
+     well-formed chain-mode transfer with real, nonzero QWC would
+     silently drop its payload (`transfer_quadwords()`'s
+     `if (g_sinks[channel]) g_sinks[channel](...)` is always
+     false) - no cross-CPU data movement happens at the hardware-DMA
+     level for ANY channel today, independent of the IOP-side gap the
+     59th finding already found.
+   - SIF0's own kick in this run used `TADR=0` (never explicitly set
+     by any EE code in the whole boot), consistent with either an
+     intentionally-empty control-only packet or a genuine missing
+     setup step - and SIF1's CHCR (the "kick" register for the
+     IOP-to-EE return direction) is NEVER written with the STR bit
+     set anywhere in the run, even though its QWC/TADR get real values
+     - meaning the EE fully prepares to RECEIVE a reply chain but
+     nothing ever drives that transfer, because (per the 59th finding)
+     the IOP never touches its own SIF0/SIF1 channel registers at all.
+
+**Real citations obtained this round** (WebSearch had recovered from
+the earlier session-limit block): ps2tek's DMAC Interrupts section
+(`psi-rockin.github.io/ps2tek`) confirms `D_STAT`'s "INT1 asserted
+when (status & mask) != 0" semantics this project already implements
+correctly, and Cause register bit 10=INTC-pending/bit 11=DMAC-pending
+- both already correctly modeled. ps2sdk's real
+`common/include/sifcmd-common.h` (fetched via the doxygen-rendered
+source at ps2dev.github.io/ps2sdk) provided the real
+`SifCmdHeader_t` (`psize:8, dsize:24, dest, cid, opt`) and command-ID
+constants (`SIF_CMD_INIT_CMD`, `SIF_CMD_RPC_BIND/CALL/END/RDATA`,
+`SIF_SREG_RPCINIT=0`) that any real SIF command-dispatch
+implementation must match - these are recorded here for the next
+implementation round to cite directly rather than re-deriving.
+
+**Conclusion / scope for task #186:** a full, real, both-sides SIF
+command/RPC protocol (matching ps2sdk's real `SifCmdHeader_t`
+dispatch) is a substantial feature, not a small fix. The most
+concrete, minimal, well-grounded FIRST increment is wiring a real
+sink for the SIF0/SIF1 DMA channels (so quadword payloads actually
+move between EE and IOP RAM when a channel is genuinely kicked with
+nonzero QWC) - independent of, and a prerequisite for, any real
+command dispatch on top. No source changed this round (pure
+diagnostic tracing plus citation-gathering, three throwaway `/tmp`
+scratch copies, no drift in the real repository files).

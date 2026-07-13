@@ -3187,3 +3187,28 @@ currently-unmodeled SIF RPC service loop or interrupt-driven mechanism
 - a genuine feature gap, scoped for a dedicated future round rather
 than rushed here. No source changed this round. See docs/STATUS.md's
 59th finding for full derivation.
+
+## Checkpoint: task #172/#186 (60th finding) - real interrupt-driven SIF0 kick traced precisely; two concrete gaps found (no DMA sink wired anywhere, SIF1 return transfer never kicked by either side); real ps2sdk SifCmdHeader_t citations obtained for the next implementation round
+
+Continuing from the 59th finding (IOP boot-time module init never
+reaches SIF0/SIF1 DMA writes), traced the EE side: the EE genuinely
+kicks SIF0 once (chain mode, STR bit set) and sets up a real SIF1
+receive chain (TADR=0x1E140), and this kick's completion correctly
+fires a real Cause.IP3 (DMAC) interrupt - task #176's existing
+interrupt-delivery infrastructure still works fine this far into boot.
+The interrupt handler's real job, traced instruction-by-instruction,
+is to call EE syscall 119 (`sceSifSetDma`) or its -119 "fast" variant
+to continue a DMA queue - fires twice, then stops (queue drained).
+
+Found the real blockers: `dma_register_sink()` is never called for
+ANY channel in this project (dead code), so even a real, well-formed
+transfer would drop its payload silently; and SIF1's CHCR (the
+IOP-to-EE kick) is never written anywhere in the whole boot, because -
+per the 59th finding - the IOP never touches its own SIF0/SIF1
+registers at all. Fetched real ps2sdk citations
+(`common/include/sifcmd-common.h`'s `SifCmdHeader_t`,
+`SIF_CMD_INIT_CMD`/`RPC_BIND`/`RPC_CALL`/etc., `SIF_SREG_RPCINIT=0`)
+for the next round, which needs to be scoped as "wire a real SIF0/SIF1
+sink first" (small, testable) rather than the full command-dispatch
+protocol at once (large, fabrication-risk if rushed). No source
+changed this round. See docs/STATUS.md's 60th finding.

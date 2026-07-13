@@ -67,9 +67,23 @@ int main(void)
     write_le32(prog + pc, enc_break()); pc += 4;
 
     ee_core_init(&bios);
-    ee_core_run(&bios);
-
     ee_state_t *st = ee_core_get_state();
+    /* Step exactly the 9 real instructions and stop before the
+     * trailing BREAK. Task #178 made BREAK raise a genuine Breakpoint
+     * exception instead of unconditionally halting; since Status.BEV
+     * is untouched here (stays 1, the reset value), the exception
+     * would vector into the same zero-filled bios.data buffer and spin
+     * as harmless NOPs until ee_core_run()'s safety step cap - the
+     * useful instructions are the ones actually under test. */
+    ee_core_step(); /* LUI r1 */
+    ee_core_step(); /* ORI r1 */
+    ee_core_step(); /* LUI r5 */
+    ee_core_step(); /* ORI r5 */
+    ee_core_step(); /* MTSA $1 */
+    ee_core_step(); /* MFSA -> r2 */
+    ee_core_step(); /* MTSA $5 */
+    ee_core_step(); /* MFSA -> r3 */
+    ee_core_step(); /* MFSA -> $0 (discarded) */
 
     CHECK(st->gpr[1].ud0 == 0x12345678u, "LUI+ORI built r1 = 0x12345678");
     /* Real 64-bit MIPS LUI sign-extends its 32-bit result into the
@@ -83,8 +97,7 @@ int main(void)
     CHECK(st->gpr[3].ud0 == 0xDEADBEEFu, "second MFSA read back exactly what the second MTSA $5 wrote (re-write, not OR/append)");
     CHECK(st->gpr[0].ud0 == 0, "MFSA with rd=$0 left $0 hardwired at zero");
 
-    CHECK(st->halted == 1, "core halted cleanly on BREAK");
-    CHECK(strstr(st->halt_reason, "BREAK") != NULL, "halt reason correctly reports BREAK, not an unimplemented-opcode error");
+    CHECK(st->halted == 0, "ran all 9 instructions without any spurious halt");
 
     printf("\n%d check(s) failed\n", failures);
     return failures ? 1 : 0;

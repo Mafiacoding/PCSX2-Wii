@@ -18,6 +18,41 @@ static int failures = 0;
     else { printf("ok:   %s\n", msg); } \
 } while (0)
 
+/* Task #178 test-harness compatibility helper: BREAK now raises a
+ * genuine Breakpoint exception (ExcCode 9, see ee_core.c's SPECIAL
+ * funct 0x0D case) instead of unconditionally halting the emulated
+ * core - real R5900 hardware never stops executing just because it
+ * hit a BREAK. This project's existing test suite used a trailing
+ * BREAK + st->halted as a convenient "run to completion, then inspect
+ * final state" marker; rather than rewriting every such test's
+ * assertions, this drop-in replacement for ee_core_run() steps until
+ * EITHER the core genuinely halts on its own (a real bug - e.g. an
+ * unimplemented opcode) or a Breakpoint exception was just raised
+ * (Cause.ExcCode==9 and Status.EXL just got set, i.e. we're now
+ * sitting right at the vectored PC), and in the latter case
+ * synthesizes the exact same st->halted=1 / halt_reason convention the
+ * old unconditional-halt code produced - purely a test-harness
+ * bookkeeping shim. It changes nothing about ee_core.c's real,
+ * production BREAK behavior (which is what task #178 is actually
+ * testing against the real BIOS). */
+static void run_until_break(const bios_image_t *bios) {
+    (void)bios;
+    ee_state_t *st = ee_core_get_state();
+    long guard;
+    for (guard = 0; guard < 2000000L; guard++) {
+        if (ee_core_step()) return; /* genuine halt - not a BREAK, leave as-is */
+        if (((st->cop0[13] >> 2) & 0x1Fu) == 9u && (st->cop0[12] & 0x2u) != 0u) {
+            st->halted = 1;
+            snprintf(st->halt_reason, sizeof(st->halt_reason),
+                     "BREAK (task #178: real Breakpoint exception raised, ExcCode 9)");
+            return;
+        }
+    }
+    st->halted = 1;
+    snprintf(st->halt_reason, sizeof(st->halt_reason),
+             "run_until_break() safety cap reached without a Breakpoint exception");
+}
+
 static uint32_t enc_lui(int rt, uint16_t imm)        { return (0x0F << 26) | (rt << 16) | imm; }
 static uint32_t enc_ori(int rt, int rs, uint16_t imm) { return (0x0D << 26) | (rs << 21) | (rt << 16) | imm; }
 static uint32_t enc_lq(int rt, int rs, int16_t imm)  { return (0x1E << 26) | (rs << 21) | (rt << 16) | (uint16_t)imm; }
@@ -66,7 +101,7 @@ int main(void) {
     wle32(st->ram + 0x1000, (uint32_t)5);            wle32(st->ram + 0x1010, (uint32_t)3);
     wle32(st->ram + 0x1004, 0x7FFFFFFFu);            wle32(st->ram + 0x1014, (uint32_t)100);
     wle32(st->ram + 0x1008, 0x80000000u);            wle32(st->ram + 0x1018, (uint32_t)(-100));
-    ee_core_run(&bios);
+    run_until_break(&bios);
     CHECK(st->halted == 1, "PADDSW test: core halted on BREAK");
     CHECK((int32_t)lane_w(st->gpr[3], 0) == 8,          "PADDSW lane0: 5+3=8 (no saturation needed)");
     CHECK(lane_w(st->gpr[3], 1) == 0x7FFFFFFFu,         "PADDSW lane1: INT32_MAX+100 saturates to INT32_MAX");
@@ -82,7 +117,7 @@ int main(void) {
     wle32(st->ram + 0x1000, (uint32_t)10);           wle32(st->ram + 0x1010, (uint32_t)3);
     wle32(st->ram + 0x1004, 0x7FFFFFFFu);            wle32(st->ram + 0x1014, (uint32_t)(-100));
     wle32(st->ram + 0x1008, 0x80000000u);            wle32(st->ram + 0x1018, (uint32_t)100);
-    ee_core_run(&bios);
+    run_until_break(&bios);
     CHECK((int32_t)lane_w(st->gpr[3], 0) == 7,          "PSUBSW lane0: 10-3=7 (no saturation needed)");
     CHECK(lane_w(st->gpr[3], 1) == 0x7FFFFFFFu,         "PSUBSW lane1: INT32_MAX-(-100) saturates to INT32_MAX");
     CHECK(lane_w(st->gpr[3], 2) == 0x80000000u,         "PSUBSW lane2: INT32_MIN-100 saturates to INT32_MIN");
@@ -102,7 +137,7 @@ int main(void) {
         st->ram[0x1012]=rt1&0xFF; st->ram[0x1013]=rt1>>8;
         st->ram[0x1014]=rt2&0xFF; st->ram[0x1015]=rt2>>8;
     }
-    ee_core_run(&bios);
+    run_until_break(&bios);
     CHECK((int16_t)lane_h(st->gpr[3], 0) == 8,      "PADDSH lane0: 5+3=8 (no saturation needed)");
     CHECK(lane_h(st->gpr[3], 1) == 0x7FFFu,         "PADDSH lane1: INT16_MAX+50 saturates to INT16_MAX");
     CHECK(lane_h(st->gpr[3], 2) == 0x8000u,         "PADDSH lane2: INT16_MIN+(-50) saturates to INT16_MIN");
@@ -122,7 +157,7 @@ int main(void) {
         st->ram[0x1012]=rt1&0xFF; st->ram[0x1013]=rt1>>8;
         st->ram[0x1014]=rt2&0xFF; st->ram[0x1015]=rt2>>8;
     }
-    ee_core_run(&bios);
+    run_until_break(&bios);
     CHECK((int16_t)lane_h(st->gpr[3], 0) == 7,      "PSUBSH lane0: 10-3=7 (no saturation needed)");
     CHECK(lane_h(st->gpr[3], 1) == 0x7FFFu,         "PSUBSH lane1: INT16_MAX-(-50) saturates to INT16_MAX");
     CHECK(lane_h(st->gpr[3], 2) == 0x8000u,         "PSUBSH lane2: INT16_MIN-50 saturates to INT16_MIN");
@@ -135,7 +170,7 @@ int main(void) {
     st->ram[0x1000]=5;    st->ram[0x1010]=3;
     st->ram[0x1001]=0x7F; st->ram[0x1011]=10;
     st->ram[0x1002]=0x80; st->ram[0x1012]=(uint8_t)(-10);
-    ee_core_run(&bios);
+    run_until_break(&bios);
     CHECK((int8_t)lane_b(st->gpr[3], 0) == 8,   "PADDSB lane0: 5+3=8 (no saturation needed)");
     CHECK(lane_b(st->gpr[3], 1) == 0x7Fu,       "PADDSB lane1: INT8_MAX+10 saturates to INT8_MAX (0x7F)");
     CHECK(lane_b(st->gpr[3], 2) == 0x80u,       "PADDSB lane2: INT8_MIN+(-10) saturates to INT8_MIN (0x80)");
@@ -148,7 +183,7 @@ int main(void) {
     st->ram[0x1000]=10;   st->ram[0x1010]=3;
     st->ram[0x1001]=0x7F; st->ram[0x1011]=(uint8_t)(-10);
     st->ram[0x1002]=0x80; st->ram[0x1012]=10;
-    ee_core_run(&bios);
+    run_until_break(&bios);
     CHECK((int8_t)lane_b(st->gpr[3], 0) == 7,   "PSUBSB lane0: 10-3=7 (no saturation needed)");
     CHECK(lane_b(st->gpr[3], 1) == 0x7Fu,       "PSUBSB lane1: INT8_MAX-(-10) saturates to INT8_MAX (0x7F)");
     CHECK(lane_b(st->gpr[3], 2) == 0x80u,       "PSUBSB lane2: INT8_MIN-10 saturates to INT8_MIN (0x80)");
@@ -165,7 +200,7 @@ int main(void) {
     ee_core_init(&bios);
     st = ee_core_get_state();
     wle32(st->ram + 0x1010, 0x0000807Fu); /* rt lane0 = the 5551 pixel */
-    ee_core_run(&bios);
+    run_until_break(&bios);
     {
         uint32_t r = lane_w(st->gpr[3], 0);
         CHECK(((r >> 3) & 0x1F)  == 0x1F, "PEXT5: R channel (bits 3-7) == 0x1F");
@@ -188,7 +223,7 @@ int main(void) {
         uint32_t unpacked = (0x1Fu << 3) | (0x03u << 11) | (0u << 19) | (1u << 31);
         wle32(st->ram + 0x1010, unpacked);
     }
-    ee_core_run(&bios);
+    run_until_break(&bios);
     CHECK(lane_w(st->gpr[3], 0) == 0x0000807Fu, "PPAC5: packs the unpacked layout back to the original 0x807F pixel (round-trip with PEXT5)");
 
     printf("\n%d check(s) failed\n", failures);

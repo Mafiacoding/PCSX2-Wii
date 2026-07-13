@@ -2793,3 +2793,56 @@ next continuation: is this expected real-hardware behavior, or does it
 mean task #176's SIF DMA completion signaling (EE-side only, no real
 IOP-side command processing) is steering boot down a path real
 hardware wouldn't take? See docs/STATUS.md's 51st finding.
+
+
+## Update (Round 29 continued, 52nd finding): real EE BREAK exception delivery implemented (task #178) - this WAS the unlock, boot now runs 65M+ instructions past the previous halt
+
+Investigated the 51st finding's open question by testing the cheaper
+alternative hypothesis first (user-approved): rather than building
+real IOP-side SIF command processing, checked whether this project's
+own long-standing "BREAK always halts" interpreter placeholder was
+itself the wall, since real R5900 hardware never stops executing on a
+BREAK - it raises a genuine Breakpoint exception (ExcCode 9) and
+vectors through the normal handler path.
+
+Implemented `ee_raise_exception(st, EE_EXC_CODE_BP, this_pc,
+in_delay_slot)` in place of `halt("BREAK")` in the SPECIAL funct 0x0D
+case. Caught and fixed a bug in my own first draft before shipping:
+the case still had the old `return 1;` (this project's "step halted
+the core" convention) despite no longer calling halt() or setting
+st->halted - matched the existing TLB-exception path's convention
+instead (raise, then fall through to the normal end-of-step epilogue
+via `break`, returning 0). Added a step-cap safety net to
+`ee_core_run()` (20M instructions) since its run loop had never
+needed one before - every prior route to a "halted" return came from
+an explicit halt() call, and a BREAK that now vectors instead of
+halting could otherwise spin forever in tests with no installed
+exception handler.
+
+Test fallout was much larger than the ~6 tests originally suspected -
+effectively the whole EE unit-test suite (~35 files) used a trailing
+BREAK + `st->halted==1` as its "run to completion" convention. Fixed
+via bounded `ee_core_step()` counts for tests with real inline logic,
+and a mechanical `run_until_break()` compatibility shim (detects
+Cause.ExcCode==9 instead of relying on a real halt) for ~29 more.
+`test_system_handshake.c` was different: its halted-check lives in
+PRODUCTION `system.c` (real boot path's own scheduler), correctly left
+untouched, since BREAK no longer halting mid-boot is the whole point -
+only the test's own assertions were updated.
+
+87/87 regression suite pass, clean Wii/devkitPPC rebuild (toolchain
+re-linked this session - see TOOLCHAIN_SETUP_NOTES.md under
+outputs/build/devkitpro/, LD_LIBRARY_PATH is the part that's easy to
+forget).
+
+**This conclusively answers the 51st finding's open question:** the
+real BIOS's kernel-installed exception handler silently resumes past
+the BREAK at 0x80000DC0 (Status.EXL cleanly back to 0, consistent
+with an ERET), exactly like real hardware handling an unattached-
+debugger breakpoint trap. Boot now runs 65,000,000+ further
+instructions past the old halt point, settling into a NEW, distinct,
+actively-executing wait/scan loop around EE PC 0x8000F768 (real and
+bounded - touches the DMAC_STAT KSEG1 mirror, resembles this
+project's earlier LOADCORE-style registration-scan loops at a
+different address). This new loop is the next thing to root-cause -
+see docs/STATUS.md's 52nd finding for full detail.

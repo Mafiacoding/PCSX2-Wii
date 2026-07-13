@@ -55,10 +55,19 @@ static void test_rfe(void) {
     wle32(p+pc, enc_break()); pc += 4;
 
     ee_core_init(&bios);
-    ee_core_run(&bios);
     ee_state_t *st = ee_core_get_state();
+    /* Step exactly the 4 real instructions (ADDIU/MTC0/RFE/MFC0) and
+     * stop before the trailing BREAK. Task #178 made BREAK raise a
+     * genuine Breakpoint exception (Status.BEV=0 here after the MTC0
+     * above clobbers bit 22) instead of unconditionally halting, so it
+     * can no longer serve as a "run to completion" convenience marker
+     * - the useful instructions are the ones actually under test. */
+    ee_core_step(); /* ADDIU r1, r0, 0x19 */
+    ee_core_step(); /* MTC0 Status = 0x19 */
+    ee_core_step(); /* RFE */
+    ee_core_step(); /* MFC0 r2 = Status */
 
-    CHECK(st->halted == 1 && strstr(st->halt_reason, "BREAK") != NULL, "RFE test: core halted cleanly on BREAK");
+    CHECK(st->halted == 0, "RFE test: ran to completion without any spurious halt");
     /* expected: (0x19 & ~0x0F) | ((0x19 >> 2) & 0x0F) = 0x10 | 0x06 = 0x16 */
     CHECK((st->gpr[2].ud0 & 0x3F) == 0x16u, "RFE shifted the Status KU/IE stack right by 2 correctly (0x19 -> 0x16)");
 }
@@ -84,10 +93,22 @@ static void test_eret(void) {
     wle32(p + 0x104, enc_break());
 
     ee_core_init(&bios);
-    ee_core_run(&bios);
     ee_state_t *st = ee_core_get_state();
+    /* Step exactly the 7 real dynamic instructions and stop before the
+     * trailing BREAK at the EPC target (see the RFE test above for why
+     * BREAK is no longer used as a run-to-completion marker - task
+     * #178): LUI, ORI, MTC0 (EPC), ADDIU, MTC0 (Status, EXL=1), ERET
+     * (no delay slot - jumps straight to EPC=0xBFC00100), then MFC0 r3
+     * at the jump target. */
+    ee_core_step(); /* LUI r1 */
+    ee_core_step(); /* ORI r1 */
+    ee_core_step(); /* MTC0 EPC = 0xBFC00100 */
+    ee_core_step(); /* ADDIU r2, r0, 0x2 */
+    ee_core_step(); /* MTC0 Status = 0x2 (EXL=1) */
+    ee_core_step(); /* ERET - jumps straight to EPC, no delay slot */
+    ee_core_step(); /* MFC0 r3 = Status, at the jump target */
 
-    CHECK(st->halted == 1 && strstr(st->halt_reason, "BREAK") != NULL, "ERET test: core halted cleanly on BREAK (control reached the EPC target)");
+    CHECK(st->halted == 0, "ERET test: ran to completion without any spurious halt (control reached the EPC target)");
     CHECK((st->gpr[3].ud0 & 0x2u) == 0u, "ERET cleared Status.EXL after taking the EPC branch");
     CHECK(st->gpr[9].ud0 == 0u, "ERET has NO branch delay slot - the instruction after it never executed");
 }
@@ -110,10 +131,19 @@ static void test_ei_di(void) {
     wle32(p+pc, enc_break()); pc += 4;
 
     ee_core_init(&bios);
-    ee_core_run(&bios);
     ee_state_t *st = ee_core_get_state();
+    /* Step exactly the 8 real instructions and stop before the
+     * trailing BREAK (see the RFE test above for why - task #178). */
+    ee_core_step(); /* EI */
+    ee_core_step(); /* MFC0 r1 = Status */
+    ee_core_step(); /* DI */
+    ee_core_step(); /* MFC0 r2 = Status */
+    ee_core_step(); /* ADDIU r3, r0, 0x08 */
+    ee_core_step(); /* MTC0 Status = 0x08 (KSU!=0) */
+    ee_core_step(); /* EI (gated off) */
+    ee_core_step(); /* MFC0 r4 = Status */
 
-    CHECK(st->halted == 1 && strstr(st->halt_reason, "BREAK") != NULL, "EI/DI test: core halted cleanly on BREAK");
+    CHECK(st->halted == 0, "EI/DI test: ran to completion without any spurious halt");
     CHECK((st->gpr[1].ud0 & 0x10000u) != 0u, "EI set Status.EIE (bit 16) when the gate condition (KSU==0) was satisfied");
     CHECK((st->gpr[2].ud0 & 0x10000u) == 0u, "DI cleared Status.EIE again");
     CHECK((st->gpr[4].ud0 & 0x10000u) == 0u, "EI did NOT set Status.EIE when gated off (KSU!=0, no _EDI/EXL/ERL)");

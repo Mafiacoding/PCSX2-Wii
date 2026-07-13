@@ -1704,3 +1704,26 @@ physically present in the BIOS image at EE PC `0x80000DC0` (code field
 symptom of task #176's admittedly-incomplete SIF DMA completion
 signaling (EE side only, no genuine IOP-side command processing) is
 the next open question - see STATUS.md's 51st finding.
+
+
+**UPDATE (Round 29 continued, 52nd finding, task #178):** implemented
+real EE BREAK exception delivery (ExcCode 9, Breakpoint) - real R5900
+hardware never halts unconditionally on BREAK, it raises a genuine
+exception and vectors through the normal handler path, same as any
+other trap. This was a bigger change than it looked: nearly all of
+this project's ~35 EE host-native unit tests relied on "BREAK halts
+the core" as a run-to-completion convenience convention dating back
+to before real MIPS exception delivery existed; fixed via a mix of
+bounded ee_core_step() counts (where genuinely useful) and a
+mechanical `run_until_break()` test-harness compatibility shim
+(unaffected: production system.c/main.c, which correctly benefit from
+BREAK no longer halting mid-boot). 87/87 suite pass; clean Wii
+rebuild. Host-native diagnostic against the real BIOS confirms this
+was the actual unlock: boot no longer stops at `0x80000DC0` - the
+kernel's own installed handler silently resumes past it (Status.EXL
+back to 0, consistent with a clean ERET), and the EE keeps running
+correctly for 65,000,000+ further instructions, settling into a NEW,
+distinct wait/scan loop around EE PC `0x8000F768` (real, bounded,
+touches the DMAC_STAT KSEG1 mirror - not a crash). See STATUS.md's
+52nd finding for full detail; this new loop is the next thing to
+root-cause for task #172.

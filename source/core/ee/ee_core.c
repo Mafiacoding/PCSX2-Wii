@@ -230,6 +230,7 @@ static inline int ee_tlb_translate(ee_state_t *st, uint32_t vaddr, uint32_t *out
 #define EE_EXC_CODE_INT   (0u << 2) /* Interrupt - raised by ee_check_timer_interrupt() below (round 9) */
 #define EE_EXC_CODE_TLBL  (2u << 2) /* TLB miss, load or instruction fetch */
 #define EE_EXC_CODE_TLBS  (3u << 2) /* TLB miss, store */
+#define EE_EXC_CODE_BP    (9u << 2) /* Breakpoint (BREAK instruction) - task #178, see the BREAK case below */
 
 /* Raises a real R5900 exception: updates Cause/EPC/Status and vectors
  * pc/next_pc to the correct handler address. Ported from PCSX2's own
@@ -1262,7 +1263,44 @@ static int ee_step(void)
             halt("SYSCALL (no BIOS syscall table implemented)");
             return 1;
         }
-        case 0x0D: /* BREAK */  halt("BREAK"); return 1;
+        case 0x0D: /* BREAK - task #178: real R5900 hardware ALWAYS
+             * raises a genuine Breakpoint exception (ExcCode 9) here
+             * and vectors through the normal exception path - it does
+             * NOT unconditionally stop the CPU. This project
+             * previously treated every BREAK as an immediate,
+             * unconditional halt() - a pragmatic placeholder from
+             * before real exception delivery existed (this project's
+             * entire host-native test suite still relies on that
+             * placeholder as a deliberate "stop and check final
+             * state" convention, since none of those hand-written
+             * test programs ever install a real exception handler).
+             * Found live: a real, intentional BREAK physically
+             * present in the BIOS image at EE PC 0x80000DC0 (task
+             * #177's 51st finding) - reached for the first time ever
+             * once tasks #176/#177 got real interrupt delivery and
+             * MFSA/MTSA working. Whether the real kernel's installed
+             * handler silently resumes past it (common real-hardware
+             * behavior for an unattached-debugger breakpoint trap) is
+             * exactly what raising it for real, instead of always
+             * halting, lets us find out. */
+            ee_raise_exception(st, EE_EXC_CODE_BP, this_pc, in_delay_slot);
+            /* task #178 fix: do NOT return 1 here. Returning 1 is this
+             * function's "the core halted" signal (see halt() call
+             * sites throughout this switch, and ee_core_run()'s
+             * `if (ee_step()) break;`), but raising a real exception
+             * does not halt anything - it just vectors st->pc/next_pc
+             * to the handler and execution must continue there. This
+             * exactly matches how the TLB-exception path elsewhere in
+             * this same switch behaves: ee_mem_check_tlb_fault() calls
+             * ee_raise_tlb_exception() from deep inside a LW/SW case,
+             * and that case still just breaks/falls through to this
+             * function's normal end-of-step epilogue and `return 0;`.
+             * Confirmed by inspection: every other exception-raising
+             * call site in this file (ee_check_timer_interrupt(),
+             * ee_check_intc_interrupt(), ee_check_dmac_interrupt(), the
+             * TLB-miss path) is followed by ordinary step completion,
+             * never by return 1. */
+            break;
         case 0x0F: /* SYNC */   break; /* no-op: no cache/pipeline model */
         case 0x10: /* MFHI */   if (rd) GPR(rd) = st->hi.ud0; break;
         case 0x11: /* MTHI */   st->hi.ud0 = GPR(rs); break;
@@ -3453,9 +3491,37 @@ void ee_core_run(const bios_image_t *bios)
     (void)bios;
     const uint64_t step_report_interval = 10000;
 
+    /* task #178 safety net: prior to this change, ee_step() only ever
+     * returned 1 (stopping this loop) via an explicit halt() call, so
+     * an unbounded while() here was safe - every host-native test's
+     * hand-written program was guaranteed to hit a halt()-calling
+     * instruction (usually its terminating BREAK) eventually.
+     *
+     * Now that BREAK raises a real, vectoring exception instead of
+     * always halting (see the SPECIAL funct 0x0D case above), a test
+     * whose terminating BREAK fires with Status.BEV=0 and no installed
+     * RAM exception handler (or any other test that never expected its
+     * BREAK to vector) will have st->pc redirected into a zero/NOP
+     * region instead of stopping - which never sets g_state.halted and
+     * never returns 1 from ee_step(), so this loop would otherwise spin
+     * forever. EE_CORE_RUN_STEP_CAP is a host-native test-harness
+     * engineering safety net only - it has no counterpart in real
+     * hardware and never fires during correct, intentionally-halting
+     * test programs (every existing test halts within a few hundred
+     * instructions at most). */
+    const uint64_t EE_CORE_RUN_STEP_CAP = 20000000ull;
+
     while (!g_state.halted) {
         if (ee_step())
             break;
+
+        if (g_state.instructions_executed >= EE_CORE_RUN_STEP_CAP) {
+            snprintf(g_state.halt_reason, sizeof(g_state.halt_reason),
+                     "ee_core_run() safety step cap (%llu) reached without halting - pc=0x%08lX (task #178 safety net, see comment above)",
+                     (unsigned long long)EE_CORE_RUN_STEP_CAP, (unsigned long)g_state.pc);
+            g_state.halted = 1;
+            break;
+        }
 
         if ((g_state.instructions_executed % step_report_interval) == 0) {
             printf("  ... %llu instructions executed, pc=0x%08lX\n",

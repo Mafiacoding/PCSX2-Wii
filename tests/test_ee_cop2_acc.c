@@ -22,6 +22,41 @@ static int failures = 0;
     else { printf("ok:   %s\n", msg); } \
 } while (0)
 
+/* Task #178 test-harness compatibility helper: BREAK now raises a
+ * genuine Breakpoint exception (ExcCode 9, see ee_core.c's SPECIAL
+ * funct 0x0D case) instead of unconditionally halting the emulated
+ * core - real R5900 hardware never stops executing just because it
+ * hit a BREAK. This project's existing test suite used a trailing
+ * BREAK + st->halted as a convenient "run to completion, then inspect
+ * final state" marker; rather than rewriting every such test's
+ * assertions, this drop-in replacement for ee_core_run() steps until
+ * EITHER the core genuinely halts on its own (a real bug - e.g. an
+ * unimplemented opcode) or a Breakpoint exception was just raised
+ * (Cause.ExcCode==9 and Status.EXL just got set, i.e. we're now
+ * sitting right at the vectored PC), and in the latter case
+ * synthesizes the exact same st->halted=1 / halt_reason convention the
+ * old unconditional-halt code produced - purely a test-harness
+ * bookkeeping shim. It changes nothing about ee_core.c's real,
+ * production BREAK behavior (which is what task #178 is actually
+ * testing against the real BIOS). */
+static void run_until_break(const bios_image_t *bios) {
+    (void)bios;
+    ee_state_t *st = ee_core_get_state();
+    long guard;
+    for (guard = 0; guard < 2000000L; guard++) {
+        if (ee_core_step()) return; /* genuine halt - not a BREAK, leave as-is */
+        if (((st->cop0[13] >> 2) & 0x1Fu) == 9u && (st->cop0[12] & 0x2u) != 0u) {
+            st->halted = 1;
+            snprintf(st->halt_reason, sizeof(st->halt_reason),
+                     "BREAK (task #178: real Breakpoint exception raised, ExcCode 9)");
+            return;
+        }
+    }
+    st->halted = 1;
+    snprintf(st->halt_reason, sizeof(st->halt_reason),
+             "run_until_break() safety cap reached without a Breakpoint exception");
+}
+
 static uint32_t enc_lui(int rt, uint16_t imm)        { return (0x0F << 26) | (rt << 16) | imm; }
 static uint32_t enc_ori(int rt, int rs, uint16_t imm) { return (0x0D << 26) | (rs << 21) | (rt << 16) | imm; }
 static uint32_t enc_break(void)                       { return 0x0D; }
@@ -95,7 +130,7 @@ int main(void)
     wle32(st->ram + 0x1018, f2bits(30.0f));
     wle32(st->ram + 0x101C, f2bits(40.0f));
 
-    ee_core_run(&bios);
+    run_until_break(&bios);
 
     CHECK(st->halted == 1 && strstr(st->halt_reason, "BREAK") != NULL,
           "core halted cleanly on BREAK (VADDA recognized)");
@@ -134,7 +169,7 @@ int main(void)
         wle32(st2->ram + 0x1014, f2bits(20.0f));
         wle32(st2->ram + 0x1018, f2bits(30.0f));
         wle32(st2->ram + 0x101C, f2bits(40.0f));
-        ee_core_run(&bios2);
+        run_until_break(&bios2);
         /* VMULA: ACC=(20,60,120,200). VMADDA: ACC=ACC+VF1*VF2=(20+20,60+60,120+120,200+200)=(40,120,240,400) */
         CHECK(bits2f(st2->vu0_acc[0]) == 40.0f && bits2f(st2->vu0_acc[1]) == 120.0f
               && bits2f(st2->vu0_acc[2]) == 240.0f && bits2f(st2->vu0_acc[3]) == 400.0f,
@@ -164,7 +199,7 @@ int main(void)
         wle32(st3->ram + 0x1014, f2bits(20.0f));
         wle32(st3->ram + 0x1018, f2bits(30.0f));
         wle32(st3->ram + 0x101C, f2bits(40.0f));
-        ee_core_run(&bios3);
+        run_until_break(&bios3);
         CHECK(bits2f(st3->vu0_acc[0]) == -8.0f && bits2f(st3->vu0_acc[1]) == -17.0f
               && bits2f(st3->vu0_acc[2]) == -26.0f && bits2f(st3->vu0_acc[3]) == -35.0f,
               "VSUBA.xyzw VF1,VF2 (idx44) computes ACC=VF1-VF2: (-8,-17,-26,-35)");
@@ -196,7 +231,7 @@ int main(void)
         /* Poke ACC to a nonzero sentinel first to prove VOPMULA
          * really overwrites it rather than accumulating. */
         st4->vu0_acc[0] = f2bits(999.0f);
-        ee_core_run(&bios4);
+        run_until_break(&bios4);
         /* ACC.x=VF1.y*VF2.z=3*30=90, ACC.y=VF1.z*VF2.x=4*10=40, ACC.z=VF1.x*VF2.y=2*20=40 */
         CHECK(bits2f(st4->vu0_acc[0]) == 90.0f && bits2f(st4->vu0_acc[1]) == 40.0f && bits2f(st4->vu0_acc[2]) == 40.0f,
               "VOPMULA VF1,VF2 (idx46) computes the cross-product-shaped outer product into ACC: (90,40,40), overwriting the prior sentinel");
@@ -228,7 +263,7 @@ int main(void)
         wle32(st5->ram + 0x1004, f2bits(3.0f));
         wle32(st5->ram + 0x1008, f2bits(4.0f));
         wle32(st5->ram + 0x100C, f2bits(5.0f));
-        ee_core_run(&bios5);
+        run_until_break(&bios5);
         CHECK(bits2f(st5->vu0_acc[0]) == 2000.0f && bits2f(st5->vu0_acc[1]) == 3000.0f
               && bits2f(st5->vu0_acc[2]) == 4000.0f && bits2f(st5->vu0_acc[3]) == 5000.0f,
               "VMULAq.xyzw VF1 (idx28, broadcasts Q=1000) computes ACC=VF1*1000: (2000,3000,4000,5000), unaffected by the following VNOP");
@@ -261,7 +296,7 @@ int main(void)
         wle32(st6->ram + 0x1014, f2bits(20.0f));
         wle32(st6->ram + 0x1018, f2bits(30.0f));
         wle32(st6->ram + 0x101C, f2bits(40.0f));
-        ee_core_run(&bios6);
+        run_until_break(&bios6);
         CHECK(bits2f(st6->vu0_acc[0]) == 22.0f && bits2f(st6->vu0_acc[1]) == 23.0f
               && bits2f(st6->vu0_acc[2]) == 24.0f && bits2f(st6->vu0_acc[3]) == 25.0f,
               "VADDAy.xyzw VF1,VF2 (idx1, broadcasts VF2.y=20) computes ACC=VF1+20: (22,23,24,25)");

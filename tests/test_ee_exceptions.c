@@ -27,6 +27,7 @@ static int failures = 0;
 } while (0)
 
 static uint32_t enc_lui(int rt, uint16_t imm)        { return (0x0F << 26) | (rt << 16) | imm; }
+static uint32_t enc_addiu(int rt, int rs, int16_t imm) { return (0x09 << 26) | (rs << 21) | (rt << 16) | (uint16_t)imm; }
 static uint32_t enc_beq(int rs, int rt, int16_t imm) { return (0x04 << 26) | (rs << 21) | (rt << 16) | (uint16_t)imm; }
 static uint32_t enc_sw(int rt, int rs, int16_t imm)  { return (0x2B << 26) | (rs << 21) | (rt << 16) | (uint16_t)imm; }
 static uint32_t enc_lw(int rt, int rs, int16_t imm)  { return (0x23 << 26) | (rs << 21) | (rt << 16) | (uint16_t)imm; }
@@ -108,25 +109,33 @@ static void test_fetch_exception(void) {
     wle32(p+pc, enc_lui(4, 0x7FFF));  pc += 4; /* a0 = 0x7FFF0000 */
     uint32_t jr_pc = pc;
     wle32(p+pc, (0x00 << 26) | (4 << 21) | 0x08); pc += 4; /* JR a0 -> jumps into unmapped KUSEG */
-    wle32(p+pc, enc_break());        pc += 4; /* JR's own delay slot - executes normally first */
+    /* JR's own delay slot - executes normally first. Task #178: this
+     * used to be a BREAK (relying on the old unconditional-halt
+     * placeholder to stop and let us inspect state cleanly). Now that
+     * BREAK raises a real Breakpoint exception, using it here would
+     * itself set Status.EXL=1 and Cause/EPC before the manual
+     * fetch-exception setup below even runs - polluting exactly the
+     * "still inside a previous exception" state that would trip the
+     * nested-exception EPC guard (see test_nested_exception) and make
+     * this test's own EPC check fail for an unrelated reason. Use a
+     * harmless canary ADDIU instead: it proves the delay slot really
+     * executed as ordinary code first, without touching COP0 at all. */
+    wle32(p+pc, enc_addiu(7, 0, 0x2A)); pc += 4;
 
     ee_core_init(&bios);
     ee_state_t *st = ee_core_get_state();
     uint32_t base_pc = st->pc;
     ee_core_step(); /* LUI */
     ee_core_step(); /* JR (schedules the jump) */
-    ee_core_step(); /* delay slot (BREAK) - halts the core first, as normal */
-    CHECK(st->halted == 1, "Fetch-exception setup: JR's own delay slot (BREAK) executed and halted normally");
+    ee_core_step(); /* delay slot (canary ADDIU) - executes normally, no exception */
+    CHECK(st->gpr[7].ud0 == 0x2Au, "Fetch-exception setup: JR's own delay slot (canary ADDIU) executed normally before the jump");
 
-    /* Manually clear the halt and force pc to the unmapped target,
-     * bypassing the BREAK, purely to exercise the fetch-exception path
-     * on its own without needing a second real program - the BREAK
-     * above is only there to prove the delay slot really did execute
-     * as ordinary code first (i.e. this is testing the SAME "JR always
-     * has a real delay slot" mechanics test_ee_cop0_special.c already
-     * covers for ERET, not reusing it as this test's actual fetch
-     * fault). */
-    st->halted = 0;
+    /* Force pc to the unmapped target, bypassing the jump's natural
+     * landing spot (which the JR already scheduled anyway - this just
+     * makes the fault deterministic and independent of what garbage
+     * bytes happen to sit at 0x7FFF0000), purely to exercise the
+     * fetch-exception path on its own without needing a second real
+     * program. */
     st->pc = 0x7FFF0000u;
     st->next_pc = 0x7FFF0004u;
     st->branch_pending = 0;

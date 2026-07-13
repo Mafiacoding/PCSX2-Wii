@@ -73,10 +73,19 @@ static void test_scratchpad_upper_half_no_tlb_needed(void) {
     ee_core_init(&bios);
     ee_state_t *st = ee_core_get_state();
     /* Deliberately install NO TLB entry anywhere - this is the point:
-     * real hardware needs none for this fixed 16KB window. */
-    ee_core_run(&bios);
+     * real hardware needs none for this fixed 16KB window. Step exactly
+     * the 4 real instructions (LUI/LUI/SW/LW) and stop before the
+     * trailing BREAK - task #178 made BREAK raise a genuine Breakpoint
+     * exception instead of unconditionally halting, so it can no
+     * longer be used as a "run to completion" convenience marker here;
+     * the useful, in-scope instructions are the ones actually under
+     * test. */
+    ee_core_step(); /* LUI a0 */
+    ee_core_step(); /* LUI a1 */
+    ee_core_step(); /* SW */
+    ee_core_step(); /* LW */
 
-    CHECK(st->halted == 1, "Scratchpad test: core halted cleanly on BREAK (no TLB Refill exception)");
+    CHECK(st->halted == 0, "Scratchpad test: ran the SW/LW round-trip without any spurious halt (no TLB Refill exception)");
     CHECK((st->cop0[12] & 0x2u) == 0, "Scratchpad test: Status.EXL never got set - no exception was raised");
     CHECK(st->gpr[6].ud0 == 0x0000000012340000ULL,
           "Scratchpad: SW/LW round-trip through 0x70003FC0 (upper half, no TLB entry) works");
@@ -125,9 +134,14 @@ static void test_count_advances(void) {
 
     ee_core_init(&bios);
     ee_state_t *st = ee_core_get_state();
-    ee_core_run(&bios);
+    /* Step exactly the 2 real instructions (MFC0 t0; MFC0 t1) and stop
+     * before the trailing BREAK - see the comment in
+     * test_scratchpad_upper_half_no_tlb_needed() above for why BREAK is
+     * no longer used as a run-to-completion marker (task #178). */
+    ee_core_step(); /* MFC0 t0 */
+    ee_core_step(); /* MFC0 t1 */
 
-    CHECK(st->halted == 1, "Count test: core halted on BREAK");
+    CHECK(st->halted == 0, "Count test: ran both MFC0 reads without any spurious halt");
     CHECK(st->gpr[9].ud0 == st->gpr[8].ud0 + 1,
           "Count test: COP0 Count advanced by exactly 1 between two consecutive MFC0 reads");
 }

@@ -59,8 +59,23 @@ int main(void)
     wle32(p+pc, enc_break()); pc += 4;
 
     ee_core_init(&bios);
-    ee_core_run(&bios);
     ee_state_t *st = ee_core_get_state();
+    /* Step exactly the 7 real instructions and stop before the
+     * trailing BREAK. Task #178 made BREAK raise a genuine Breakpoint
+     * exception instead of unconditionally halting; since Status.BEV
+     * is untouched here (stays 1, the reset value), the exception
+     * would vector into the same zero-filled bios.data buffer and spin
+     * as harmless NOPs until ee_core_run()'s safety step cap - wasteful
+     * even though it wouldn't have failed any of this test's own
+     * (register-content-only) checks. Stepping explicitly avoids that
+     * entirely. */
+    ee_core_step(); /* LUI r1 */
+    ee_core_step(); /* ORI r1 */
+    ee_core_step(); /* CTC2 r1 -> FBRST */
+    ee_core_step(); /* CFC2 FBRST -> r2 */
+    ee_core_step(); /* MTC2 r1 -> ctrl reg 5 */
+    ee_core_step(); /* MFC2 ctrl reg 5 -> r3 */
+    ee_core_step(); /* MFC2 ctrl reg 0 -> r4 */
 
     CHECK(st->gpr[2].ud0 == (uint64_t)(int64_t)(int32_t)0x00000200u,
           "CFC2 reads back exactly what CTC2 wrote to FBRST (control reg 28)");

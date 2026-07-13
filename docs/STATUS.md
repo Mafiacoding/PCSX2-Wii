@@ -7331,3 +7331,120 @@ would never actually take? Not yet determined either way - the code
 field `0xFFFFF` gives no further clue by itself (looks like a generic/
 placeholder value, not a specific numbered diagnostic code). This is
 the next concrete thing to resolve.
+
+
+## 52nd finding (task #178): real BREAK exception delivery (ExcCode 9) confirmed as the actual unlock - boot now runs ~65M+ instructions past the previous BREAK@0x80000DC0 halt into a new, distinct wait-loop
+
+Directly following up on the 51st finding's "honest open question": is the
+real BREAK at `0x80000DC0` normal expected boot behavior, or a symptom of
+incomplete SIF/IOP integration? The user asked whether real IOP-side SIF
+command processing was the right next move; investigated instead (per an
+alternative, cheaper-to-test hypothesis) whether this project's own
+long-standing "BREAK always halts unconditionally" interpreter placeholder
+- a pragmatic stand-in from before real MIPS exception delivery existed,
+predating even the Cause/EPC/Status work - was itself the actual problem,
+since real R5900 hardware never stops executing on a BREAK: it raises a
+genuine Breakpoint exception (ExcCode 9) and vectors through the normal
+exception path, same as any other trap. User confirmed: implement real
+delivery and find out.
+
+**Implemented:** `EE_EXC_CODE_BP` (`9u << 2`), and the SPECIAL funct 0x0D
+(BREAK) case in `ee_core.c` now calls `ee_raise_exception(st,
+EE_EXC_CODE_BP, this_pc, in_delay_slot)` instead of `halt("BREAK")`. Caught
+and fixed a same-session bug before it shipped: the first draft of this
+change kept the old case's `return 1;` (this project's own "this step
+halted the core" convention, checked by `ee_core_run()`'s `if (ee_step())
+break;`), which would have made the exception-raise ALSO incorrectly report
+a halt despite `st->halted` never actually being set - inspected how the
+existing TLB-exception path handles this (raises via
+`ee_mem_check_tlb_fault()` deep inside a LW/SW case, then just `break`s to
+the shared end-of-step epilogue) and matched that convention exactly.
+
+**Added a step-cap safety net to `ee_core_run()`** (`EE_CORE_RUN_STEP_CAP`,
+20M instructions): its `while (!g_state.halted)` loop had never needed a
+bound before, since every prior path to `ee_step()` returning 1 came from
+an explicit `halt()` call. A BREAK that now vectors instead of halting -
+into a handler-free zero-filled buffer, as most of this project's
+hand-written EE unit tests do - would otherwise spin forever with no
+internal bound. Purely a host-native test-harness safety measure; no real-
+hardware counterpart, and it never fires for any correctly-behaving test.
+
+**Test fallout was much larger than initially scoped** - not the ~6 tests
+originally suspected (ones that write small immediates to Status,
+clobbering BEV), but effectively every EE unit test that used a trailing
+BREAK + `ee_core_run()` + `st->halted==1` as a "run to completion, then
+inspect state" convenience convention, because even tests that never touch
+Status (leaving BEV=1, the reset value) hit the same problem: the
+Breakpoint exception vectors into the same zero-filled BIOS buffer with no
+installed handler, decodes as harmless NOPs, and spins to the new step cap
+instead of halting. Fixed by category:
+
+- **Six tests with genuinely reachable end-of-program logic before the
+  BREAK** (`test_ee_cop0_special.c`, `test_ee_scratchpad_count.c`,
+  `test_ee_cop2_ctrl.c`, `test_ee_sa_reg.c`, `test_ee_exceptions.c` (one
+  subtest only), `test_ee_timer_interrupt.c` - already unaffected) were
+  converted to step exactly their real, useful instruction count via
+  `ee_core_step()`, stopping before the now-inert trailing BREAK, with
+  halted-based assertions replaced by direct register/state checks.
+  `test_ee_exceptions.c`'s `test_fetch_exception()` specifically had its
+  delay-slot BREAK swapped for a harmless canary `ADDIU`, since executing
+  a real BREAK there would have set Status.EXL=1 *before* the test's own
+  manual fetch-exception setup, corrupting the nested-exception EPC guard
+  it depends on.
+- **Twenty-nine tests** using a uniform `ee_core_run(&bios); CHECK(st->
+  halted == 1 [&& strstr(halt_reason,"BREAK")], ...)` pattern were fixed
+  with a mechanical, drop-in test-harness compatibility shim
+  (`run_until_break()`, inserted per-file, `ee_core_run(&X)` ->
+  `run_until_break(&X)`): it steps until either a genuine halt occurs (a
+  real bug) or Cause.ExcCode==9 with Status.EXL just set (i.e. exactly
+  where the BREAK fired), and in the latter case synthesizes the same
+  `st->halted=1` / `halt_reason` convention the old unconditional-halt code
+  produced - a test-harness-only bookkeeping shim that changes nothing
+  about `ee_core.c`'s real, production BREAK behavior.
+- **`test_system_handshake.c`** was different in kind: its "both cores
+  halted" check lives in `system_run_interleaved()` in
+  **production** `source/core/system.c` (the same interleaved scheduler
+  `main.c` uses for the real boot path), so it was correctly left
+  untouched - a real BREAK no longer halting the EE mid-boot is exactly
+  the intended, desired effect of this whole change. Fixed the test itself
+  instead: it no longer expects `ee->halted==1`, and directly checks
+  Cause.ExcCode==9/Status.EXL to confirm the EE genuinely reached its
+  BREAK as a real exception, while the IOP side (BREAK behavior
+  unchanged, out of scope here) is still checked via `halted==1`.
+
+**Verified:** full suite, 87/87 (88 build/run invocations counting
+`test_iop_module_loader_bootinfo`'s separate command), 0 failures, 0
+step-cap hits. Clean Wii/devkitPPC rebuild (toolchain re-linked this
+session per `TOOLCHAIN_SETUP_NOTES.md` - `LD_LIBRARY_PATH` pointing at the
+bundled `libmpfr.so.4` is what's easy to forget after a fresh sandbox).
+
+**Host-native diagnostic against the real BIOS - this is the actual
+experiment the user asked for:** boot no longer stops at `0x80000DC0`.
+`Status=0x70030C00` there decodes to `BEV=0`, so the Breakpoint exception
+vectors into RAM (the kernel's own installed general-exception handler,
+offset `0x180`) instead of the boot-time ROM vector - and that handler
+evidently just deals with it and returns (Status.EXL back to 0 downstream,
+consistent with a clean ERET), because the EE keeps running: confirmed
+executing correctly (not halted) after 65,000,000+ further instructions,
+having advanced from `0x80000DC0` to a completely different address
+region entirely. **This conclusively answers the open question from the
+51st finding: yes, the real kernel's installed handler silently resumes
+past this BREAK, exactly like real hardware handling an unattached-
+debugger breakpoint trap** - it was this project's own decade-old-by-this-
+project's-standards "BREAK always halts" interpreter placeholder that was
+the wall, not anything IOP/SIF-related. The user's original instinct to
+ask about IOP-side integration was reasonable given the symptom, but the
+actual root cause was one level up, in the EE interpreter's own opcode
+dispatch.
+
+**New wall found, next up for task #172:** boot now settles into a new,
+distinct, actively-executing loop around EE PC `0x8000F768` (confirmed via
+instruction-window tracing across a 65M-instruction run: it's a real,
+bounded loop repeatedly visiting `0x8000CF88-0x8000D01C`, `0x8000F768-
+0x8000F874`, not a crash or runaway-into-blank-memory). `$1` holds
+`0xB000E010` (the DMAC_STAT KSEG1 uncached mirror), and `$31` (return
+address) is `0x8000F86C`, meaning this is a called subroutine, not top-
+level code - shape strongly resembles this project's earlier LOADCORE-
+style device/registration-list scan loops (tasks #124/#132/#148 etc.),
+just at a different address and (very likely) a different list/condition.
+Not yet root-caused - that's the next concrete step.

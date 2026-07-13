@@ -159,20 +159,35 @@ int main(void)
 
     /* Slice cap chosen generously (each side's program is well under
      * 100 instructions and the poll loops only need to spin a few
-     * times waiting for the other side) - if the scheduler didn't
-     * really interleave, this would hit the cap and return 0 instead
-     * of both cores halting cleanly. */
-    int both_halted = system_run_interleaved(2000);
-    CHECK(both_halted == 1, "both cores halted before the slice cap (real interleaving happened)");
+     * times waiting for the other side).
+     *
+     * Task #178 note: the EE side's BREAK now raises a genuine
+     * Breakpoint exception (ExcCode 9) instead of unconditionally
+     * halting - real R5900 hardware never stops executing just
+     * because it hit a BREAK, and system_run_interleaved()'s own
+     * ee->halted && iop->halted gate (source/core/system.c) is real,
+     * shared production code also used by main.c's actual boot path,
+     * so it must NOT be changed to paper over this - it is now exactly
+     * as correct as the rest of task #178's change. This means EE will
+     * never set ee->halted from this test's own program anymore (its
+     * BREAK vectors into the zero-filled remainder of ee_bios and
+     * spins through harmless NOPs), so system_run_interleaved() is
+     * expected to hit the slice cap and return 0 here - only the IOP
+     * side still halts via its own (untouched) unconditional-BREAK
+     * convention. The cap is generous enough that both sides' real
+     * handshake logic (the actual thing under test) completes long
+     * before it's reached, which is verified directly below instead of
+     * via "both cores halted". */
+    system_run_interleaved(2000);
 
     ee_state_t  *ee  = ee_core_get_state();
     iop_state_t *iop = iop_core_get_state();
     sif_state_t *sif = sif_get_state();
 
-    CHECK(ee->halted == 1 && strstr(ee->halt_reason, "BREAK") != NULL,
-          "EE core halted cleanly on BREAK");
+    CHECK(((ee->cop0[13] >> 2) & 0x1Fu) == 9u && (ee->cop0[12] & 0x2u) != 0u,
+          "EE reached its BREAK as a real Breakpoint exception (ExcCode 9), not an unconditional halt");
     CHECK(iop->halted == 1 && strstr(iop->halt_reason, "BREAK") != NULL,
-          "IOP core halted cleanly on BREAK");
+          "IOP core halted cleanly on BREAK (IOP-side BREAK is untouched by task #178)");
 
     CHECK(sif->mscom == 0x1234u, "EE's MSCOM write landed in shared SIF state");
     CHECK((sif->msflag & 1u) == 1u, "EE's MSFLAG OR-write set bit 0");

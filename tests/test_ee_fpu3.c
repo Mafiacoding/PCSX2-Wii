@@ -28,6 +28,41 @@ static int failures = 0;
     else { printf("ok:   %s\n", msg); } \
 } while (0)
 
+/* Task #178 test-harness compatibility helper: BREAK now raises a
+ * genuine Breakpoint exception (ExcCode 9, see ee_core.c's SPECIAL
+ * funct 0x0D case) instead of unconditionally halting the emulated
+ * core - real R5900 hardware never stops executing just because it
+ * hit a BREAK. This project's existing test suite used a trailing
+ * BREAK + st->halted as a convenient "run to completion, then inspect
+ * final state" marker; rather than rewriting every such test's
+ * assertions, this drop-in replacement for ee_core_run() steps until
+ * EITHER the core genuinely halts on its own (a real bug - e.g. an
+ * unimplemented opcode) or a Breakpoint exception was just raised
+ * (Cause.ExcCode==9 and Status.EXL just got set, i.e. we're now
+ * sitting right at the vectored PC), and in the latter case
+ * synthesizes the exact same st->halted=1 / halt_reason convention the
+ * old unconditional-halt code produced - purely a test-harness
+ * bookkeeping shim. It changes nothing about ee_core.c's real,
+ * production BREAK behavior (which is what task #178 is actually
+ * testing against the real BIOS). */
+static void run_until_break(const bios_image_t *bios) {
+    (void)bios;
+    ee_state_t *st = ee_core_get_state();
+    long guard;
+    for (guard = 0; guard < 2000000L; guard++) {
+        if (ee_core_step()) return; /* genuine halt - not a BREAK, leave as-is */
+        if (((st->cop0[13] >> 2) & 0x1Fu) == 9u && (st->cop0[12] & 0x2u) != 0u) {
+            st->halted = 1;
+            snprintf(st->halt_reason, sizeof(st->halt_reason),
+                     "BREAK (task #178: real Breakpoint exception raised, ExcCode 9)");
+            return;
+        }
+    }
+    st->halted = 1;
+    snprintf(st->halt_reason, sizeof(st->halt_reason),
+             "run_until_break() safety cap reached without a Breakpoint exception");
+}
+
 static uint32_t enc_lui(int rt, uint16_t imm) { return (0x0F << 26) | (rt << 16) | imm; }
 static uint32_t enc_ori(int rt, int rs, uint16_t imm) { return (0x0D << 26) | (rs << 21) | (rt << 16) | imm; }
 static uint32_t enc_mtc1(int rt, int fs) { return (0x11 << 26) | (0x04 << 21) | (rt << 16) | (fs << 11); }
@@ -81,7 +116,7 @@ int main(void) {
     wle32(p+pc, enc_break()); pc += 4;
     if (ee_core_init(&bios) != 0) { printf("init failed\n"); return 1; }
     ee_state_t *st = ee_core_get_state();
-    ee_core_run(&bios);
+    run_until_break(&bios);
     CHECK(st->halted == 1, "ADDA.S test: core halted on BREAK");
     float acc1 = bits_float((uint32_t)st->gpr[3].ud0);
     CHECK(acc1 > 6.9999f && acc1 < 7.0001f, "ADDA.S: ACC = 3.0 + 4.0 == 7.0");
@@ -98,7 +133,7 @@ int main(void) {
     wle32(p+pc, enc_break()); pc += 4;
     ee_core_init(&bios);
     st = ee_core_get_state();
-    ee_core_run(&bios);
+    run_until_break(&bios);
     float acc2 = bits_float((uint32_t)st->gpr[3].ud0);
     CHECK(acc2 > 5.9999f && acc2 < 6.0001f, "SUBA.S: ACC = 10.0 - 4.0 == 6.0");
 
@@ -114,7 +149,7 @@ int main(void) {
     wle32(p+pc, enc_break()); pc += 4;
     ee_core_init(&bios);
     st = ee_core_get_state();
-    ee_core_run(&bios);
+    run_until_break(&bios);
     float acc3 = bits_float((uint32_t)st->gpr[3].ud0);
     CHECK(acc3 > 14.9999f && acc3 < 15.0001f, "MULA.S: ACC = 3.0 * 5.0 == 15.0");
 
@@ -132,7 +167,7 @@ int main(void) {
     wle32(p+pc, enc_break()); pc += 4;
     ee_core_init(&bios);
     st = ee_core_get_state();
-    ee_core_run(&bios);
+    run_until_break(&bios);
     float madd_result = bits_float((uint32_t)st->gpr[3].ud0);
     CHECK(madd_result > 13.9999f && madd_result < 14.0001f, "MADD.S: fd = ACC(2.0) + 3.0*4.0 == 14.0");
 
@@ -150,7 +185,7 @@ int main(void) {
     wle32(p+pc, enc_break()); pc += 4;
     ee_core_init(&bios);
     st = ee_core_get_state();
-    ee_core_run(&bios);
+    run_until_break(&bios);
     float msub_result = bits_float((uint32_t)st->gpr[3].ud0);
     CHECK(msub_result > 7.9999f && msub_result < 8.0001f, "MSUB.S: fd = ACC(20.0) - 3.0*4.0 == 8.0");
 
@@ -169,7 +204,7 @@ int main(void) {
     wle32(p+pc, enc_break()); pc += 4;
     ee_core_init(&bios);
     st = ee_core_get_state();
-    ee_core_run(&bios);
+    run_until_break(&bios);
     float madda_result = bits_float((uint32_t)st->gpr[3].ud0);
     CHECK(madda_result > 6.9999f && madda_result < 7.0001f, "MADDA.S: ACC = 1.0 + 2.0*3.0 == 7.0");
 
@@ -188,7 +223,7 @@ int main(void) {
     wle32(p+pc, enc_break()); pc += 4;
     ee_core_init(&bios);
     st = ee_core_get_state();
-    ee_core_run(&bios);
+    run_until_break(&bios);
     float msuba_result = bits_float((uint32_t)st->gpr[3].ud0);
     CHECK(msuba_result > 3.9999f && msuba_result < 4.0001f, "MSUBA.S: ACC = 10.0 - 2.0*3.0 == 4.0");
 
@@ -229,7 +264,7 @@ int main(void) {
     wle32(p+pc, enc_break()); pc += 4;
     ee_core_init(&bios);
     st = ee_core_get_state();
-    ee_core_run(&bios);
+    run_until_break(&bios);
     float madd_asym = bits_float((uint32_t)st->gpr[7].ud0);
     CHECK(madd_asym > -0.0001f && madd_asym < 0.0001f,
           "MADD.S asymmetry case: fd = fpuDouble(-Fmax) + fpuDouble(clamped +inf product) == 0.0 exactly");

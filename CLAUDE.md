@@ -3514,3 +3514,43 @@ bound LOADFILE service, with a payload that appears to reference a
 See docs/STATUS.md's 70th finding for full detail. New task #195:
 trace the real SifRpcCallPkt_t protocol and what a genuine LOADFILE
 IOP-side response needs to contain.
+
+## Checkpoint (Round 45, task #195/#196): real ELF-load of OSDSYS + syscalls 23/19/7 implemented; boot genuinely jumps into OSDSYS, re-enters a previously-solved wait loop as new open item
+
+Fixed a real descriptor-order bug in the RPC_CALL handler (payload
+descriptor precedes header descriptor in real _SifSendCmd(), opposite
+of this project's prior assumption - corrected via re-reading the
+fetched real ee/kernel/src/sifcmd.c). Implemented a real ELF32 loader
+for "rom0:OSDSYS": ROMDIR-looks-up the real 582,704-byte OSDSYS entry
+already present in the loaded BIOS image, copies its real PT_LOAD
+segment bytes into EE RAM, and returns the real e_entry/gp
+(gp hardcoded 0 per real eeelfloader.c behavior) - independently
+verified against a direct Python scan of the real BIOS
+(e_entry=0x00200008, byte-exact match).
+
+Implemented three new real EE syscalls in source/core/ee/ee_core.c,
+each confirmed via byte-exact real register-state matches: 23
+(_DisableDmac, mirrors already-implemented 22), 19
+(RemoveDmacHandler, mirrors 18, vectored as a real MIPS exception per
+the established task #180 pattern since real ps2sdk gives no C source
+for kernel-table syscalls), and 7 (_ExecPS2 - real ps2sdk ships no C
+source either, confirmed bare SYSCALL() trampoline - vectored the
+same way; $a0 matched OSDSYS's real e_entry byte-exact, definitive
+confirmation this is the real jump-to-loaded-program mechanism).
+
+Verified for real: all 87 regression tests pass; diagnostic against
+the fixed source confirms the entire chain fires (RPC_CALL -> ROMDIR
+lookup -> real ELF load -> WaitSema unpark -> _DisableDmac/
+RemoveDmacHandler -> _ExecPS2 with byte-exact real arguments). Boot
+then re-enters the 0x8000F768 wait loop this project's own 53rd-55th
+findings already root-caused and fixed the first time it was reached
+(task #180) - consistent with _ExecPS2 performing a genuine kernel
+re-init pass for the newly-executed program, but this second pass
+does not clear within a further 20M instructions this time. Honestly
+reported as a new, unresolved open item - not fabricated as solved.
+Clean Wii/devkitPPC rebuild verified.
+
+See docs/STATUS.md's 71st finding for full detail. New task #197:
+root-cause why the re-entered 0x8000F768 loop doesn't clear on this
+second pass (same live-disassembly/printf-trace methodology the 55th
+finding already proved effective for this exact code region).

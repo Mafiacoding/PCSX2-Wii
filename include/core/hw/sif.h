@@ -225,6 +225,37 @@ uint32_t sif_cmd_iop_get_init_cmd_count(void);
  * `sif_cmd_iop_send_rpcinit_ready()` above. */
 #define SIF_CMD_RPC_END    0x80000008u /* SIF_CMD_ID_SYSTEM | 8 */
 #define SIF_CMD_RPC_BIND   0x80000009u /* SIF_CMD_ID_SYSTEM | 9 */
+#define SIF_CMD_RPC_CALL   0x8000000Au /* SIF_CMD_ID_SYSTEM | 10 - task #195/#196 (71st finding).
+                                        * Confirmed via the fetched ee/kernel/src/sifrpc.c's
+                                        * sceSifCallRpc(): sends this cid via sceSifSendCmd()
+                                        * with a RPC_PACKET_SIZE=64-byte SifRpcCallPkt_t header
+                                        * (byte-exact match: this project's own diagnostic
+                                        * observed size=64 for this send, matching
+                                        * RPC_PACKET_SIZE exactly) plus a second DMA descriptor
+                                        * carrying the caller's raw sendbuf payload (matching
+                                        * _SifSendCmd()'s own "if (size>0) {...}" extra-payload
+                                        * branch, already byte-exact confirmed in the 67th
+                                        * finding). Real SifRpcCallPkt_t layout (56 bytes, from
+                                        * common/include/sifrpc-common.h, all 4-byte fields):
+                                        *   0x00 sifcmd (SifCmdHeader_t, 16B), 0x10 rec_id,
+                                        *   0x14 pkt_addr, 0x18 rpc_id, 0x1C cd, 0x20 rpc_number,
+                                        *   0x24 send_size, 0x28 recvbuf, 0x2C recv_size,
+                                        *   0x30 rmode, 0x34 sd.
+                                        * _request_end() (same real, already-resident handler
+                                        * this project already drives for RPC_BIND) dispatches
+                                        * on this cid too - for SIF_CMD_RPC_CALL it only calls
+                                        * cd->end_function if set (NULL for the synchronous
+                                        * calls this project has observed) then unconditionally
+                                        * iSignalSema(cd->hdr.sema_id), exactly like the BIND
+                                        * case - no cd->server/buf/cbuf writes for this cid, so
+                                        * this project's REND reply's sd/buf/cbuf fields are
+                                        * irrelevant for a CALL reply. The actual RPC RESULT
+                                        * DATA is delivered separately, directly into the
+                                        * caller-supplied recvbuf (a plain EE-memory write this
+                                        * project performs directly, matching how a real IOP
+                                        * service would DMA its own reply data there before
+                                        * sending the REND "done" signal) - not part of the REND
+                                        * packet's own fields at all. */
 
 void sif_cmd_iop_handle_rpc_bind(uint32_t cd_ptr);
 uint32_t sif_cmd_iop_get_rpc_bind_cd(void);

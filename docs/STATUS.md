@@ -9054,3 +9054,121 @@ task (task #195): trace the real `SifRpcCallPkt_t` layout, the real
 LOADFILE IOP-side response needs to contain.
 
 Clean Wii/devkitPPC rebuild verified.
+
+---
+
+## 71st finding (task #195/#196): fixed the RPC_CALL descriptor-order bug; implemented real ELF32 loading of "rom0:OSDSYS" from the BIOS ROM; implemented real syscalls 23 (_DisableDmac), 19 (RemoveDmacHandler), 7 (_ExecPS2) - boot now genuinely executes real EELOAD-equivalent code all the way through a real jump into OSDSYS's own kernel-reinit path
+
+Continuing directly from the 70th finding's discovery of a real
+`SIF_CMD_RPC_CALL` (LOADFILE ELF-load request), this round traced and
+implemented the full real protocol end to end.
+
+**Descriptor-order bug found and fixed.** The synthetic RPC_CALL
+handler initially looked for the request's payload descriptor
+("PAYLOAD" = the raw `_lf_elf_load_arg` struct, containing the target
+path) at index `i+1` relative to the header descriptor - this never
+matched (diagnostic showed the header always arrives at loop index
+`i=1` with `count=2`, i.e. there is no `i+1`). Re-reading real
+`_SifSendCmd()`'s exact source (`ee/kernel/src/sifcmd.c`) resolved
+this: when `size>0`, the extra-payload descriptor is built into
+`dmat[0]` FIRST, and the header packet descriptor is appended SECOND
+into `dmat[count]` (count now 1) - the OPPOSITE order this project
+had assumed. Fixed by reading the payload from `i-1` instead of `i+1`.
+
+**Real ELF32 loader implemented** (`sif_loadfile_elf_load()`,
+`romdir_lookup()` in `source/core/ee/ee_core.c`), grounded in two real
+sources fetched via the user-supplied ps2sdk-master.zip:
+  - `iop/system/loadfile/src/eeelfloader.c`'s `elf_load_all_section()`:
+    confirms every `PT_LOAD` program header's real file bytes are
+    copied into EE RAM at the segment's real `p_vaddr` (zero-filling
+    the BSS gap `p_memsz-p_filesz`), and that the real IOP-side reply
+    for a full-ELF load returns `*result_out = e_entry` (real) but
+    `*result_module_out = 0` (a literal hardcoded 0, not computed) -
+    this project's own reply matches exactly, not fabricated.
+  - This project's own already-tested ROMDIR-based file-lookup
+    mechanism (`iop_module_loader.c`'s `locate_and_parse_romdir()`),
+    reimplemented for this new caller (same "each caller needs a
+    different slice" reasoning that file already documents for not
+    sharing with `bios_loader.c` either).
+
+Verified via Python replication of the same ROMDIR-walk algorithm
+against the real BIOS: "OSDSYS" is a genuine 582,704-byte ROMDIR entry
+whose bytes are a valid ELF32 MIPS executable (magic `7F 45 4C 46`,
+`e_entry=0x00200008`, one `PT_LOAD` segment at `vaddr=0x200000`,
+`filesz=0x8D1EC`, `memsz=0x2702B0`) - real, legally-owned BIOS ROM
+bytes already present in this project's own loaded `bios_image_t`, not
+downloaded or fabricated.
+
+**Path parsing**: the real `sceSifCallRpc()` payload is
+`_lf_elf_load_arg{ p; modres; path[252]; secname[252]; }` with `path`
+starting at offset 8; real observed strings are `"rom0:OSDSYS"`-style.
+This project's ROMDIR stores entries by bare name (no device prefix),
+so the handler skips past the `"rom0:"` device-name colon rather than
+searching for a literal `"rom0:OSDSYS"` ROMDIR entry (which would
+never match) - diagnostic-confirmed to correctly extract `"OSDSYS"`.
+
+**Real result delivery**: unlike the RPC_BIND case, real
+`_request_end()` does NOT write any result data into the REND packet
+for a `SIF_CMD_RPC_CALL` reply (only `cd->end_function`/
+`iSignalSema()`, confirmed by re-reading the fetched `sifrpc.c` to the
+end) - the actual `t_ExecData`-style `epc`/`gp` result is written
+DIRECTLY into the caller's own `recvbuf` (same address as `sendbuf` in
+this real call, per the fetched `_SifLoadElfPart()` source), matching
+real protocol: the REND is only a "done" signal, not a data carrier.
+
+**Three new real EE syscalls implemented, all confirmed byte-exact via
+diagnostic tracing of the real caller's own register state at each new
+wall, each cross-checked against the real, fetched
+`ee/kernel/include/syscallnr.h`:**
+  - **23 (`0x17`, `_DisableDmac`)**: the exact mirror-image counterpart
+    to the already-implemented 22 (`_EnableDmac`, task #176) - reached
+    right after the LOADFILE RPC completes, `$a0=5`
+    (`DMA_CHANNEL_SIF0`, same channel `_EnableDmac`'s own citation
+    documents). Implemented as the real inverse of
+    `dma_channel_set_irq_enable(channel, 1)`.
+  - **19 (`0x13`, `RemoveDmacHandler`)**: the real counterpart to the
+    already-implemented 18 (`AddDmacHandler`, task #180's own fix).
+    Per this project's own already-learned task #180 lesson ("don't
+    guess at a kernel-table-mutating syscall's internal bookkeeping -
+    let it vector as a real MIPS Syscall exception so genuine BIOS
+    code runs"), implemented identically to 18: `ee_raise_exception()`.
+  - **7 (`0x07`, `_ExecPS2`)**: THE genuine mechanism that transfers
+    control to a freshly-loaded program. `$a0=0x00200008` (byte-exact
+    match to OSDSYS's real `e_entry`), `$a1=0` (matching this round's
+    synthetic reply's `gp=0`), `$a2=1`, `$a3=`(argv pointer) - i.e.
+    real BIOS/EELOAD code calling `ExecPS2(data.epc, data.gp, argc,
+    argv)` exactly as real ps2sdk's own `exit.c` wrapper does. Real
+    ps2sdk ships NO C source for `_ExecPS2` itself - confirmed via the
+    fetched `ee/kernel/src/kernel.S`, which shows it is a bare
+    `SYSCALL(_ExecPS2)` trampoline macro (a raw syscall instruction
+    wrapper, exactly like CreateSema/WaitSema before it), meaning its
+    real internal behavior lives entirely in BIOS ROM. Implemented
+    identically to 18/19 for the same reason.
+
+**Verified, substantial, real forward progress:** all 87 regression
+tests pass; a host-native diagnostic against the real, fixed source
+confirms: the RPC_CALL fires correctly, `romdir_lookup()` finds
+"OSDSYS", `sif_loadfile_elf_load()` succeeds with
+`epc=0x00200008 gp=0x00000000` (byte-exact real values), WaitSema
+unparks, `_DisableDmac`/`RemoveDmacHandler` vector and resolve, and
+`_ExecPS2` is reached and vectors into the real, resident BIOS kernel
+exception handler - which (based on the observed resulting EE PC) APPEARS
+to perform a genuine kernel re-initialization pass, since execution
+lands back in the `0x8000F768` wait loop this project's own 53rd/54th/
+55th findings (from a much earlier round) already extensively
+root-caused and fixed the FIRST time boot reached it (task #180's
+AddDmacHandler-vectoring fix, already merged and active). Boot now
+appears to re-enter this same loop a SECOND time (consistent with
+`_ExecPS2` performing a real "reinitialize hardware/kernel state for
+the new program" pass, matching real PS2 ExecPS2 semantics of giving a
+newly-executed program a clean bring-up), but does not clear it within
+a further 20,000,000 instructions this time - an honestly-reported,
+not-yet-root-caused open result, not a fabricated success. Clean
+Wii/devkitPPC rebuild verified.
+
+**New task #197 for the next round:** determine why the re-entered
+`0x8000F768` loop (or whichever DMAC/INTC condition it's now actually
+waiting on this second time) doesn't clear the way it did the first
+time - likely requires the same live-disassembly/printf-trace
+methodology the 55th finding already established as effective for
+this exact code region.

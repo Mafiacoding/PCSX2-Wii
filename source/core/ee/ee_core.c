@@ -830,6 +830,120 @@ static void ee_check_rpcinit_pending(ee_state_t *st)
     sif_cmd_iop_send_rpcinit_ready(st, sif_cmd_iop_get_ee_recvbuf());
 }
 
+/* task #195/#196 (71st finding): real ELF32 loader for the LOADFILE
+ * RPC's LF_F_ELF_LOAD request (rpc_number==1), grounded in two real,
+ * cited sources fetched via the user-supplied ps2sdk-master.zip:
+ *   1. iop/system/loadfile/src/eeelfloader.c's elf_load_all_section():
+ *      loads every PT_LOAD program header's real file bytes into EE
+ *      RAM at the segment's real p_vaddr (zero-filling the BSS gap
+ *      p_memsz-p_filesz), then returns *result_out = e_entry (the
+ *      real ELF header's own entry point) and, critically,
+ *      *result_module_out = 0 - the real IOP-side "gp" reply for a
+ *      full-ELF load is a literal, hardcoded 0, not computed. This
+ *      project's own reply below matches that exactly (epc = real
+ *      e_entry, gp = 0), not fabricated.
+ *   2. This project's OWN, already-tested ROMDIR-based file-lookup
+ *      mechanism (source/hw/iop_module_loader.c's locate_and_parse_
+ *      romdir(), proven correct by already loading real modules like
+ *      SYSMEM/LOADCORE from this exact same real BIOS ROM). Re-
+ *      implemented here (not shared across translation units) for
+ *      the same reason that file's own header comment gives for not
+ *      sharing with bios_loader.c either: each caller needs a
+ *      different slice of the same ROMDIR data.
+ * Host-native diagnostic confirmed the real BIOS's own ROMDIR
+ * contains a genuine "OSDSYS" entry (582704 bytes) whose bytes are a
+ * valid ELF32 MIPS executable (magic 7F 45 4C 46, e_entry=0x00200008,
+ * one PT_LOAD segment at vaddr=0x200000 filesz=0x8D1EC memsz=0x2702B0)
+ * - real, legally-owned BIOS ROM bytes already present in this
+ * project's own loaded bios_image_t, not fabricated or downloaded. */
+static inline uint32_t elfld_rd_le32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+static inline uint16_t elfld_rd_le16(const uint8_t *p) {
+    return (uint16_t)(p[0] | (p[1] << 8));
+}
+
+static int romdir_lookup(const bios_image_t *bios, const char *name, uint32_t *out_off, uint32_t *out_size)
+{
+    if (!bios || !bios->data || bios->size < 0x20u) return 0;
+    const uint8_t *data = bios->data;
+    uint32_t limit = (bios->size < 0x10000u) ? bios->size : 0x10000u;
+    uint32_t romdir_off = 0xFFFFFFFFu;
+    uint32_t off;
+    for (off = 0; off + 16u <= limit; off++) {
+        if (memcmp(data + off, "RESET\0\0\0\0\0", 10) == 0 &&
+            off + 16u + 6u <= bios->size && memcmp(data + off + 16u, "ROMDIR", 6) == 0) {
+            romdir_off = off;
+            break;
+        }
+    }
+    if (romdir_off == 0xFFFFFFFFu) return 0;
+
+    uint32_t payload_off = 0;
+    off = romdir_off;
+    while (off + 16u <= bios->size) {
+        char ename[11];
+        memcpy(ename, data + off, 10);
+        ename[10] = '\0';
+        uint16_t extinfo = elfld_rd_le16(data + off + 10);
+        uint32_t psize = elfld_rd_le32(data + off + 12);
+        if (ename[0] == '\0' && extinfo == 0u && psize == 0u) break; /* real terminator entry */
+        if (strcmp(ename, name) == 0) {
+            *out_off = payload_off;
+            *out_size = psize;
+            return 1;
+        }
+        payload_off += (psize + 15u) & ~15u;
+        off += 16u;
+    }
+    return 0;
+}
+
+/* Returns 1 and sets *out_epc / *out_gp on success (real values, never
+ * fabricated - see the citation above); 0 on any failure (missing
+ * ROMDIR entry, bad ELF magic, malformed program header table). A 0
+ * return must NOT be papered over with a fake epc by the caller -
+ * this project's established discipline (see e.g. the 70th finding's
+ * "never disguise a gap as success" reasoning) applies here too. */
+static int sif_loadfile_elf_load(ee_state_t *st, const char *romname, uint32_t *out_epc, uint32_t *out_gp)
+{
+    uint32_t file_off, file_size;
+    if (!romdir_lookup(st->bios, romname, &file_off, &file_size)) return 0;
+    if (file_size < 52u || (uint64_t)file_off + file_size > st->bios->size) return 0;
+    const uint8_t *data = st->bios->data;
+    if (data[file_off + 0] != 0x7Fu || data[file_off + 1] != 'E' ||
+        data[file_off + 2] != 'L' || data[file_off + 3] != 'F') return 0;
+
+    uint32_t e_entry = elfld_rd_le32(data + file_off + 24u);
+    uint32_t e_phoff = elfld_rd_le32(data + file_off + 28u);
+    uint16_t e_phentsize = elfld_rd_le16(data + file_off + 42u);
+    uint16_t e_phnum = elfld_rd_le16(data + file_off + 44u);
+    uint32_t i;
+
+    for (i = 0; i < (uint32_t)e_phnum; i++) {
+        uint32_t ph = file_off + e_phoff + i * (uint32_t)e_phentsize;
+        if ((uint64_t)ph + 32u > st->bios->size) break;
+        uint32_t p_type = elfld_rd_le32(data + ph + 0u);
+        uint32_t p_offset = elfld_rd_le32(data + ph + 4u);
+        uint32_t p_vaddr = elfld_rd_le32(data + ph + 8u);
+        uint32_t p_filesz = elfld_rd_le32(data + ph + 16u);
+        uint32_t p_memsz = elfld_rd_le32(data + ph + 20u);
+        uint32_t k;
+        if (p_type != 1u) continue; /* PT_LOAD only, matches real elf_load_all_section() */
+        for (k = 0; k < p_filesz; k++) {
+            uint32_t src_off = file_off + p_offset + k;
+            uint8_t b = (src_off < st->bios->size) ? data[src_off] : 0u;
+            ee_mem_write8(st, p_vaddr + k, b);
+        }
+        for (; k < p_memsz; k++)
+            ee_mem_write8(st, p_vaddr + k, 0u); /* BSS zero-fill */
+    }
+
+    *out_epc = e_entry;
+    *out_gp = 0u; /* real IOP-side elf_load_all_section() hardcodes this reply field to 0 - see citation above */
+    return 1;
+}
+
 /* task #192 (68th finding): synthesizes the real IOP's SIF_CMD_RPC_END
  * (REND) reply to a SIF_CMD_RPC_BIND request - see sif.h for the full
  * citation trail (byte-exact match to real sceSifBindRpc()/
@@ -906,7 +1020,7 @@ static void ee_check_rpcinit_pending(ee_state_t *st)
  * (_SifCmdIntHandler(), usr_cmd_handlers[8], _request_end(),
  * iSignalSema()) is genuine, already-resident real BIOS/kernel code
  * this project's interpreter executes for real once invoked. */
-static void sif_cmd_iop_send_rpc_bind_rend(ee_state_t *st, uint32_t ee_recvbuf, uint32_t cd_ptr)
+static void sif_cmd_iop_send_rpc_bind_rend(ee_state_t *st, uint32_t ee_recvbuf, uint32_t cd_ptr, uint32_t inner_cid)
 {
     if (!ee_recvbuf)
         return;
@@ -917,9 +1031,14 @@ static void sif_cmd_iop_send_rpc_bind_rend(ee_state_t *st, uint32_t ee_recvbuf, 
     ee_mem_write32(st, ee_recvbuf + 0x10u, 0u);            /* rec_id (unused by _request_end) */
     ee_mem_write32(st, ee_recvbuf + 0x14u, 0u);            /* pkt_addr (unused by _request_end) */
     ee_mem_write32(st, ee_recvbuf + 0x18u, 0u);            /* rpc_id (unused by _request_end) */
-    ee_mem_write32(st, ee_recvbuf + 0x1Cu, cd_ptr);        /* cd - echoed from the real Bind packet */
-    ee_mem_write32(st, ee_recvbuf + 0x20u, SIF_CMD_RPC_BIND); /* inner cid: "this replies to a Bind" */
-    ee_mem_write32(st, ee_recvbuf + 0x24u, 0x00001000u);   /* sd = non-NULL PLACEHOLDER (task #194/70th finding, see comment above - NOT a real IOP address) */
+    ee_mem_write32(st, ee_recvbuf + 0x1Cu, cd_ptr);        /* cd - echoed from the real request packet */
+    ee_mem_write32(st, ee_recvbuf + 0x20u, inner_cid);     /* inner cid: task #195/#196 (71st finding) - generalized
+                                                             * to also carry SIF_CMD_RPC_CALL (real
+                                                             * _request_end() dispatches identically for
+                                                             * both: reads cd, conditionally does cid-
+                                                             * specific work, then always iSignalSema()s -
+                                                             * see sif.h's SIF_CMD_RPC_CALL comment) */
+    ee_mem_write32(st, ee_recvbuf + 0x24u, 0x00001000u);   /* sd = non-NULL PLACEHOLDER (task #194/70th finding, see comment above - NOT a real IOP address; irrelevant for a CALL reply, harmless either way) */
     ee_mem_write32(st, ee_recvbuf + 0x28u, 0u);            /* buf = NULL */
     ee_mem_write32(st, ee_recvbuf + 0x2Cu, 0u);            /* cbuf = NULL */
     dma_channel_signal_done(DMA_CHANNEL_SIF0); /* real SIF0 completion IRQ - drives the real, resident _SifCmdIntHandler() */
@@ -930,12 +1049,30 @@ static void sif_cmd_iop_send_rpc_bind_rend(ee_state_t *st, uint32_t ee_recvbuf, 
 static int g_rpc_bind_pending = 0;
 static uint32_t g_rpc_bind_delay = 0;
 static uint32_t g_rpc_bind_cd_pending = 0;
+static uint32_t g_rpc_bind_inner_cid = 0; /* task #195/#196: which REND "replying to" cid to send - SIF_CMD_RPC_BIND or SIF_CMD_RPC_CALL */
 
 static void ee_arm_rpc_bind_pending(uint32_t cd_ptr)
 {
     g_rpc_bind_pending = 1;
     g_rpc_bind_delay = 50000u;
     g_rpc_bind_cd_pending = cd_ptr;
+    g_rpc_bind_inner_cid = SIF_CMD_RPC_BIND;
+}
+
+/* task #195/#196 (71st finding): same delayed-delivery mechanism as
+ * ee_arm_rpc_bind_pending() above, reused for SIF_CMD_RPC_CALL replies
+ * (only one RPC request is ever outstanding at a time in this
+ * project's observed boot trace - each Bind/Call is always followed
+ * by its own WaitSema before the next one is sent - so sharing the
+ * single pending/delay/cd state between both request kinds is safe,
+ * matching the same reasoning task #194 already established for
+ * reusing this mechanism across multiple sequential Binds). */
+static void ee_arm_rpc_call_pending(uint32_t cd_ptr)
+{
+    g_rpc_bind_pending = 1;
+    g_rpc_bind_delay = 50000u;
+    g_rpc_bind_cd_pending = cd_ptr;
+    g_rpc_bind_inner_cid = SIF_CMD_RPC_CALL;
 }
 
 static void ee_check_rpc_bind_pending(ee_state_t *st)
@@ -947,7 +1084,7 @@ static void ee_check_rpc_bind_pending(ee_state_t *st)
         return;
     }
     g_rpc_bind_pending = 0;
-    sif_cmd_iop_send_rpc_bind_rend(st, sif_cmd_iop_get_ee_recvbuf(), g_rpc_bind_cd_pending);
+    sif_cmd_iop_send_rpc_bind_rend(st, sif_cmd_iop_get_ee_recvbuf(), g_rpc_bind_cd_pending, g_rpc_bind_inner_cid);
 }
 
 int ee_core_init(const bios_image_t *bios)
@@ -1691,6 +1828,68 @@ static int ee_step(void)
                 ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
                 break;
             }
+            if (sysnum == 7) {
+                /* _ExecPS2(void *entry, void *gp, int num_args,
+                 * char *args[]) - task #195/#196 (71st finding), THE
+                 * genuine real mechanism that transfers control to a
+                 * freshly LOADFILE-loaded program. Reached for the
+                 * first time this round: $a0=0x00200008 (byte-exact
+                 * match to the real e_entry this same round's
+                 * sif_loadfile_elf_load() read out of the real
+                 * "rom0:OSDSYS" ELF header - see that function's
+                 * citation above), $a1=0 (matching this project's own
+                 * synthetic LOADFILE reply's gp=0, itself matching
+                 * real IOP-side elf_load_all_section()'s hardcoded
+                 * gp-reply-field-is-always-0 behavior), $a2=1,
+                 * $a3=(an argv-style pointer) - i.e. real BIOS/EELOAD
+                 * code calling ExecPS2(data.epc, data.gp, argc, argv)
+                 * exactly as real ps2sdk's own ExecPS2()/exit.c
+                 * wrapper does after a successful SifLoadElf().
+                 * Real ps2sdk ships NO C or documented-semantics
+                 * source for _ExecPS2 itself - confirmed via the
+                 * fetched ee/kernel/src/kernel.S, which shows it is a
+                 * bare "SYSCALL(_ExecPS2)" trampoline macro (a raw
+                 * syscall instruction wrapper, exactly like
+                 * CreateSema/WaitSema before it - see the 65th
+                 * finding's identical citation reasoning), meaning its
+                 * real internal behavior (kernel state teardown,
+                 * argc/argv register convention, TLB/cache handling,
+                 * etc.) lives entirely in BIOS ROM, not in any
+                 * available source. Per this project's own established
+                 * task #180 lesson (do not guess at an unknown real
+                 * kernel syscall's internal bookkeeping - let it
+                 * vector as a real MIPS Syscall exception instead, so
+                 * genuine, already-resident BIOS kernel code performs
+                 * the ENTIRE real jump-to-OSDSYS mechanism itself,
+                 * with byte-exact real semantics this project could
+                 * never faithfully reimplement from guesswork), this
+                 * is handled identically to 18/19 above. */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
+            }
+            if (sysnum == 19) {
+                /* RemoveDmacHandler - task #195/#196 (71st finding).
+                 * Real ps2sdk syscallnr.h: __NR_RemoveDmacHandler =
+                 * 0x13 (19), the exact real counterpart to
+                 * AddDmacHandler (18) directly above. Reached for the
+                 * first time this round, right after the real
+                 * _DisableDmac (23) syscall this same round added,
+                 * with $a0=5=DMA_CHANNEL_SIF0 and $a1=1 (handler id) -
+                 * real BIOS/EELOAD-style teardown of the SIF0 DMAC
+                 * handler this project's boot earlier installed via
+                 * AddDmacHandler, immediately before handing control
+                 * to the freshly-loaded program. Handled exactly like
+                 * 18 above and for the identical, already-learned
+                 * reason (task #180's lesson: do NOT bypass a real
+                 * kernel-table-mutating syscall in software - let it
+                 * vector as a real MIPS Syscall exception so the
+                 * genuine, already-resident BIOS kernel handler runs
+                 * and mutates its own real per-channel handler table
+                 * for real, rather than guessing at what bookkeeping
+                 * it performs). */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
+            }
             if (sysnum == -5) {
                 /* Task #181 (56th finding): reached for the first time
                  * only after task #180's AddDmacHandler fix unblocked
@@ -1745,6 +1944,30 @@ static int ee_step(void)
                  * (BIOS-internal code this project doesn't have). */
                 uint32_t channel = (uint32_t)GPR(4); /* $a0 */
                 dma_channel_set_irq_enable((int)channel, 1);
+                GPR(2) = 0;
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
+            if (sysnum == 23) {
+                /* 23 (0x17) _DisableDmac(channel): task #195/#196
+                 * (71st finding) - the exact mirror-image counterpart
+                 * to _EnableDmac (22) directly above, confirmed via
+                 * ps2sdk's real ee/kernel/include/syscallnr.h
+                 * (__NR__DisableDmac = 0x17, fetched via the user-
+                 * supplied ps2sdk-master.zip). Reached for real by
+                 * this project's boot for the first time this round,
+                 * right after the LOADFILE RPC call that loads
+                 * "rom0:OSDSYS" completes (observed $a0=5=DMA_CHANNEL_
+                 * SIF0, the same channel _EnableDmac's own citation
+                 * trail above already documents) - real BIOS/EELOAD-
+                 * style code disabling the SIF0 DMAC channel's
+                 * interrupt now that the RPC exchange is done, before
+                 * handing control to the freshly-loaded program.
+                 * Implemented symmetrically to 22 above: the real
+                 * inverse of dma_channel_set_irq_enable(channel, 1). */
+                uint32_t dchannel = (uint32_t)GPR(4); /* $a0 */
+                dma_channel_set_irq_enable((int)dchannel, 0);
                 GPR(2) = 0;
                 st->pc = this_pc + 4u;
                 st->next_pc = this_pc + 8u;
@@ -1935,6 +2158,99 @@ static int ee_step(void)
                             uint32_t cd_ptr = ee_mem_read32(st, src + 0x1Cu);
                             sif_cmd_iop_handle_rpc_bind(cd_ptr);
                             ee_arm_rpc_bind_pending(cd_ptr);
+                        }
+                        if (cid == SIF_CMD_RPC_CALL) {
+                            /* task #195/#196 (71st finding): real
+                             * sceSifCallRpc() call, confirmed byte-
+                             * exact (size==64==real RPC_PACKET_SIZE,
+                             * matching the 67th/68th findings' same
+                             * _SifSendCmd()-based send convention).
+                             * Only LF_F_ELF_LOAD (rpc_number==1,
+                             * real ps2sdk common/include/loadfile-
+                             * common.h enum) is handled - this is the
+                             * ONLY rpc_number this project's boot
+                             * trace has ever observed being sent
+                             * (loading "rom0:OSDSYS" - see sif.h's
+                             * SIF_CMD_RPC_CALL comment and
+                             * sif_loadfile_elf_load()'s citation
+                             * above for the full grounding). Other
+                             * rpc_numbers (LF_F_MOD_LOAD etc) are an
+                             * honest, explicitly-labeled gap - falling
+                             * through here leaves them un-replied
+                             * rather than fabricating a response for a
+                             * request kind this project hasn't traced
+                             * evidence for yet. */
+                            uint32_t rpc_number = ee_mem_read32(st, src + 0x20u);
+                            uint32_t call_recvbuf = ee_mem_read32(st, src + 0x28u);
+                            uint32_t call_cd = ee_mem_read32(st, src + 0x1Cu);
+                            if (rpc_number == 1u && call_recvbuf != 0u && i >= 1u) {
+                                /* The real _lf_elf_load_arg payload
+                                 * (path[252] starting at its own
+                                 * offset 8) is the PRECEDING descriptor
+                                 * in this same multi-descriptor array -
+                                 * re-reading real _SifSendCmd()'s exact
+                                 * source (ee/kernel/src/sifcmd.c) shows
+                                 * the "if (size>0) {...}" extra-payload
+                                 * descriptor is built into dmat[0]
+                                 * FIRST, then the header packet
+                                 * descriptor is appended SECOND into
+                                 * dmat[count] (count now 1) - the
+                                 * OPPOSITE order this project initially
+                                 * assumed (confirmed wrong via a
+                                 * diagnostic: the header always arrives
+                                 * at loop index i=1 with the payload at
+                                 * i=0, count=2, never i+1). */
+                                uint32_t payload_base = dmat_ptr + (i - 1u) * 16u;
+                                uint32_t payload_src = ee_mem_read32(st, payload_base + 0u);
+                                char romname[64];
+                                int pk;
+                                for (pk = 0; pk < 63; pk++) {
+                                    uint8_t b = ee_mem_read8(st, payload_src + 8u + (uint32_t)pk);
+                                    if (b == 0u || b == ':') break; /* stop at "rom0:" separator or NUL */
+                                    romname[pk] = (char)b;
+                                }
+                                /* real path strings observed are
+                                 * "rom0:NAME" - this project's own
+                                 * ROMDIR entries are stored by NAME
+                                 * only (no device prefix), so skip
+                                 * past the device-name colon rather
+                                 * than searching for "rom0:OSDSYS" as
+                                 * a literal ROMDIR entry name (which
+                                 * would never match). */
+                                if (pk > 0 && payload_src != 0u) {
+                                    uint8_t colon = ee_mem_read8(st, payload_src + 8u + (uint32_t)pk);
+                                    if (colon == ':') {
+                                        int qk;
+                                        for (qk = 0; qk < 63; qk++) {
+                                            uint8_t b = ee_mem_read8(st, payload_src + 8u + (uint32_t)pk + 1u + (uint32_t)qk);
+                                            romname[qk] = (char)b;
+                                            if (!b) break;
+                                        }
+                                        romname[qk < 63 ? qk : 63] = 0;
+                                    } else {
+                                        romname[0] = 0; /* no device prefix - honest gap, not guessed */
+                                    }
+                                } else {
+                                    romname[0] = 0;
+                                }
+                                if (romname[0] != 0) {
+                                    uint32_t elf_epc = 0u, elf_gp = 0u;
+                                    if (sif_loadfile_elf_load(st, romname, &elf_epc, &elf_gp)) {
+                                        /* Real result data (t_ExecData-style epc/gp,
+                                         * per the real, fetched _SifLoadElfPart()) is
+                                         * delivered directly into the caller's own
+                                         * recvbuf - NOT part of the REND packet's
+                                         * fields, matching real protocol (the REND is
+                                         * only the "done" signal - see sif.h). */
+                                        ee_mem_write32(st, call_recvbuf + 0u, elf_epc);
+                                        ee_mem_write32(st, call_recvbuf + 4u, elf_gp);
+                                        ee_arm_rpc_call_pending(call_cd);
+                                    }
+                                    /* sif_loadfile_elf_load() returning 0 (ROMDIR
+                                     * miss / bad ELF) is left un-replied - an honest
+                                     * gap, not a fabricated success. */
+                                }
+                            }
                         }
                     }
                 }

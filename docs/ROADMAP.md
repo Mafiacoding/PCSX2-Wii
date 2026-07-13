@@ -2153,3 +2153,46 @@ module, possibly the boot logo). Clean Wii/devkitPPC rebuild verified.
 See docs/STATUS.md's 70th finding for full detail. New task #195:
 trace the real SifRpcCallPkt_t protocol and what a genuine LOADFILE
 response needs to contain.
+
+## UPDATE (Round 45, task #195/#196): fixed RPC_CALL descriptor-order bug; implemented real ELF32 loading of "rom0:OSDSYS"; implemented syscalls 23/19/7 (_DisableDmac/RemoveDmacHandler/_ExecPS2) - boot genuinely executes real jump into OSDSYS, re-enters a previously-solved wait loop as new open item
+
+Traced the real SifRpcCallPkt_t/sceSifCallRpc() protocol against the
+user-uploaded ps2sdk-master.zip. Found and fixed a descriptor-order
+bug: the RPC_CALL payload descriptor (the raw request struct
+containing the target path) is built BEFORE the header descriptor by
+real _SifSendCmd() (dmat[0]=payload, then dmat[1]=header), the
+opposite of what this project's synthetic handler assumed.
+
+Implemented a real ELF32 loader for "rom0:OSDSYS" straight out of the
+already-loaded BIOS ROM image: a ROMDIR lookup finds the real
+582,704-byte "OSDSYS" entry, its PT_LOAD segment's real bytes are
+copied into EE RAM at the real p_vaddr (BSS zero-filled), and the real
+e_entry/gp are returned - grounded in the real
+iop/system/loadfile/src/eeelfloader.c behavior (including the
+non-obvious detail that gp is always hardcoded 0 for full-ELF loads,
+not computed). Independently verified against a direct Python ROMDIR/
+ELF scan of the real BIOS: e_entry=0x00200008, matches exactly.
+
+Implemented three new real EE syscalls, each confirmed via byte-exact
+register-state matches at each new wall: 23 (_DisableDmac, mirror of
+already-implemented 22), 19 (RemoveDmacHandler, mirror of 18, vectored
+as a real exception per the task #180 lesson), and 7 (_ExecPS2 - the
+actual jump-to-loaded-program mechanism; $a0 matched OSDSYS's real
+e_entry byte-exact). Real ps2sdk ships no C source for _ExecPS2
+itself (confirmed bare SYSCALL() trampoline in kernel.S) so it too is
+vectored as a real exception into resident BIOS code, consistent with
+this project's established syscall-7/18/19 pattern.
+
+Verified: all 87 regression tests pass; diagnostic confirms the full
+chain fires for real (RPC_CALL -> ROMDIR lookup -> ELF load -> WaitSema
+unpark -> _DisableDmac/RemoveDmacHandler -> _ExecPS2 with byte-exact
+real arguments). Execution then re-enters the 0x8000F768 wait loop
+this project's own 53rd-55th findings (a much earlier round)
+extensively root-caused and fixed the first time boot reached it
+(task #180) - consistent with _ExecPS2 performing a genuine hardware/
+kernel re-init pass for the newly-executed program, but this second
+pass does not clear within a further 20M instructions. Honestly
+reported as unresolved, not fabricated. Clean Wii/devkitPPC rebuild
+verified. See docs/STATUS.md's 71st finding for full detail. New task
+#197: root-cause why the re-entered 0x8000F768 loop doesn't clear the
+second time.

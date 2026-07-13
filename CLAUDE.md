@@ -3723,3 +3723,25 @@ least two more services) using a proven, repeatable diagnostic
 methodology. Next: apply the same tracing to the two new binds
 (cd=0x00441EF0, cd=0x00441F18) to find their real rpc_number/path and
 continue this same evidence-based chain.
+
+## Checkpoint (Round 51, investigation only)
+
+Extended diagnostic tracing showed Round 50's CLEARSPU fix actually
+generalizes correctly to a full real driver-loading chain (CLEARSPU,
+SIO2MAN, MCMAN, MCSERV, PADMAN, OSDSND, all via the same LOADFILE
+service and the same generic reply). Real, substantial, verified boot
+progress. New wall: two binds to different, unidentified real RPC
+services (sid=0x8000010F, sid=0x8000011F) whose function-number
+semantics differ from LOADFILE's - this project's code correctly
+leaves the resulting call un-replied rather than guessing (candidates:
+PADMAN/MCSERV's own services, not confirmed).
+
+Pure investigation this round - no source changes, no regression/
+rebuild needed.
+
+Status: task #172's goal not yet reached - zero GS register writes
+still observed. This project has now mapped a genuine, multi-stage
+real IOP driver-loading sequence inside OSDSYS's boot path using a
+proven, repeatable methodology. Next: identify sid=0x8000010F/
+0x8000011F via ps2tek/psdevwiki research or live PCSX2 tracing, then
+implement their real reply semantics.

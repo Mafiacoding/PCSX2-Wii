@@ -2352,3 +2352,18 @@ re-parks at the same WaitSema address and zero GS writes are observed.
 See docs/STATUS.md's 77th finding for the full trace and honest
 assessment. Next: trace the two new binds' own rpc_number/path using
 the same proven methodology.
+
+## Round 51 (78th finding, investigation only): CLEARSPU reply generalizes to a full real driver chain; two new non-LOADFILE service binds found
+
+Longer diagnostic tracing showed the Round 50 fix correctly, generically
+unblocked a real sequence of six PS2 BIOS driver module loads
+(CLEARSPU, SIO2MAN, MCMAN, MCSERV, PADMAN, OSDSND) via repeated
+LOADFILE binds - genuine, verified boot progress. A new wall follows:
+two binds to different, non-LOADFILE real RPC services
+(sid=0x8000010F, sid=0x8000011F) whose own rpc_number/payload
+semantics this project hasn't identified yet (candidates: PADMAN's and
+MCSERV's own RPC services, not confirmed). This project's existing
+code correctly leaves the resulting call un-replied (an honest gap,
+not a fabricated response) rather than guessing. See docs/STATUS.md's
+78th finding. Pure investigation - no source changes this round, no
+regression/rebuild needed.

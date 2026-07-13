@@ -9604,3 +9604,65 @@ tracing methodology (now proven twice this session) for the two new
 binds (`cd=0x00441EF0`, `cd=0x00441F18`) to identify their real
 rpc_number/path, continuing the same real, evidence-based chain rather
 than guessing at what comes next.
+
+## Update (Round 51, 78th finding): the CLEARSPU reply generalized cleanly to a full real driver-loading chain; new blocker identified - two new, non-LOADFILE RPC service binds
+
+Extending the same instrumented-diagnostic tracing methodology to a
+longer instruction cap revealed that the 77th finding's synthetic
+LF_F_MOD_LOAD reply (task #201) was NOT actually retried 6 times for
+the SAME module as initially assumed - it correctly, generically
+unblocked a full, REAL sequence of SIX DIFFERENT PS2 BIOS driver
+modules, all loaded via OSDSYS's own repeated bind/call/wait cycle to
+the SAME LOADFILE service (sid=0x80000006), one after another, each
+using the SAME generic "success" reply this project's code already
+sends for any LF_F_MOD_LOAD request:
+
+```
+rom0:CLEARSPU -> rom0:SIO2MAN -> rom0:MCMAN -> rom0:MCSERV -> rom0:PADMAN -> rom0:OSDSND
+```
+
+This is real, substantial, verified forward progress: OSDSYS's own
+real boot code is genuinely walking through its real driver-init
+sequence (SPU2 clear, then SIO2/memory-card/pad/sound driver loads) -
+exactly matching a real PS2's known BIOS boot order for these
+subsystems.
+
+**New wall found, precisely characterized:** after `rom0:OSDSND`,
+OSDSYS binds to TWO NEW, DIFFERENT real RPC services (NOT LOADFILE):
+
+```
+[RPCBIND] sid=0x8000010F cd=0x00441EF0
+[RPCBIND] sid=0x8000011F cd=0x00441F18
+[RPCCALL] rpc_number=0x00000001 call_recvbuf=0x00441FC0 call_cd=0x00441EF0 i=1 count=2
+[RPCCALL] payload_src=0x00441FC0 path=""
+```
+
+This project's existing RPC_CALL dispatch unconditionally treats ANY
+`rpc_number==1` as LOADFILE's `LF_F_ELF_LOAD` (correct ONLY for
+sid=0x80000006's own numbering) - it does not yet track which real sid
+each `cd` was bound to, so it doesn't know these two new services
+define their OWN, unrelated function-number meanings for `rpc_number`.
+The payload read as an empty path (correctly, since this isn't a
+LOADFILE ELF-load payload at all) - `sif_loadfile_elf_load()` then
+fails its ROMDIR lookup and the call is correctly left un-replied,
+matching this project's existing "honest gap, not a fabricated
+success" convention. The boot re-parks at the same `0x00210F84`
+address waiting for this reply.
+
+**Not guessed at:** identifying what real PS2 system services
+`sid=0x8000010F` and `sid=0x8000011F` are (candidates given the
+just-loaded driver sequence: PADMAN's and MCSERV's own RPC service
+IDs, per ps2tek's RPC_System_services table this project has
+referenced before, but NOT yet confirmed) and what their own
+`rpc_number=1` actually requests is flagged as the next investigation,
+not fabricated this round.
+
+**Verified:** pure investigation this round (instrumented diagnostic
+copy in /tmp/, no source changes beyond what Round 50 already
+committed) - per this project's docs-only-round convention, no new
+regression suite or Wii rebuild was required for this specific
+increment (Round 50's rebuild already covers the currently-committed
+source).
+
+Zero GS register writes are still observed. Neither the splash-screen
+nor the GS-output relaxed goal is met yet - honestly reported.

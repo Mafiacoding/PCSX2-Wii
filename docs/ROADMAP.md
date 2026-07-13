@@ -1843,3 +1843,24 @@ PCSX2 debugging (the same technique that resolved Round 30) as the
 next step, rather than guessed at. No source changed this round -
 pure diagnostic investigation. See STATUS.md's 57th finding for full
 detail.
+
+**UPDATE (Round 33, 58th finding, task #172/#183):** live PCSX2
+debugging against real GT3 confirmed real hardware DOES write
+`0x0008C440` to 1 (this project's own emulator never does, past BSS
+init). Live write-timing capture proved fundamentally impractical over
+this tool bridge (the emulator runs in real wall-clock time between
+calls, not lockstep with tool call cadence - confirmed by cycles
+jumping from tens of millions to over 2 billion in a single
+continue/pause round trip regardless of retry count), so pivoted to
+static ROM analysis: searched the entire real BIOS for every
+occurrence of the exact address-computation instruction pattern
+(`lui reg,9; addiu reg,reg,-0x3bc0`) used by every known reader/writer
+of this address so far. Found 4 matches - the known read site, a
+near-duplicate read site, one unrelated stub, and a 32-word zero-fill
+loop confirming `0x0008C440` is entry 0 of a real 32-entry table - but
+NONE of them is a nonzero write. This rules out ordinary EE CPU code
+using this literal address pattern as the write mechanism, pointing
+instead toward an indirect write (most likely a SIF DMA transfer from
+the IOP side, matching this project's established SIF/IOP-EE
+communication gaps). No source changed this round. See STATUS.md's
+58th finding for full detail.

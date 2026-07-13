@@ -7946,3 +7946,95 @@ with this project's prior doc-only rounds (e.g. Round 19).
 is unavailable/unstable) to identify what real mechanism sets it, then
 implement that mechanism for real - the same pattern that has now
 resolved two consecutive walls (tasks #180, #181).
+
+## 58th finding (task #172/#183): live PCSX2 debugging confirms real hardware DOES write 0x0008C440 (=1) somewhere between boot and gameplay; ROM signature search rules out all direct-CPU-store candidates - real mechanism is likely an indirect (SIF/IOP DMA) transfer, not a literal EE store instruction
+
+Continuing task #183's investigation of the 57th finding's blocker (the
+`0x00083B40` loop polls `0x0008C440`, which this project's own
+emulator never writes after BSS init). Connected to a live, real GT3
+boot via `pcsx2-mcp` to check real hardware's actual value.
+
+**Confirmed: real hardware writes this address to 1.** A direct memory
+read on live, mid-gameplay real hardware (`Cycles: 1590071881`) showed
+`0x0008C440 = 0x00000001` - definitively confirming this project's
+hypothesis that a real, currently-unmodeled write sets this flag,
+unblocking the loop for real. This rules out "it's dead code that real
+hardware also never satisfies" - real hardware genuinely depends on
+and receives this write.
+
+**Live write-timing capture proved impractical - a genuine tooling/
+timing constraint, not a retry-away problem.** Armed a write watchpoint
+on `0x0008C440` before a user-triggered cold reset (the same rigorous
+methodology that resolved the 55th finding). Two real complications
+were found and worked through:
+1. The watchpoint's own break point coincided with the very
+   instruction it triggers on (the address is part of a real, ~2-
+   million-iteration "zero all of EE RAM" sweep starting near boot,
+   confirmed live via `sq $v0,(s0)` with `s0` sweeping up to
+   `a0=0x02000000` = the full 32MB EE RAM size) - `continue()` calling
+   back into the same write instantly re-triggered without advancing,
+   the same "breakpoint at current PC" quirk seen in earlier rounds.
+   Worked around by manually stepping past before re-arming.
+2. More fundamentally: `pcsx2_continue()` runs the real emulator in
+   real wall-clock time, not in lockstep with this tool's own call
+   cadence - a single `continue()`-then-`pause()` pair (with no
+   deliberate delay in between) still let cycles jump by low hundreds
+   of millions to over 2 billion in one round trip. This makes
+   single-instruction-precision bisection via continue/pause
+   fundamentally impractical over a network-latency-bound tool bridge,
+   regardless of how many more reset cycles are spent on it - a real,
+   inherent constraint of this debugging setup, not a problem more
+   retries would solve. The watchpoint itself also never reported a
+   hit via `pcsx2_list_watchpoints` despite the value demonstrably
+   changing from 0 to 1 within the observed window, suggesting write
+   watchpoints in this specific DebugServer bridge are not reliable
+   during free-run `continue()` (works fine as a manual read/compare
+   tool, not as a break trigger for this address).
+
+**Pivoted to static ROM analysis - ruled out the obvious mechanism.**
+Constructed the exact MIPS `lui reg,9` / `addiu reg,reg,-0x3bc0`
+instruction encodings (the same address-computation pattern this
+project's own emulator's `0x00083B40` accessor and the 56th finding's
+`0x00083e38` setter both use to reach `0x0008C440`) and searched the
+entire real BIOS ROM for every occurrence. Found exactly 4 matches:
+- One is the already-known READ site (the `0x00083B40` accessor
+  itself, confirmed via matching surrounding disassembly).
+- One is a second, near-identical accessor variant right next to it
+  (same read pattern, different call site).
+- One sits inside an unrelated, tiny function stub (`0x0C89C8`,
+  immediately preceded by an unrelated prologue - a red herring from
+  the ADDIU-immediate coincidentally matching without the paired LUI;
+  not a real occurrence of this address).
+- One is a SEPARATE zero-fill loop: `lui v0,9; addiu s0,zero,0x1f;
+  addiu v0,v0,-0x3bc0; addiu v0,v0,0x7c; ...; sw zero,(v0)` looping 32
+  times while decrementing v0 by 4 - zeroing the entire 32-word
+  (128-byte) range `0x0008C440`-`0x0008C4BC` inclusive. This confirms
+  `0x0008C440` is the FIRST word of a real, dedicated 32-entry table
+  (very plausibly a device/interrupt/DMA-channel handler table, given
+  its size matches plausible real hardware channel counts) - but this
+  is STILL a zero-write, not the "set to 1" event.
+
+**None of the 4 ROM occurrences of this address-computation pattern is
+a nonzero write.** This means the real "set to 1" event is not
+performed by ordinary EE CPU code re-deriving this address via the
+same `lui`/`addiu` pattern - it must arrive via a different mechanism:
+most likely a cached/pre-computed base pointer passed into a
+subroutine (undetectable by this literal-encoding search), or - more
+likely given this project's established SIF/IOP-EE communication gaps
+(46th/55th/56th findings) - an actual SIF DMA transfer FROM the IOP
+side writing directly into this EE memory region, which would explain
+why no EE-side store instruction computing this exact address exists:
+the byte arrives via DMA copy, not a CPU store.
+
+**No source code changed this round** - pure live-hardware
+verification plus static ROM analysis, consistent with prior doc-only
+rounds. No regression/rebuild needed.
+
+**Next for task #172:** investigate the SIF DMA-transfer hypothesis
+directly - check whether this project's IOP-side code ever sends a
+SIF command/RPC targeting this EE address region (cross-reference
+against the boot_info/module registration structures near this table,
+given its 32-entry size and proximity to the device-ID registration
+table from the 56th/57th findings), and whether this project's
+existing `sceSifSetDma` implementation (task #175) is capable of
+carrying such a transfer once the right trigger is identified.

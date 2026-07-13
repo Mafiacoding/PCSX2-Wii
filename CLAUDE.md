@@ -3101,3 +3101,52 @@ equivalent of this address. No source code changed this round.
 **Next for task #172:** live-debug (or further static-trace) what
 real mechanism sets this flag, then implement it for real. See
 docs/STATUS.md's 57th finding for full detail.
+
+## Update (Round 33, 58th finding): confirmed real hardware writes 0x0008C440 via live debugging; ROM signature search rules out direct EE CPU stores - real mechanism likely a SIF DMA transfer from the IOP
+
+Live-debugged real GT3 boot (`pcsx2-mcp`) to check the 57th finding's
+open question. Confirmed directly: real hardware's `0x0008C440 = 1`
+(this project's own emulator leaves it 0 forever past BSS init) -
+real hardware genuinely depends on and receives a write this project
+doesn't yet model.
+
+**Live write-timing capture is fundamentally impractical over this
+tool bridge**, not just difficult this round: `pcsx2_continue()` runs
+in real wall-clock time, independent of tool call cadence - even an
+immediate `continue()`-then-`pause()` pair let cycles jump by hundreds
+of millions to billions in one round trip. No amount of additional
+resets/retries would give single-instruction precision here; this is
+an inherent constraint worth recording so future rounds don't re-spend
+effort on the same approach. (Also worked through, en route: a
+watchpoint armed exactly at the instruction it triggers on
+self-retriggers without advancing - the same "breakpoint at current
+PC" quirk from earlier rounds, worked around by manually stepping past
+first; and write watchpoints in this DebugServer bridge don't reliably
+report hits via `pcsx2_list_watchpoints` during free-run `continue()`
+even though the watched value demonstrably changes.)
+
+**Pivoted to static ROM analysis - ruled out the obvious mechanism.**
+Searched the whole real BIOS ROM for the exact `lui reg,9; addiu
+reg,reg,-0x3bc0` instruction pattern (the same computation every known
+reader of this address uses). Found exactly 4 occurrences: the known
+`0x00083B40` read site, a near-duplicate read site, one irrelevant
+coincidental match, and a real 32-word zero-fill loop confirming
+`0x0008C440` is entry 0 of a genuine 32-entry table - but every one of
+these is a read or a zero-write, none is the "set to 1" event. This
+rules out ordinary EE CPU code reusing this literal address-computation
+pattern as the write mechanism.
+
+**Working hypothesis for the next round:** the value most likely
+arrives via a SIF DMA transfer from the IOP side (not a CPU store
+instruction at all), matching this project's established SIF/IOP-EE
+communication gaps (46th/55th/56th findings) - would explain why no
+EE-side store computing this exact address exists anywhere in the ROM.
+
+No source code changed this round - pure live-hardware verification
+plus static ROM analysis.
+
+**Next for task #172:** investigate whether IOP-side code sends a SIF
+command/RPC targeting this EE address region, and whether the
+existing `sceSifSetDma` implementation (task #175) could carry it once
+the trigger is identified. See docs/STATUS.md's 58th finding for full
+detail.

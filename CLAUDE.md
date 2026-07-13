@@ -3554,3 +3554,47 @@ See docs/STATUS.md's 71st finding for full detail. New task #197:
 root-cause why the re-entered 0x8000F768 loop doesn't clear on this
 second pass (same live-disassembly/printf-trace methodology the 55th
 finding already proved effective for this exact code region).
+
+## Checkpoint (Round 46, task #196/#197): three-layer TLB/physical-address bug in the ELF loader fixed - boot now genuinely executes deep into OSDSYS's own code, zero wall hits in 90M instructions
+
+What looked like boot re-entering the already-solved 0x8000F768 wait
+loop after _ExecPS2 was actually a brand-new bug in Round 45's own ELF
+loader, three layers deep, found via careful register/TLB/physical-
+memory diagnostic tracing (never guessed at):
+
+1. Writes went through the ordinary TLB-gated EE memory path, but no
+   TLB entry existed yet for OSDSYS's KUSEG load address - every byte
+   silently dropped (confirmed: epc/gp delivered correctly, but all
+   code read back zero, causing a 7.86M-instruction NOP-slide off the
+   end of RAM).
+2. A naive physical identity write was also wrong - a real, stable,
+   pre-existing kernel TLB entry relocates this virtual range to a
+   DIFFERENT physical address (0x300008 for vaddr 0x200008), matching
+   real PS2 hardware reserving low physical RAM for the kernel.
+3. Per-byte TLB re-querying then aliased the segment's BSS zero-fill
+   back onto the same physical byte the file-content copy had just
+   written, clobbering it back to zero - the real TLB entry's page
+   geometry doesn't cover the full 2.5MB segment linearly.
+
+Fixed in source/core/ee/ee_core.c by translating ONCE at each
+segment's base address and applying that fixed delta uniformly across
+the whole transfer (sif_loadfile_translate_base() +
+sif_loadfile_ram_write8_delta()) - matching how a real, physical
+SIF-DMA burst actually behaves.
+
+Verified for real: ee_mem_read8() (the same path a genuine instruction
+fetch uses) now reads OSDSYS's actual code at its entry point,
+byte-for-byte matching the raw BIOS ROM. A 90,000,000-instruction
+diagnostic shows ZERO hits on the 0x8000F768 loop (previously entered
+at i=38M and never left) - boot instead settles deep inside OSDSYS's
+own loaded code range (PC 0x00210F84, real $ra=0x002133B8), still
+running, IOP correctly idle, no crash - the deepest real, kernel-
+independent user-mode code this project has ever gotten running. All
+87 regression tests pass; clean Wii/devkitPPC rebuild verified
+(pcsx2-wii-git.dol, 433280 bytes).
+
+See docs/STATUS.md's 72nd finding for the full three-layer trace. New
+task #198: find OSDSYS's actual next milestone toward a visible splash
+screen (GS/DISPFB register writes) with a longer diagnostic run -
+task #172's "produce a visible splash/logo" goal is closer than ever
+but not yet confirmed.

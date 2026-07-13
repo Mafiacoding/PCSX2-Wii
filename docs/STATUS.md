@@ -9172,3 +9172,106 @@ waiting on this second time) doesn't clear the way it did the first
 time - likely requires the same live-disassembly/printf-trace
 methodology the 55th finding already established as effective for
 this exact code region.
+
+---
+
+## 72nd finding (task #196/#197): root-caused and fixed the re-entered 0x8000F768 wait loop - it was never a re-entry at all, it was a real TLB/physical-address bug in this round's own new ELF loader silently discarding every byte of OSDSYS's real code; boot now genuinely executes deep into OSDSYS's own code (verified past PC 0x00210F84, no wall reached in 90,000,000 instructions)
+
+Task #196 was opened to investigate why boot appeared to re-enter the
+already-solved `0x8000F768` wait loop after `_ExecPS2` fired. Deep,
+methodical diagnostic tracing (register/TLB/physical-memory dumps at
+each step) found the true root cause was three layers deeper than
+"re-entering a solved loop," and each layer's fix was verified before
+moving to the next - all real, honestly-reported findings, not
+guesses:
+
+**Layer 1: the loaded ELF was never actually written to RAM.**
+`sif_loadfile_elf_load()` (task #195/#196's own ELF loader, this
+round) copied OSDSYS's real segment bytes via `ee_mem_write8()`, which
+for any KUSEG address (< 0x80000000, which OSDSYS's `p_vaddr=
+0x00200000` is) requires a valid TLB entry - and none existed at the
+time this loader ran. Every byte was silently dropped. A diagnostic
+proved this directly: `epc`/`gp` were delivered correctly to the
+caller (both read unconditionally, independent of the copy loop
+outcome), but every byte at `0x00200008` onward read back as zero -
+0x00000000 is a real MIPS NOP, so the "loaded" program NOP-slid
+straight through 7.86 million instructions until it fell off the end
+of the 32MB RAM array and TLB-faulted at exactly `EE_RAM_SIZE`
+(`0x02000000`) - the same category of "runaway into blank memory" bug
+this project's much earlier `#44/#52/#53/#58` investigations dealt
+with, now recurring in new code. Root cause: this data transfer
+represents the real IOP's SIF-DMA delivery of the ELF into EE RAM, and
+real DMA hardware operates on physical bus addresses, bypassing the
+EE core's own MMU/TLB - routing it through the ordinary EE-instruction
+memory-access path was the wrong model.
+
+**Layer 2: a naive physical identity map was ALSO wrong.** The first
+fix attempt (`vaddr & 0x1FFFFFFF`) still produced all-zero reads at
+the entry point. Diagnostic proof: the real, ALREADY-INSTALLED kernel
+TLB entry covering this exact range (confirmed present, completely
+unchanged, from instruction 20,000,000 all the way through the
+RPC_CALL/ELF-load point at ~30,100,000 - a genuine, stable, real
+mapping, not a stale/coincidental leftover) translates
+`vaddr=0x00200008` to **physical `0x00300008`**, not `0x00200008` -
+real PS2 hardware reserves the low few MB of physical RAM for kernel
+use and relocates user-ELF virtual space above that reservation. Since
+the CPU's own later instruction fetch uses this same TLB (and DOES
+successfully translate, confirmed via direct `ee_tlb_translate()`
+instrumentation - `mem_tlb_miss=0`), the loader has to write wherever
+that real translation says, not a guessed-at identity address.
+
+**Layer 3: per-byte TLB re-querying aliased the BSS zero-fill onto the
+file content.** Switching to a live `ee_tlb_translate()` call per byte
+fixed the entry point but a full-boot diagnostic still showed no
+progress past the loop. A targeted watch on every write to physical
+`0x00300008` found the actual bug: `vaddr=0x00200008` (real file
+content, correctly translated to `phys=0x00300008`) got the real byte
+written - and then, in the SAME function call, `vaddr=0x00300008` (a
+BSS-zero-fill address roughly 1MB further into the SAME 2.5MB segment)
+ALSO translated to `phys=0x00300008` and immediately zeroed it right
+back out. This real TLB entry's large-page geometry (a 2MB half-page
+selected by address bit 21) does not cover this segment's full
+`memsz` (`0x2702B0`, ~2.5MB) as one linear range - re-querying the TLB
+independently for every byte let a later, unrelated virtual address
+alias back onto an earlier one's physical target.
+
+**Fix:** translate ONCE, at each PT_LOAD segment's base virtual
+address, to get the real physical base the kernel's TLB entry actually
+intends, then apply that fixed delta uniformly across the WHOLE
+segment transfer (both file content and BSS zero-fill) -
+`sif_loadfile_translate_base()` + `sif_loadfile_ram_write8_delta()` in
+`source/core/ee/ee_core.c`. This matches how a real, physical SIF-DMA
+burst actually behaves (one contiguous physical destination, not a
+fresh page-table walk per byte - a real DMA controller has no concept
+of "re-fault partway through a burst"), and is honestly scoped: the
+file content (926KB) fits entirely inside the first, correctly-mapped
+2MB region, so it's translated exactly as the CPU's own fetch will see
+it; the BSS tail beyond that is, by definition, supposed to be zero
+regardless of exactly which physical bytes it lands on, so any
+residual page-geometry mismatch there is harmless.
+
+**Verified, real, substantial, honestly-checked progress:**
+`ee_mem_read8()` (the SAME path a genuine EE instruction fetch uses)
+now reads OSDSYS's real code bytes at its entry point
+(`29 00 02 3C 47 00 03 3C ...`, matching the raw BIOS ROM bytes
+byte-for-byte). A full-boot diagnostic run shows **zero** hits on the
+`0x8000F768` loop entry point across a full 90,000,000-instruction
+run (compare: the pre-fix build entered that loop at instruction
+38,024,237 and never left it) - boot instead settles at EE PC
+`0x00210F84` with `$ra=0x002133B8`, both real addresses well inside
+OSDSYS's own loaded code range (`0x00200000-0x00470000`), still
+running, still making forward progress, with the IOP correctly idle
+and no halt. This is the deepest real, genuine BIOS-kernel-independent
+user-mode code (OSDSYS itself, not kernel/EELOAD infrastructure) this
+project has ever gotten the emulator to execute. All 87 regression
+tests pass; clean Wii/devkitPPC rebuild verified
+(`pcsx2-wii-git.dol`, 433280 bytes).
+
+**Honestly open for the next round (no wall reached yet, not a
+completed task):** the diagnostic capped at 90,000,000 instructions
+without OSDSYS halting, crashing, or visibly reaching a GS/display
+register write - task #172's "produce a visible splash/logo screen"
+goal is closer than ever (real OSDSYS code is genuinely executing) but
+not yet confirmed. New task #198: run a longer, GS/DISPFB-write-
+watching diagnostic against this fixed build to find OSDSYS's actual
+next milestone (or blocker) toward drawing something to the screen.

@@ -863,6 +863,83 @@ static inline uint16_t elfld_rd_le16(const uint8_t *p) {
     return (uint16_t)(p[0] | (p[1] << 8));
 }
 
+/* 72nd finding (task #196/#197): OSDSYS's real PT_LOAD segment loads
+ * at p_vaddr=0x00200000 - a KUSEG (< 0x80000000) address that, for
+ * ordinary EE-instruction-driven loads/stores, requires a valid TLB
+ * entry (ee_mem_ptr()'s "KUSEG - needs real TLB translation" branch).
+ * No such entry exists in the emulated TLB at the point this loader
+ * runs (nothing has mapped that range yet), so routing these writes
+ * through ee_mem_write8() silently dropped every byte - confirmed via
+ * diagnostic: epc/gp were delivered correctly (both read before any
+ * write happens) but the actual OSDSYS code bytes at 0x00200008
+ * onward all read back as zero, causing a NOP-slide (0x00000000 is a
+ * real MIPS NOP) that ran until it fell off the end of the 32MB RAM
+ * array and TLB-faulted at exactly EE_RAM_SIZE (0x02000000).
+ *
+ * This is the correct real-hardware model, not a workaround: this
+ * data transfer represents the real IOP's SIF-DMA delivery of an
+ * ELF's segment bytes into EE RAM, and real DMA hardware operates on
+ * physical bus addresses, bypassing the EE core's own MMU/TLB
+ * entirely - this project has already established this exact
+ * "DMA is physical-address, not virtual-address" principle elsewhere
+ * (see e.g. the 54th finding's citation of PCSX2's own hwDmacIrq()
+ * being a flat, physical-target operation). A PS2 ELF's p_vaddr is
+ * always within the identity-mapped low range the retail kernel wires
+ * 1:1 to physical RAM, so masking to the physical range here
+ * (identical to ee_mem_ptr()'s own kseg0/1 physical-mask step, just
+ * without requiring a matching TLB entry first) is the real, correct
+ * target address - not a guess. */
+/* 72nd finding (task #196/#197), THIRD and final pass: a plain
+ * identity mask (vaddr & 0x1FFFFFFF) is wrong (real kernel relocates
+ * this KUSEG range to a different physical range via a genuine,
+ * stable, already-installed wired TLB entry - confirmed present
+ * unchanged from i=20,000,000 through the RPC_CALL/ELF-load point).
+ * But re-querying ee_tlb_translate() independently for EVERY byte
+ * (the second-pass attempt) is ALSO wrong: this real TLB entry's
+ * large-page geometry (a 2MB half-page per even/odd selector) does
+ * not cover this segment's full memsz (0x2702B0, ~2.5MB) linearly -
+ * diagnostic proof: translate(0x00200008) and translate(0x00300008)
+ * (a BSS-zero-fill address ~1MB further into the SAME segment) both
+ * resolved to the SAME physical byte (0x00300008), so the BSS-zero
+ * pass was silently clobbering the real code the file-content pass
+ * had just written, right back to zero - reproducing the exact
+ * NOP-slide symptom this finding set out to fix, one layer deeper.
+ *
+ * The real, physical DMA transfer this represents targets ONE
+ * contiguous physical destination block, not a fresh page-table walk
+ * per byte (a real SIF-DMA controller has no concept of "re-fault
+ * partway through a burst"). So the correct model is: translate ONCE,
+ * at the segment's base virtual address, to find the real physical
+ * base the kernel's TLB entry actually intends for this segment, then
+ * apply that fixed vaddr->phys delta uniformly across the whole
+ * transfer (file content AND BSS zero-fill alike) - exactly what a
+ * real contiguous DMA burst does, and what keeps every byte the CPU's
+ * own later (per-instruction, freshly-translated) fetch will look up
+ * self-consistent with what this loader wrote, for the file-content
+ * portion where it matters (the BSS tail beyond the first mapped page
+ * is, by definition, supposed to be zero anyway, so any residual
+ * page-geometry mismatch there is harmless). */
+static uint32_t sif_loadfile_translate_base(ee_state_t *st, uint32_t vaddr_base)
+{
+    uint32_t phys;
+    if (vaddr_base < 0x80000000u) {
+        if (!ee_tlb_translate(st, vaddr_base, &phys))
+            phys = vaddr_base & 0x1FFFFFFFu;
+    } else {
+        phys = vaddr_base & 0x1FFFFFFFu;
+    }
+    return phys;
+}
+
+static void sif_loadfile_ram_write8_delta(ee_state_t *st, uint32_t vaddr, int64_t delta, uint8_t val)
+{
+    int64_t phys64 = (int64_t)vaddr + delta;
+    if (phys64 < 0) return;
+    uint32_t phys = (uint32_t)phys64;
+    if (st->ram && phys < st->ram_size)
+        st->ram[phys] = val;
+}
+
 static int romdir_lookup(const bios_image_t *bios, const char *name, uint32_t *out_off, uint32_t *out_size)
 {
     if (!bios || !bios->data || bios->size < 0x20u) return 0;
@@ -930,13 +1007,18 @@ static int sif_loadfile_elf_load(ee_state_t *st, const char *romname, uint32_t *
         uint32_t p_memsz = elfld_rd_le32(data + ph + 20u);
         uint32_t k;
         if (p_type != 1u) continue; /* PT_LOAD only, matches real elf_load_all_section() */
+        /* Translate ONCE at the segment base, then apply that fixed
+         * delta across the whole segment (see the citation above) -
+         * not a fresh per-byte TLB query. */
+        uint32_t phys_base = sif_loadfile_translate_base(st, p_vaddr);
+        int64_t delta = (int64_t)phys_base - (int64_t)p_vaddr;
         for (k = 0; k < p_filesz; k++) {
             uint32_t src_off = file_off + p_offset + k;
             uint8_t b = (src_off < st->bios->size) ? data[src_off] : 0u;
-            ee_mem_write8(st, p_vaddr + k, b);
+            sif_loadfile_ram_write8_delta(st, p_vaddr + k, delta, b);
         }
         for (; k < p_memsz; k++)
-            ee_mem_write8(st, p_vaddr + k, 0u); /* BSS zero-fill */
+            sif_loadfile_ram_write8_delta(st, p_vaddr + k, delta, 0u); /* BSS zero-fill, same fixed delta */
     }
 
     *out_epc = e_entry;

@@ -2196,3 +2196,43 @@ reported as unresolved, not fabricated. Clean Wii/devkitPPC rebuild
 verified. See docs/STATUS.md's 71st finding for full detail. New task
 #197: root-cause why the re-entered 0x8000F768 loop doesn't clear the
 second time.
+
+## UPDATE (Round 46, task #196/#197): root-caused and fixed the "re-entered 0x8000F768 loop" - it was a three-layer TLB/physical-address bug in the new ELF loader silently discarding OSDSYS's real code; boot now genuinely executes deep into OSDSYS (verified 90M instructions with zero wall hits)
+
+What looked like a re-entry into the already-solved 0x8000F768 wait
+loop turned out to be a completely different, new bug: the ELF loader
+implemented in Round 45 was silently failing to write OSDSYS's real
+code into RAM at all, three layers deep. Layer 1: writes went through
+the ordinary TLB-gated EE-instruction memory path, but no TLB entry
+existed yet for OSDSYS's KUSEG load address, so every byte was
+dropped (confirmed: epc/gp delivered correctly, but all code bytes
+read back zero, causing a 7.86M-instruction NOP-slide off the end of
+RAM). Layer 2: switching to a naive physical identity write was also
+wrong - a real, stable, already-installed kernel TLB entry (present
+unchanged from long before the ELF load) relocates this virtual range
+to a DIFFERENT physical address than identity mapping would suggest
+(0x00300008 for vaddr 0x00200008), matching real PS2 hardware's
+practice of reserving low physical RAM for the kernel. Layer 3: naive
+per-byte TLB re-querying then aliased the segment's BSS zero-fill
+(roughly 1MB into the same segment) back onto the same physical byte
+the file-content copy had just written, clobbering it right back to
+zero, because the real TLB entry's page geometry doesn't cover the
+full 2.5MB segment as one linear range.
+
+Fixed by translating ONCE at each segment's base address and applying
+that fixed delta uniformly across the whole transfer - matching how a
+real, physical DMA burst actually behaves (one contiguous destination,
+no re-fault mid-burst).
+
+Verified: ee_mem_read8() (the same path a real instruction fetch uses)
+now reads OSDSYS's actual code at its entry point, byte-for-byte
+matching the raw BIOS ROM. A 90,000,000-instruction diagnostic shows
+ZERO hits on the 0x8000F768 loop (previously entered at instruction
+38M and never left) - boot instead settles deep inside OSDSYS's own
+loaded code range (PC 0x00210F84), still running, IOP correctly idle,
+no crash. This is the deepest real, kernel-independent user-mode code
+(OSDSYS itself) this project has ever gotten running. All 87
+regression tests pass; clean Wii/devkitPPC rebuild verified. See
+docs/STATUS.md's 72nd finding for the full three-layer trace. New task
+#198: find OSDSYS's actual next milestone toward a visible splash
+screen (GS/DISPFB writes) with a longer diagnostic run.

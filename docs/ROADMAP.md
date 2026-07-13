@@ -1864,3 +1864,37 @@ instead toward an indirect write (most likely a SIF DMA transfer from
 the IOP side, matching this project's established SIF/IOP-EE
 communication gaps). No source changed this round. See STATUS.md's
 58th finding for full detail.
+
+## UPDATE (Round 34, task #172/#184/#185): IOP never reaches real SIF0/SIF1 DMA register writes during boot; SIFCMD's own init code found to retry an undocumented ~438,000-iteration internal poll loop before giving up on its own
+
+Traced whether the IOP, even with the existing task #164 syscall
+0x10/0x08/0x14 bypass in place, ever reaches real code that writes to
+the real SIF0/SIF1 DMA channel registers (0x1F801520-0x1F80153F) at
+any point during boot. Host-native diagnostic across a full
+60-million-instruction boot (all 28 real IOPBTCONF modules, LOADCORE
+through EESYNC) found **zero** such writes anywhere - module init
+completes successfully and the IOP goes idle exactly as already
+understood (54th finding), but no module's code ever touches a SIF
+DMA channel register.
+
+Along the way, found that SIFCMD's own module init code (not any of
+the module loader's own bypass/panic logic) calls the same two
+bypassed syscalls with identical arguments roughly 438,000 times in a
+row before proceeding on its own - a real, previously-undocumented
+retry/poll loop whose exit condition our `$v0=0` bypass never
+satisfies, but which SIFCMD's own code eventually gives up on anyway.
+Considered un-bypassing these syscalls (mirroring the twice-successful
+EE syscall-18/-5 fix pattern), but ruled it out: this project's own
+existing comments already establish there is no real, resident kernel
+dispatcher for these calls to vector into yet, so removing the bypass
+would only reintroduce the original task #151 module-abandonment bug,
+not fix anything.
+
+Conclusion: the real 0x0008C440 write (confirmed present on real
+hardware - 58th finding) is not reachable via any boot-time IOP module
+code path this project currently models. The next real target is
+IOP-side **post-boot runtime** behavior (a real SIF RPC service loop
+or interrupt-driven mechanism), which is presently unmodeled - a
+genuine feature gap, not a bug fix. No source changed this round
+(three throwaway `/tmp` scratch copies, diff-verified against the real
+files). See STATUS.md's 59th finding for full detail.

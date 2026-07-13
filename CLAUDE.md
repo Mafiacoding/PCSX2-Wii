@@ -3150,3 +3150,40 @@ command/RPC targeting this EE address region, and whether the
 existing `sceSifSetDma` implementation (task #175) could carry it once
 the trigger is identified. See docs/STATUS.md's 58th finding for full
 detail.
+
+## Checkpoint: task #172/#184/#185 (59th finding) - IOP boot-time module init conclusively ruled out as the source of the 0x0008C440 write; SIFCMD's own code found to run an undocumented ~438,000-iteration internal retry loop
+
+Investigated the user's "fix the SIF issue and the other trouble
+related to IOP" instruction. Re-read the existing task #164
+0x10/0x08/0x14 syscall bypass and its own surrounding comments
+carefully: this project's IOP side has no real, resident kernel
+dispatcher for these calls (an explicit, pre-existing, honest scope
+gap - not an oversight), so un-bypassing them (the pattern that fixed
+EE syscalls 18 and -5 this session) would only regress to the original
+task #151 module-abandonment bug, not help. No WebSearch was available
+this round (session limit) to obtain a citable real kernel struct
+layout, so no fabricated RegisterLibraryEntries-style implementation
+was attempted, consistent with this project's no-fabrication rule.
+
+Instead, built a host-native diagnostic (three throwaway `/tmp`
+scratch copies of iop_core.c/iop_dma.c/iop_module_loader.c,
+diff-verified against the real files - zero drift) to check whether
+the IOP ever reaches real SIF0/SIF1 DMA channel register writes
+(0x1F801520-0x1F80153F) during a full 60M-instruction boot. **Result:
+never - across the entire boot, not just the steady-state loop.**
+
+Also found, as a side effect of the same trace: SIFCMD's own real
+module init code (not any module-loader bypass) calls the same two
+bypassed syscalls with identical arguments ~438,000 times in a row
+before giving up on its own and proceeding - a genuine, previously
+undocumented retry/poll loop, now understood but not yet fixed (its
+real exit condition is unknown - no struct/semantics fabricated).
+
+**Conclusion:** the real 0x0008C440 write mechanism (real hardware
+confirmed writing it - 58th finding) is not reachable via any IOP
+boot-time module code path this project currently models. Next target
+for task #172 is IOP **post-boot runtime** behavior - a real,
+currently-unmodeled SIF RPC service loop or interrupt-driven mechanism
+- a genuine feature gap, scoped for a dedicated future round rather
+than rushed here. No source changed this round. See docs/STATUS.md's
+59th finding for full derivation.

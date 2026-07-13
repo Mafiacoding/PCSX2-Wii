@@ -3006,3 +3006,53 @@ guessed at. 87/87 regression suite pass; clean Wii/devkitPPC rebuild,
 **Next for task #172:** identify what real convention/bug produces
 `$v1=-5` at ~`0x00081FF0` and what code region `0x00081FF4` belongs to.
 See docs/STATUS.md's 55th finding for full detail.
+
+## Update (Round 31, 56th finding): syscall -5 fix (task #181) - real interrupt-dispatch-trampoline syscall, same "vector for real" treatment as task #180 - EE core no longer halts at all within a 100M-instruction budget
+
+The deeper halt found right after task #180's fix (EE PC `0x00081FF4`,
+`$v1=-5`, `halt_reason="SYSCALL (no BIOS syscall table implemented)"`)
+turned out to be a real, intentional syscall, not a bug. Disassembly
+of the call site:
+```
+lui   $sp, 8
+jalr  $v1                  ; indirect call through a handler pointer
+addiu $sp, $sp, 0x1fc0      ; delay slot
+addiu $v1, $zero, -5        ; runs after the call returns
+syscall
+```
+- classic kernel interrupt-dispatch-trampoline shape: call the
+installed handler, then tell the kernel "resume dispatch." Fetched the
+full raw `syscallnr.h` source (not just the doxygen summary) to rule
+out a missed entry - confirmed no `-5` alias exists, and that positive
+syscall 5 is `ResumeIntrDispatch // Arbitrarily named` per ps2sdk's own
+maintainers (an inferred, undocumented, kernel-internal mechanism).
+The dual positive/negative "fast syscall" convention is real and
+already used elsewhere in that same header for other low-numbered
+syscalls - just never named for 5, consistent with this being
+kernel-internal-only (no public IRX/user code calls it this way).
+
+**Fix:** added `sysnum == -5` alongside the existing `sysnum == 18`
+case in `ee_core.c`, both raising a real `EE_EXC_CODE_SYS` exception
+via `ee_raise_exception()` instead of being bypassed/halted - same
+reasoning as task #180 (don't guess at real kernel-internal side
+effects, let real BIOS code run them).
+
+**Result: a major unlock.** An extended diagnostic running a full
+100,000,000-instruction budget (previous diagnostics all capped at
+65M) found the EE core no longer halts at all. Real, continued forward
+progress through several genuinely new code regions never reached
+before (`0xBFC00000` -> `0x9FC4254C` -> `0xBFC00C74` -> `0x8000B8A0` ->
+`0x0008202C` -> `0x00083B40`), settling into a steady state cycling
+within `0x00083B40-0x00083B54`. Disassembly confirms this is NOT a
+spin-loop itself - it's an ordinary array-index accessor function
+(`base + index*4; load; return`) - so whatever OUTER code is calling
+it repeatedly (not yet identified) is the next thing to trace.
+
+**Verified:** 87/87 regression suite pass, clean Wii/devkitPPC
+rebuild (0 errors).
+
+**Next for task #172:** find the caller driving repeated calls into
+the `0x00083B40` accessor - bounded/finite (would resolve with a
+longer budget) vs. a genuine blocking loop - and check whether any GS
+registers get touched anywhere in this new territory. See
+docs/STATUS.md's 56th finding for full detail.

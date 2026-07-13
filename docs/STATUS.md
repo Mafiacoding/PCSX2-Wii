@@ -7768,3 +7768,79 @@ syscall-18 bypass behavior), clean Wii/devkitPPC rebuild (0 errors).
 `0x00081FF4` belongs to - this is now the concrete next blocker,
 found only because letting AddDmacHandler run for real, instead of
 being bypassed, unlocked genuinely new territory.
+
+## 56th finding (task #172/#181): syscall -5 real fix produces a MAJOR unlock - EE core no longer halts at all within a 100M-instruction budget; boot progresses through multiple new stages into a steady-state loop far past every previous wall
+
+Following task #180's AddDmacHandler fix, boot progressed to a new,
+deeper halt at EE PC `0x00081FF4` (`halt_reason="SYSCALL (no BIOS
+syscall table implemented)"`, `$v1=-5`). Investigated via a targeted
+diagnostic (`diag_dump_81ff4.c`) dumping the surrounding code and full
+register state.
+
+**Disassembly of the real call site (`0x00081FE0-0x00081FF4`):**
+```
+lui   $sp, 8               ; sp = 0x00080000
+jalr  $v1                  ; indirect call through a handler pointer
+addiu $sp, $sp, 0x1fc0      ; delay slot: sp = 0x00081FC0
+addiu $v1, $zero, -5        ; <- runs after the called function returns
+syscall                     ; real SYSCALL, $v1 = -5
+```
+This is a real, intentional `addiu $v1,zero,-5` immediately before
+`syscall` - not a corrupted/garbage register value. The surrounding
+shape (indirect `jalr` through a handler-pointer register, followed
+immediately by this syscall on return) is the classic structure of a
+kernel interrupt-dispatch trampoline: call the installed handler, then
+tell the kernel "resume dispatch."
+
+**Cross-referenced against the full, raw ps2sdk `syscallnr.h` source**
+(fetched directly, not just the doxygen-rendered summary, to rule out
+any missed entries): no `-5` alias is defined anywhere in the file.
+Positive syscall 5 is defined as `__NR_ResumeIntrDispatch 5 //
+Arbitrarily named` - ps2sdk's own maintainers flag this one as an
+inferred, undocumented, kernel-internal-only mechanism. The negative
+aliases that ARE documented (`-0x1a` and up) are all explicitly named
+"fast"/interrupt-context counterparts of low-numbered positive
+originals (e.g. `__NR__iEnableIntc (-0x1a)` next to `__NR__EnableIntc
+0x14`), establishing that this dual positive/negative convention is
+real and applies to exactly this class of syscall - it simply isn't
+named for number 5 in the public header, consistent with being a
+kernel-internal-only call user/IRX code never makes directly (hence
+never needing a public "fast" alias).
+
+**Fix (`source/core/ee/ee_core.c`):** added `sysnum == -5` alongside
+the existing `sysnum == 18` case, both raising a real
+`EE_EXC_CODE_SYS` exception via `ee_raise_exception()` rather than
+being bypassed or halted. Per this round's own task #180 lesson
+(bypassing AddDmacHandler in software silently broke a real kernel
+side effect), this project does not guess at what bookkeeping
+ResumeIntrDispatch's fast form performs - it lets real BIOS handler
+code run instead.
+
+**Verified via diagnostic - and the result is dramatic:** the EE core
+no longer halts at all. A extended diagnostic
+(`diag_progress_check.c`) ran a full 100,000,000-instruction budget
+(previous diagnostics all capped at 65M) with periodic PC sampling and
+found real, continuous forward progress through multiple genuinely new
+code regions: `0xBFC00000` -> `0x9FC4254C` -> `0xBFC00C74` ->
+`0x8000B8A0` -> `0x0008202C` -> `0x00083B40`, none of which had been
+reached in any prior finding. Execution settles into a steady state
+cycling within the narrow `0x00083B40-0x00083B54` range for the
+remainder of the 100M-instruction budget. Disassembly of this region
+shows it is NOT a spin-loop - it's a small, ordinary array-index
+accessor function (`base + index*4; load; return`) - meaning the
+CALLER of this accessor (not yet identified) is what's actually
+iterating, potentially many times, from somewhere else in the 65M+
+instruction range this diagnostic didn't capture in detail.
+
+**Verified:** 87/87 regression suite pass (no test depended on the old
+syscall dispatch behavior for -5, since it was previously unreached),
+clean Wii/devkitPPC rebuild (0 errors, same pre-existing unrelated
+strncpy truncation warning as every prior round).
+
+**Next for task #172:** identify the actual caller/outer loop driving
+repeated calls into the `0x00083B40` accessor function - specifically
+whether it's a bounded, finite iteration (real, if slow, forward
+progress that a longer instruction budget would resolve) or a genuine
+infinite loop with a real blocking condition, and whether GS registers
+get touched anywhere in this new code range (the ultimate signal of
+real graphics-pipeline activity, one step closer to a splash screen).

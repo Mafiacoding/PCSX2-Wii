@@ -1800,3 +1800,25 @@ outside the `0x8000xxxx` kernel range explored so far) - flagged as
 the concrete next blocker rather than guessed at. 87/87 regression
 pass; clean Wii/devkitPPC rebuild. See STATUS.md's 55th finding for
 full detail.
+
+**UPDATE (Round 31, 56th finding, task #172/#181):** the deeper halt
+from Round 30 (EE PC `0x00081FF4`, `$v1=-5`) turned out to be a real,
+intentional `addiu $v1,zero,-5` immediately before `syscall`, not a
+corrupted register - disassembly shows the classic shape of a kernel
+interrupt-dispatch trampoline (indirect `jalr` through a handler
+pointer, then this syscall on return). Cross-referencing the full raw
+ps2sdk `syscallnr.h` source confirms positive syscall 5 is
+`ResumeIntrDispatch // Arbitrarily named` (ps2sdk's own maintainers
+flag it as inferred/undocumented), and the dual positive/negative
+"fast" syscall convention is real and established elsewhere in that
+same header - just not named for number 5, consistent with a
+kernel-internal-only call. Fixed the same way as task #180's
+AddDmacHandler: let `-5` vector as a real Syscall exception instead of
+being bypassed or halted, so genuine BIOS handler code runs. Result:
+the EE core no longer halts at all within a 100M-instruction budget -
+real, continued forward progress through several genuinely new code
+regions, settling into a steady-state loop around `0x00083B40`
+(confirmed to be an ordinary array-accessor function, not a spin-loop
+itself - the actual iterating caller is not yet identified). 87/87
+regression pass; clean Wii/devkitPPC rebuild. See STATUS.md's 56th
+finding for full detail.

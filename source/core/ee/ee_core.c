@@ -1202,6 +1202,42 @@ static int ee_step(void)
                 ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
                 break;
             }
+            if (sysnum == -5) {
+                /* Task #181 (56th finding): reached for the first time
+                 * only after task #180's AddDmacHandler fix unblocked
+                 * boot past the old 0x8000F768 wall. Real ps2sdk's
+                 * public syscallnr.h defines positive syscall 5 as
+                 * "ResumeIntrDispatch // Arbitrarily named" - even
+                 * ps2sdk's own maintainers flag this one as an
+                 * inferred, not officially documented, kernel-internal
+                 * mechanism, and no "-5" alias is defined anywhere in
+                 * that header (unlike -0x1a and up, which ARE named
+                 * "fast"/interrupt-context counterparts of their
+                 * positive originals - e.g. __NR__iEnableIntc/-0x1a
+                 * next to __NR__EnableIntc/0x14). That gap is
+                 * consistent with -5 being real hardware's own
+                 * kernel-internal "fast" form of ResumeIntrDispatch,
+                 * used only by the BIOS's own low-level interrupt
+                 * trampoline (never called this way from user/IRX
+                 * code, hence never given a public ps2sdk name).
+                 * Disassembly of the real call site itself supports
+                 * this directly: `lui sp,8; jalr $v1 (delay slot: addiu
+                 * sp,sp,0x1fc0); addiu v1,zero,-5; syscall` - an
+                 * indirect call through a handler-function-pointer
+                 * register, immediately followed by this syscall on
+                 * return. That is exactly the shape of a kernel
+                 * interrupt-dispatch trampoline calling a handler and
+                 * then telling the kernel "resume dispatch" - not
+                 * ordinary application code. Per this project's own
+                 * task #180 lesson (bypassing AddDmacHandler in
+                 * software silently broke a real, load-bearing kernel
+                 * side effect), do NOT guess at what real bookkeeping
+                 * ResumeIntrDispatch's fast form performs - let it
+                 * vector as a real Syscall exception instead, exactly
+                 * like 18 above, so genuine BIOS handler code runs. */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
+            }
             if (sysnum == 22) {
                 /* 22 (0x16) _EnableDmac(channel): task #176 - this was
                  * previously a flat no-op (batched with 18/60/61/100/

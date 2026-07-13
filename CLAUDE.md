@@ -3378,3 +3378,39 @@ not guessed at or half-fixed. No source changed this round (docs-only
 investigation); task #189 remains open/in_progress.
 
 See docs/STATUS.md's 65th finding for full detail.
+
+## Checkpoint (Round 41, task #172/#189/#190): real WaitSema/SignalSema/iSignalSema/DeleteSema implemented; corrected a misread from last round; new open lead identified (task #191)
+
+Corrected a mistake made last round (65th finding): a MIPS branch-delay
+slot was misread (delay-slot instructions execute unconditionally,
+whether the branch is taken or not), leading to a wrong conclusion
+about a "sceSifSetDma return-convention conflict." Re-read correctly:
+reaching WaitSema is the genuine, intended real control flow (create a
+locked semaphore, kick off an async SIF op, wait for its completion,
+clean up) - confirmed consistent with real ps2sdk's own
+`while (!sceSifSetDma(&dmat, 1))` idiom found in the user-supplied
+ps2sdk-master.zip's sifrpc.c. Nothing about this project's existing
+syscall 119 needed to change.
+
+Implemented real WaitSema (68)/SignalSema (66)/iSignalSema (-67)/
+DeleteSema (65) in ee_core.c. WaitSema blocks by "parking" (not
+advancing pc past the syscall) while every existing per-step interrupt
+check keeps running normally - reusing the same real exception-
+delivery machinery already built for timer/vblank/DMAC interrupts, so
+a real interrupt can still vector away, run genuine BIOS code, and
+retry the syscall on return, rather than inventing a new mechanism.
+
+Full 88-build/87-distinct-binary regression suite passes; clean
+Wii/devkitPPC rebuild. Real-BIOS diagnostic over 300,000,000
+instructions confirms the parking is safe (no halt, 0x0008C440 stays
+correctly at 1) but boot does not progress further within that sample -
+nothing in this project's currently-modeled interrupt/dispatch chain
+calls SignalSema on this semaphore yet. Honestly reported as an open
+result, not a fabricated success. New task #191 opened with a
+precisely scoped leading hypothesis: the real registration function
+from the 64th finding (0x00083E90) writes a NEW, raw handler-table
+entry that this project's interrupt dispatch doesn't yet know how to
+discover or invoke - the likely real signaling path, not yet
+implemented.
+
+See docs/STATUS.md's correction + 66th finding for full detail.

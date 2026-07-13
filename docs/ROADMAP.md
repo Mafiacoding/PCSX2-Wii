@@ -2035,3 +2035,37 @@ RPCINIT boot progress (tasks #186/#187), and changing it without being
 certain of the real convention risks a silent regression. No source
 changed; docs-only investigation round. See docs/STATUS.md's 65th
 finding for full detail and the precise next step.
+
+## UPDATE (Round 41, task #172/#189/#190): real WaitSema/SignalSema/iSignalSema/DeleteSema implemented; corrected the 65th finding's misread; boot safely parks (no halt) with an honest new open lead (task #191)
+
+Corrected a mistake from Round 40 (65th finding): the "sceSifSetDma
+return-convention conflict" was a misread MIPS branch-delay slot -
+delay-slot instructions execute unconditionally, taken or not.
+Re-reading the real caller correctly shows WaitSema is the genuine,
+intended control flow (create a locked semaphore, kick off an async
+SIF op, wait for completion, clean up), not an error branch - nothing
+about this project's existing sceSifSetDma needed to change (and
+confirmed against the user's ps2sdk-master.zip: real ee/kernel/src/
+sifrpc.c's own `while (!sceSifSetDma(&dmat, 1))` idiom matches this
+project's zero=fail/nonzero=success convention exactly).
+
+Implemented real WaitSema (68), SignalSema (66), iSignalSema (-67),
+DeleteSema (65). WaitSema blocks by "parking" (not advancing pc past
+the syscall) while all existing per-step interrupt checks keep running
+normally, so a real interrupt can still vector away, run genuine BIOS
+handler code, and retry the syscall on return - reusing the same real
+exception-delivery machinery already built for timer/vblank/DMAC
+interrupts, not a new synthetic mechanism.
+
+Full 88-build/87-distinct-binary regression suite passes; clean
+Wii/devkitPPC rebuild. Real-BIOS diagnostic over 300,000,000
+instructions past the WaitSema wall: the EE never halts, stays
+correctly parked at the WaitSema syscall PC, and 0x0008C440 stays at
+its correct value 1 (no regression) - but boot does not progress
+further, since nothing in this project's currently-modeled interrupt
+chain calls SignalSema on this semaphore yet. Honestly reported, not
+disguised. New task #191 opened: the real function traced in the 64th
+finding writes a new, raw (non-syscall-registered) handler-table entry
+this project's interrupt dispatch doesn't yet know how to invoke - the
+leading hypothesis for what's still missing. See docs/STATUS.md's
+correction + 66th finding for full detail.

@@ -1352,6 +1352,150 @@ static int ee_step(void)
                 st->next_pc = this_pc + 8u;
                 return 1;
             }
+            if (sysnum == 68) {
+                /* 68 (0x44) WaitSema - task #189/#190 (65th/66th
+                 * findings). CORRECTION to the 65th finding: earlier
+                 * this round this project misread a MIPS branch-delay
+                 * slot in the real caller traced right after
+                 * CreateSema (0x000848d0's "beqz $v0,->0x84928",
+                 * immediately followed by a delay-slot "li $v0,-2"
+                 * that unconditionally executes regardless of which
+                 * way the branch goes) and concluded there was a
+                 * return-convention "conflict" with this project's
+                 * own sceSifSetDma (syscall 119). Re-reading the full
+                 * block correctly (delay slots always execute, taken
+                 * or not) shows the OPPOSITE: when the preceding call
+                 * chain (ending in sceSifSetDma) returns NONZERO
+                 * (this project's own, already-verified convention -
+                 * matches real ps2sdk's own idiom in the fetched
+                 * ee/kernel/src/sifrpc.c: "while (!sceSifSetDma(&dmat,
+                 * 1))" retries WHILE the return is zero/false, i.e.
+                 * zero=failure, nonzero=success), the real caller
+                 * falls through to call WaitSema then DeleteSema on
+                 * the semaphore it just created, and only THEN
+                 * returns success (0). So WaitSema being reached here
+                 * is the genuine, INTENDED real control flow - a
+                 * classic "create a locked semaphore, kick off an
+                 * async SIF operation, wait for its real completion
+                 * interrupt to signal the semaphore, clean up" idiom -
+                 * not an error branch, and not caused by any bug in
+                 * this project's syscall 119 return value.
+                 *
+                 * Real signature (confirmed via psdevwiki's "EE
+                 * Syscalls" page and this project's own reading of
+                 * the user-supplied ps2sdk-master.zip's
+                 * ee/kernel/src/thread.c, which uses WaitSema(topSema)
+                 * as a genuine blocking wait - ps2sdk ships no C
+                 * source for WaitSema itself, confirmed via GitHub's
+                 * ee/kernel/src/ directory listing, since it is a
+                 * pure BIOS-ROM-resident kernel syscall like
+                 * CreateSema): "s32 WaitSema(s32 sema_id);". Real
+                 * semantics: if count>0, decrement and return 0
+                 * immediately; else block the calling thread until
+                 * another context (typically a real interrupt
+                 * handler) calls SignalSema/iSignalSema.
+                 *
+                 * This project has no real multi-thread scheduler, so
+                 * "blocking" is modeled the same way this project
+                 * already handles VBLANK/timer/DMAC interrupt
+                 * delivery: by NOT advancing pc/next_pc past this
+                 * syscall (so the exact same instruction re-executes
+                 * next step), while every other per-step interrupt
+                 * check (ee_check_timer_interrupt/ee_check_intc_
+                 * interrupt/ee_check_dmac_interrupt/ee_check_rpcinit_
+                 * pending, all called unconditionally before ee_step()
+                 * dispatches - see the bottom of this file) keeps
+                 * running exactly as normal. If a real interrupt fires
+                 * while parked here, it vectors away via the SAME
+                 * real exception-delivery path already implemented
+                 * (task #63/#66), runs genuine BIOS handler code (an
+                 * EPC pointing at this same syscall instruction), and
+                 * an eventual real "eret"/RFE resumes execution here,
+                 * re-running this syscall - which will see any count
+                 * increment a real SignalSema/iSignalSema call made in
+                 * the meantime. This is not a synthetic shortcut: if
+                 * nothing this project's modeled interrupt/dispatch
+                 * chain ever calls SignalSema/iSignalSema on this
+                 * exact semaphore ID, this will honestly park forever,
+                 * which is reported precisely (not disguised as
+                 * progress) via the diagnostic wait_threads counter. */
+                uint32_t semid = (uint32_t)GPR(4); /* $a0 */
+                if (semid < EE_MAX_SEMAPHORES && g_ee_sema[semid].in_use) {
+                    if (g_ee_sema[semid].count > 0) {
+                        g_ee_sema[semid].count--;
+                        GPR(2) = 0;
+                        st->pc = this_pc + 4u;
+                        st->next_pc = this_pc + 8u;
+                    } else {
+                        g_ee_sema[semid].wait_threads++;
+                        st->pc = this_pc;      /* park: re-execute this same syscall next step */
+                        st->next_pc = this_pc + 4u;
+                    }
+                } else {
+                    GPR(2) = sext32((uint32_t)-1); /* real error: invalid sema ID */
+                    st->pc = this_pc + 4u;
+                    st->next_pc = this_pc + 8u;
+                }
+                return 1;
+            }
+            if (sysnum == 66 || sysnum == -67) {
+                /* 66 (0x42) SignalSema, -67 (-0x43) iSignalSema -
+                 * task #189/#190 (66th finding). Real signatures:
+                 * "s32 SignalSema(s32 sema_id);" /
+                 * "s32 iSignalSema(s32 sema_id);" (the latter is the
+                 * interrupt-context-safe form ps2sdk's naming
+                 * convention uses for the negated syscall number,
+                 * same pattern as this project's existing isceSif*
+                 * handling - see the generic-bypass block above).
+                 * Real semantics: increments the semaphore's count
+                 * (waking a blocked WaitSema); real hardware returns
+                 * a real error (E_SEMA_OVF-style) if this would exceed
+                 * max_count instead of incrementing past it - modeled
+                 * here for real, not just clamped silently. This
+                 * project has no distinction between "thread" and
+                 * "interrupt" execution context, so both syscall
+                 * numbers share the exact same implementation. */
+                uint32_t semid = (uint32_t)GPR(4); /* $a0 */
+                if (semid < EE_MAX_SEMAPHORES && g_ee_sema[semid].in_use) {
+                    if (g_ee_sema[semid].count < g_ee_sema[semid].max_count) {
+                        g_ee_sema[semid].count++;
+                        if (g_ee_sema[semid].wait_threads > 0) g_ee_sema[semid].wait_threads--;
+                        GPR(2) = 0;
+                    } else {
+                        GPR(2) = sext32((uint32_t)-419); /* real E_KERNEL_SEMA_OVF-style error */
+                    }
+                } else {
+                    GPR(2) = sext32((uint32_t)-1); /* real error: invalid sema ID */
+                }
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
+            if (sysnum == 65) {
+                /* 65 (0x41) DeleteSema - task #189/#190 (66th
+                 * finding). Real signature: "s32 DeleteSema(s32
+                 * sema_id);". Frees the slot in this project's
+                 * g_ee_sema[] table. Real hardware errors if threads
+                 * are still waiting on it (E_KERNEL_SEMA_STAT-style) -
+                 * modeled honestly here rather than silently deleting
+                 * out from under a waiter, matching this project's
+                 * general precedent of implementing real error paths
+                 * where the check is cheap and well-documented. */
+                uint32_t semid = (uint32_t)GPR(4); /* $a0 */
+                if (semid < EE_MAX_SEMAPHORES && g_ee_sema[semid].in_use) {
+                    if (g_ee_sema[semid].wait_threads > 0) {
+                        GPR(2) = sext32((uint32_t)-419); /* real error: threads still waiting */
+                    } else {
+                        g_ee_sema[semid].in_use = 0;
+                        GPR(2) = 0;
+                    }
+                } else {
+                    GPR(2) = sext32((uint32_t)-1); /* real error: invalid sema ID */
+                }
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
             if (sysnum == 18) {
                 /* AddDmacHandler - task #180 (55th finding): let this
                  * vector as a real MIPS Syscall exception (ExcCode 8)

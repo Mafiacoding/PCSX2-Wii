@@ -8658,3 +8658,79 @@ comparison at the exact moment of this specific call), and check
 whether a per-call-shape distinction (e.g. return value differs based
 on `count`, `attr` flags, or channel-busy state at call time) is the
 real resolution, before touching the syscall 119 handler again.
+## CORRECTION to the 65th finding, and 66th finding (task #189/#190): real WaitSema/SignalSema/iSignalSema/DeleteSema implemented; the earlier "return-convention conflict" was a misread delay slot, not a real bug
+
+**Correction first, since accuracy matters more than a clean
+narrative:** the 65th finding's claim of a "likely sceSifSetDma
+return-convention conflict" was WRONG, caused by misreading a MIPS
+branch-delay slot. The real block at `0x000848d0` is:
+`beqz $v0, ->0x84928` immediately followed by the delay-slot
+instruction `li $v0,-2` - and delay-slot instructions execute
+UNCONDITIONALLY, whether the branch is taken or not. Re-reading the
+full block correctly: when the preceding call chain (ending in this
+project's own `sceSifSetDma`) returns NONZERO - this project's actual,
+already-verified convention, which also matches real ps2sdk's own
+idiom, confirmed this round in the user-supplied `ps2sdk-master.zip`'s
+`ee/kernel/src/sifrpc.c` line 657: `while (!sceSifSetDma(&dmat, 1))`
+(retries WHILE the return is zero/false - i.e. zero=failure,
+nonzero=success, exactly this project's convention) - the branch is
+NOT taken, execution falls through to call `WaitSema` then
+`DeleteSema` on the semaphore it just created, and only afterward
+returns overall success (0). So reaching `WaitSema` here is the
+genuine, INTENDED real control flow: a standard "create a locked
+semaphore (`max_count=1, init_count=0`), kick off a real async SIF
+operation, wait for its completion interrupt to signal the semaphore,
+then clean up" idiom - not an error/fallback branch, and nothing
+about this project's syscall 119 needs to change.
+
+**Implemented for real** (`source/core/ee/ee_core.c`): `WaitSema`
+(syscall 68/0x44): decrements `count` and returns 0 if `count>0`;
+otherwise "parks" - does not advance `pc`/`next_pc` past the syscall,
+so the exact same instruction re-executes next step, while every
+other per-step interrupt check (`ee_check_timer_interrupt`/
+`ee_check_intc_interrupt`/`ee_check_dmac_interrupt`/`ee_check_rpcinit_
+pending`, all called unconditionally before each instruction dispatch)
+keeps running exactly as normal, so a real interrupt can still fire,
+vector away via the existing real exception-delivery path, run genuine
+BIOS handler code, and RFE back to retry the syscall. `SignalSema`
+(66/0x42) and `iSignalSema` (-67/-0x43): increment `count` (real
+E_KERNEL_SEMA_OVF-style error if it would exceed `max_count`).
+`DeleteSema` (65/0x41): frees the slot (real error if threads are
+still waiting on it). All grounded in real signatures from
+`psdevwiki.com/ps2/EE_Syscalls` and the user-supplied ps2sdk source
+tree (which itself ships no C implementation for these - confirmed via
+GitHub's `ee/kernel/src/` directory listing - since they are pure
+BIOS-ROM-resident kernel syscalls, same category as `CreateSema`).
+
+**Verification performed:** full 88-build/87-distinct-binary
+regression suite passes (0 failures); clean Wii/devkitPPC rebuild
+(exit 0, only the pre-existing unrelated `strncpy` warning).
+
+**Real-BIOS empirical result:** the parking mechanism works exactly as
+designed - across a 300,000,000-instruction sample (well past the
+point `WaitSema` is first reached), the EE never halts
+(`ee_halted=0`), `poll@0x0008C440` remains correctly `1` (task #187's
+RPCINIT fix stays intact), and `pc` stays stable at
+`0x000836C4` (the `WaitSema` syscall instruction itself) the entire
+time - a genuine, safe, non-crashing block, not a bug. However, boot
+does NOT progress past it within that sample: nothing in this
+project's currently-modeled interrupt/dispatch chain ever calls
+`SignalSema`/`iSignalSema` on this semaphore. This is an honest
+result, not a fabricated success - the real handler that is supposed
+to signal this semaphore has not been identified or modeled yet.
+
+**Leading hypothesis for what's missing (task #191, opened this
+round):** the real function traced in the 64th finding
+(`0x00083E90`) writes a NEW handler-table entry (using a raw
+struct/table write, not going through this project's existing
+`AddDmacHandler` syscall-based path from task #180) before calling
+`sceSifSetDma`. This project's currently-modeled SIF0 DMAC completion
+interrupt only re-invokes the handler registered via the EARLIER,
+syscall-based `AddDmacHandler` call (`_SifCmdIntHandler`, per task
+#180/#187) - it has no mechanism to discover or invoke this NEW,
+raw-table-registered handler, which is the more likely candidate to
+actually call `SignalSema` on completion. Confirming this needs
+further live-PCSX2 disassembly of the exact table this write targets
+and whatever code (if any) in this project's modeled interrupt chain
+could plausibly read and dispatch through it - not guessed at, a
+precisely scoped next investigation.

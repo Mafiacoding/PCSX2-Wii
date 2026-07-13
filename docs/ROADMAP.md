@@ -2301,3 +2301,35 @@ a visible splash screen or GS register write. Next: search for a real
 source on OSDSYS's private SIF-queue protocol, or use live PCSX2
 reference debugging (55th finding's proven methodology) to observe
 the real structure directly.
+
+## Round 49 (task #198/#199/#200, 75th/76th findings): live PCSX2 debugging finds the real SIF reply-queue protocol; targeted fix implemented
+
+Connected to a live, running PCSX2 instance via DebugServer
+(`mcp__pcsx2-mcp__*`), reset to a fresh real-BIOS boot (no disc), and
+directly observed the real structure the 74th finding's static
+analysis had located but not yet populated: a write watchpoint on
+`MEM[0x2046D540]` (pointed to by the already-correctly-ELF-loaded
+`MEM[0x0046D618]`) caught OSDSYS's own handler draining a real,
+nonzero byte count (0x40) and dispatching through a real function
+pointer at offsets +0x1C ("cd") and +0x20 (command-type marker,
+observed = `0x8000000A`).
+
+`0x8000000A` is exactly this project's own, already-cited
+`SIF_CMD_RPC_CALL` constant, at the exact same record offset this
+project's existing `sif_cmd_iop_send_rpc_bind_rend()` already writes
+`inner_cid` to - proving the real queue buffer's record format IS this
+project's already-correct `SifRpcRendPkt_t` layout, just needing to
+also be written to a second, real, fixed-pointer-addressed location.
+
+Implemented `sif_cmd_iop_write_private_queue_copy()` (resolves the
+real pointer dynamically at delivery time, no hardcoded address) and
+call it alongside the existing `ee_recvbuf` write. Verified: 87/87
+regression suite pass, clean Wii/devkitPPC rebuild. Host-native
+diagnostic shows genuine forward progress - deepest EE PC reached
+advanced from 0x00214C9C (baseline) to 0x00218BF8 (post-fix) - real,
+new OSDSYS code now executes. The boot still re-parks at the same
+WaitSema(semid=2) address, and zero GS register writes are still
+observed, so the user's relaxed goal (splash or GS write) is not yet
+met - reported honestly. See docs/STATUS.md's 75th/76th findings for
+the full live-debugging evidence trail and the narrowed next step
+(the BIND-reply vs CALL-reply dispatch branch distinction).

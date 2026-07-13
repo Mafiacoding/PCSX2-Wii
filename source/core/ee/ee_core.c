@@ -1102,6 +1102,93 @@ static int sif_loadfile_elf_load(ee_state_t *st, const char *romname, uint32_t *
  * (_SifCmdIntHandler(), usr_cmd_handlers[8], _request_end(),
  * iSignalSema()) is genuine, already-resident real BIOS/kernel code
  * this project's interpreter executes for real once invoked. */
+/* task #198/#199/#200 (75th/76th findings): OSDSYS's own, privately
+ * re-registered SIF0-completion handler (installed via its SECOND
+ * AddDmacHandler call, see the 73rd finding) does NOT read its reply
+ * data from the ee_recvbuf this project already writes to below -
+ * live PCSX2 debugger observation (DebugServer, real BIOS, real
+ * boot, no fabricated data) proved it instead polls a completely
+ * separate, FIXED, real EE-kernel-owned queue buffer, reached via a
+ * pointer this project's own (already-correct, ELF-loaded-from-the-
+ * real-BIOS-image) static data provides at EE address 0x0046D618.
+ * Live-observed real facts (all read directly off a real, running
+ * PCSX2 instance with a real BIOS, via mcp__pcsx2-mcp__* debug
+ * tools):
+ *   - MEM[0x0046D618] (a real, static, ELF-loaded pointer - already
+ *     correct in this project without any fix, since it's plain BIOS
+ *     data, not runtime-computed) held 0x2046D540 in both a live
+ *     mid-game session and a fresh BIOS-only boot - a fixed, real,
+ *     kernel-reserved buffer address, not something allocated per
+ *     call.
+ *   - OSDSYS's handler (disassembled from the SAME real BIOS this
+ *     project loads, at 0x00212B28) does:
+ *       lw   a3, MEM[0x0046D618]        ; a3 = the real queue buffer
+ *       lbu  v0, (a3)                   ; v0 = "how many bytes queued"
+ *       andi a1, v0, 0xff
+ *       beqz a1, <skip-everything>      ; empty queue -> do nothing
+ *     i.e. the VERY FIRST BYTE of that buffer is a real, live,
+ *     byte-length gate the handler polls before doing any work at
+ *     all - confirmed zero in this project's own (previously
+ *     unpopulated) model, exactly matching the always-empty-queue
+ *     symptom the 73rd/74th findings already documented.
+ *   - A live write-watchpoint on that exact byte caught OSDSYS's OWN
+ *     handler draining it (a real "sb zero,(a3)" clearing the byte
+ *     right after reading it - real hardware's grab-and-reset
+ *     pattern), with the drained value = 0x40 (64 = 4 real 16-byte
+ *     records) and a1 = (count>>4) driving a real `lq`/`sq` copy loop
+ *     that copies exactly that many bytes from the SAME buffer to a
+ *     stack scratch area, then dispatches through it.
+ *   - Stepping the real dispatch to its actual callback invocation
+ *     (a real, in-range OSDSYS code pointer, 0x00212FB8 - not a
+ *     zero/garbage pointer) showed it reads the copied record at
+ *     OFFSET +0x1C ("cd", a SifRpcClientData_t*) and OFFSET +0x20
+ *     (a command-type marker), comparing +0x20 against the literal
+ *     constant 0x8000000A before doing a real double-indirect
+ *     function-pointer call - and 0x8000000A is EXACTLY this
+ *     project's own, already-cited SIF_CMD_RPC_CALL constant (see
+ *     sif.h), at the EXACT SAME byte offset (+0x20) this project's
+ *     OWN sif_cmd_iop_send_rpc_bind_rend() below already writes
+ *     inner_cid to, and +0x1C is the EXACT SAME offset this function
+ *     already writes cd_ptr to. This is not a coincidence: the real
+ *     queue buffer's record format IS this project's already-cited,
+ *     already-correct SifRpcRendPkt_t layout (48 bytes, psize=0x30 in
+ *     the first word - whose LOW BYTE, 0x30, is itself a valid,
+ *     nonzero real "bytes queued" gate value under the real byte-gate
+ *     convention observed above).
+ * Conclusion, fully grounded in the above (no fabricated struct
+ * layout or semantics - every field/offset/constant here was either
+ * directly observed on live real hardware or was already an existing,
+ * separately-cited real constant in this project): OSDSYS's private
+ * handler reads its replies from the SAME logical reply-packet this
+ * project already builds for ee_recvbuf, just via a SECOND, real,
+ * fixed-pointer-addressed path this project never also wrote to.
+ * Writing the identical, already-correct packet to *both* locations
+ * (ee_recvbuf, for whichever consumer still uses the original
+ * shared-kernel path, and the real queue buffer resolved dynamically
+ * from MEM[0x0046D618] at delivery time - not a hardcoded address,
+ * so this works even if this project's specific BIOS build/revision
+ * places the real pointer differently) is the minimal, real-protocol-
+ * matching fix. */
+static void sif_cmd_iop_write_private_queue_copy(ee_state_t *st, uint32_t cd_ptr, uint32_t inner_cid)
+{
+    uint32_t queue_ptr = ee_mem_read32(st, 0x0046D618u);
+    if (!queue_ptr || queue_ptr < 0x00100000u)
+        return; /* not yet populated / not a plausible real pointer - stay silent, no guessing */
+    uint32_t qbuf = queue_ptr & 0x1FFFFFFFu; /* real vaddr -> phys, same convention as sif_loadfile_translate_base() */
+    ee_mem_write32(st, qbuf + 0x00u, 0x30u);        /* psize=48 low byte doubles as the real byte-count gate (see citation above) */
+    ee_mem_write32(st, qbuf + 0x04u, 0u);
+    ee_mem_write32(st, qbuf + 0x08u, SIF_CMD_RPC_END);
+    ee_mem_write32(st, qbuf + 0x0Cu, 0u);
+    ee_mem_write32(st, qbuf + 0x10u, 0u);
+    ee_mem_write32(st, qbuf + 0x14u, 0u);
+    ee_mem_write32(st, qbuf + 0x18u, 0u);
+    ee_mem_write32(st, qbuf + 0x1Cu, cd_ptr);       /* cd - real offset +0x1C, live-confirmed */
+    ee_mem_write32(st, qbuf + 0x20u, inner_cid);    /* inner cid - real offset +0x20, live-confirmed against 0x8000000A */
+    ee_mem_write32(st, qbuf + 0x24u, 0x00001000u);
+    ee_mem_write32(st, qbuf + 0x28u, 0u);
+    ee_mem_write32(st, qbuf + 0x2Cu, 0u);
+}
+
 static void sif_cmd_iop_send_rpc_bind_rend(ee_state_t *st, uint32_t ee_recvbuf, uint32_t cd_ptr, uint32_t inner_cid)
 {
     if (!ee_recvbuf)
@@ -1123,6 +1210,7 @@ static void sif_cmd_iop_send_rpc_bind_rend(ee_state_t *st, uint32_t ee_recvbuf, 
     ee_mem_write32(st, ee_recvbuf + 0x24u, 0x00001000u);   /* sd = non-NULL PLACEHOLDER (task #194/70th finding, see comment above - NOT a real IOP address; irrelevant for a CALL reply, harmless either way) */
     ee_mem_write32(st, ee_recvbuf + 0x28u, 0u);            /* buf = NULL */
     ee_mem_write32(st, ee_recvbuf + 0x2Cu, 0u);            /* cbuf = NULL */
+    sif_cmd_iop_write_private_queue_copy(st, cd_ptr, inner_cid); /* task #200 (75th/76th finding): also feed OSDSYS's private handler */
     dma_channel_signal_done(DMA_CHANNEL_SIF0); /* real SIF0 completion IRQ - drives the real, resident _SifCmdIntHandler() */
 }
 

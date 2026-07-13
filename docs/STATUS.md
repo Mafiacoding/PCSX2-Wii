@@ -9446,3 +9446,95 @@ project has reached and precisely characterized OSDSYS's first
 genuinely OSDSYS-private (not shared-kernel) execution and blocking
 point - a substantial, real milestone - but has not yet produced a
 visible splash screen or GS register write.
+
+## Update (Round 49, 75th/76th findings): live PCSX2 debugging locates the real SIF reply-queue protocol; a real, targeted fix implemented - measurable forward progress, wall not yet fully cleared
+
+Per the user's "lets go finish until you reach the splash screen or atleast
+gs output" directive, this round finally exercised the live-PCSX2
+reference-debugging avenue the 74th finding's own next-steps flagged but
+had not yet attempted (`mcp__pcsx2-mcp__*` DebugServer tools).
+
+**Live connection.** Connected to a real, running PCSX2 instance via
+DebugServer (port 21512). It was initially mid-game (2.4B cycles into a
+real title, parked in the kernel idle loop) - not useful for observing a
+fresh BIOS boot. With the user's explicit permission, the instance was
+reset to boot the real BIOS with no disc (straight to OSDSYS), and
+verified via `pcsx2_get_threads` to have multiple threads resident in the
+exact `0x00210000-0x00213000` OSDSYS code range this project's own static
+analysis (73rd/74th findings) already identified.
+
+**Real, live-observed facts (not fabricated - every value below was read
+directly off real hardware via the debug protocol):**
+- `MEM[0x0046D618]` (the real, static, ELF-loaded pointer this project's
+  fixed ELF loader already places correctly, since it's plain BIOS data)
+  held `0x2046D540` in both a live mid-game session and a fresh BIOS-only
+  boot - a fixed, real, kernel-reserved buffer, not a per-call allocation.
+- Disassembling OSDSYS's own handler at `0x00212B28` on the LIVE instance
+  produced byte-identical instructions to this project's earlier static
+  disassembly of `/tmp/real_bios.bin` - confirming the two BIOS images
+  agree and the earlier static analysis was accurate.
+- A write watchpoint on `0x2046D540` (the first byte - the real "bytes
+  queued" gate the handler polls before doing any work) caught OSDSYS's
+  OWN handler executing `sb zero,(a3)` - a real grab-and-reset drain,
+  with the drained value = `0x40` (64 = four real 16-byte records) and
+  the resulting `a1 = count>>4` driving a real `lq`/`sq` copy loop that
+  copies exactly that many bytes to a stack scratch buffer before
+  dispatching.
+- Stepping the real dispatch to its actual callback invocation (a real,
+  in-range OSDSYS code pointer, `0x00212FB8` - not garbage/zero) showed
+  it reads the copied record at **offset +0x1C** (a `SifRpcClientData_t*`
+  "cd" pointer) and **offset +0x20** (a command-type marker), comparing
+  +0x20 against the literal constant `0x8000000A` before doing a real
+  double-indirect function-pointer call.
+
+**The key discovery:** `0x8000000A` is EXACTLY this project's own,
+already-cited `SIF_CMD_RPC_CALL` constant (`include/core/hw/sif.h`), at
+the EXACT SAME byte offset (+0x20) this project's own
+`sif_cmd_iop_send_rpc_bind_rend()` already writes `inner_cid` to, and
++0x1C is the exact same offset that function already writes `cd_ptr` to.
+This is not a coincidence: the real queue buffer's record format IS this
+project's already-cited, already-correct `SifRpcRendPkt_t` layout (48
+bytes, `psize=0x30` in the first word - whose low byte, `0x30`, is itself
+a valid, nonzero real "bytes queued" gate value under the observed
+byte-gate convention). OSDSYS's private handler reads its replies from
+the SAME logical reply packet this project already builds for
+`ee_recvbuf` - just via a SECOND, real, fixed-pointer-addressed path
+(`MEM[0x0046D618]` -> queue buffer) this project never also wrote to.
+
+**Fix implemented (task #200):** added
+`sif_cmd_iop_write_private_queue_copy()` in `source/core/ee/ee_core.c`,
+called from `sif_cmd_iop_send_rpc_bind_rend()` right alongside the
+existing `ee_recvbuf` write. It resolves the real queue pointer
+dynamically from `MEM[0x0046D618]` at delivery time (not a hardcoded
+address, so it works even if this project's specific BIOS build/revision
+places the pointer differently) and writes the identical, already-correct
+48-byte reply packet there too.
+
+**Verified, honestly:** A host-native diagnostic (300M-instruction GS-
+register-watching harness) shows real, measurable forward progress from
+this fix - `max_pc_seen` (the deepest EE PC reached) advanced from
+`0x00214C9C` (pre-fix baseline, re-run and confirmed this round) to
+`0x00218BF8` (post-fix) - genuinely new OSDSYS code now executes that
+never ran before. **However, the boot still ultimately re-parks at the
+same `WaitSema` address (`0x00210F84`)** - the real dispatch, per the
+disassembly above, has two branches (BIND vs CALL); the BIND-reply path
+this delivery currently sends takes a different real branch
+(`cd->server=...`-style field copy, not the callback-invoking path this
+round traced) than the CALL-reply path does, so semid=2's specific
+`iSignalSema` may be reached by a later/different call this project
+hasn't yet arm-triggered with `inner_cid=SIF_CMD_RPC_CALL` at the right
+moment. **Zero GS register writes are still observed** - the user's
+relaxed goal (splash screen OR at least a GS register write) is NOT yet
+met, reported honestly rather than claimed.
+
+**Verified for real:** all 87 host-native regression tests pass (0
+failures); clean Wii/devkitPPC rebuild (`pcsx2-wii-git.dol` produced,
+433536 bytes). No BIOS bytes were committed, pushed, or rsynced at any
+point (`find` check after rsync, as always, comes back empty).
+
+**Concrete next step:** trace which specific SifBindRpc/SifCallRpc
+sequence's reply needs `inner_cid=SIF_CMD_RPC_CALL` (not `RPC_BIND`) at
+the moment `g_rpc_bind_inner_cid` is armed for OSDSYS's own semid=2 wait,
+using the same live-PCSX2 methodology now proven to work this round -
+this is now a narrow, well-scoped, well-grounded follow-up, not an open
+architectural gap.

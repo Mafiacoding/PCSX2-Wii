@@ -3670,3 +3670,34 @@ progress, precisely characterized down to the disassembled instruction
 level - not a completed splash screen, and not represented as one.
 Next: find a real source for OSDSYS's private SIF-queue protocol, or
 use live PCSX2 reference debugging to observe it directly.
+
+## Checkpoint (Round 49, task #198/#199/#200)
+
+Live PCSX2 reference debugging (`mcp__pcsx2-mcp__*`, DebugServer)
+finally exercised this round, per the user's "lets go finish until you
+reach the splash screen or atleast gs output" directive. Reset a live
+instance to a fresh real-BIOS boot, watched the real SIF reply-queue
+structure the 74th finding had located but not populated, and found:
+its record format is byte-for-byte this project's own already-correct
+`SifRpcRendPkt_t` layout (confirmed via the real `0x8000000A` marker
+matching this project's own cited `SIF_CMD_RPC_CALL` constant at the
+exact same offset this project already writes it to). Implemented
+`sif_cmd_iop_write_private_queue_copy()` in `source/core/ee/ee_core.c`
+to also write the already-correct reply packet to this real, dynamically-
+resolved queue address (see docs/STATUS.md's 75th/76th findings).
+
+Verified: 87/87 regression suite pass, clean Wii/devkitPPC rebuild.
+Host-native diagnostic confirms genuine, measurable forward progress
+(deepest EE PC reached: 0x00214C9C -> 0x00218BF8), but the boot still
+re-parks at the same WaitSema(semid=2) wall and zero GS register
+writes are observed.
+
+Status: task #172's "produce a visible splash/logo screen" goal (or
+the user's this-window relaxed "at least a GS register write" goal) is
+NOT yet reached. This is real, live-hardware-verified, measurable
+progress - not a completed splash screen, and not represented as one.
+Next: the live-PCSX2 methodology proven this round should be used
+again to determine which specific SifBindRpc/SifCallRpc sequence needs
+`inner_cid=SIF_CMD_RPC_CALL` (not RPC_BIND) armed at the moment of
+OSDSYS's own semid=2 wait - a narrow, well-scoped follow-up, not an
+open architectural gap.

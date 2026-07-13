@@ -1727,3 +1727,28 @@ distinct wait/scan loop around EE PC `0x8000F768` (real, bounded,
 touches the DMAC_STAT KSEG1 mirror - not a crash). See STATUS.md's
 52nd finding for full detail; this new loop is the next thing to
 root-cause for task #172.
+
+
+**UPDATE (Round 29 continued, 53rd finding, task #179):** audited the
+EE syscall table (0-172 requested scope) against a real 65M-instruction
+boot trace - no gap found, only the 9 already-implemented numbers are
+ever invoked. Implemented real VBLANK_START/VBLANK_END interrupt
+delivery (INTC bits 2/3, `ee_intc_raise()` - previously declared but
+never called by anything in this project), the first genuinely new
+"registration" this round adds; verified it fires and vectors
+correctly, and kept as real, independently-correct hardware behavior.
+However, direct disassembly of the real BIOS's `0x8000CF88` polling
+subroutine (called from the `0x8000F768` wait loop found in the 52nd
+finding) shows the loop's real exit condition is NOT COP0-interrupt-
+based at all - it's a plain memory-mapped poll of DMAC_STAT bit 0x80
+(SIF2 completion) or INTC_STAT bit 0x2 (SBUS), neither of which this
+project's IOP can ever raise because the IOP halts by design once its
+own module-loading sequence completes (`i=29,937,994`, well before the
+EE even reaches this loop), instead of continuing into a persistent
+idle/scheduler loop the way real IOP hardware does. 87/87 regression
+suite pass; clean Wii rebuild. This reframes task #172's next step:
+the real fix is making the IOP core stay "alive" (idle loop or minimal
+scheduler) after module loading finishes, not a further EE-side
+registration/interrupt addition - see STATUS.md's 53rd finding for
+full detail. Flagged to the user before implementing, given the scope
+of an IOP-core-lifecycle change.

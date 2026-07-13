@@ -2846,3 +2846,58 @@ bounded - touches the DMAC_STAT KSEG1 mirror, resembles this
 project's earlier LOADCORE-style registration-scan loops at a
 different address). This new loop is the next thing to root-cause -
 see docs/STATUS.md's 52nd finding for full detail.
+
+
+## Update (Round 29 continued, 53rd finding): EE syscall table audited (clean, no gap), VBLANK interrupt delivery implemented and verified real, and the 0x8000F768 loop's TRUE exit condition found via direct disassembly - it's an IOP-halt deadlock
+
+This round's request: audit the EE syscall table (0-172) for gaps and
+add whatever "registration" is missing so the boot handler works and a
+splash screen can be reached. Two user-approved pivots along the way
+(via AskUserQuestion): first toward a scoped IOP-reply HLE fix for
+what looked like a missing-reply gap, then - after discovering the
+underlying mechanism might be genuine real-BIOS behavior rather than
+an emulation gap - toward "keep digging to find the real exit
+condition" instead of guessing.
+
+**Syscall audit: clean.** A full syscall-number histogram over a 65M-
+instruction real-BIOS boot run shows only the 9 already-implemented
+numbers (18, 22, 60, 61, 100, 119, 120, 121, 122) are ever invoked, 13
+calls total. No missing-syscall gap exists at the current boot state.
+
+**VBLANK_START/VBLANK_END implemented** (`ee_check_vblank()` in
+ee_core.c, raising INTC bits 2/3 via `ee_intc_raise()` - declared since
+task #176 but never called by anything until now). Real cadence:
+4,921,488 EE cycles/frame (294.912MHz/59.94Hz), VBLANK_END at a 1/12-
+frame offset, using this project's already-established 1-cycle-per-
+instruction simplification. Verified via trace: fires and correctly
+vectors into the interrupt exception exactly once during a 65M-
+instruction run. Real, correct, independently worth keeping.
+
+**But it doesn't unblock the 0x8000F768 loop - and now we know exactly
+why.** Disassembling the loop's own polling subroutine (0x8000CF88,
+called ~1.4M times) shows it bypasses the COP0 interrupt-exception
+mechanism entirely: it's a plain memory-mapped poll of DMAC_STAT
+(0x1000E010) bit 0x80 (SIF2 completion) or INTC_STAT (0x1000F000) bit
+0x2 (SBUS). Neither register bit is ever set in the 65M-instruction
+trace. Root cause, confirmed empirically: the IOP core halts at
+i=29,937,994 (before the EE even reaches this loop) with
+halt_reason="module boot sequence complete: 29/29 real modules loaded,
+28 run to completion (task #92)" - this project's own IOP module
+loader deliberately stops the IOP once it finishes running every
+discovered module, instead of dropping into the persistent idle/
+scheduler loop real IOP hardware uses to keep servicing SIF/DMA
+requests indefinitely. Since nothing can run on the IOP side anymore,
+neither exit condition this loop is polling for can ever become true.
+
+87/87 regression suite pass (script now auto-detects each test's own
+embedded-vs-linked-source convention - several tests `#include` the
+.c file under test directly, which must then be excluded from the
+external link line, a subtlety the previous blanket-link-everything
+approach missed). Clean Wii/devkitPPC rebuild.
+
+**Next for task #172:** this is a real IOP-core-lifecycle gap, not a
+small registration fix - needs a design decision (keep IOP alive in a
+sensible steady state after module loading, or model a minimal real
+idle/scheduler loop) before implementing. Flagged to the user rather
+than guessing at scope. See docs/STATUS.md's 53rd finding for full
+detail.

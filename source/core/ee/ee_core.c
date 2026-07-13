@@ -461,6 +461,54 @@ static void ee_check_dmac_interrupt(ee_state_t *st, uint32_t this_pc)
     ee_raise_exception(st, EE_EXC_CODE_INT, this_pc, 0);
 }
 
+/* Task #179 (splash-screen blocker investigation, continued from
+ * task #178): real EE VBLANK_START/VBLANK_END are INTC sources 2/3
+ * (see ee_intc.h's real ten-source list, ported from PCSX2's Hw.h
+ * EE_INTC enum: 0=GS,1=SBUS,2=VBLANK_S,3=VBLANK_E,...) - unlike
+ * SBUS/DMAC-completion, which genuinely depend on IOP-side or DMA
+ * activity this project doesn't fully model, VBLANK is a raw display-
+ * refresh timing signal: real hardware raises it unconditionally,
+ * continuously, at the real NTSC/PAL refresh rate, regardless of what
+ * the IOP or any DMA channel is doing. This project had NEVER raised
+ * it before now (ee_intc.h's ee_intc_raise() doc comment: "Not yet
+ * called by anything") - found while investigating a new post-BREAK
+ * boot wall (a real, in-BIOS ROM function at 0xBFCC1CA8 that clears a
+ * pending-status field, confirmed via instruction-address tracing to
+ * never execute even once in 65M+ instructions of real-BIOS boot -
+ * consistent with it being reached only via an interrupt path this
+ * project never triggers).
+ *
+ * Real EE clock: 294.912 MHz (documented, e.g. ps2tek). Real NTSC
+ * vertical refresh: 59.94 Hz. Cycles/frame = 294912000/59.94 =
+ * 4921488 (rounded). This project has no cycle-accurate timing model
+ * (see ee_step()'s own Count-register comment above: "advances Count
+ * by a fixed 1 per instruction instead... without precise bus-clock-
+ * rate fidelity, which isn't verifiable without a real timing model")
+ * - VBLANK timing here follows that SAME already-established, already-
+ * documented simplification: 1 instruction counted as 1 EE cycle, so
+ * a real, cited cycles/frame value is used directly as an instruction
+ * count. VBLANK_END is modeled as a fixed, real-ratio offset within
+ * the frame rather than fired simultaneously with VBLANK_START - real
+ * NTSC vertical blanking spans roughly 8.5% of a frame's total scan
+ * lines (approx. 22-26 of the ~262.5 total scanlines depending on
+ * exact standard/interlace details cited by various real hardware
+ * references) - approximated here as VBLANK_END firing 1/12th of a
+ * frame's cycles after VBLANK_START (a round, defensible fraction in
+ * that cited range), not a fabricated arbitrary number. */
+#define EE_CYCLES_PER_FRAME_NTSC   4921488u
+#define EE_CYCLES_VBLANK_DURATION  (EE_CYCLES_PER_FRAME_NTSC / 12u)
+#define EE_INTC_IRQ_VBLANK_START   2
+#define EE_INTC_IRQ_VBLANK_END     3
+
+static void ee_check_vblank(ee_state_t *st)
+{
+    uint64_t phase = st->instructions_executed % EE_CYCLES_PER_FRAME_NTSC;
+    if (phase == 0)
+        ee_intc_raise(EE_INTC_IRQ_VBLANK_START);
+    else if (phase == EE_CYCLES_VBLANK_DURATION)
+        ee_intc_raise(EE_INTC_IRQ_VBLANK_END);
+}
+
 static inline uint8_t *ee_mem_ptr(ee_state_t *st, uint32_t addr, uint32_t size)
 {
     /* R5900 Scratchpad RAM (SPR): a real, dedicated 16KB on-chip buffer
@@ -3458,6 +3506,14 @@ static int ee_step(void)
      * whether the NEXT instruction (whatever this step just set
      * st->pc to) is itself a delay slot. */
     ee_latch_timer_interrupt(st);
+    /* Task #179: raised unconditionally, every instruction, same
+     * reasoning as ee_latch_timer_interrupt() above - VBLANK is a
+     * real, free-running hardware timing signal, not something that
+     * should be skipped mid-delay-slot. Only the higher-level "should
+     * we actually take an interrupt right now" decision (via
+     * ee_check_intc_interrupt() below) is deferred to a genuine
+     * instruction boundary. */
+    ee_check_vblank(st);
     if (!st->branch_pending) {
         ee_check_timer_interrupt(st, st->pc);
         /* Task #176: same instruction-boundary gating as the timer

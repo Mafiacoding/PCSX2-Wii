@@ -7448,3 +7448,92 @@ level code - shape strongly resembles this project's earlier LOADCORE-
 style device/registration-list scan loops (tasks #124/#132/#148 etc.),
 just at a different address and (very likely) a different list/condition.
 Not yet root-caused - that's the next concrete step.
+
+## 53rd finding (task #179): EE syscall table audited (no gap found); real root cause of the 0x8000F768 wait loop identified via disassembly - it's an IOP-halt deadlock, not an interrupt-delivery gap
+
+**Syscall audit (the literal first half of this round's request):** instrumented
+a full syscall-number histogram over a 65,000,000-instruction real-BIOS boot
+run. Only 13 syscalls are ever invoked, all against the 9 numbers this
+project's EE syscall dispatch already implements (18, 22, 60, 61, 100, 119,
+120, 121, 122). **No missing-syscall gap exists at the current boot state** -
+the syscall table is not the blocker. (It will very likely need further
+entries once boot progresses past the wall below, into code that hasn't run
+yet - revisit when that happens rather than speculatively adding unverified
+numbers now.)
+
+**VBLANK_START/VBLANK_END interrupt delivery implemented** (the concrete
+"missing registration" this round targeted): `ee_intc_raise(2)`/`ee_intc_raise
+(3)` (INTC bits 2/3, per this project's own already-cited real ten-source
+INTC ordering in `ee_intc.h`) are now raised periodically from `ee_core.c`'s
+new `ee_check_vblank()`, called unconditionally every step alongside
+`ee_latch_timer_interrupt()`. Cadence: `EE_CYCLES_PER_FRAME_NTSC = 4921488`
+(294.912MHz real EE clock / 59.94Hz real NTSC vblank rate), using this
+project's already-established "1 instruction = 1 cycle" simplification
+(same precedent as the Count-register comment elsewhere in `ee_core.c`).
+VBLANK_END fires at a fixed 1/12-frame offset after VBLANK_START,
+approximating real NTSC vertical-blank duration (~8.5% of a frame).
+`ee_intc_raise()` was previously declared but, per its own doc comment,
+"not yet called by anything" - this is the first real INTC source this
+project raises. Verified via trace: it does fire and correctly vector into
+the interrupt exception (`0x80000200`) exactly once during the 65M-
+instruction run (Status.IE briefly enabled during kernel init), confirming
+the mechanism works end to end. This is independently correct, real EE
+hardware behavior regardless of the finding below, and is being kept.
+
+**Real exit condition for the 0x8000F768 loop found, via direct disassembly
+of the real BIOS (not speculation this time):** the loop calls a subroutine
+at `0x8000CF88` on every iteration (confirmed called ~1.4 million times
+before the 65M-instruction cap). Disassembling that subroutine shows it
+does NOT use the EE's COP0 interrupt-exception mechanism at all - it
+directly polls two real, memory-mapped hardware registers with plain loads:
+`DMAC_STAT` (`0xB000E010`, KSEG1-uncached mirror of `0x1000E010`) bit `0x80`
+(channel 7 = SIF2 completion, per this project's own already-documented
+real DMAC channel numbering), and `INTC_STAT` (`0xB000F000`, mirror of
+`0x1000F000`) bit `0x2` (SBUS, per `ee_intc.h`'s real ten-source ordering).
+If either condition is true, it jumps into a real handler (`0x8000CEA8`/
+`0x8000CDF8`); if not, it returns and the caller loops back. Instrumented
+both registers across the full 65M-instruction run: `DMAC_STAT`'s low
+(status) half never sets bit `0x80` and `INTC_STAT` never sets bit `0x2` -
+only the already-explained VBLANK bits (`0xC` = bits 2/3) and the SIF2
+channel's own upper enable-mask bit (already armed, part of `0x00A00000`)
+are ever seen. `cea8_hits=0`, `cdf8_hits=0` - neither exit path is ever
+taken.
+
+**Root cause, confirmed empirically:** the IOP core halts at
+`i=29,937,994` (EE-instruction-equivalent; before the wait loop is even
+entered at `i≈30,002,714`), IOP `pc=0x00100000`, with
+`halt_reason="module boot sequence complete: 29/29 real modules loaded, 28
+run to completion (task #92)"`. This is this project's own IOP module
+loader's own, deliberate, by-design halt once it finishes running every
+discovered module - not a bug or an unimplemented-opcode crash. Real IOP
+hardware never does this: after its own module/driver bring-up, the real
+IOP kernel drops into a persistent idle/scheduler loop, continuing
+indefinitely to service SIF DMA requests and raise interrupts (like the
+SIF2 completion or SBUS signal this exact loop is waiting for). Since this
+project's IOP simply stops executing at that point, nothing can ever kick
+a SIF2 transfer or raise SBUS, so `0x8000F768`'s poll deadlocks forever -
+confirmed consistent with the summary's earlier task-92 hypothesis, but now
+pinned to an exact mechanism (an intentional halt, not a missing feature on
+the EE side) instead of a guess.
+
+This directly explains why VBLANK delivery alone (implemented above) does
+not unblock this specific loop: VBLANK is unrelated to what this loop is
+actually waiting for (SIF2/SBUS, both IOP-driven), and by the time the loop
+is reached the IOP that would raise either condition is already halted.
+
+**Verified:** full regression suite, 87/87 build+run, 0 failures (all 87
+`tests/test_*.c` rebuilt and rerun with each test's own embedded-vs-linked
+source convention respected - several tests `#include` the `.c` file under
+test directly and must NOT have that file also linked externally, which
+this session's regression script now detects automatically instead of
+assuming one fixed link line for every test). Clean Wii/devkitPPC rebuild
+(`pcsx2-wii-git.dol` produced, toolchain env vars re-exported this session
+per `TOOLCHAIN_SETUP_NOTES.md`).
+
+**Not yet done - next step for task #172:** this is a real architectural
+gap (this project's IOP core stops running instead of idling/scheduling
+forever like real hardware) rather than a small registration fix, so it
+needs a deliberate design decision (e.g., keep the IOP core "alive" in a
+sensible steady state after module-loading completes, or model a minimal
+real IOP idle/kernel-scheduler loop) rather than a scoped patch - flagged
+to the user before implementing.

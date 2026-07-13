@@ -2236,3 +2236,37 @@ regression tests pass; clean Wii/devkitPPC rebuild verified. See
 docs/STATUS.md's 72nd finding for the full three-layer trace. New task
 #198: find OSDSYS's actual next milestone toward a visible splash
 screen (GS/DISPFB writes) with a longer diagnostic run.
+
+## UPDATE (Round 47, task #196/#197/#198, investigation only): OSDSYS runs real code but parks on its own new semaphore waiting for its own SIF RPC bind to complete - root cause narrowed to OSDSYS's own internal SIF dispatch logic
+
+With Round 46's fix shipped, this round characterized OSDSYS's actual
+next wall via a 300,000,000-instruction GS-register-watching
+diagnostic: zero GS register writes, PC settles permanently at
+0x00210F84 - a genuine WaitSema(semid=2) syscall, on a semaphore
+OSDSYS itself creates and waits on (its own code, not shared kernel/
+EELOAD code - the first genuinely OSDSYS-internal blocking wait this
+project has reached).
+
+Traced the full real chain: OSDSYS issues its own sceSifBindRpc() to a
+new IOP service; this project's existing generalized RPC_BIND REND
+mechanism (task #194) correctly delivers a reply with the right
+cd_ptr; that reply's DMA completion genuinely raises a real DMAC
+interrupt; separately, OSDSYS re-registers its own SIF0 DMAC handler
+(a second real AddDmacHandler call, letting genuine vectored BIOS code
+install it); when the interrupt fires, it now runs OSDSYS's OWN
+handler code (not the shared kernel dispatcher that successfully
+signaled the two earlier semaphores) - real, expected AddDmacHandler
+replacement semantics, not a bug. OSDSYS's own handler runs for real
+but the trace shows no SignalSema/iSignalSema call afterward - it
+returns through the already-understood real -5 (ResumeIntrDispatch)
+syscall without ever unblocking the wait.
+
+Honestly reported as open: this project hasn't yet traced what
+condition OSDSYS's own internal SIF dispatch logic checks before
+signaling its semaphore - likely either specific reply-packet field
+content or its own internal pending-bind tracking. No source changes
+this round (pure investigation); see docs/STATUS.md's 73rd finding for
+the full trace. Next: identify the target service ID and disassemble
+OSDSYS's own handler (0x00212B28-0x00212C30), or use live PCSX2
+reference debugging (per the 55th finding's proven methodology) to
+observe the real condition directly.

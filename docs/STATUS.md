@@ -9275,3 +9275,96 @@ goal is closer than ever (real OSDSYS code is genuinely executing) but
 not yet confirmed. New task #198: run a longer, GS/DISPFB-write-
 watching diagnostic against this fixed build to find OSDSYS's actual
 next milestone (or blocker) toward drawing something to the screen.
+
+---
+
+## 73rd finding (task #196/#197/#198): OSDSYS runs real code but parks forever on a NEW semaphore (id=2) waiting for its own SIF RPC bind to complete; the REND delivery mechanism, DMAC interrupt, and OSDSYS's own re-registered SIF0 handler all fire for real, but iSignalSema(2) is never observed - narrowed to OSDSYS's own internal SIF dispatch logic, not yet resolved
+
+Following the 72nd finding's fix (real OSDSYS code now executes), this
+round characterized where OSDSYS's forward progress actually stops.
+
+**The wall, precisely characterized:** a 300,000,000-instruction
+diagnostic (watching every GS privileged register - PMODE/DISPFB1/2/
+DISPLAY1/2 - for any change) shows ZERO GS register writes, and PC
+never advances past a narrow, already-executed range
+(`0x00210F84-0x00214C9C`) after the first ~30,400,000 instructions.
+The exact parked instruction is `0x00210F84`, confirmed via register
+dump to be a `WaitSema(sema_id=2)` syscall (`$v1=0x44`/68, `$a0=2`) -
+the SAME real blocking-wait mechanism this project has already solved
+twice before (semid 0 and 1, both LOADFILE-related). This semaphore
+(`CreateSema` id=2, `max_count=1 init_count=0`) is created by, and
+waited on by, OSDSYS's OWN code (`ra=0x00213378`, `pc=0x00210F44`) -
+the first genuinely OSDSYS-internal (not shared-kernel/EELOAD)
+blocking wait this project has ever reached.
+
+**Traced the full real chain leading into this wait, all genuine
+executed code, nothing fabricated:**
+1. OSDSYS issues its own `sceSifBindRpc()` call (`SIF_CMD_RPC_BIND`,
+   `cid=0x80000009`, at `pc=0x00211324`) to a NEW IOP service (not
+   LOADFILE's `0x80000006` - the specific service ID wasn't extracted
+   this round, a concrete next step).
+2. This project's already-generalized RPC_BIND REND-reply mechanism
+   (task #194) correctly arms and, after its modeled delay, delivers
+   a reply into the shared recvbuf with the correct `cd_ptr`
+   (`0x00441EC0`, matching this specific bind's own request) -
+   confirmed via direct instrumentation of the arm/fire functions,
+   not assumed.
+3. That reply's `dma_channel_signal_done(DMA_CHANNEL_SIF0)` call
+   genuinely raises a real DMAC interrupt (Cause `IP3` bit set,
+   confirmed via COP0 Cause register dump) - the interrupt fires and
+   vectors through the real exception path exactly like the two
+   earlier, successful cases.
+4. Separately, and BEFORE the wait, OSDSYS calls `AddDmacHandler`
+   (syscall 18, channel 5/SIF0) a SECOND time (`pc=0x00210C64`,
+   confirmed via instrumentation) - i.e., OSDSYS re-registers its OWN
+   SIF0 completion handler with the real, already-fixed (task #180)
+   vectored mechanism, letting genuine BIOS kernel code install it for
+   real.
+5. When the DMAC interrupt fires (step 3), the real handler chain now
+   detours into OSDSYS's OWN code (`0x00212B28`-`0x00212C30` range,
+   confirmed via PC trace) - NOT the shared kernel `_request_end()`
+   dispatcher's own code path (`~0x84574`) that successfully called
+   `iSignalSema` for the two earlier, resolved semaphores. This is the
+   real, expected consequence of OSDSYS re-registering its own handler
+   for the same channel (step 4) - real hardware's AddDmacHandler
+   semantics are being executed by genuine BIOS code here, not
+   modeled/guessed at by this project.
+
+**Open, honestly unresolved:** OSDSYS's own handler runs for real
+(confirmed, not skipped or crashed) but the trace never shows a
+`SignalSema`/`iSignalSema` (syscall 66/-67) call afterward - the
+handler chain instead runs through a real `-5`
+(`ResumeIntrDispatch` fast form, already understood since the 56th
+finding) syscall and returns to continue parking. This means
+OSDSYS's own internal SIF-command dispatch logic - not the shared
+kernel's - is what ultimately needs to recognize this reply and signal
+semaphore 2, and this project has not yet traced what condition it's
+actually checking (e.g., whether it validates specific reply-packet
+field values this project's generic REND-reply content doesn't
+happen to satisfy, or whether it's tracking pending binds via its own
+internal table keyed by something this project's synthetic reply
+doesn't populate). Per this project's own established discipline
+(never fabricate kernel-internal logic - task #180's lesson, reused
+throughout this entire investigation chain), this is being reported
+as a genuine, precisely-characterized open item rather than patched
+with a guess.
+
+**Verified:** this was a pure investigation round (diagnostic tracing
+only, several instrumented copies of ee_core.c in /tmp/, never
+committed) - no source changes were made, so no regression/rebuild
+was required this round per this project's established workflow for
+docs-only rounds.
+
+**Concrete next steps for task #198/#199:**
+1. Identify the real IOP service ID this second bind targets (read
+   the `sid` argument at the bind's own call site, or the RPC number
+   passed to the eventual `sceSifCallRpc()`, if OSDSYS ever issues
+   one) - likely a real, named PS2 system service (pad, memory card,
+   or graphics-related) per ps2tek's RPC_System_services table,
+   consistent with this project's existing sourcing discipline.
+2. Disassemble/trace OSDSYS's own handler at `0x00212B28-0x00212C30`
+   to find what condition it actually checks before calling
+   `iSignalSema`, OR use the same live-PCSX2-reference-debugging
+   methodology the 55th finding already proved effective (real GT3
+   boot, breakpoints/watchpoints at these same real addresses) to
+   observe genuine hardware behavior directly rather than guessing.

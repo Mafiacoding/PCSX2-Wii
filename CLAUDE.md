@@ -3598,3 +3598,40 @@ task #198: find OSDSYS's actual next milestone toward a visible splash
 screen (GS/DISPFB register writes) with a longer diagnostic run -
 task #172's "produce a visible splash/logo" goal is closer than ever
 but not yet confirmed.
+
+## Checkpoint (Round 47, task #196/#197/#198, investigation only): OSDSYS executes real code but parks on its own new semaphore - root cause narrowed to OSDSYS's own internal SIF dispatch logic, not yet resolved
+
+A 300,000,000-instruction GS-register-watching diagnostic (PMODE/
+DISPFB1/2/DISPLAY1/2) confirmed Round 46's fixed boot settles
+permanently at PC 0x00210F84 - a real WaitSema(semid=2) syscall on a
+semaphore OSDSYS itself creates and waits on (its own code, not shared
+kernel/EELOAD code - the first genuinely OSDSYS-internal blocking wait
+reached so far). Zero GS register writes observed in the full window.
+
+Traced the complete real chain and confirmed every mechanism involved
+actually fires for real: OSDSYS's own sceSifBindRpc() to a new IOP
+service; this project's already-generalized RPC_BIND REND reply (task
+#194) delivers correctly with the right cd_ptr; the resulting DMA
+completion raises a genuine DMAC interrupt; OSDSYS separately
+re-registers its own SIF0 DMAC handler via a real, vectored
+AddDmacHandler call; the interrupt then runs OSDSYS's OWN handler code
+(0x00212B28-0x00212C30) instead of the shared kernel dispatcher that
+successfully signaled the two earlier semaphores - real, expected
+AddDmacHandler-replacement behavior, not a project bug. OSDSYS's own
+handler runs for real but never calls SignalSema/iSignalSema
+afterward in the observed trace.
+
+Honestly reported as open, not patched with a guess (per this
+project's established task #180 discipline): the real condition
+OSDSYS's own SIF dispatch checks before signaling its semaphore is
+not yet known. No source changes this round - pure investigation, so
+per this project's docs-only-round convention, no regression suite or
+Wii rebuild was needed.
+
+See docs/STATUS.md's 73rd finding for the full trace and instrumented-
+diagnostic evidence. Next steps: identify the target IOP service ID
+for OSDSYS's second bind, disassemble its own handler, or use live
+PCSX2 reference debugging (the 55th finding's proven methodology) to
+observe the real hardware condition directly. Task #172's "produce a
+visible splash screen" goal remains open but the investigation is now
+narrowed to a single, well-characterized real code path.

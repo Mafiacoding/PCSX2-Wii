@@ -3238,3 +3238,40 @@ flagged the two-way fork for the next round: keep hunting for the
 real IOP-side source, or implement a minimal, clearly-labeled
 protocol-symmetry-based responder (real fabrication risk, needs
 explicit sign-off) - see docs/STATUS.md's 61st finding.
+
+## Checkpoint (Round 37, task #172/#186): minimal IOP-side SIF_CMD_INIT_CMD consumer
+
+Implemented `sif_cmd_iop_handle_init_cmd()` (in `sif.c`/`sif.h`, not a
+separate translation unit, so every existing test that already links
+`sif.c` keeps building unchanged): records the EE's reply/receive
+buffer address on receipt of `SIF_CMD_INIT_CMD`, invoked from the EE's
+`sceSifSetDma` (syscall 119) handler right after the real EE-RAM-to-
+IOP-RAM copy. Explicitly labeled throughout as grounded in confirmed
+real-protocol behavior (byte-exact EE-side `sifcmd.c` plus independent
+WebSearch corroboration) and NOT a byte-exact port of the real IOP-side
+assembly (`iop/kernel/src/sifcmd.s`), which this project's fetch tools
+could not retrieve after exhausting every avenue tried (raw
+githubusercontent.com, GitHub blob/tree, GitHub API, jsdelivr,
+ps2dev.github.io doxygen).
+
+Full 88-test host-native regression suite passes (0 failures); clean
+Wii/devkitPPC rebuild (only the pre-existing, unrelated `strncpy`
+warning). Real-BIOS diagnostic (60M-instruction cap) confirms the new
+consumer fires correctly on real boot (records `0x0008C240`, matching
+the real EE pktbuf address from the 61st finding, at i=30001031) with
+NO regression - boot reaches the exact same furthest point
+(`0x00083B40`) as before this change. Honest result: this increment
+alone does NOT unblock the still-open `0x0008C440` poll - that remains
+task #186's open question, with the AddDmacHandler 32-entry table
+(56th/57th findings) as the leading unconfirmed hypothesis.
+
+Also root-caused (but did not need to fix) a diagnostic-tooling
+hazard found while building this round's verification harness: calling
+`ee_mem_read32()` out-of-band before the EE executes its first real
+instruction can corrupt CPU state via `ee_mem_check_tlb_fault()`,
+making the EE appear permanently stuck at the boot ROM reset vector.
+Confirmed via `git stash`/`git stash pop` A/B testing that this is a
+harness-only hazard, not a regression in shipped source - noted here
+so a future round doesn't re-diagnose it.
+
+See docs/STATUS.md's 62nd finding for full detail.

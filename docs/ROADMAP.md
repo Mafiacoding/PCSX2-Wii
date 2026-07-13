@@ -1951,3 +1951,22 @@ resident at the expected address, ~2 billion cycles into gameplay).
 No source changed this round. See STATUS.md's 61st finding for full
 detail and the explicit fork in next steps (further source-fetching
 vs. a labeled, protocol-symmetry-based minimal implementation).
+
+## UPDATE (Round 37, task #172/#186): minimal IOP-side SIF_CMD_INIT_CMD consumer implemented and verified - no regression, boot progress unchanged
+
+Per user direction ("proceed with what I have now" after exhausting
+real IOP-assembly fetch attempts), implemented `sif_cmd_iop_handle_init_cmd()`
+in `sif.c`/`sif.h`: records the EE's reply-buffer address on receipt of
+`SIF_CMD_INIT_CMD`, by direct symmetry with the real, byte-exact EE-side
+`SIF_CMD_CHANGE_SADDR` handler (61st finding). Explicitly labeled as
+protocol-grounded, not a byte-exact IOP assembly port. Full 88-test
+regression suite passes; clean Wii rebuild. Real-BIOS diagnostic
+confirms it fires correctly (records `0x0008C240`, the real EE pktbuf
+address) with zero regression - boot reaches the identical furthest
+point (`0x00083B40`) as before. Does NOT by itself unblock the
+`0x0008C440` poll; that remains open, likely gated by the
+AddDmacHandler 32-entry table instead. See docs/STATUS.md's 62nd
+finding for full detail, including a diagnostic-tooling quirk found
+and root-caused along the way (out-of-band `ee_mem_read32()` calls
+before boot execution begins can corrupt CPU state - not a shipped
+bug, just a harness hazard, documented so it isn't rediscovered).

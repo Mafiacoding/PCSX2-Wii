@@ -743,6 +743,7 @@ int ee_core_init(const bios_image_t *bios)
     ee_intc_init(); /* task #176: EE interrupt controller (INTC_STAT/MASK) - see core/hw/ee_intc.h */
     gs_init();  /* GS privileged register block - see core/hw/gs.h */
     sif_init(); /* EE-side SIF/SBUS mailbox registers - see core/hw/sif.h */
+    sif_cmd_iop_init(); /* task #186: minimal IOP-side SIFCMD consumer model - see core/hw/sif.h */
     mch_init(); /* EE-side MCH_RICM/MCH_DRD RDRAM auto-init registers - see core/hw/mch.h */
 
     g_state.ram = memalign(32, EE_RAM_SIZE);
@@ -1352,6 +1353,30 @@ static int ee_step(void)
                         for (k = 0; k < size; k++) {
                             uint8_t byte = ee_mem_read8(st, src + k);
                             g_ee_iop_write8(g_ee_iop_ctx, (dest & 0x1FFFFFFFu) + k, byte);
+                        }
+                    }
+                    /* task #186: minimal, explicitly-labeled IOP-side
+                     * SIF_CMD_INIT_CMD consumer model - see
+                     * core/hw/sif_cmd.h for full grounding/caveats.
+                     * Real IOP assembly (iop/kernel/src/sifcmd.s)
+                     * could not be fetched (61st finding); this only
+                     * models the narrowly-grounded protocol effect
+                     * (recording the EE's ca_pkt.buf reply-buffer
+                     * address), by direct symmetry with this
+                     * project's own real, byte-exact EE-side
+                     * SIF_CMD_CHANGE_SADDR handler. Decoded from the
+                     * real SifCmdHeader_t layout confirmed in the
+                     * 61st finding: offset 0 = psize:dsize, offset 4
+                     * = header.dest, offset 8 = cid, offset 12 = opt,
+                     * offset 16 = ca_pkt.buf (only present/valid for
+                     * commands that use the ca_pkt extension, which
+                     * SIF_CMD_INIT_CMD does per the real, fetched
+                     * sceSifInitCmd() source). */
+                    if (size >= 20u) {
+                        uint32_t cid = ee_mem_read32(st, src + 8u);
+                        if (cid == SIF_CMD_INIT_CMD) {
+                            uint32_t ee_recvbuf = ee_mem_read32(st, src + 16u);
+                            sif_cmd_iop_handle_init_cmd(ee_recvbuf);
                         }
                     }
                 }

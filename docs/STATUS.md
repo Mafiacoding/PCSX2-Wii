@@ -8318,3 +8318,99 @@ exact real indexing convention is also still unconfirmed) - option (b)
 carries real fabrication risk this project has successfully avoided
 throughout, so is flagged for explicit user sign-off rather than
 assumed.
+
+## 62nd finding (task #172/#186): implemented a minimal, explicitly-labeled IOP-side SIF_CMD_INIT_CMD consumer (records the EE's reply-buffer address) - verified against real BIOS boot with no regression, but does NOT by itself unblock the 0x0008C440 poll
+
+Continuing from the 61st finding (real IOP-side `sifcmd.s` assembly
+still unobtainable after exhausting every fetch avenue this round -
+`raw.githubusercontent.com` in multiple forms, GitHub's blob/tree
+pages, GitHub's content API, `cdn.jsdelivr.net`, ps2dev.github.io's
+doxygen - all returned empty for this one specific path), reported
+this state to the user along with the well-grounded (though not
+byte-exact) real protocol confirmation already in hand: the byte-
+exact real EE-side `ee/kernel/src/sifcmd.c` (61st finding) plus an
+independent, real PS2 homebrew documentation source found via
+WebSearch confirming "the IOP uses a software SIF register to tell
+the EE what the IOP has stored for the EE's receive buffer" and that
+`SIF_CMD_INIT_CMD (0x80000002)` is sent exactly twice during SIFRPC
+init - matching this project's own trace precisely. Asked the user how
+to proceed; the user chose to implement the minimal IOP-side responder
+now, using this grounding, clearly labeled as such rather than as a
+byte-exact assembly port.
+
+**What was implemented:** `sif_cmd_iop_handle_init_cmd()` (new
+functions, added to `sif.c`/`sif.h` rather than a separate translation
+unit specifically so every existing test that already links `sif.c`
+keeps building without any test-harness changes). Models exactly one,
+narrowly-grounded real-protocol effect: recording the EE's own reply/
+receive buffer address (the packet's `ca_pkt.buf` field) on receipt of
+a `SIF_CMD_INIT_CMD` packet - by direct symmetry with this project's
+own real, byte-exact EE-side `SIF_CMD_CHANGE_SADDR` handler
+(`cmd_data->iopbuf = pkt->buf`, confirmed in the fetched real
+`sifcmd.c`). Invoked synchronously from the EE's `sceSifSetDma`
+(syscall 119) handler in `ee_core.c`, immediately after the real EE-
+RAM-to-IOP-RAM byte copy, decoding the real `SifCmdHeader_t` layout
+confirmed in the 61st finding (offset 0=psize:dsize, 4=header.dest,
+8=cid, 12=opt, 16=ca_pkt.buf) directly from the copied bytes. This is
+modeled synchronously rather than via a running IOP-side consumer loop
+because this project's IOP has already gone idle by this point in a
+real boot (59th finding) - there is no live IOP dispatcher to trigger
+this naturally yet. Extensively commented in both `sif.h` and the call
+site with the full honesty scope: this is NOT a port of real IOP
+assembly (which this project does not have), does NOT drive any
+hardware SIF register on its own, and is explicitly NOT confirmed to
+be what unblocks the still-open `0x0008C440` poll - that poll may
+instead be gated by the AddDmacHandler-populated 32-entry table from
+the 56th/57th findings, whose exact real indexing convention remains
+unconfirmed.
+
+**Verification performed:** full 88-test host-native regression suite
+passes (0 build failures, 0 run failures, 0 check failures - up from
+87 pre-existing, no new test added this round since the effect is
+exercised via the real-BIOS diagnostic below rather than a synthetic
+unit test); clean Wii/devkitPPC rebuild (exit 0, only the pre-existing,
+unrelated `strncpy` warning).
+
+**Real-BIOS empirical result (host-native diagnostic, 60M-instruction
+cap):** confirmed via a dedicated diagnostic harness that
+`sif_cmd_iop_get_ee_recvbuf()` is correctly set to `0x0008C240` at
+instruction i=30001031 (ee_pc=0x00083A68) - matching exactly the real
+EE pktbuf address independently confirmed in the 61st finding. Boot
+otherwise reaches the IDENTICAL furthest point as before this change
+(`0x00083B40`/`0x00083B48`, the same plateau documented since the
+56th/57th/59th findings) - i.e. this increment is confirmed to fire
+correctly on real boot, with zero regression, but by itself does NOT
+advance boot any further. This is the expected, honestly-anticipated
+result: the `0x0008C440` poll's real gating condition remains
+unconfirmed and is the next open question for task #186.
+
+**Diagnostic tooling note (not a shipped-code bug):** while building
+this round's verification harness, found that calling
+`ee_mem_read32()` out-of-band (i.e. from diagnostic code, before the
+EE has executed even its first real instruction, at i=0 right after
+`ee_core_init()`) can corrupt CPU state via the `ee_mem_check_tlb_fault()`
+path and cause the EE to appear permanently stuck at the boot ROM
+reset vector for the rest of the run. This ONLY reproduces when the
+read happens before any real boot code has run; the exact same
+function call from WITHIN real instruction execution (e.g. this
+finding's own `sif_cmd_iop_handle_init_cmd()` call site, or the prior
+`[SIFHDR]` instrumentation from the 60th finding) is safe and already
+proven correct by this round's own passing diagnostic. Root-caused via
+a controlled A/B test (`git stash`/`git stash pop` to compare identical
+diagnostic code against the pre- and post-patch source tree, then
+bisecting the diagnostic file itself line-by-line) - confirmed the
+regression was in the throwaway diagnostic harness, not in this
+project's shipped source. No source file changed for this; noted here
+purely so a future round doesn't waste time re-diagnosing the same
+tooling quirk.
+
+**No source files changed beyond `include/core/hw/sif.h`,
+`source/hw/sif.c`, `source/core/ee/ee_core.c`** - all diagnostic/test
+harnesses stayed in throwaway `/tmp` scratch files.
+
+**Next for task #186:** the `0x0008C440` poll remains unresolved.
+Leading hypothesis (per the 61st finding, still unconfirmed): it may
+be gated by the AddDmacHandler-populated 32-entry table from the
+56th/57th findings rather than by this specific SIFCMD packet's
+handling. Investigating that table's real indexing convention is the
+natural next step.

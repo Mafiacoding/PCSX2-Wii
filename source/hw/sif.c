@@ -164,3 +164,24 @@ int sif_iop_mmio_write32(uint32_t addr, uint32_t value)
                                * backing array. */
     }
 }
+
+/* --- task #186: minimal IOP-side SIFCMD consumer model - see the
+ * comment block in sif.h above sif_cmd_iop_handle_init_cmd() for full
+ * grounding, scope and honest caveats. */
+
+static uint32_t g_iop_cmd_ee_recvbuf;
+
+void sif_cmd_iop_init(void)
+{
+    g_iop_cmd_ee_recvbuf = 0;
+}
+
+void sif_cmd_iop_handle_init_cmd(uint32_t ee_recvbuf_addr)
+{
+    g_iop_cmd_ee_recvbuf = ee_recvbuf_addr;
+}
+
+uint32_t sif_cmd_iop_get_ee_recvbuf(void)
+{
+    return g_iop_cmd_ee_recvbuf;
+}

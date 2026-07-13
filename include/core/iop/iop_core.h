@@ -35,6 +35,32 @@ typedef struct {
     uint8_t  halted;
     char     halt_reason[128];
 
+    /* Task #179 continued: real IOP hardware never halts - after its
+     * boot-time module list finishes running, the real IOP kernel's
+     * thread scheduler always has at least an idle thread to fall
+     * back to, and stays interrupt-responsive forever (any driver
+     * that installed a real interrupt handler during its earlier
+     * init keeps reacting to hardware events indefinitely, even
+     * though this project doesn't model persistent threads). Set
+     * instead of `halted` by iop_module_loader.c's final "all
+     * modules run to completion" site (previously the last remaining
+     * unconditional halt() in that file). While idle, iop_core_step()
+     * does NOT fetch/decode/execute anything at the (synthetic,
+     * likely-zeroed) trampoline address - inventing specific "idle
+     * loop" instruction bytes real hardware might contain would be
+     * fabrication this project's discipline forbids - it only keeps
+     * re-checking iop_check_hw_interrupt() every call, exactly like
+     * the real per-step check every other instruction already gets.
+     * If a hardware interrupt becomes pending (any of the sources
+     * this project already models - timers, DMA, etc.), that check
+     * vectors pc/next_pc into the real exception vector as normal,
+     * this flag is cleared, and the interpreter resumes real
+     * fetch/decode/execute from there next call - running whatever
+     * real, RAM-resident handler code the modules installed before
+     * their entry points returned. See docs/STATUS.md's 54th
+     * finding. */
+    uint8_t  idle;
+
     /* Round 29 continued (task #156): set to 1 by every real
      * exception-entry site (hardware interrupt, SYSCALL, TGE - see
      * iop_core.c's own cop0[14]/EPC-writing sites), cleared to 0 by

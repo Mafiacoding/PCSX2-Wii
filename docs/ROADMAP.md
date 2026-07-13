@@ -1752,3 +1752,22 @@ scheduler) after module loading finishes, not a further EE-side
 registration/interrupt addition - see STATUS.md's 53rd finding for
 full detail. Flagged to the user before implementing, given the scope
 of an IOP-core-lifecycle change.
+
+
+**UPDATE (Round 29 continued, 54th finding, task #172):** implemented
+the user-approved fix direction from the 53rd finding - IOP core no
+longer halts after module loading, instead entering a real, honest
+`idle` state (interrupt-responsive, no fabricated instruction content
+executed) matching real IOP hardware's actual never-halts behavior.
+Verified via diagnostic and 87/87 regression; clean Wii rebuild. This
+change is real and being kept, but empirically does NOT unblock the
+`0x8000F768` loop by itself: this project's IOP has no persistent
+driver-thread model, so an idling-but-not-halted IOP still raises
+nothing new on its own. Deeper instrumentation found the loop's true
+remaining blocker is EE-side: EE code never writes to its own D7
+(SIF2) DMA channel control register across the full 65M-instruction
+run, and since this project's DMA kicks are synchronous/CPU-
+independent (matching real DMA hardware, cross-checked against
+PCSX2's `Hw.cpp`), an alive IOP was never going to be sufficient on
+its own. Narrows task #172's next step to an EE-side question. See
+STATUS.md's 54th finding for full detail.

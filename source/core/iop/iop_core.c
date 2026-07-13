@@ -785,6 +785,26 @@ int iop_core_step(void)
 {
     if (g_iop.halted)
         return 1;
+
+    /* Task #179 continued: real IOP hardware never halts after boot -
+     * see the `idle` field's own doc comment in iop_core.h for the
+     * full citation trail. While idle, skip real fetch/decode/execute
+     * entirely (nothing genuine to run - the trampoline address isn't
+     * real code) and only re-run the same hardware-interrupt check
+     * every other instruction step already gets. If that check finds
+     * a real pending interrupt, it vectors pc/next_pc into the normal
+     * exception vector itself (see iop_check_hw_interrupt() above) -
+     * clear `idle` so the very next call resumes genuine fetch/decode/
+     * execute there, running whatever real handler code the modules
+     * installed before returning. */
+    if (g_iop.idle) {
+        uint8_t pending_before = g_iop.exception_pending;
+        iop_check_hw_interrupt(&g_iop, g_iop.pc);
+        if (!pending_before && g_iop.exception_pending)
+            g_iop.idle = 0; /* a real interrupt just vectored us - resume real execution next call */
+        return 0;
+    }
+
     return iop_step();
 }
 

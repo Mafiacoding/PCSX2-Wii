@@ -936,18 +936,31 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
     /* Every module in the real BIOS's own IOPBTCONF/IOPBTCON2 list
      * has now been front-loaded (task #92, extended by the 31st
      * change) and had its real entry point executed to completion by
-     * this project's actual IOP interpreter - a genuine milestone,
-     * not a real hardware halt (no public reference describes what
-     * real hardware's OWN loadcore loop does immediately after this
-     * point, so this project stops here honestly rather than
-     * guessing). */
+     * this project's actual IOP interpreter - a genuine milestone.
+     *
+     * Task #179 continued (54th finding): this used to be an
+     * unconditional halt() here, on the reasoning that "no public
+     * reference describes what real hardware's OWN loadcore loop
+     * does immediately after this point, so this project stops here
+     * honestly rather than guessing." That reasoning was incomplete -
+     * real IOP hardware never halts at all; its kernel scheduler
+     * always has at minimum an idle thread to fall back to, and stays
+     * interrupt-responsive indefinitely. Halting here was hiding a
+     * real, confirmed effect: an EE-side wait loop (0x8000F768, see
+     * STATUS.md's 53rd finding) polls DMAC_STAT/INTC_STAT bits that
+     * only real IOP-side hardware activity can ever set, and nothing
+     * can raise them once the IOP stops running. Switched to the
+     * `idle` flag (see its doc comment in iop_core.h) instead of
+     * `halted` - same halt_reason-style message kept for diagnostics,
+     * but the core keeps ticking (interrupt-responsive, no fetch/
+     * decode/execute of fabricated "idle loop" instruction content). */
     static char msg[128];
     snprintf(msg, sizeof(msg),
-             "module boot sequence complete: %u/%u real modules loaded, %u run to completion (task #92)",
+             "module boot sequence complete: %u/%u real modules loaded, %u run to completion (task #92, idle since task #179)",
              (unsigned)g.stats.modules_loaded, (unsigned)g.modlist_count,
              (unsigned)g.stats.modules_run_to_completion);
     mark_iop_boot_complete();
-    st->halted = 1;
+    st->idle = 1;
     strncpy(st->halt_reason, msg, sizeof(st->halt_reason) - 1);
     st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';
     return 1;

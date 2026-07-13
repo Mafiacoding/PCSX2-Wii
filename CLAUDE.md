@@ -2901,3 +2901,46 @@ sensible steady state after module loading, or model a minimal real
 idle/scheduler loop) before implementing. Flagged to the user rather
 than guessing at scope. See docs/STATUS.md's 53rd finding for full
 detail.
+
+
+## Update (Round 29 continued, 54th finding): IOP idle-instead-of-halt implemented (user-approved) - real and correct, but conclusively does not unblock the wait loop by itself; blocker narrowed to EE-side
+
+Per the user's approval of "model a minimal real IOP idle/scheduler
+loop," added a new `idle` field to `iop_state_t` (iop_core.h) and
+switched `iop_module_loader.c`'s terminal "all modules run to
+completion" site from `st->halted = 1` to `st->idle = 1`. While idle,
+`iop_core_step()` skips real fetch/decode/execute entirely (no
+fabricated "idle loop" instruction bytes - real hardware content at
+that address isn't known) but keeps re-running the same
+`iop_check_hw_interrupt()` check every call; if a real interrupt
+becomes pending, it vectors normally and `idle` clears so real
+execution resumes at the handler. Verified: IOP now stays
+`halted=0`/`idle=1` indefinitely (confirmed to 65M+ instructions), no
+crash, no regression - 87/87 suite pass, clean Wii rebuild.
+
+**Honest result: this does NOT unblock the 0x8000F768 loop.**
+Re-running the same DMAC_STAT/INTC_STAT instrumentation from the 53rd
+finding with the IOP idling instead of halted shows byte-identical
+results - `cea8_hits=0`, `cdf8_hits=0`, same register values. Root
+cause: this project's IOP has no persistent driver-thread model, so
+an idling-but-not-halted IOP still has nothing new to raise on its
+own. Separately (and this is the more important finding): instrumented
+ALL EE-side writes to its own D7 (SIF2) DMA channel control register
+across the entire 65M-instruction run - it's NEVER written. Since
+`dma_channel_kick()` is synchronous and CPU-independent by design
+(matching real DMA hardware - cross-checked against PCSX2's own
+`hwDmacIrq()` in `Hw.cpp`, an instantaneous flat status-bit set), an
+"alive" IOP was never going to be sufficient by itself for this
+specific loop - the real remaining gap is that EE-side code never
+attempts to kick its own SIF2 channel (or otherwise raise SBUS).
+Attempted to trace the real ps2sdk source for what triggers this
+(user asked for exactly this kind of tracing) - `sifdma.h` fetched
+successfully and confirms already-implemented SIF_STAT constants are
+correct, but the actual SIF DMA implementation source repeatedly
+returned empty on fetch - inconclusive, left honestly open rather than
+guessed at.
+
+Keeping the IOP-idle change regardless (independently correct, real
+hardware behavior). Task #172's next step is now a narrower, EE-side
+question: why does EE code never reach a D7/SIF2 kick. See
+docs/STATUS.md's 54th finding for full detail.

@@ -7537,3 +7537,72 @@ needs a deliberate design decision (e.g., keep the IOP core "alive" in a
 sensible steady state after module-loading completes, or model a minimal
 real IOP idle/kernel-scheduler loop) rather than a scoped patch - flagged
 to the user before implementing.
+
+## 54th finding (task #179 continued, task #172): implemented real IOP idle-instead-of-halt behavior (user-approved) - verified real and correct, but conclusively does NOT unblock the 0x8000F768 loop on its own; the loop's true blocker is EE-side, not IOP-side
+
+Following the 53rd finding's IOP-halt root cause, the user approved
+"model a minimal real IOP idle/scheduler loop" as the fix direction.
+Implemented: a new `idle` flag on `iop_state_t` (`include/core/iop/
+iop_core.h`), set instead of `halted` by `iop_module_loader.c`'s
+terminal "all modules run to completion" site (previously the last
+unconditional `halt()` there). While idle, `iop_core_step()` does NOT
+fetch/decode/execute anything - inventing specific "real idle loop"
+instruction bytes would be fabrication - it only re-runs the same
+`iop_check_hw_interrupt()` check every other instruction step already
+gets. If a real hardware interrupt becomes pending, that check vectors
+`pc`/`next_pc` into the normal exception vector as usual and `idle` is
+cleared, so the interpreter resumes genuine fetch/decode/execute from
+there next call - running whatever real, RAM-resident handler code the
+modules installed before their entry points returned. This matches
+real IOP hardware's actual behavior far better than an unconditional
+halt: real hardware never stops running.
+
+**Verified via diagnostic:** the IOP now stays `halted=0` indefinitely
+past the old halt point (confirmed to i=65,000,000+), with `idle=1`
+and the same descriptive `halt_reason` message (now noting "idle since
+task #179"). No crash, no fetch of garbage memory, no regression.
+
+**But it does NOT unblock the loop - and this is itself a real,
+useful, disassembly-grounded finding, not a dead end.** Re-running the
+same DMAC_STAT/INTC_STAT instrumentation from the 53rd finding with
+the IOP now idling instead of halted shows byte-for-byte identical
+results: `cea8_hits=0`, `cdf8_hits=0`, `DMAC_STAT`/`INTC_STAT` never
+gain the bits `0x8000CF88` is polling for. Root cause: this project's
+IOP idle state has nothing productive queued to run (no persistent
+driver threads modeled, per the 53rd finding's own framing) and raises
+no interrupts of its own, so simply not being halted changes nothing
+observable from the EE's side. Separately, and just as importantly:
+instrumented EE-side writes to its own D7 (SIF2) DMA channel control
+register (`0x1000C800`, the channel `0x8000CF88` is ultimately gating
+on) across the FULL 65M-instruction run (not just after the loop is
+reached) - **the EE's own code never once writes to it.** Since this
+project's `dma_channel_kick()` is synchronous (real DMA hardware moves
+data without needing ongoing CPU cycles from either side - confirmed
+against real PCSX2's `Hw.cpp`: `hwDmacIrq(n)` is a flat, instantaneous
+"set this status bit" call, matching this project's own
+`dma_channel_signal_done()`), an IOP that's "alive" was never going to
+be sufficient by itself: **the real, remaining blocker is that EE-side
+code never attempts to kick its own SIF2 channel (or otherwise causes
+its own SBUS INTC bit to be raised)** - a gap on the EE side of the
+boundary, not the IOP side. The IOP-idle change is being kept
+regardless (independently correct, real hardware behavior, zero
+regressions), but it doesn't complete task #172's unlock by itself.
+
+Attempted to pin down the exact real ps2sdk/PCSX2 source describing
+what EE-side code path is expected to kick SIF2 at this point in real
+boot (per the user's request to trace via real source) -
+`ee/kernel/include/sifdma.h` fetched successfully and confirms this
+project's already-implemented `SIF_STAT_SIFINIT/CMDINIT/BOOTEND`
+constants are correct, real ps2sdk values, but repeated attempts to
+fetch the actual SIF DMA implementation source (`sifdma.c`,
+`Sif.cpp`, GitHub code search) returned empty - inconclusive, not
+confirmed either way. Not fabricating a specific trigger mechanism
+without a citable source - this is the honest state of the
+investigation, left open rather than guessed at.
+
+**Verified:** 87/87 regression suite pass, clean Wii/devkitPPC
+rebuild.
+
+**Next for task #172:** investigate why EE-side code never reaches a
+D7/SIF2 kick (or an SBUS-raising code path) - this is now a concrete,
+narrowed, EE-side question rather than an IOP-lifecycle one.

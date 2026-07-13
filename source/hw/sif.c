@@ -172,10 +172,18 @@ int sif_iop_mmio_write32(uint32_t addr, uint32_t value)
 static uint32_t g_iop_cmd_ee_recvbuf;
 static uint32_t g_iop_cmd_init_cmd_count;
 
+/* task #192 (68th finding): tracks the "cd" (SifRpcClientData_t*)
+ * pointer from the real, observed SIF_CMD_RPC_BIND packet, so a
+ * synthetic REND reply can echo it back exactly - see sif.h. */
+static uint32_t g_iop_cmd_rpc_bind_cd;
+static uint32_t g_iop_cmd_rpc_bind_count;
+
 void sif_cmd_iop_init(void)
 {
     g_iop_cmd_ee_recvbuf = 0;
     g_iop_cmd_init_cmd_count = 0;
+    g_iop_cmd_rpc_bind_cd = 0;
+    g_iop_cmd_rpc_bind_count = 0;
 }
 
 void sif_cmd_iop_handle_init_cmd(uint32_t ee_recvbuf_addr)
@@ -192,4 +200,20 @@ uint32_t sif_cmd_iop_get_ee_recvbuf(void)
 uint32_t sif_cmd_iop_get_init_cmd_count(void)
 {
     return g_iop_cmd_init_cmd_count;
+}
+
+void sif_cmd_iop_handle_rpc_bind(uint32_t cd_ptr)
+{
+    g_iop_cmd_rpc_bind_cd = cd_ptr;
+    g_iop_cmd_rpc_bind_count++;
+}
+
+uint32_t sif_cmd_iop_get_rpc_bind_cd(void)
+{
+    return g_iop_cmd_rpc_bind_cd;
+}
+
+uint32_t sif_cmd_iop_get_rpc_bind_count(void)
+{
+    return g_iop_cmd_rpc_bind_count;
 }

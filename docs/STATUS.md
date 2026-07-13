@@ -8804,3 +8804,156 @@ lower-level SIF documentation, or live PCSX2 comparison against a
 DIFFERENT real game/BIOS combination where this code path might be
 reached with Pine IPC connected for live register capture, which
 was not available this round).
+
+---
+
+## 68th finding (task #192): "system command 9" identified as the real, documented `SIF_CMD_RPC_BIND` - not an undocumented mystery
+
+Two user-provided URLs this round (`https://www.psdevwiki.com/ps2/Memory_Map#Subsystem_Interface_(SIF)`
+and `https://www.mikekohn.net/software/playstation2.php`) confirmed this
+project's existing SIF register map and general SIF/IOP programming
+background, but neither documents specific command IDs. Following up by
+exploring `https://israpps.github.io/ps2tek/PS2/BIOS/` (a valid ps2tek
+navigation page) revealed a dedicated Subsystem Interface (SIF) section,
+leading to `https://israpps.github.io/ps2tek/PS2/SIF/RPC_Cmds.html`,
+which documents the full real SIF RPC command-ID table, including:
+
+  - `80000008h: End` (`SIF_CMD_RPC_END`, REND)
+  - `80000009h: Bind` (`SIF_CMD_RPC_BIND`)
+
+So the "mysterious system command 9" this project's 67th finding left
+open is simply the well-documented, standard `SIF_CMD_RPC_BIND` - part
+of ordinary `sceSifBindRpc()`, not a Sony-internal secret.
+
+The user also uploaded a full copy of `ps2sdk-master.zip` this round
+("das sollte helfen"), which let this project cross-check the real
+source directly instead of relying on documentation alone. Confirmed
+via `ee/kernel/src/sifrpc.c`:
+
+  - `sceSifBindRpc()`'s real implementation is a byte-exact match for
+    everything already traced: it creates a semaphore
+    (`max_count=1, init_count=0` - matches the 64th finding's observed
+    `CreateSema` arguments exactly), sends `SIF_CMD_RPC_BIND` via
+    `sceSifSendCmd()`, then calls `WaitSema` + `DeleteSema` on it -
+    exactly the call chain this project has been tracing since the
+    64th finding.
+  - `_request_end()` is the real EE-side handler for
+    `SIF_CMD_RPC_END` replies, registered via
+    `sceSifAddCmdHandler(SIF_CMD_RPC_END, _request_end, ...)` inside
+    `sceSifInitRpc()`. Its logic:
+    `SifRpcClientData_t *cd = request->cd; ... if (cd->hdr.sema_id >= 0) iSignalSema(cd->hdr.sema_id);`
+    - this is the REAL mechanism that unblocks `WaitSema`.
+  - `_SifCmdIntHandler()` (already traced byte-exact in the 67th
+    finding) has real dispatch logic for both `sys_cmd_handlers` and
+    `usr_cmd_handlers` (registered via `sceSifAddCmdHandler()`), so a
+    correctly-shaped REND packet delivered through this project's
+    already-faithful SIF0 DMA-completion path should dispatch to the
+    real, already-resident `_request_end()` BIOS code.
+
+Exact real struct layouts obtained from
+`common/include/sifrpc-common.h`/`sifcmd-common.h` (all fields 4 bytes,
+per the EE's 32-bit-pointer n32 ABI):
+
+  - `SifCmdHeader_t` (16B): `psize:dsize`@0x00, `dest`@0x04, `cid`@0x08, `opt`@0x0C
+  - `SifRpcBindPkt_t` (36B): `sifcmd`@0x00(16B), `rec_id`@0x10, `pkt_addr`@0x14, `rpc_id`@0x18, `cd`@0x1C, `sid`@0x20
+  - `SifRpcRendPkt_t` (48B): `sifcmd`@0x00(16B), `rec_id`@0x10, `pkt_addr`@0x14, `rpc_id`@0x18, `cd`@0x1C, `cid`@0x20, `sd`@0x24, `buf`@0x28, `cbuf`@0x2C
+  - `SIF_CMD_RPC_END = 0x80000008`, `SIF_CMD_RPC_BIND = 0x80000009`
+
+Implemented a synthetic REND-delivery mechanism symmetric to the
+already-proven RPCINIT delivery (task #187): detect the outgoing
+`SIF_CMD_RPC_BIND` send, capture the real `cd` pointer from the
+outgoing packet, arm a delayed delivery, then write a byte-exact
+`SifRpcRendPkt_t` into the EE's receive buffer (echoing back the real
+`cd` pointer so the REAL, already-resident `_request_end()` reads the
+correct `cd->hdr.sema_id`) and fire the SIF0 completion interrupt.
+Added to `include/core/hw/sif.h`, `source/hw/sif.c`,
+`source/core/ee/ee_core.c`.
+
+**Initial result this round: implemented but NOT firing.** A
+host-native diagnostic confirmed the BIND detection and the arm/
+countdown mechanism were structurally correct (traced decrementing
+normally for its first ~40 ticks), but the actual delivery never fired
+even after a full 60,000,000-instruction run - investigated further
+below (69th finding).
+
+## 69th finding (task #192/#193): ROOT CAUSE found and fixed - WaitSema's park path was silently starving ALL per-step interrupt/pending checks
+
+Extending the host-native diagnostic's trace window (rather than the
+narrow ~50-step window used initially) revealed the real bug: a step
+counter incremented at the top of `ee_check_rpc_bind_pending()` (called
+from `ee_step()`'s shared per-step epilogue) advanced normally right up
+until the exact instruction WaitSema began parking - and then **never
+incremented again**, even though the host harness kept calling
+`ee_core_step()` tens of millions more times afterward with `ee_halted`
+staying false throughout.
+
+Root cause: every `if (sysnum == N) { ... return 1; }` block in the
+syscall dispatch chain (CreateSema, WaitSema, SignalSema/iSignalSema,
+DeleteSema, etc.) returns immediately from `ee_step()`, which exits
+BEFORE the function ever reaches its own shared per-step epilogue at
+the bottom (COP0 Count increment, VBLANK check,
+`ee_check_rpcinit_pending()`, `ee_check_rpc_bind_pending()`, and -
+critically - the timer/INTC/DMAC interrupt checks). For an ordinary,
+one-shot syscall this only skips a single epilogue tick per
+instruction executed - a harmless, purely cosmetic inexactness that
+never mattered in ~191 prior tasks' worth of syscalls. WaitSema's park
+branch is fundamentally different: while `count == 0`, the EE
+re-executes THIS EXACT SAME instruction every single step (`pc` never
+advances), so the epilogue - and every interrupt/pending check it
+drives - gets skipped on EVERY step for as long as the park lasts,
+permanently starving the very mechanism that is supposed to let a real
+SIF0/DMAC/INTC interrupt vector away, run a genuine handler, and call
+`SignalSema`/`iSignalSema`. This directly contradicts (and corrects)
+part of the 66th finding's claim that "every existing per-step
+interrupt check ... keeps running normally" while parked - that
+verification only confirmed "no halt, poll stays 1" over 300M
+instructions, not that the interrupt-check epilogue specifically kept
+running during an actual park (no synthetic external signal had been
+attempted yet at that point, so the bug had no way to manifest until
+this round's RPC_BIND/REND work tried to exercise it).
+
+**Fix applied** (`source/core/ee/ee_core.c`, WaitSema's park branch
+only - the shared epilogue itself is untouched, to avoid any risk to
+the already-verified normal-instruction path): while parked, explicitly
+run the same interrupt/pending check sequence the shared epilogue would
+have run (COP0 Count increment, `ee_latch_timer_interrupt`,
+`ee_check_vblank`, `ee_check_rpcinit_pending`,
+`ee_check_rpc_bind_pending`, and - gated on `!branch_pending`, matching
+the real epilogue exactly - `ee_check_timer_interrupt`/
+`ee_check_intc_interrupt`/`ee_check_dmac_interrupt`). This models real
+hardware behavior: the CPU keeps ticking real timers/DMA/INTC lines and
+re-checking them every cycle even while a thread is blocked on a
+semaphore, rather than silently freezing all per-step logic.
+
+**Verified working, real forward progress achieved:**
+
+  - Rebuilt all 87 host-native regression tests against the fixed
+    source - all pass (no regression).
+  - Host-native diagnostic against the real, fixed
+    `source/core/ee/ee_core.c` (not a diagnostic copy) confirms: the
+    synthetic REND delivery now fires as designed at step ~30,101,579,
+    `iSignalSema` (syscall -67) is called at step ~30,101,825 with
+    `semid=0` - exactly matching the semaphore `WaitSema` was parked
+    on - and **the EE genuinely unparks and proceeds with real further
+    execution**, calling `DeleteSema`, returning from
+    `sceSifBindRpc()`, and executing several million more real
+    instructions before hitting a **new, different** `WaitSema` park on
+    a **different semaphore (`semid=1`)** roughly 7,000,000+
+    instructions later (first observed parking around step
+    ~37,442,000, still parked at the 60,000,000-instruction cap with
+    `wait_threads` climbing normally, `ee_halted=0` throughout, no
+    regression at `poll@0x0008C440` which correctly stays 1).
+  - This is genuine, substantial, verified boot progress past the
+    original WaitSema wall (tasks #188-#192), not a synthetic shortcut:
+    the actual real, already-resident `_request_end()` BIOS code
+    processed a correctly-shaped real reply packet and called the real
+    semaphore-signal syscall, exactly as the 68th finding's ps2sdk
+    cross-check predicted it would.
+
+**New, honestly-reported open item:** the boot now reaches a fresh
+`WaitSema` wall on a different semaphore (`semid=1`), most likely the
+next real RPC bind or a different kernel init step (candidates per
+ps2tek's RPC_System_services table: FILEIO=`0x80000001`,
+LOADFILE=`0x80000006`, PADMAN=`0x80000100`, etc. - not yet identified
+for real, no fabricated claim of which one this is). This becomes the
+next concrete blocker for task #172.

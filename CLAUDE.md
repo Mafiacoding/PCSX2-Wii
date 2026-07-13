@@ -3437,3 +3437,51 @@ one for "command 9" yet. No source changed this round (docs-only);
 task #191 stays open with this precise next question.
 
 See docs/STATUS.md's 67th finding for full detail.
+
+## Checkpoint (Round 43, task #192/#193): "system command 9" = real SIF_CMD_RPC_BIND; WaitSema-park epilogue-starvation bug found and FIXED - genuine forward progress past the WaitSema wall
+
+Two user-provided research URLs plus a user-uploaded ps2sdk-master.zip
+led to identifying cid=0x80000009 as the real, documented
+SIF_CMD_RPC_BIND (via ps2tek's RPC_Cmds.html page), not an undocumented
+Sony-internal command as the 67th finding had left open. Cross-checked
+byte-exact against the uploaded zip's real sceSifBindRpc()/
+_request_end() source. Implemented a synthetic SIF_CMD_RPC_END (REND)
+delivery mechanism symmetric to task #187's proven RPCINIT delivery -
+it initially did not fire.
+
+Root-caused via host-native diagnostic tracing extended beyond the
+first debugging attempt's narrow window: EVERY syscall dispatch block
+in ee_step() (`if (sysnum == N) { ... return 1; }`) returns before
+reaching the function's own shared per-step epilogue (Count/VBLANK/
+RPCINIT/RPC-bind pending checks, and the timer/INTC/DMAC interrupt
+checks). Harmless for one-shot syscalls, but WaitSema's park branch
+re-executes the identical instruction every step while blocked - so
+the epilogue, and every real-interrupt-delivery check it drives, was
+being silently skipped for the ENTIRE duration of any park. This
+quietly invalidated part of the 66th finding's claim that interrupt
+checks "keep running normally" while parked - untested until this
+round's synthetic-signal attempt actually tried to exercise it.
+
+Fixed in source/core/ee/ee_core.c: WaitSema's park branch now
+explicitly runs the same interrupt/pending check sequence the shared
+epilogue would have run, leaving the shared epilogue itself untouched
+to avoid any risk to the already-verified normal-instruction path.
+
+Verified for real: all 87 host-native regression tests pass (rebuilt
+against the fixed source); a diagnostic against the real, fixed source
+shows the synthetic REND firing, the real _request_end() BIOS code
+calling iSignalSema on the correct semaphore, WaitSema genuinely
+unparking, and several million more real instructions of forward
+execution (DeleteSema, return from sceSifBindRpc(), and beyond) before
+hitting a NEW WaitSema wall on a DIFFERENT semaphore (semid=1) - real,
+substantial, honestly-verified progress past tasks #188-#192's wall,
+not a synthetic shortcut. Clean Wii/devkitPPC rebuild also verified
+(devkitPPC + libogc re-extracted from user-uploaded archives this
+session; libmpfr.so.4/libfat.a recovered from the persisted outputs
+folder's prior build, matching the cc1/libogc gap this project
+documented back in tasks #72/#74).
+
+New, honestly open item: identify what semid=1's real blocking
+condition corresponds to - task #172 continues.
+
+See docs/STATUS.md's 68th/69th findings for full detail.

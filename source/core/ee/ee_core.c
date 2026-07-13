@@ -830,6 +830,90 @@ static void ee_check_rpcinit_pending(ee_state_t *st)
     sif_cmd_iop_send_rpcinit_ready(st, sif_cmd_iop_get_ee_recvbuf());
 }
 
+/* task #192 (68th finding): synthesizes the real IOP's SIF_CMD_RPC_END
+ * (REND) reply to a SIF_CMD_RPC_BIND request - see sif.h for the full
+ * citation trail (byte-exact match to real sceSifBindRpc()/
+ * _request_end() from the fetched ee/kernel/src/sifrpc.c, plus the
+ * ps2tek RPC_Cmds/RPC_System_services pages the user pointed to).
+ * Real SifRpcRendPkt_t layout (48 bytes, all 4-byte fields per the
+ * EE's 32-bit-pointer n32 ABI, same convention already confirmed for
+ * SifCmdHeader_t/cmd_data in the 61st/63rd findings):
+ *   offset 0x00: SifCmdHeader_t (psize:dsize word, dest, cid, opt)
+ *   offset 0x10: rec_id      (not read by _request_end - left 0)
+ *   offset 0x14: pkt_addr    (not read by _request_end - left 0)
+ *   offset 0x18: rpc_id      (not read by _request_end - left 0)
+ *   offset 0x1C: cd          (SifRpcClientData_t* - MUST echo the
+ *                             real value from the observed outgoing
+ *                             Bind packet, since real _request_end()
+ *                             reads *this* pointer to find
+ *                             cd->hdr.sema_id and call iSignalSema()
+ *                             on it for real)
+ *   offset 0x20: cid         (the INNER "which request" field real
+ *                             _request_end() checks against
+ *                             SIF_CMD_RPC_BIND - NOT the same as the
+ *                             outer SifCmdHeader.cid at offset 0x08,
+ *                             which must be SIF_CMD_RPC_END so
+ *                             _SifCmdIntHandler() dispatches to
+ *                             usr_cmd_handlers[8]=_request_end in the
+ *                             first place)
+ *   offset 0x24: sd          (SifRpcServerData_t* - left NULL: this
+ *                             project has no real IOP-side server
+ *                             data to echo back honestly, an
+ *                             explicitly-labeled gap - later code that
+ *                             tries to actually USE this binding, e.g.
+ *                             a subsequent sceSifCallRpc() through it,
+ *                             is not validated by this delivery)
+ *   offset 0x28: buf, offset 0x2C: cbuf (left NULL, same caveat as sd)
+ *
+ * As with sif_cmd_iop_send_rpcinit_ready(), only the INCOMING PACKET
+ * CONTENT and its delivery trigger are synthesized; the dispatch
+ * (_SifCmdIntHandler(), usr_cmd_handlers[8], _request_end(),
+ * iSignalSema()) is genuine, already-resident real BIOS/kernel code
+ * this project's interpreter executes for real once invoked. */
+static void sif_cmd_iop_send_rpc_bind_rend(ee_state_t *st, uint32_t ee_recvbuf, uint32_t cd_ptr)
+{
+    if (!ee_recvbuf)
+        return;
+    ee_mem_write32(st, ee_recvbuf + 0x00u, 0x30u);        /* psize=48 (sizeof SifRpcRendPkt_t), dsize=0 */
+    ee_mem_write32(st, ee_recvbuf + 0x04u, 0u);            /* header.dest = NULL */
+    ee_mem_write32(st, ee_recvbuf + 0x08u, SIF_CMD_RPC_END); /* outer cid = SIF_CMD_ID_SYSTEM|8 */
+    ee_mem_write32(st, ee_recvbuf + 0x0Cu, 0u);            /* header.opt = 0 */
+    ee_mem_write32(st, ee_recvbuf + 0x10u, 0u);            /* rec_id (unused by _request_end) */
+    ee_mem_write32(st, ee_recvbuf + 0x14u, 0u);            /* pkt_addr (unused by _request_end) */
+    ee_mem_write32(st, ee_recvbuf + 0x18u, 0u);            /* rpc_id (unused by _request_end) */
+    ee_mem_write32(st, ee_recvbuf + 0x1Cu, cd_ptr);        /* cd - echoed from the real Bind packet */
+    ee_mem_write32(st, ee_recvbuf + 0x20u, SIF_CMD_RPC_BIND); /* inner cid: "this replies to a Bind" */
+    ee_mem_write32(st, ee_recvbuf + 0x24u, 0u);            /* sd = NULL (honest gap, see comment above) */
+    ee_mem_write32(st, ee_recvbuf + 0x28u, 0u);            /* buf = NULL */
+    ee_mem_write32(st, ee_recvbuf + 0x2Cu, 0u);            /* cbuf = NULL */
+    dma_channel_signal_done(DMA_CHANNEL_SIF0); /* real SIF0 completion IRQ - drives the real, resident _SifCmdIntHandler() */
+}
+
+/* task #192: delayed-delivery state for sif_cmd_iop_send_rpc_bind_rend(),
+ * same collision-avoidance rationale as g_rpcinit_pending above. */
+static int g_rpc_bind_pending = 0;
+static uint32_t g_rpc_bind_delay = 0;
+static uint32_t g_rpc_bind_cd_pending = 0;
+
+static void ee_arm_rpc_bind_pending(uint32_t cd_ptr)
+{
+    g_rpc_bind_pending = 1;
+    g_rpc_bind_delay = 50000u;
+    g_rpc_bind_cd_pending = cd_ptr;
+}
+
+static void ee_check_rpc_bind_pending(ee_state_t *st)
+{
+    if (!g_rpc_bind_pending)
+        return;
+    if (g_rpc_bind_delay > 0u) {
+        g_rpc_bind_delay--;
+        return;
+    }
+    g_rpc_bind_pending = 0;
+    sif_cmd_iop_send_rpc_bind_rend(st, sif_cmd_iop_get_ee_recvbuf(), g_rpc_bind_cd_pending);
+}
+
 int ee_core_init(const bios_image_t *bios)
 {
     memset(&g_state, 0, sizeof(g_state));
@@ -841,6 +925,9 @@ int ee_core_init(const bios_image_t *bios)
     sif_cmd_iop_init(); /* task #186: minimal IOP-side SIFCMD consumer model - see core/hw/sif.h */
     g_rpcinit_pending = 0; /* task #187: reset delayed-delivery state on (re-)init */
     g_rpcinit_delay = 0;
+    g_rpc_bind_pending = 0; /* task #192: reset delayed-delivery state on (re-)init */
+    g_rpc_bind_delay = 0;
+    g_rpc_bind_cd_pending = 0;
     memset(g_ee_sema, 0, sizeof(g_ee_sema)); /* task #188: reset semaphore table on (re-)init */
     mch_init(); /* EE-side MCH_RICM/MCH_DRD RDRAM auto-init registers - see core/hw/mch.h */
 
@@ -1430,6 +1517,60 @@ static int ee_step(void)
                         g_ee_sema[semid].wait_threads++;
                         st->pc = this_pc;      /* park: re-execute this same syscall next step */
                         st->next_pc = this_pc + 4u;
+
+                        /* task #192 (69th finding), ROOT CAUSE of why the
+                         * RPC_BIND/REND synthetic-delivery mechanism (added
+                         * earlier this round) never fired: this whole
+                         * syscall dispatch chain returns immediately after
+                         * each "if (sysnum == N) { ... return 1; }" block,
+                         * which exits ee_step() BEFORE it ever reaches the
+                         * shared per-step epilogue at the bottom of this
+                         * function (COP0 Count increment, VBLANK check,
+                         * ee_check_rpcinit_pending(), ee_check_rpc_bind_
+                         * pending(), and - critically - the timer/INTC/
+                         * DMAC interrupt checks). For an ordinary syscall
+                         * that executes once and advances pc, this only
+                         * ever skips a single epilogue tick - a harmless,
+                         * purely cosmetic inexactness. WaitSema's park
+                         * branch is different: while count==0, THIS EXACT
+                         * SAME instruction re-executes every single step
+                         * (pc never advances), so the epilogue - and every
+                         * interrupt/pending check it drives - would be
+                         * skipped on EVERY step for as long as the park
+                         * lasts, permanently starving the very mechanism
+                         * that is supposed to let a real SIF0/DMAC/INTC
+                         * interrupt vector away, run a genuine handler, and
+                         * call SignalSema/iSignalSema on this semaphore.
+                         * Confirmed via a host-native diagnostic
+                         * (g_diag_step_count, incremented at the top of
+                         * ee_check_rpc_bind_pending()): it advanced
+                         * normally right up to the exact step WaitSema
+                         * started parking, then never incremented again
+                         * even after 30,000,000+ further host-loop
+                         * iterations that kept calling ee_core_step() - the
+                         * outer harness kept ticking, but ee_step() itself
+                         * was silently returning before doing any more
+                         * real per-step work. Fix: while parked, explicitly
+                         * run the same interrupt/pending checks the shared
+                         * epilogue would have run, so parking behaves like
+                         * real hardware (the CPU core keeps ticking real
+                         * timers/DMA/INTC lines and re-checking them every
+                         * cycle even while a thread is blocked) instead of
+                         * silently freezing all per-step logic. This does
+                         * not touch the shared epilogue itself (avoiding
+                         * any risk to the already-verified normal-
+                         * instruction path) - it only adds an equivalent
+                         * call sequence to this one park branch. */
+                        st->cop0[9]++;
+                        ee_latch_timer_interrupt(st);
+                        ee_check_vblank(st);
+                        ee_check_rpcinit_pending(st);
+                        ee_check_rpc_bind_pending(st);
+                        if (!st->branch_pending) {
+                            ee_check_timer_interrupt(st, st->pc);
+                            ee_check_intc_interrupt(st, st->pc);
+                            ee_check_dmac_interrupt(st, st->pc);
+                        }
                     }
                 } else {
                     GPR(2) = sext32((uint32_t)-1); /* real error: invalid sema ID */
@@ -1715,6 +1856,26 @@ static int ee_step(void)
                                  * viable). */
                                 ee_arm_rpcinit_pending();
                             }
+                        }
+                        if (cid == SIF_CMD_RPC_BIND && sif_cmd_iop_get_rpc_bind_count() == 0u) {
+                            /* task #192 (68th finding): the real
+                             * caller past CreateSema/WaitSema
+                             * (sceSifBindRpc(), byte-exact match per
+                             * the 67th finding) sends this packet;
+                             * `cd` (the SifRpcClientData_t* the real
+                             * WaitSema is blocked on, via
+                             * cd->hdr.sema_id) lives at offset 0x1C of
+                             * the real SifRpcBindPkt_t. Only arm the
+                             * synthetic REND reply on the FIRST
+                             * observed Bind (matching the RPCINIT
+                             * precedent's "count==1" gating style,
+                             * adapted since Bind is naturally only
+                             * sent once per real sceSifBindRpc() call,
+                             * unlike SIF_CMD_INIT_CMD's documented
+                             * twice-send). */
+                            uint32_t cd_ptr = ee_mem_read32(st, src + 0x1Cu);
+                            sif_cmd_iop_handle_rpc_bind(cd_ptr);
+                            ee_arm_rpc_bind_pending(cd_ptr);
                         }
                     }
                 }
@@ -3957,6 +4118,7 @@ static int ee_step(void)
      * instruction boundary. */
     ee_check_vblank(st);
     ee_check_rpcinit_pending(st); /* task #187 (63rd finding) */
+    ee_check_rpc_bind_pending(st); /* task #192 (68th finding) */
     if (!st->branch_pending) {
         ee_check_timer_interrupt(st, st->pc);
         /* Task #176: same instruction-boundary gating as the timer

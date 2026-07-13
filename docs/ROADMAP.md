@@ -2091,3 +2091,40 @@ IOP-side response. Deliberately did NOT fabricate a synthetic response
 documented struct/field) since there is no real source to ground one
 here. No source changed this round; docs-only. See docs/STATUS.md's
 67th finding for full detail and the precise open question.
+
+## UPDATE (Round 43, task #192/#193): "system command 9" identified for real (SIF_CMD_RPC_BIND); WaitSema-park epilogue-starvation root cause found and FIXED - real forward progress past the WaitSema wall
+
+User-provided ps2tek URL (following up on two earlier user-provided
+research links) identified cid=0x80000009 as the real, documented
+SIF_CMD_RPC_BIND - not an undocumented mystery. Cross-confirmed
+byte-exact against the user-uploaded ps2sdk-master.zip's real
+sceSifBindRpc()/_request_end() source. Implemented a synthetic
+SIF_CMD_RPC_END (REND) reply delivery mechanism symmetric to the
+already-proven RPCINIT delivery (task #187) - initially did not fire.
+
+Root-caused via extended host-native diagnostic tracing: EVERY syscall
+handler in the EE's syscall dispatch chain (`if (sysnum == N) { ...
+return 1; }`) exits ee_step() before reaching its own shared per-step
+epilogue (Count increment, VBLANK, RPCINIT/RPC-bind pending checks,
+and the timer/INTC/DMAC interrupt checks). Harmless for one-shot
+syscalls, but WaitSema's park branch re-executes the SAME instruction
+every step while blocked, so the epilogue - and all real-interrupt
+delivery it drives - was being silently starved for as long as any
+WaitSema park lasted. This silently invalidated part of the 66th
+finding's claim that interrupt checks "keep running normally" while
+parked (never actually exercised by a real external signal until this
+round). Fixed by explicitly running the same interrupt/pending checks
+inside WaitSema's park branch itself (source/core/ee/ee_core.c),
+leaving the shared epilogue itself untouched.
+
+Verified: all 87 host-native regression tests pass; a host-native
+diagnostic against the real fixed source shows the synthetic REND
+delivery firing, the real, already-resident _request_end() BIOS code
+calling iSignalSema on the correct semaphore, WaitSema genuinely
+unparking, and the boot executing several million more real
+instructions (DeleteSema, return from sceSifBindRpc(), and beyond)
+before hitting a NEW WaitSema wall on a different semaphore (semid=1) -
+real, substantial, honestly-verified progress past tasks #188-#192's
+wall, not a synthetic shortcut. See docs/STATUS.md's 68th/69th findings
+for full detail. New open item: identify what semid=1's real blocking
+condition corresponds to (task #172 continues).

@@ -199,4 +199,35 @@ uint32_t sif_cmd_iop_get_init_cmd_count(void);
 #define SIF_CMD_SET_SREG   0x80000001u /* SIF_CMD_ID_SYSTEM | 1 */
 #define SIF_SREG_RPCINIT   0u
 
+/* task #192 (68th finding): real SIF RPC command IDs, confirmed via
+ * both the fetched ee/kernel/src/sifrpc.c (user-supplied
+ * ps2sdk-master.zip) and the psdevwiki-mirrored ps2tek pages the user
+ * pointed to this round (israpps.github.io/ps2tek/PS2/SIF/RPC_Cmds.html,
+ * PS2/SIF/RPC_System_services.html) - real, cited constants, not
+ * guessed. `SIF_CMD_RPC_BIND` (0x80000009) is what this project's own
+ * traced real caller past CreateSema/WaitSema (task #191's 67th
+ * finding, byte-exact match to real `sceSifBindRpc()`) sends;
+ * `SIF_CMD_RPC_END` (0x80000008) is what the real IOP replies with
+ * once the bind completes, dispatched by the SAME real, already-
+ * resident `_SifCmdIntHandler()` this project already drives for
+ * SIF_CMD_SET_SREG (63rd finding) - but this time through its
+ * `usr_cmd_handlers[]` path (real `sceSifAddCmdHandler()`-registered,
+ * confirmed via the fetched sifcmd.c's `_SifCmdIntHandler()` dispatch
+ * logic: `if (cid & SIF_CMD_ID_SYSTEM) {...sys_cmd_handlers...} else
+ * {...usr_cmd_handlers...}`) rather than `sys_cmd_handlers[]`. The
+ * real EE-side handler this drives, `_request_end()` (fetched
+ * ee/kernel/src/sifrpc.c), reads `request->cd` (the real
+ * `SifRpcClientData_t*` echoed back from the original Bind packet)
+ * and calls `iSignalSema(cd->hdr.sema_id)` - genuine, already-resident
+ * BIOS/kernel code, executed for real once invoked; only the INCOMING
+ * REND PACKET CONTENT is synthesized here (byte-exact real
+ * `SifRpcRendPkt_t` layout), same style/precedent as
+ * `sif_cmd_iop_send_rpcinit_ready()` above. */
+#define SIF_CMD_RPC_END    0x80000008u /* SIF_CMD_ID_SYSTEM | 8 */
+#define SIF_CMD_RPC_BIND   0x80000009u /* SIF_CMD_ID_SYSTEM | 9 */
+
+void sif_cmd_iop_handle_rpc_bind(uint32_t cd_ptr);
+uint32_t sif_cmd_iop_get_rpc_bind_cd(void);
+uint32_t sif_cmd_iop_get_rpc_bind_count(void);
+
 #endif

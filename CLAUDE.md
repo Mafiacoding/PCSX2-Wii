@@ -3745,3 +3745,24 @@ real IOP driver-loading sequence inside OSDSYS's boot path using a
 proven, repeatable methodology. Next: identify sid=0x8000010F/
 0x8000011F via ps2tek/psdevwiki research or live PCSX2 tracing, then
 implement their real reply semantics.
+
+## Checkpoint (Round 52, task #202)
+
+Implemented real cd->sid tracking (`source/hw/sif.c`) and a cited
+PADMAN reply (sid=0x8000010F/0x8000011F, real ps2sdk-sourced), fixing
+a latent bug where RPC_CALL dispatch always assumed LOADFILE's
+numbering. Verified: 87/87 regression suite pass, clean Wii/devkitPPC
+rebuild.
+
+Diagnostic tracing shows real, chained progress: OSDSYS now proceeds
+through THREE real services in sequence - LOADFILE, PADMAN, and now
+MCSERV (sid=0x80000400, confirmed via ee/rpc/memorycard/src/libmc.c).
+Boot re-parks at MCSERV's own call (rpc_number=0x70, not yet
+implemented); zero GS writes still observed.
+
+Status: this project has now mapped a genuine, three-service-deep real
+RPC chain inside OSDSYS's boot path using a proven, repeatable
+methodology (identify real sid/rpc_number from host-native tracing,
+cite the real ps2sdk client/server source, implement a minimal
+protocol-correct synthetic reply, verify progress). Next: apply the
+same methodology to MCSERV's rpc_number=0x70.

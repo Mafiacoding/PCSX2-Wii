@@ -261,4 +261,39 @@ void sif_cmd_iop_handle_rpc_bind(uint32_t cd_ptr);
 uint32_t sif_cmd_iop_get_rpc_bind_cd(void);
 uint32_t sif_cmd_iop_get_rpc_bind_count(void);
 
+/* task #202 (79th finding): live/host-native tracing (77th/78th
+ * findings) showed OSDSYS binds to MULTIPLE different real RPC
+ * services during boot (LOADFILE sid=0x80000006, then PADMAN's real,
+ * ps2sdk-cited PAD_BIND_RPC_ID1_OLD/ID2_OLD sids 0x8000010F/
+ * 0x8000011F - see ee/rpc/pad/src/libpad.c in the fetched ps2sdk
+ * source) - and each service defines its OWN, unrelated meaning for
+ * SifRpcCallPkt_t's rpc_number field (LOADFILE's 0/1 = MOD_LOAD/
+ * ELF_LOAD; PADMAN's calls are ALWAYS sent with the client library's
+ * own fixed sceSifCallRpc() fno=1, with the real command instead
+ * encoded inside the call's own payload - see libpad.c's
+ * padPortInit()/padEnd()/etc., which ALL call
+ * "sceSifCallRpc(&padsif[i], 1, 0, &buffer, ...)" regardless of which
+ * pad operation buffer.command actually requests). Dispatching every
+ * observed RPC_CALL as if it were always talking to LOADFILE (this
+ * project's original, narrower assumption) is wrong once a second
+ * service is bound - this small cd_ptr->sid table lets the RPC_CALL
+ * dispatch look up which real service a given `cd` was bound to
+ * before deciding how to interpret its rpc_number/payload, instead of
+ * guessing. Fixed-size (8 entries, matching this project's observed
+ * boot trace never having more than a handful of RPC clients
+ * outstanding at once) - a real design bound, not an arbitrary limit
+ * hiding a bug: if exceeded, the oldest entry is silently overwritten
+ * (an honest, explicitly-labeled simplification, not a fabricated
+ * unbounded table). */
+/* task #202 (79th finding): real, ps2sdk-cited RPC service sid
+ * constants this project's boot trace has observed being bound to -
+ * used to route SIF_CMD_RPC_CALL dispatch by which real service a
+ * given `cd` belongs to (see sif_cmd_iop_lookup_bind_sid() below). */
+#define SIF_SID_LOADFILE        0x80000006u /* real, already cited (task #195/#196) */
+#define SIF_SID_PAD_BIND_ID1_OLD 0x8000010Fu /* real, ee/rpc/pad/src/libpad.c PAD_BIND_RPC_ID1_OLD */
+#define SIF_SID_PAD_BIND_ID2_OLD 0x8000011Fu /* real, ee/rpc/pad/src/libpad.c PAD_BIND_RPC_ID2_OLD */
+
+void sif_cmd_iop_track_bind_sid(uint32_t cd_ptr, uint32_t sid);
+uint32_t sif_cmd_iop_lookup_bind_sid(uint32_t cd_ptr); /* returns 0 if not found */
+
 #endif

@@ -178,12 +178,26 @@ static uint32_t g_iop_cmd_init_cmd_count;
 static uint32_t g_iop_cmd_rpc_bind_cd;
 static uint32_t g_iop_cmd_rpc_bind_count;
 
+/* task #202 (79th finding): small fixed-size cd_ptr->sid table - see
+ * the citation in sif.h above sif_cmd_iop_track_bind_sid()'s
+ * declaration for the full real-protocol grounding. */
+#define SIF_CMD_BIND_SID_TABLE_SIZE 8
+static uint32_t g_bind_sid_table_cd[SIF_CMD_BIND_SID_TABLE_SIZE];
+static uint32_t g_bind_sid_table_sid[SIF_CMD_BIND_SID_TABLE_SIZE];
+static uint32_t g_bind_sid_table_next;
+
 void sif_cmd_iop_init(void)
 {
+    uint32_t i;
     g_iop_cmd_ee_recvbuf = 0;
     g_iop_cmd_init_cmd_count = 0;
     g_iop_cmd_rpc_bind_cd = 0;
     g_iop_cmd_rpc_bind_count = 0;
+    for (i = 0; i < SIF_CMD_BIND_SID_TABLE_SIZE; i++) {
+        g_bind_sid_table_cd[i] = 0;
+        g_bind_sid_table_sid[i] = 0;
+    }
+    g_bind_sid_table_next = 0;
 }
 
 void sif_cmd_iop_handle_init_cmd(uint32_t ee_recvbuf_addr)
@@ -216,4 +230,28 @@ uint32_t sif_cmd_iop_get_rpc_bind_cd(void)
 uint32_t sif_cmd_iop_get_rpc_bind_count(void)
 {
     return g_iop_cmd_rpc_bind_count;
+}
+
+void sif_cmd_iop_track_bind_sid(uint32_t cd_ptr, uint32_t sid)
+{
+    uint32_t i;
+    for (i = 0; i < SIF_CMD_BIND_SID_TABLE_SIZE; i++) {
+        if (g_bind_sid_table_cd[i] == cd_ptr) {
+            g_bind_sid_table_sid[i] = sid;
+            return;
+        }
+    }
+    g_bind_sid_table_cd[g_bind_sid_table_next] = cd_ptr;
+    g_bind_sid_table_sid[g_bind_sid_table_next] = sid;
+    g_bind_sid_table_next = (g_bind_sid_table_next + 1u) % SIF_CMD_BIND_SID_TABLE_SIZE;
+}
+
+uint32_t sif_cmd_iop_lookup_bind_sid(uint32_t cd_ptr)
+{
+    uint32_t i;
+    for (i = 0; i < SIF_CMD_BIND_SID_TABLE_SIZE; i++) {
+        if (g_bind_sid_table_cd[i] == cd_ptr)
+            return g_bind_sid_table_sid[i];
+    }
+    return 0u;
 }

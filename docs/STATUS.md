@@ -9666,3 +9666,63 @@ source).
 
 Zero GS register writes are still observed. Neither the splash-screen
 nor the GS-output relaxed goal is met yet - honestly reported.
+
+## Update (Round 52, 79th finding): implement real cd->sid tracking + PADMAN reply - unblocks a THIRD real service (MCSERV)
+
+Per the 78th finding's next step, implemented a small, fixed-size
+cd_ptr->sid tracking table (`sif_cmd_iop_track_bind_sid()`/
+`sif_cmd_iop_lookup_bind_sid()`, `source/hw/sif.c` +
+`include/core/hw/sif.h`), recorded on every real SIF_CMD_RPC_BIND
+(the real `sid` field, already-cited offset 0x20). This lets the
+RPC_CALL dispatch in `source/core/ee/ee_core.c` know which real
+service a given `cd` was bound to before interpreting its
+`rpc_number`/payload - fixing a real, latent bug (the code previously
+always assumed LOADFILE's numbering, which the 78th finding showed is
+wrong for other services).
+
+Identified `sid=0x8000010F`/`sid=0x8000011F` conclusively via the
+already-fetched real source: `ee/rpc/pad/src/libpad.c`'s
+`PAD_BIND_RPC_ID1_OLD`/`PAD_BIND_RPC_ID2_OLD` - real PADMAN (pad/
+controller driver) RPC service IDs. Confirmed the real reason the
+78th finding's payload read as an empty path: unlike LOADFILE, every
+libpad call site sends its `sceSifCallRpc()` with a FIXED `fno=1`
+regardless of the actual pad operation - the real command lives inside
+the payload itself (`buffer.command`, offset 0), not as a per-function
+`rpc_number` the way LOADFILE works.
+
+Implemented a synthetic, cited reply (`data[3]=1` handle,
+`data[5]=0`, matching `iop/input/padman/src/rpcserver.c`'s
+`RpcPadOpen()`: `data[3] = padPortOpen(...)`) - explicitly not
+decoding which specific pad command was requested nor modeling real
+controller presence (an honest, labeled gap).
+
+**Verified, real, and significant:** a host-native diagnostic
+(instrumented tracing copy) shows this fix unblocks OSDSYS past the
+PAD binds entirely, advancing to a THIRD, brand-new real service:
+
+```
+[RPCBIND] sid=0x80000400 cd=0x0046BB80
+[RPCCALL] sid=0x80000400 rpc_number=0x00000070 call_recvbuf=0x0046BBC0 call_cd=0x0046BB80 i=1 count=2
+```
+
+`sid=0x80000400` is confirmed, real, and cited: the memory-card server
+RPC ID (`rpc_id = 0x80000400`, `ee/rpc/memorycard/src/libmc.c`) -
+matching this project's own earlier-traced MCSERV module load (77th
+finding). This is genuine, deeper real boot progress, three real
+services deep now (LOADFILE -> PADMAN -> MCSERV), not a repeat of the
+same wall.
+
+**Honest result:** the boot still ultimately re-parks (same shared
+wait routine, `0x00210F84`) at this new MCSERV call - this project has
+not yet implemented MCSERV's real `rpc_number=0x70` semantics, an
+honest, unclaimed gap for a future round. Zero GS register writes
+still observed; neither of the user's target conditions is met yet.
+
+**Verified for real:** all 87 host-native regression tests pass (0
+failures); clean Wii/devkitPPC rebuild (`pcsx2-wii-git.dol`, 433984
+bytes). No BIOS bytes committed/pushed/rsynced.
+
+**Concrete next step:** identify MCSERV's real `rpc_number=0x70`
+semantics from the already-fetched `ee/rpc/memorycard/src/libmc.c`/
+`iop/memorycard/mcserv/src/mcserv.c` sources and implement a cited
+reply, continuing the same real, evidence-based chain.

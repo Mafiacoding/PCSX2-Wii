@@ -2326,7 +2326,9 @@ static int ee_step(void)
                              * whatever this send's own cd_ptr was -
                              * which this already does. */
                             uint32_t cd_ptr = ee_mem_read32(st, src + 0x1Cu);
+                            uint32_t bind_sid = ee_mem_read32(st, src + 0x20u); /* real SifRpcBindPkt_t.sid offset, already cited (task #195/#196) */
                             sif_cmd_iop_handle_rpc_bind(cd_ptr);
+                            sif_cmd_iop_track_bind_sid(cd_ptr, bind_sid); /* task #202 (79th finding) */
                             ee_arm_rpc_bind_pending(cd_ptr);
                         }
                         if (cid == SIF_CMD_RPC_CALL) {
@@ -2353,7 +2355,8 @@ static int ee_step(void)
                             uint32_t rpc_number = ee_mem_read32(st, src + 0x20u);
                             uint32_t call_recvbuf = ee_mem_read32(st, src + 0x28u);
                             uint32_t call_cd = ee_mem_read32(st, src + 0x1Cu);
-                            if (rpc_number == 1u && call_recvbuf != 0u && i >= 1u) {
+                            uint32_t call_sid = sif_cmd_iop_lookup_bind_sid(call_cd); /* task #202 (79th finding) - see sif.h citation */
+                            if (call_sid == SIF_SID_LOADFILE && rpc_number == 1u && call_recvbuf != 0u && i >= 1u) {
                                 /* The real _lf_elf_load_arg payload
                                  * (path[252] starting at its own
                                  * offset 8) is the PRECEDING descriptor
@@ -2420,7 +2423,7 @@ static int ee_step(void)
                                      * miss / bad ELF) is left un-replied - an honest
                                      * gap, not a fabricated success. */
                                 }
-                            } else if (rpc_number == 0u && call_recvbuf != 0u && i >= 1u) {
+                            } else if (call_sid == SIF_SID_LOADFILE && rpc_number == 0u && call_recvbuf != 0u && i >= 1u) {
                                 /* task #201 (77th finding): real
                                  * LF_F_MOD_LOAD (=0, see the already-
                                  * fetched common/include/loadfile-
@@ -2470,6 +2473,64 @@ static int ee_step(void)
                                  * project actually runs CLEARSPU. */
                                 ee_mem_write32(st, call_recvbuf + 0u, 1u); /* result: synthetic module id (placeholder, not tracked) */
                                 ee_mem_write32(st, call_recvbuf + 4u, 0u); /* modres: synthetic module start() return = success */
+                                ee_arm_rpc_call_pending(call_cd);
+                            } else if ((call_sid == SIF_SID_PAD_BIND_ID1_OLD || call_sid == SIF_SID_PAD_BIND_ID2_OLD)
+                                       && call_recvbuf != 0u) {
+                                /* task #202 (79th finding): real
+                                 * PADMAN RPC call, confirmed via the
+                                 * cd->sid tracking table above (task
+                                 * #202) - the 78th finding's trace
+                                 * showed this call's own path bytes
+                                 * read empty, which puzzled this
+                                 * project until re-reading the fetched
+                                 * ee/rpc/pad/src/libpad.c: unlike
+                                 * LOADFILE, EVERY real libpad call site
+                                 * (padPortInit/padEnd/padRead/etc.)
+                                 * sends its sceSifCallRpc() with a
+                                 * FIXED, literal fno=1 regardless of
+                                 * the actual pad operation - the real
+                                 * operation is instead encoded as a
+                                 * "command" field INSIDE the call's
+                                 * own payload (byte offset 0, not the
+                                 * LOADFILE-style path-string-at-offset-
+                                 * 8 layout this project's rpc_number==1
+                                 * branch above assumes), which is why
+                                 * this project's earlier, sid-blind
+                                 * dispatch read it as an empty path.
+                                 * The real IOP-side reply (see the
+                                 * fetched iop/input/padman/src/
+                                 * rpcserver.c's RpcPadOpen():
+                                 * "data[3] = padPortOpen(...)" - a
+                                 * small non-negative port handle on
+                                 * success - "&data[5]" for extra
+                                 * output) writes back into the SAME
+                                 * call buffer, matching every libpad
+                                 * call site's own
+                                 * "sceSifCallRpc(&padsif[i], 1, 0,
+                                 * &buffer, sizeof(buffer), &buffer,
+                                 * sizeof(buffer), NULL, NULL)"
+                                 * convention (recvbuf == the same
+                                 * buffer as the request). This project
+                                 * does NOT yet decode which specific
+                                 * pad command was requested (would
+                                 * need the real per-command struct
+                                 * layouts for open/init/read/etc. - a
+                                 * real, separate feature, not yet
+                                 * built) nor does it model real
+                                 * controller presence/state - an
+                                 * honest, explicitly-labeled gap.
+                                 * Writing a plausible, cited-offset
+                                 * "success, handle=1" reply (word
+                                 * offset 3 = byte 12, per RpcPadOpen()
+                                 * above; word offset 5 = byte 20, left
+                                 * 0) is a best-effort, real-protocol-
+                                 * shaped synthesis - not a guess at
+                                 * unknown structure semantics, since
+                                 * both written offsets are directly
+                                 * cited from the real IOP-side
+                                 * handler's own source. */
+                                ee_mem_write32(st, call_recvbuf + 12u, 1u); /* data[3]: synthetic pad handle (placeholder) */
+                                ee_mem_write32(st, call_recvbuf + 20u, 0u); /* data[5]: synthetic extra output = 0 */
                                 ee_arm_rpc_call_pending(call_cd);
                             }
                         }

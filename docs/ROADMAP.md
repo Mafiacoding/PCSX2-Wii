@@ -2367,3 +2367,20 @@ code correctly leaves the resulting call un-replied (an honest gap,
 not a fabricated response) rather than guessing. See docs/STATUS.md's
 78th finding. Pure investigation - no source changes this round, no
 regression/rebuild needed.
+
+## Round 52 (task #202, 79th finding): cd->sid tracking + real PADMAN reply - unblocks a third real service (MCSERV)
+
+Implemented a small cd_ptr->sid tracking table (`source/hw/sif.c`) so
+SIF_CMD_RPC_CALL dispatch can tell which real service a `cd` belongs
+to. Identified sid=0x8000010F/0x8000011F as real, cited PADMAN bind
+IDs (`ee/rpc/pad/src/libpad.c`) and implemented a synthetic, cited
+reply (`iop/input/padman/src/rpcserver.c`'s RpcPadOpen() offsets).
+
+Verified: 87/87 regression suite pass, clean Wii/devkitPPC rebuild.
+Diagnostic tracing shows this genuinely unblocks OSDSYS past PADMAN
+into a THIRD real service - sid=0x80000400, confirmed as MCSERV
+(memory card server, `ee/rpc/memorycard/src/libmc.c`) - matching the
+77th finding's earlier-traced MCSERV module load. Boot still re-parks
+at the same wait routine (MCSERV's rpc_number=0x70 not yet
+implemented); zero GS writes still observed. See docs/STATUS.md's
+79th finding. Next: identify MCSERV's real rpc_number=0x70 semantics.

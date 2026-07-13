@@ -1822,3 +1822,24 @@ regions, settling into a steady-state loop around `0x00083B40`
 itself - the actual iterating caller is not yet identified). 87/87
 regression pass; clean Wii/devkitPPC rebuild. See STATUS.md's 56th
 finding for full detail.
+
+**UPDATE (Round 32, 57th finding, task #172/#182):** investigated the
+Round 31 steady-state loop (`0x00083B40`) and found two things. First,
+a major positive milestone: this project's boot now performs a real,
+complete GS CRTC/video-timing configuration sequence for the first
+time ever (`GS_CSR`/`SMODE1`/`SYNCH1`/`SYNCH2`/`SYNCV`/`SMODE2`/
+`SRFSH`, all real registers, real addresses, correct order) - a
+genuine prerequisite for a splash screen. Second, precisely identified
+the next blocker: the `0x00083B40` loop polls a fixed address
+(`0x0008C440`) that is zeroed once at BSS-init time and never written
+again - confirmed via a dedicated whole-boot memory watch, a
+2-billion-instruction run that never resolved it, and frozen register
+state across 1.4M+ loop iterations (ruling out "real hardware busy-
+wait, just slow in emulation"). One candidate mechanism (the 4-call
+device-registration sequence found in Round 31) was investigated and
+ruled out - it writes a different, nearby table. The real mechanism
+that should set this flag is not yet identified; flagged for live
+PCSX2 debugging (the same technique that resolved Round 30) as the
+next step, rather than guessed at. No source changed this round -
+pure diagnostic investigation. See STATUS.md's 57th finding for full
+detail.

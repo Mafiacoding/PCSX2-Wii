@@ -7844,3 +7844,105 @@ progress that a longer instruction budget would resolve) or a genuine
 infinite loop with a real blocking condition, and whether GS registers
 get touched anywhere in this new code range (the ultimate signal of
 real graphics-pipeline activity, one step closer to a splash screen).
+
+## 57th finding (task #172/#182): first-ever confirmed real GS/CRTC register writes during boot; precisely identified the next real blocker as a genuine, zero-progress polling loop on a single never-written memory address (0x0008C440) - no fix yet, root cause narrowed exactly
+
+Continuing task #182's investigation of the steady-state loop found in
+the 56th finding (settling around EE PC `0x00083B40` after task #181's
+syscall -5 fix unblocked boot). Used temporary, non-committed
+instrumentation (a scratch copy of `gs.c` with write counters, never
+touching the real repo file) plus the same host-native diagnostic
+methodology established throughout this project.
+
+**Major positive result: real GS register writes, for the first time
+ever.** Between the earlier fixes and reaching the `0x00083B40` steady
+state, the boot performs a complete, real GS CRTC/video-timing
+configuration sequence:
+```
+i=15320027 pc=0x8000AAC8 GS_CSR    (0x12001000) = 0x0000000000000200
+i=15410601 pc=0x8000A134 GS_SMODE1 (0x12000010) = 0x0000000740834504
+i=15410603 pc=0x8000A13C GS_SYNCH1 (0x12000040) = 0x0007F5B61F06F040
+i=15410608 pc=0x8000A150 GS_SYNCH2 (0x12000050) = 0x000000000033A4D8
+i=15410620 pc=0x8000A180 GS_SYNCV  (0x12000060) = 0x00C7800601A01801
+i=15410623 pc=0x8000A18C GS_SMODE2 (0x12000020) = 0x0000000000000003
+i=15410632 pc=0x8000A1B0 GS_SRFSH  (0x12000030) = 0x0000000000000008
+i=15410636 pc=0x8000A2A0 GS_SMODE1 (0x12000010) = 0x0000000740814504
+```
+This is a real, coherent CRTC/video-mode-init routine (matching real
+PS2 BIOS boot behavior of configuring sync/refresh timing before any
+video output) - addresses, register names, and write order all match
+PCSX2's own `Hw.h`/this project's `gs.h` register map exactly. This is
+the first time this project's boot has ever reached genuine GS
+hardware configuration - a concrete prerequisite for a splash screen,
+not previously observed in any prior finding (the earlier live-PCSX2
+GT3 investigation and every prior static trace never got this far).
+(Caveat found and self-corrected mid-investigation: an initial
+instrumented counter placed BEFORE `gs_mmio_write64`'s own address
+bounds check counted 4+ million calls, but that function is called
+unconditionally for every 64-bit EE store regardless of destination
+(see `ee_mem_write64`) - most of those calls are for unrelated
+addresses and get rejected. Moving the counter after the bounds check
+gave the real, trustworthy count of 8 genuine in-range GS writes above.)
+
+**The `0x00083B40` steady state, precisely characterized:** confirmed
+via call-frequency instrumentation that `0x00083B40` (the array-getter
+function identified in the 56th finding) is called 1,499,819 times
+between i=30,001,810 and the end of a 45M-instruction budget - and a
+2,000,000,000-instruction run (the largest instruction budget this
+project has attempted) still had not resolved it after 600M
+instructions, ruling out "it's just a very long but finite real
+hardware delay that a bigger budget would clear." Sampling registers
+at the loop's entry point across a million+ iterations shows `$a0`
+(the array index) and every other observed register frozen at
+identical values every single time (`a0=0`, `ra=0x00084338`,
+`sp=0xFFFFFF40`, `s0=0x0008D4C0`, `s1=0x00000001`) - zero forward
+progress, not a counting/bounded loop. This rules out the "real
+hardware busy-wait, just slow in emulation" hypothesis definitively:
+a loop with a completely static index and no state change is not how
+a real, bounded hardware delay is coded.
+
+**Root cause narrowed to an exact address.** The accessor's own body
+(`lui v0,9; sll a0,a0,2; addiu v0,v0,-0x3bc0; addu a0,a0,v0; lw
+v0,(a0)`) computes, with `a0=0`, a fixed read address of
+`0x0008C440`. A dedicated watch on this exact address across the
+ENTIRE boot (from `i=0`) found it is written exactly ONCE - zeroed as
+part of BSS initialization at `i=0` (`pc=0xBFC00200`) - and never
+written again for the rest of the run. This is a real, precisely
+identified "polling loop waits for a flag that nothing ever sets" bug,
+structurally identical to every prior instance of this pattern this
+project has found and fixed (SIF_SMFLG, DMAC_STAT, the AddDmacHandler/
+ResumeIntrDispatch gaps from the 55th/56th findings) - this project
+does not yet know what real mechanism is supposed to write
+`0x0008C440`.
+
+**Investigated and ruled out one candidate mechanism.** The 4 calls to
+`0x00083e38` seen in the 56th finding's call-frequency check (a
+generic "table[index] = {a1, a2}" indexed-array setter, used for the
+device-ID-8/9/0xa/0xc registration sequence at `0x000842A0`-
+`0x000842E8`) write to a DIFFERENT table, based at `0x0008C324`/
+`0x0008C32C` (computed from the same `9<<16` base as the polled
+address but with different offsets: `-0x3cdc`/`-0x3cd4` vs. the polled
+address's `-0x3bc0`) - not `0x0008C440`. Ruled out as the mechanism
+that should be setting the polled flag; the real mechanism remains
+unidentified.
+
+**Not fabricating a fix without a citable real mechanism.** Given this
+project's established discipline (tasks #180/#181's own lesson: don't
+guess at kernel-internal side effects, let real code/hardware behavior
+determine the fix), and that the responsible next step mirrors exactly
+what resolved the SIF2/SBUS question in the 55th finding - live PCSX2
+debugging against a real GT3 boot to see what real mechanism (an
+interrupt handler, an IOP<->EE message, a different syscall) writes
+the real-hardware equivalent of this address - this is flagged as the
+next concrete step rather than guessed at.
+
+**No source code was changed this round** (pure diagnostic
+investigation using temporary, non-committed instrumentation) - no
+regression suite or Wii rebuild is needed for this commit, consistent
+with this project's prior doc-only rounds (e.g. Round 19).
+
+**Next for task #172:** live-debug the real-hardware equivalent of
+`0x0008C440` (or find it via further static tracing if live debugging
+is unavailable/unstable) to identify what real mechanism sets it, then
+implement that mechanism for real - the same pattern that has now
+resolved two consecutive walls (tasks #180, #181).

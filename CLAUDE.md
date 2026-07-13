@@ -3056,3 +3056,48 @@ the `0x00083B40` accessor - bounded/finite (would resolve with a
 longer budget) vs. a genuine blocking loop - and check whether any GS
 registers get touched anywhere in this new territory. See
 docs/STATUS.md's 56th finding for full detail.
+
+## Update (Round 32, 57th finding): first-ever real GS/CRTC register writes confirmed; next blocker precisely identified as a genuine polling loop on 0x0008C440 (never written by anything) - no fix yet, root cause narrowed exactly
+
+Investigated the Round 31 steady-state loop at `0x00083B40`. Two
+findings:
+
+**Major milestone: real GS CRTC/video-mode configuration now happens.**
+Between the fixes and the loop, this project's boot performs a
+complete, real register sequence (`GS_CSR=0x200`,
+`GS_SMODE1=0x740834504`, `SYNCH1/SYNCH2/SYNCV`, `SMODE2=3`, `SRFSH=8`,
+`SMODE1=0x740814504` again) - real addresses, real register names,
+correct order, matching this project's own `gs.h` map and PCSX2's
+`Hw.h` exactly. First time ever this project's boot has reached real
+GS hardware configuration - a genuine prerequisite for a splash
+screen. (Self-caught instrumentation bug along the way: a write
+counter placed before `gs_mmio_write64`'s bounds check counted every
+64-bit EE store regardless of destination - 4M+ calls - moving it
+after the check gave the real, trustworthy count of 8.)
+
+**The 0x00083B40 loop, precisely characterized as a genuine bug, not
+a slow real delay.** Call-frequency instrumentation: 1,499,819 calls
+into this accessor within a 45M window; a 2,000,000,000-instruction
+run (largest ever attempted) still hadn't resolved it after 600M
+instructions. Register sampling across 1.4M+ iterations shows `$a0`
+and every other register completely frozen (`a0=0`, `ra=0x00084338`,
+same every time) - zero progress, ruling out "just a very long real
+hardware wait." The accessor reads a fixed address, `0x0008C440`
+(computed from its own `lui v0,9; ...; addiu v0,v0,-0x3bc0` body). A
+dedicated whole-boot memory watch found this address is written
+exactly once - zeroed during BSS init at `i=0` - and never again.
+
+**One candidate mechanism ruled out.** The 4-call device-registration
+sequence found in Round 31 (`0x00083e38`, a generic indexed-table
+setter) writes to a different, nearby table (`0x0008C324`/
+`0x0008C32C`), not `0x0008C440`. Not the mechanism.
+
+**No fix yet - not fabricating one.** Per this project's own task
+#180/#181 lesson, the responsible next step is the same one that
+resolved Round 30's SIF2/SBUS question: live PCSX2 debugging against
+a real GT3 boot, to find what real mechanism writes the real-hardware
+equivalent of this address. No source code changed this round.
+
+**Next for task #172:** live-debug (or further static-trace) what
+real mechanism sets this flag, then implement it for real. See
+docs/STATUS.md's 57th finding for full detail.

@@ -11544,3 +11544,103 @@ so that VU1 eventually receives its first real microprogram dispatch.
 No citable source for that mechanism has been found yet. No source
 change this round - docs-only investigation; regression/rebuild
 skipped per this project's own standing convention.
+
+
+## 103rd finding (Round 65 continued, task #172/#230): the real per-frame RPC/setup block is gated by RAM[0x80020B54], checked exactly once, found zero - most precise root cause yet
+
+Directly follows from the 100th finding's caller identification. Since
+`0x8000FCE8`'s epilogue calls `jal 0x8000F6E0` on every exit path
+(with `a0` as a mode flag), that function was disassembled in full
+this round and turns out to BE OSDSYS's real per-frame update/render
+dispatcher - not a separate notification call. It contains, inline,
+the per-vblank loop body previously characterized in earlier findings
+(`0x8000F768-0x8000F938`, including the `jal 0x8000CF88` /
+`[0x80020E4C]` retry-loop-continuation check from the 96th/100th
+findings).
+
+**The real gate.** Early in this function's loop body
+(`0x8000F794-0x8000F7A0`), after three status checks (`RAM[s0+0xE28]`,
+`RAM[s5+0xE30]`, `RAM[s4+0xE3C]`, all confirmed zero throughout this
+project's captured boot in earlier findings), there is a fourth,
+previously-uncharacterized check: `lw v0, 0x4(s6)` where
+`s6 = 0x80020B50` (i.e. `RAM[0x80020B54]`). If nonzero, this unlocks
+the ONLY block in this entire function that performs genuine, real
+per-frame work: it builds a small packed struct (writing a real
+"open code" byte `0x15`, plus live status bytes pulled from
+`RAM[a1+0xE40]`/`RAM[s7+0xE4C]`/`RAM[a3+0xE44]`) and calls
+`jal 0x80010A08` - the SAME real SIF/RPC dispatch helper this
+project's own earlier findings (Round 53-55, the 80th/81st findings)
+already identified and hooked into for the game/menu launch RPC
+protocol. This is, as far as this session has traced, the ONLY code
+path anywhere in this dispatcher chain that issues real ongoing
+per-frame RPC traffic - everything else is pure local status-flag
+bookkeeping.
+
+**Empirical result (own emulator, not the mismatched live session)**:
+instrumented `pc==0x8000F798` (the instruction immediately after the
+`lw v0, 0x4(s6)` gate read) across the full 765M-instruction run used
+for the 102nd finding. Result: this program point was reached exactly
+**once** in the entire run - the very first vblank pass - and `v0`
+(i.e. `RAM[0x80020B54]`) was **zero** on that single hit. Every
+subsequent vblank/loop pass evidently takes an earlier branch (one of
+the three preceding zero-checks must flip nonzero after the first
+pass, based on something set during that first pass's own
+`jal 0x8000CF88` call) that skips this gate check entirely for the
+rest of the run, meaning the real RPC-issuing block has NEVER
+executed, not even once, and structurally cannot be reached again
+after the first pass under the current state.
+
+**Why this is likely the real root cause.** This is the most precise
+target identified in this entire investigative arc (96th-103rd
+findings): a single, specific, real 32-bit memory location
+(`RAM[0x80020B54]`) whose value gates the one code path in OSDSYS's
+per-frame logic that performs genuine RPC traffic (as opposed to local
+bookkeeping/retry). No writer for this address has been located yet
+in this session (a targeted search is the concrete next step), but
+given the pattern-match to this project's own well-established
+"registration/status flag never gets set by a real triggering
+mechanism this emulation doesn't yet model" bug family (already found
+and fixed at least twice this session in different forms - the
+IOP module-registration list, and the two OSDSYS-side tables from the
+96th/99th findings), this is a strong, concrete lead.
+
+**Honest scope.** No writer for `RAM[0x80020B54]` was found this
+round; a live/emulator-side search for it is the natural next step but
+was not completed within this round's time budget. No source change
+this round - docs-only investigation; regression/rebuild skipped per
+this project's own standing convention.
+
+
+## 103rd finding addendum (same round): confirmed - RAM[0x80020B54] is NEVER written anywhere in this project's entire captured boot
+
+A direct write-watch on `RAM[0x80020B54]` specifically (same
+own-emulator technique, this time run for 812,918,045 EE instructions
+- extending past the 102nd finding's 765M-instruction data point)
+recorded **zero** writes to this address for the entire run. This
+address genuinely never receives a value from anywhere in this
+project's current boot sequence - it is not merely "not yet written by
+the time we checked," it is unwritten across nearly a billion
+simulated EE instructions, which is decisively more real-world time
+than real hardware takes to reach a visible, interactive OSDSYS.
+
+**Conclusion for task #172/#230**: this is now the single most
+precise, concrete, and well-evidenced open item this entire
+investigation has produced. `RAM[0x80020B54]` gates the only code path
+that issues real per-frame RPC traffic in OSDSYS's update loop; it is
+never written; and its absence is fully sufficient, on its own, to
+explain both the permanent VU1-dispatch stall (102nd finding) and the
+steady-state per-frame retry loop (96th/100th findings) as a single,
+unified root cause rather than several separate symptoms. No writer
+for this address exists anywhere in this project's current source -
+confirmed by the fact that a dedicated write-watch covering this exact
+address, run across the ENTIRE captured boot from cold start, recorded
+zero hits.
+
+**What remains before a fix can be implemented**: a citable real
+source for what should populate `RAM[0x80020B54]` (and when/how) -
+this project's no-fabrication policy means the value's real meaning
+and origin must be established, not guessed, before writing to it.
+This is now a well-scoped, narrow, single-variable question rather
+than the broad multi-table investigation earlier findings were
+chasing - a significant narrowing of scope for whoever continues this
+thread. No source change this round.

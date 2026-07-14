@@ -2534,3 +2534,20 @@ init_timer()) but its effect isn't observed. Next (task #218): trace
 EnableIntr()'s real call chain (AllocHardTimer/GetHardTimerIntrCode)
 against this project's own timer/intc models to find where it
 diverges. Full 89/89 regression, clean Wii rebuild (435936 bytes).
+
+### Round 59 (89th finding, task #218 continued)
+Root cause of the missing I_MASK bit conclusively located: real
+THREADMAN issues two direct calls into real INTRMAN
+(`RegisterIntrHandler`/`EnableIntr`, per `init_timer()`'s cited real
+call order) both with `irq=0xFFFFFFFF` - both hit intrman's real
+`KE_ILLEGAL_INTRCODE` catch-all, touching neither the handler table
+nor I_MASK. Found via a widened J/JAL (not just JALR) call-target
+trace, since real IOP imports resolve through a two-hop local-stub
+pattern this project's earlier JALR-only trace missed entirely.
+Shared culprit: `AllocHardTimer(1,32,1)` (real TIMEMAN export,
+return value never checked by real code) almost certainly returns an
+invalid timer_id that `GetHardTimerIntrCode()` legitimately maps to
+-1. Next (task #218/#219): fetch real TIMEMAN source and check its
+allocation-eligibility logic against this project's own
+`iop_timers.c` T0-T5 model. Docs-only round, no source change; full
+89/89 regression and Wii build unaffected (unchanged from Round 58).

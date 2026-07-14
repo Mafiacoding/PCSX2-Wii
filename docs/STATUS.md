@@ -10379,3 +10379,101 @@ code, or diverge somewhere upstream of the `EnableIntr` call itself.
 
 Full 89/89 regression suite passing, clean Wii/devkitPPC rebuild
 (435936 bytes), all changes documented/committed/pushed/rsynced.
+
+---
+
+## 89th finding (Round 59, task #218 continued): root cause of the
+missing I_MASK bit conclusively located - `RegisterIntrHandler`/
+`EnableIntr` are both real, reached, and both invoked with
+`irq=-1` (0xFFFFFFFF), hitting real intrman's illegal-intrcode
+fallback
+
+**Method.** Rather than continue reasoning from register-write
+traces alone, this round fetched real ps2sdk source directly:
+`iop/system/threadman/src/thcommon.c`'s full `init_timer()` and
+`_start()` (confirming the exact real call sequence:
+`AllocHardTimer` -> `GetTimerReadFunc` -> `GetHardTimerIntrCode` ->
+`RegisterIntrHandler` -> ... -> `EnableIntr(GetHardTimerIntrCode(...))`)
+and `iop/system/intrman/src/intrman.c`'s full real `EnableIntr()`/
+`RegisterIntrHandler()` bodies. Both real functions share the same
+shape: `irq_index = irq & 0xFF;` then a three-way range check
+(`< IOP_IRQ_DMA_MDEC_IN` / DMA1 range / DMA2 range) with a final
+`else { ret = KE_ILLEGAL_INTRCODE; }` catch-all that touches
+*nothing* - no imask write, no handler-table write - if `irq` is out
+of every known range.
+
+A live PCSX2 reference check (`pcsx2_set_watchpoint` on I_MASK,
+`pcsx2_continue`) was also attempted this round to catch a real
+nonzero I_MASK write on genuine hardware, but the connected session
+was already billions of cycles past boot (idling), so no write fired
+in observable time - inconclusive, abandoned in favor of the
+source-level approach above.
+
+**New instrumentation (scratch-only, `/tmp/iop_core_jscan.c`, never
+committed).** Real IOP import calls in this project's own interpreted
+model go through a two-hop pattern - the caller does a plain `JAL` to
+a local stub address inside its own module image, and the (already
+loader-patched) stub does a plain `J` to the real target inside the
+exporting module - so the previous round's `JALR`-only trace missed
+every one of these calls entirely (`JALR` never fires for this
+pattern). Widening the trace to catch `J`/`JAL` (opcodes 0x02/0x03)
+whose target lands inside INTRMANP/INTRMANI's real load range
+(`[0x00103100, 0x00106990)`, read directly from this project's own
+already-correct `iop_elf_load_result_t.load_addr/load_end`, dumped
+via a one-off `[MODRANGE]` printout) during THREADMAN's known
+execution window (instr 4459000-4471000) finally surfaced every real
+call into INTRMAN.
+
+**Result - two direct, THREADMAN-issued calls, both with irq=-1.**
+Filtering to calls issued directly from THREADMAN's own load range
+(not nested/internal intrman-to-intrman helper calls, which
+inherit stale `$a0` from their caller and aren't meaningful on their
+own):
+
+```
+instr=4467380 from=0x001128cc tgt=0x00103234 a0=0xffffffff
+instr=4470320 from=0x001128d4 tgt=0x00103574 a0=0xffffffff
+```
+
+Two distinct real intrman export addresses (0x00103234 and
+0x00103574 - almost certainly `RegisterIntrHandler` and `EnableIntr`
+respectively, matching `init_timer()`'s real call order and the
+~3000-instruction gap between them, consistent with the real timer
+mode/compare/counter setup calls that run in between), each called
+with `$a0 = 0xFFFFFFFF` (-1). Per real intrman.c's cited source
+above, an irq value of -1 fails every range check in both functions
+and falls straight to `KE_ILLEGAL_INTRCODE` - no imask write, no
+handler-table write, `ret` returned but never checked by
+`init_timer()`'s real (non-error-checking) call sites. This is
+sufficient, on its own, to fully explain the observed
+`imask=0x00000000` steady state with no further hypothesis needed.
+
+**Narrowed root cause - upstream of EnableIntr.** Since both
+observed calls receive the SAME bogus `irq=-1`, and real
+`init_timer()` computes `GetHardTimerIntrCode(timer_id)` fresh for
+each call site (not cached), the shared culprit is almost certainly
+`timer_id` itself - i.e. `AllocHardTimer(1, 32, 1)` (real TIMEMAN
+export, called earlier in `init_timer()`, return value never checked
+by real code either) returning an invalid/sentinel timer_id that
+`GetHardTimerIntrCode()` then legitimately maps to -1 via its own
+real error path. This project's `source/hw/iop_timers.c` models the
+6 real hardware COUNT/MODE/TARGET register windows (T0-T5,
+`pcsx2/IopHw.h`-cited addresses) but was never checked against real
+TIMEMAN's own allocation-eligibility logic (e.g. which timers report
+32-bit-counter capability, gate-mode support, or whatever specific
+condition `AllocHardTimer(source=1, size=32, mode=1)` real-checks
+before granting a timer) - real TIMEMAN module source
+(`iop/system/timrman/src/*.c` in ps2sdk) has not yet been fetched or
+cross-referenced this round; doing so is the concrete next step for
+task #218/#219, not yet started.
+
+**Not yet fixed - intentionally.** No source change was made this
+round; this is a docs-only investigation round per this project's
+standing workflow (investigation-only rounds skip regression/rebuild
+but still get full docs/commit/push/rsync treatment). All scratch
+diagnostic files (`/tmp/iop_core_jscan.c`, `/tmp/iop_module_loader_diag2.c`,
+`/tmp/diag_jscan_bin`, `/tmp/diag_modrange_bin`, etc.) were used to
+build and run standalone host-native diagnostic binaries against
+*copies* of the tracked source; the working tree was restored to the
+exact committed state (verified via `git diff --stat` showing no
+changes) before this finding was written up.

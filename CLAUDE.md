@@ -3970,3 +3970,23 @@ though THREADMAN's real init_timer() (which calls it) is confirmed to
 run to completion. Full 89/89 regression, clean Wii rebuild (435936
 bytes). Next (task #218): trace EnableIntr()'s real call chain against
 this project's timer/intc models.
+
+## Checkpoint (Round 59 - 89th finding, task #218 continuation)
+Root cause of the missing I_MASK bit found: real THREADMAN's
+`init_timer()` calls `RegisterIntrHandler(timer_irq,...)` and
+`EnableIntr(GetHardTimerIntrCode(timer_id))` - both live-traced
+(widened J/JAL call-target trace, since real IOP imports resolve via
+a two-hop local-stub pattern a JALR-only trace misses) receiving
+`irq=0xFFFFFFFF`. Real intrman.c's cited `EnableIntr`/
+`RegisterIntrHandler` both silently no-op (KE_ILLEGAL_INTRCODE) on
+an out-of-range irq - fully explaining the steady `imask=0x0`, no
+further hypothesis needed. Shared culprit: `AllocHardTimer(1,32,1)`
+(real TIMEMAN export, return value never checked by real code)
+almost certainly returns an invalid timer_id. Docs-only round (no
+source change - working tree verified clean via `git diff --stat`
+before this checkpoint was written). Next (task #218/#219): fetch
+real TIMEMAN source (`iop/system/timrman/` or similarly-named ps2sdk
+path - not yet located) and cross-check its allocation-eligibility
+logic against this project's `source/hw/iop_timers.c` T0-T5 model;
+implement whichever fix that comparison reveals, then re-run the
+same J/JAL call trace to confirm `irq` is no longer -1.

@@ -4425,3 +4425,21 @@ hardware installs this vector table as one of the very first cold-boot
 steps, before any module-specific code runs. No fix yet - next step is
 finding what real ROM function is responsible and why our PRId=0x1f
 path skips it. PRId stays 0 in the shipped build.
+
+## Checkpoint (Round 80 - 120th finding, task #244/#245)
+Static-disassembled the real IOP reset vector (0xBFC00000) for the
+first time: PRId-keyed dispatch, PRId<0x59 -> 0xBFC02000, else ->
+0xBFC00800. Host-native trace confirms this project's own emulator
+(PRId=0) takes the correct 0xBFC02000 branch, matching real hardware.
+Tracing that path found two PRId<0x10 gates that skip the IOP_ICFG
+read entirely at PRId=0 - conclusively closes task #244 (icfg 16-bit
+dispatch gap: real hardware never touches it this early either, not a
+bug). Rest of 0xBFC02000 is real POST-style bring-up: boot-progress
+byte, two-pass RAM 0x000-0xF80 zero-init (covers but doesn't yet
+populate the 119th finding's 0x400-0x47C vector-table region), cache-
+control register setup. Found a likely next link: a loader-call
+pattern (jal 0xBFC02600 + conditional jr $v0) structurally identical
+to the already-solved 117th finding's device-table mechanism - not yet
+disassembled. Task #244 closed. Task #245 next step: disassemble
+0xBFC02600 and its table entries (0xBFC02478-0xBFC024A8). No fix, no
+source change. PRId stays 0.

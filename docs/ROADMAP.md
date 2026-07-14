@@ -2952,3 +2952,26 @@ table" rather than deliberate idle-handler design. Reframes task #245:
 the real gap is earlier and more foundational than the device-table
 mechanism - need to find why the universal vector-table install step
 doesn't run. No fix this round, no source change. PRId stays 0.
+
+### Round 80 (120th finding, task #244/#245, task #172 continuation)
+Docs-only round. Static-disassembled the real IOP reset vector
+(0xBFC00000) for the first time: a PRId-keyed two-way dispatch
+(PRId<0x59 -> 0xBFC02000, else -> 0xBFC00800). Host-native trace
+confirms this project's own emulator (PRId=0) correctly takes the
+0xBFC02000 branch, matching real hardware for that PRId value - no
+fix needed there. Tracing the 0xBFC02000 path shows two repeated
+PRId<0x10 gates (0xBFC02028-3C, 0xBFC02368-80) that skip the
+IOP_ICFG (0x1F801450) read entirely for PRId<0x10 - conclusively
+explaining and closing task #244 (icfg 16-bit dispatch gap: real
+hardware never touches ICFG this early at this PRId either). The rest
+of 0xBFC02000 is genuine POST-style hardware bring-up: boot-progress
+byte increments, a two-pass RAM 0x000-0xF80 zero-init (covering but
+not yet populating the 119th finding's 0x400-0x47C vector-table
+region), cache-control register setup, cache warm reads. Found a
+likely next link: a loader-call pattern at 0xBFC023D0/0xBFC0242C
+(jal 0xBFC02600 + conditional jr $v0) structurally identical to the
+already-solved 117th finding's device-table mechanism, operating on
+different table entries/ROM banks - not yet disassembled. Task #244
+closed. Task #245 next step: disassemble 0xBFC02600 and its table
+entries (0xBFC02478-0xBFC024A8). No fix, no source change. PRId
+stays 0.

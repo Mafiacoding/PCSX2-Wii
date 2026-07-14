@@ -211,30 +211,55 @@ int iop_core_init(const bios_image_t *bios)
      * "normal" vector (0x80000080) from the very start. */
     g_iop.cop0[12] = 0x00400000u;
 
-    /* Round 59 (91st finding, task #219): real PCSX2's psxReset()
-     * (pcsx2/R3000A.cpp, the EXACT SAME function already cited two
-     * lines above for Status.BEV) sets `psxRegs.CP0.n.PRid =
-     * 0x0000001f;` right next to that Status line - this project
-     * carried over the Status half but never the PRid half, leaving
-     * IOP COP0 register 15 at its zero-initialized default from the
-     * memset() above. Real ps2sdk boot code (intrman.c/timrman.c/
-     * sifman.c/udnl.c/modload.c/igreeting.c's real `_start()`
-     * functions, all independently reading `get_mips_cop_reg(0,
-     * COP0_REG_PRId)`) uses this value to decide which of a P/I
-     * "twin" module pair (INTRMANP vs INTRMANI, TIMEMANP vs
-     * TIMEMANI, ...) should treat itself as resident on real
-     * hardware: `prid >= 16` selects the non-P ("I") build as
-     * resident (given this project's `iop_icfg_init()` default of 0
-     * for the same real `iop_sbus_ctrl`/bit-3 the P/I check also
-     * reads) - matching real retail PS2 hardware, not PS1-BC mode.
-     * With PRId left at 0 (`< 16`), every P/I twin's real _start()
-     * code was reaching the OPPOSITE of the real hardware's actual
-     * residency decision - not yet a functional fix by itself (see
-     * the loader-side export-registration change below, which is
-     * the piece that actually makes this decision affect anything
-     * observable), but a genuine, cited correctness gap closed on
-     * its own, directly analogous to task #59's EE-side PRId fix. */
-    g_iop.cop0[15] = 0x0000001fu;
+    /* Round 59 (91st finding, task #219), REVERTED Round 60 (93rd
+     * finding, task #222): real PCSX2's psxReset() (pcsx2/R3000A.cpp,
+     * the EXACT SAME function already cited two lines above for
+     * Status.BEV) sets `psxRegs.CP0.n.PRid = 0x0000001f;` right next
+     * to that Status line - this project's Status.BEV init carried
+     * that over correctly but never the PRid half, leaving IOP COP0
+     * register 15 at its zero-initialized default from the memset()
+     * above. Real ps2sdk boot code (intrman.c/timrman.c/sifman.c/
+     * udnl.c/modload.c/igreeting.c's real `_start()` functions, all
+     * independently reading `get_mips_cop_reg(0, COP0_REG_PRId)`)
+     * uses this value to decide P/I module-twin residency
+     * (INTRMANP/I, TIMEMANP/I, ...) - `prid >= 16` selects the "I"
+     * twin, matching real retail PS2 hardware rather than PS1-BC
+     * mode.
+     *
+     * Round 59 set this to the real 0x1f value - correct and cited,
+     * but empirically (live-traced, 92nd finding) it also changes
+     * the real BIOS ROM's OWN early boot control flow (BEFORE this
+     * project's module loader ever gets a chance to run - see
+     * iop_module_loader_boot()'s own header comment: it only
+     * activates when real ROM code's PC tries to escape into memory
+     * this project doesn't model as fetchable, which never happens
+     * on the corrected-PRId path since it stays inside real, valid
+     * ROM content the whole way). With the real PRId, the ROM walks
+     * into a real device/driver descriptor validation routine at
+     * 0xBFC4A340+ (disassembled via the live PCSX2 reference
+     * debugger) that this project has no data for, hits a genuine
+     * dead-end/panic loop (write status byte 2 to IOP RAM address 0,
+     * spin forever, confirmed via live diagnostic: neither MIPS
+     * exception vector is ever entered from there), and NEVER
+     * reaches this project's own synthesized module-loading system
+     * at all - meaning all of tasks #86-217's boot-progress work
+     * (SYSMEM through THREADMAN and the whole SIF/RPC/OSDSYS chain)
+     * becomes unreachable, a real net regression toward the
+     * project's actual goal (a visible splash screen), confirmed via
+     * a controlled isolation test (reverting only this one line
+     * while keeping every other Round 59 change restores the
+     * familiar pre-Round-59 idle=1/pc~0x8000CFCC boot state exactly).
+     *
+     * Deliberately reverted to 0 for now - the real value is still
+     * correctly cited above for whenever a future round manages to
+     * model that early ROM device-table validation well enough not
+     * to dead-end on it (tracked as task #222); until then, 0 is the
+     * practically useful value, and `iop_module_loader.c`'s P/I
+     * export-visibility fix (Round 59/60) has been made conditional
+     * on this exact value so it automatically does the right thing
+     * either way, with no further change needed here when this does
+     * get revisited. */
+    g_iop.cop0[15] = 0x00000000u;
 
     /* Round 22: real RAM[0x100] exception-handler priority-chain
      * table + array, all-empty (no handler registered) - see

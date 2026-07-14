@@ -379,16 +379,29 @@ static uint32_t load_only_one(iop_state_t *st, const char *name, iop_elf_load_re
      * the same front-loading pass - can resolve imports against it
      * once link_imports_one() runs for everyone.
      *
-     * Round 59 (90th/91st findings): skip this for a "P" twin whose
-     * real "I" counterpart is also present in the modlist - see
-     * module_has_i_twin()'s own comment above for the full real
-     * citation trail. The P twin is still LOADED (its own real code
-     * still runs, and - now that the 91st finding's PRId fix is in
-     * place - its own real _start() genuinely reaches its own
-     * MODULE_NO_RESIDENT_END early-return, matching real hardware);
-     * only its EXPORT VISIBILITY is suppressed, since real hardware
-     * never lets a non-resident module's exports be called at all. */
-    if (!module_has_i_twin(name)) {
+     * Round 59 (90th/91st findings, corrected Round 60/93rd finding):
+     * skip this for a "P" twin whose real "I" counterpart is also
+     * present in the modlist - see module_has_i_twin()'s own comment
+     * above for the full real citation trail - but ONLY when this
+     * project's actual modeled COP0 PRId (`st->cop0[15]`) is the
+     * real retail value (`>= 16`) that makes real hardware's own
+     * `_start()` check select the "I" twin as resident in the first
+     * place. This project's PRId is currently deliberately left at
+     * its pre-91st-finding value of 0 (see iop_core.c's own citation
+     * trail for why - a real, cited PRId=0x1f causes real BIOS ROM
+     * code to take an early path this project can't yet follow past
+     * a real hardware device-table validation, dead-ending the boot
+     * before this synthesized loader is ever reached at all), so
+     * with `prid < 16`, real hardware's OWN check makes the "P" twin
+     * the resident one instead - matching this project's original,
+     * pre-Round-59 loader behavior (P always wins by load order) -
+     * and this fix intentionally does NOT override that while PRId
+     * stays at 0. Once a future round models the real early-ROM
+     * device-table check well enough to set PRId to its real value
+     * without dead-ending the boot, this same check will
+     * automatically flip to the real-hardware-correct behavior with
+     * no further changes needed here. */
+    if (st->cop0[15] < 16u || !module_has_i_twin(name)) {
         for (int i = 0; i < out->export_count; i++) {
             export_registry_add(out->exports[i].name,
                                  out->exports[i].addr + 20u /* fptrs[0] - see iop_elf.h layout */,

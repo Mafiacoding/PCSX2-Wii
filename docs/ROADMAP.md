@@ -2608,3 +2608,35 @@ stack, is wrong/garbage because this project doesn't yet model
 whatever real device/driver table this ROM code walks. Docs-only
 round, no source change. Next (task #221): trace the real value that
 should be at that stack slot and what table it indexes.
+
+### Round 61 (93rd finding, task #219/#220 corrected, #221 re-scoped)
+Found the pc=0xBFC4A45C dead-end (92nd finding) is reached extremely
+early - instr=62865, essentially at the very start of real IOP boot -
+and re-read `iop_module_loader_boot()`'s real trigger: it's a
+last-resort fallback that only fires when the IOP's PC escapes into
+memory this project doesn't model as real, fetchable content, checked
+only after the HLE-BIOS and already-active-loader PC traps both fail.
+Putting these together: the Round 59 PRId fix (cop0[15]=0x1f) made
+the real ROM take a control-flow path that stays inside real, valid
+ROM content the whole time (per the P/I twin convention, 90th
+finding) straight into the unmodeled device-table dead-end - so
+`iop_module_loader_boot()` (all of tasks #86-217's synthesized
+module-loading work) is NEVER invoked on this path at all. A
+controlled isolation test (reverting only cop0[15] to 0 in a scratch
+copy) confirmed PRId alone causes this - restoring the familiar
+idle=1/pc~0x8000CFCC baseline immediately. Corrective action:
+reverted `cop0[15]` to 0 in the real source (real value 0x1f still
+cited, comment explains why it's not used), and made the loader's
+P/I export-shadowing fix (91st finding) conditional on
+`cop0[15] < 16u` so it stays correct and automatically self-activates
+whenever a future round safely reintroduces the real PRId value.
+Verified: ee.pc=0x8000CFD4/iop.pc=0x00100000/iop.idle=1 restored
+exactly, modloader still activates as expected
+(instr=3055099), 89/89 regression OK, clean Wii rebuild. Task #221's
+original goal (reverse-engineer the proprietary device-table at the
+0xBFC4A45C dead-end - magic values 0x162/0x107, no ps2sdk citation
+available) is re-scoped as a known, deep, out-of-scope gap rather
+than a near-term target, since pursuing it means abandoning this
+project's citation-first discipline. Boot is back at the most
+advanced confirmed-good state (post-task-#217), now with a correct,
+conditional loader fix banked for later.

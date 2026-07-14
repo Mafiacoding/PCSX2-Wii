@@ -4061,3 +4061,39 @@ Working hypothesis (not yet confirmed, no source change made): the
 called function pointer at `sp+0x3C` is wrong/garbage because this
 project doesn't model whatever real device/driver table this ROM
 code walks. Next (task #221): trace what real value belongs there.
+
+## Checkpoint (Round 61 - 93rd finding, tasks #219/#220 corrected, #221 re-scoped)
+Corrective round. Found the pc=0xBFC4A45C dead-end fires extremely
+early (instr=62865) and re-read `iop_module_loader_boot()`'s real
+trigger: it's fallback-only, invoked ONLY when the IOP's PC escapes
+into unmapped/unmodeled memory - never by reaching a specific PC in
+isolation. This means the Round 59 PRId fix (cop0[15]=0x1f) causes
+the real ROM to stay on a real, valid, fetchable control-flow path
+the whole time, straight into the unmodeled device-table dead-end -
+so `iop_module_loader_boot()` (all synthesized module-loading work,
+tasks #86-217) is never invoked at all on this path. Confirmed via
+isolation test: reverting cop0[15] alone (loader fix left in place)
+restores the familiar idle=1/pc~0x8000CFCC baseline immediately.
+
+Fix applied: reverted `g_iop.cop0[15]` to 0 in
+`source/core/iop/iop_core.c` (real value 0x1f stays cited in a
+comment for a future round prepared to model the proprietary,
+uncitable device-table walk - magic values 0x162/0x107, no ps2sdk
+equivalent). Made `source/hw/iop_module_loader.c`'s P/I export-
+shadowing fix conditional on `cop0[15] < 16u`, so it's correct and
+automatically self-activating whenever PRId=0x1f is safely
+reintroduced, while being a no-op (matches pre-Round-59 behavior)
+with the current PRId=0.
+
+Verified: ee.pc=0x8000CFD4, iop.pc=0x00100000, iop.idle=1 - exact
+parity with the historic most-advanced-known-good baseline (post-task
+#217). `[modloader] boot succeeded...instr=3055099` still fires.
+89/89 regression OK. Clean Wii/devkitPPC rebuild (436064-byte .dol).
+
+Task #221's original goal (reverse-engineer the sp+0x3C device-table
+at 0xBFC4A45C) is re-scoped: doing so requires proprietary, uncitable
+retail BIOS internals, a materially riskier undertaking than this
+project's citation-first practice - tracked as a known out-of-scope
+gap, not a near-term target. Boot restored to its best confirmed-good
+state; loader fix banked correctly for later. Task #172 (splash
+screen blockers) remains in_progress at this same baseline.

@@ -10721,3 +10721,97 @@ struct `$s3`/`$s5` are walking.
 Docs-only round (investigation only, no source change - working tree
 verified clean, matches commit `e3bcd07`, before this finding was
 written up).
+
+### 93rd finding (Round 61): PRId fix reverted - practical regression identified and corrected, loader fix made conditional
+
+Follow-up investigation on the 92nd finding's dead-end at `0xBFC4A45C`
+uncovered that this wall is reached **extremely early** - a dedicated
+diagnostic (`/tmp/diag_findfirst.c`, scratch-only) found the exact
+instruction count of the FIRST time `iop.pc == 0xBFC4A45C`: **instr =
+62865**. This is far earlier than previously assumed; the earlier
+`/tmp/diag_watch4.c` run (ungated) had shown activity in the same
+code region around instr ~40,000-63,000 but this had been read as an
+early, harmless pass, not as the actual point of no return.
+
+This timing forced a re-read of exactly when `iop_module_loader_boot()`
+(the function that synthesizes SYSMEM through THREADMAN module
+loading - all of tasks #86-217's work) is actually invoked. Its real
+trigger, in `iop_core.c`'s step function, is a **last-resort
+fallback**: it only fires when the IOP's PC becomes "unfetchable" -
+i.e. escapes into memory this project doesn't model as real, fetchable
+ROM/RAM content - checked only after `iop_hle_bios_try_handle()` and
+`iop_module_loader_try_handle()` (the already-active-loader PC trap)
+both fail. It is NOT triggered by reaching any particular magic PC in
+isolation.
+
+Putting these two facts together: with the Round 59 PRId fix in place
+(`cop0[15]=0x1f`), the real BIOS ROM's own early boot code takes a
+different control-flow path than it did before (the real ROM decides
+what to execute next partly based on PRId, per the P/I twin
+convention already documented in the 90th finding) - and this
+different path stays inside real, valid, fetchable ROM content the
+entire time, walking into the unmodeled device/driver-descriptor
+validation routine at `0xBFC4A340+` and hitting its genuine dead-end
+panic loop (documented in the 92nd finding) at instr=62865 - LONG
+BEFORE the PC ever has a chance to escape into unmapped memory. Since
+`iop_module_loader_boot()` is fallback-only, **it is never invoked at
+all** on this corrected-PRId path. The entire syntesized module-loading
+system this project has built up across tasks #86-217 becomes
+unreachable - a real, practical regression, even though the PRId
+value itself (`0x1f`) is the historically correct one (cited from
+real PCSX2's `psxReset()`, R3000A.cpp).
+
+**Verification (isolation test).** A scratch copy
+(`/tmp/iop_core_isolate_test.c`) with `cop0[15]` manually reverted to
+`0` (loader fix left in place) was swapped in, built
+(`/tmp/diag_isolate_bin`), and run: this immediately restored the
+familiar, most-advanced-known-good pre-Round-59 boot state
+(`idle=1`, `iop.pc~0x8000CFCC`/`0x00100000`) - confirming PRId alone,
+not the loader fix, causes the regression.
+
+**Corrective action taken this round.**
+1. `source/core/iop/iop_core.c`: `g_iop.cop0[15]` reverted from
+   `0x0000001f` back to `0x00000000`. The real value and its citation
+   remain documented in an extensive comment explaining exactly why
+   it's not used right now (see above) - tracked as a known gap for a
+   future round that's prepared to reverse-engineer the proprietary,
+   uncitable device/driver-descriptor table this ROM code walks
+   (magic values `0x162`/`0x107`, no ps2sdk equivalent).
+2. `source/hw/iop_module_loader.c`: the P/I export-shadowing skip
+   (91st finding's other fix, `module_has_i_twin()`-gated) is now
+   itself gated behind `st->cop0[15] < 16u` - i.e. it only applies
+   when PRId is real/retail (matching the real P/I twin convention's
+   own `prid>=16` branch point, 90th finding). With PRId=0 (current
+   state), this condition is always true, so ALL modules register
+   unconditionally, exactly matching pre-Round-59 behavior. This
+   keeps the fix correct and automatically self-activating whenever a
+   future round re-enables the real PRId value, without silently
+   reintroducing the shadowing bug in the meantime.
+
+**Verification (real source, post-fix).** Fresh diagnostic
+(`/tmp/diag_reverted_bin`) confirms: `ee.pc=0x8000CFD4`,
+`iop.pc=0x00100000`, `iop.idle=1` - exact parity with the historic,
+most-advanced-known-good baseline. Log confirms
+`[modloader] boot succeeded, redirected pc=0x001000a0 at
+instr=3055099` still fires correctly - the module loader is reachable
+and functioning again. Full 89/89 regression suite: all passing, no
+failures. Clean Wii/devkitPPC rebuild: exit 0, `.dol`/`.elf` produced
+(436064 / 2399748 bytes).
+
+**Net effect.** This round is a correction, not new forward progress:
+boot is restored to exactly where it stood after task #217 (idle=1,
+ee.pc=0x8000CFD4), with the loader's P/I shadowing bug fix preserved
+(inert for now, correct and ready for whenever PRId=0x1f is safely
+reintroduced). Task #221's original goal (trace the real sp+0x3C
+function pointer/table at the 0xBFC4A45C dead-end) is re-scoped: it
+requires reverse-engineering proprietary, uncitable retail BIOS
+internals with no available public source, a materially different
+(riskier, speculative) undertaking than this project's established
+citation-first practice. It remains tracked as a known, deep,
+currently out-of-scope gap - not on the critical path since this
+round deliberately avoids that code path entirely by keeping PRId=0.
+
+Source-change round: `source/core/iop/iop_core.c` (cop0[15] revert),
+`source/hw/iop_module_loader.c` (loader fix made conditional on
+cop0[15]). Full workflow completed: regression (89/89 OK), Wii
+rebuild (clean), docs (this finding), commit/push/rsync to follow.

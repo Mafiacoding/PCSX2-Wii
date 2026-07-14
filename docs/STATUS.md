@@ -11644,3 +11644,49 @@ This is now a well-scoped, narrow, single-variable question rather
 than the broad multi-table investigation earlier findings were
 chasing - a significant narrowing of scope for whoever continues this
 thread. No source change this round.
+
+
+## 104th finding (Round 65 continued, task #172/#231): corroborating open-source evidence found (MIT-licensed OSDSYS RE project) - confirms real architecture, no byte-exact source for RAM[0x80020B54] yet
+
+User pointed at an official Sony PS2 SDK 3.0.3 ISO (archive.org). That
+is Sony's proprietary, commercially-licensed devkit - not
+appropriately licensed for this project (GPL-3.0, inherited from
+porting PCSX2's GPL code) to extract structure layouts, values, or
+code from. Declined to use it directly for that reason, consistent
+with this project's citation discipline, which has only ever drawn
+from GPL/BSD/MIT-licensed or community-documentation sources (PCSX2,
+ps2sdk, psx-spx, PS2 Developer wiki).
+
+A web search instead surfaced a genuinely appropriate alternative:
+`ps2re/osdsys_re` (github.com/ps2re/osdsys_re), an MIT-licensed
+community reverse-engineering project targeting HDDOSD/HOSDSYS 1.10U
+(the HDD Utility Disc's on-screen display, extracted from SUDC4 -
+Sony Utility Disc Compilation - by krHACKen). This is a DIFFERENT
+Sony first-party binary from the console's built-in OSDSYS browser
+this project's own boot runs (different base address - 0x00200000+
+rather than 0x8000xxxx, different disc/context), so its symbol
+addresses do not map 1:1 onto `RAM[0x80020B54]` or any of the other
+offsets this session's own disassembly has characterized.
+
+**What it does confirm, independently**: its MIT-licensed symbol map
+(`symbol_addrs.txt`, pure address->name metadata, not extracted Sony
+code) names a real `vblankHandler` function and a `get_vblank_count`
+helper, corroborating this project's own 100th finding that Sony's OSD
+family of programs are genuinely VBLANK-interrupt-driven for their
+per-frame update logic - not a guess or reverse-engineering artifact
+specific to this project. It also names a real `sceDevVu1*` driver API
+family (`sceDevVu1Exec`, `sceDevVu1GetTpc`, `sceDevVu1PutCnd`,
+`sceDevVu1Reset`/`Pause`/`Continue`, etc.), independently confirming
+that real PS2 kernel code dispatches VU1 through a defined driver API
+surface - consistent with, and corroborating, this session's 102nd/
+103rd findings' focus on VU1 dispatch and RPC-driven per-frame setup
+as the operative real mechanism.
+
+**Net effect**: valuable, appropriately-licensed corroborating
+evidence that this investigation's overall architecture model (VBLANK
+-> per-frame OSD update -> gated RPC/VU1 dispatch) matches how real
+Sony OSD software is actually built, increasing confidence in the
+96th-103rd findings' conclusions. It does NOT supply a citable,
+byte-exact real value or initialization source for `RAM[0x80020B54]`
+in the SPECIFIC binary (console OSDSYS, not HDDOSD) this project's
+boot runs - that remains open. No source change this round.

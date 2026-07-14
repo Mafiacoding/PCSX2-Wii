@@ -40,13 +40,19 @@
  *                        (`ret = psxHu32(HW_ICTRL); psxHu32(HW_ICTRL)
  *                        = 0;`) - reading this register consumes it.
  *
- * NOT modeled: raising an actual IOP CPU interrupt/exception when
- * I_STAT & I_MASK becomes nonzero (iop_core.c has no interrupt/
- * exception handling of any kind yet - see docs/ROADMAP.md), and the
- * individual IRQ source numbers/assignments (VBLANK, DMA completion,
- * etc - real PS2 IOP has ~20 of these). iop_intc_raise() below lets
- * other hardware models set a specific I_STAT bit, for when those are
- * eventually wired up.
+ * UPDATE (task #115): raising a real IOP CPU interrupt/exception when
+ * I_STAT & I_MASK becomes nonzero IS now modeled - see iop_core.c's
+ * iop_check_hw_interrupt(). UPDATE (tasks #215/#216): two real IRQ
+ * source numbers are now wired up and actually raised by hardware
+ * models - the IOP counter/timer overflow/target IRQs (bits 4-6,
+ * 14-16, see iop_timers.c's iop_timers_tick()) and the real IOP
+ * VBLANK_IN/VBLANK_OUT lines (bits 0 and 11, see iop_core.c's
+ * iop_check_vblank(), cited from PCSX2's IopCounters.cpp
+ * iopIntcIrq(0)/iopIntcIrq(11) calls). Real PS2 IOP has ~20 total IRQ
+ * sources; the remainder (DMA completion, CDVD, SIO, SPU, PIO, etc.)
+ * are NOT modeled yet. iop_intc_raise() below lets other hardware
+ * models set a specific I_STAT bit, for when those are eventually
+ * wired up.
  */
 #ifndef PCSX2_WII_IOP_INTC_H
 #define PCSX2_WII_IOP_INTC_H

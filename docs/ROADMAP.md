@@ -2501,3 +2501,23 @@ detail. Next: deep-dive what real IOP kernel code (if any, within
 reach of this project's methodology) should run after IOPBTCONF
 module loading completes, or find an alternate real trigger for
 INTC_SBUS that doesn't depend on it.
+
+### Round 57 (87th finding)
+Implemented a real IOP VBLANK_IN/VBLANK_OUT interrupt (bits 0/11,
+cited from PCSX2's IopCounters.cpp + independently corroborated by
+allkern/iris), unit-tested (tests/test_iop_vblank.c, 6/6 passing).
+Diagnostic re-run still shows the EE parked at pc=0x8000CFD4 (no
+change from Round 56) - but a new one-line trace at the exact point
+iop_module_loader.c sets `idle=1` proves WHY: IOP COP0 Status is
+0x00000000 (IEc=0, IM2=0) at that moment, meaning no interrupt source
+this project has ever modeled (or will model) can structurally fire
+under the current "front-load modules, run each to completion, then
+park" boot model - the enable-bits are simply never set by any of the
+29 real module entry points this project executes. Real explanation
+almost certainly: real hardware's IOP thread scheduler enables
+interrupts when it dispatches its first real thread, a concept this
+project's module-loader-only boot model doesn't represent at all.
+Next: confirm via live-debugger/disassembly (same rigor as the
+LOADCORE investigation, tasks #148-163) what minimal real thread-
+dispatch step is needed, rather than fabricating Status bit values.
+Full 88/88 regression, clean Wii rebuild (435872 bytes).

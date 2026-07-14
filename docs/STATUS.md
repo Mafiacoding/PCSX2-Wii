@@ -10113,3 +10113,86 @@ asserted the previous plain-stub roundtrip behavior, which the real
 fix intentionally changes). Clean Wii/devkitPPC rebuild verified
 (435808 bytes, no new warnings beyond the one pre-existing benign
 `strncpy` warning).**
+
+## Round 57 (87th finding): real IOP VBLANK interrupt implemented + definitive root-cause proof for the `idle=1` interrupt-wake gap (task #172/#214/#216 continuation)
+
+**Context.** Round 56 (85th/86th findings) implemented the real ICFG/
+SBUS-raise mechanism and the real IOP counter/timer tick model, both
+individually correct and unit-tested, but a diagnostic re-run showed
+neither unblocked the EE poll loop stuck at pc=0x8000CFD4 (IOP
+permanently `idle=1`). Task #216 was opened to investigate what real
+IOP kernel code (if any) should run after module-loading completes.
+
+**87th finding: real IOP VBLANK_IN/VBLANK_OUT interrupt.** Fetched and
+cited two independent real sources agreeing on the exact same IOP
+INTC bit assignments: PCSX2's `pcsx2/IopCounters.cpp` calls
+`iopIntcIrq(0)` from `psxVBlankStart()` and `iopIntcIrq(11)` from
+`psxVBlankEnd()`; allkern/iris's `src/iop/intc.h` independently names
+these `IOP_INTC_VBLANK_IN` (0x00000001, bit 0) and
+`IOP_INTC_VBLANK_OUT` (0x00000800, bit 11), and its `src/gs/gs.c`
+calls them from its vsync-start/-end handlers alongside the
+equivalent EE-side raises. Implemented as `iop_check_vblank()` in
+`source/core/iop/iop_core.c`, ticked unconditionally every
+`iop_core_step()` call (same "runs even while idle" rationale as
+`iop_timers_tick()`, task #215) - timing reuses this project's
+already-cited `EE_CYCLES_PER_FRAME_NTSC` (ee_core.c) divided by the
+already-documented ~8:1 EE:IOP clock ratio (source/core/system.c),
+with VBLANK_END at the same 1/12-of-frame offset `ee_check_vblank()`
+already uses. New standalone unit test `tests/test_iop_vblank.c`
+(6 checks, all passing) verifies the raise-only mechanism directly.
+`include/core/hw/iop_intc.h`'s stale "NOT modeled: ... individual IRQ
+source numbers" comment (and `iop_core.c`'s equally stale top-of-file
+"no timer ticking"/"no interrupt-driven exceptions" comment) were
+also corrected to reflect tasks #115/#215/#216's real state.
+
+**Diagnostic verification - and the definitive root-cause proof.** A
+300M-instruction diagnostic re-run with this VBLANK fix in place
+showed the exact same result as Round 56: EE still parked at
+pc=0x8000CFD4, IOP still `idle=1` for the entire run. To find out
+*why* no real interrupt source - however correctly modeled - can
+ever wake it, a one-line diagnostic trace was added at the exact
+point `source/hw/iop_module_loader.c` sets `st->idle = 1;` (line
+~970), printing the IOP's COP0 Status register (cop0[12]) at that
+moment. Result: **`cop0_status=0x00000000` - both Status.IEc (bit 0,
+global interrupt enable) and Status.IM2 (bit 10, this project's
+single aggregated hardware-IRQ line, see task #115's
+`iop_check_hw_interrupt()`) are 0.**
+
+This is the concrete, quantified root cause, sharper than "we don't
+know what kernel code should run": grepping every write to
+`st->cop0[12]` in this project's IOP core shows it is initialized
+once to the real MIPS reset value `0x00400000` (BEV set, everything
+else clear) and thereafter is only ever touched by this project's
+RFE/exception-entry stack-push/pop logic - never by any code path
+that sets IEc=1 or IM2=1 outright. The final observed value
+(`0x00000000`, BEV also now clear) proves *some* real, interpreted
+module code did execute a genuine `MTC0` write to Status at some
+point during boot (clearing BEV is a normal real-kernel bootstrap
+step) - so MTC0/module execution is genuinely happening - but
+nothing among the 29 real IOPBTCONF modules' entry-point code this
+project executes ever sets the enable bits. Consequently, **every
+interrupt source this project has ever modeled or ever will model
+(SBUS, timers, VBLANK, or others) is structurally inert under the
+current boot model**, independent of how correctly each is
+individually implemented and cited - the gate that would let any of
+them fire is simply never opened.
+
+**Honest scoping.** The real-hardware explanation is almost certainly
+that Status.IEc/IM are enabled not by a module's own init code, but
+by the real IOP kernel's thread scheduler when it first dispatches a
+genuine thread (module init routines typically just register
+handlers/services with SYSMEM/THREADMAN; the actual "enable
+interrupts and start running the idle/root thread" step is kernel
+scheduler behavior this project's "front-load all modules, run each
+entry-to-completion, then park" model (tasks #92/#152/#179) does not
+represent at all - there is no modeled concept of a persistent kernel
+thread that outlives module-loading). Confirming this precisely and
+implementing a real, cited minimal thread-scheduler dispatch (rather
+than guessing at Status bit values to hard-code) needs the same
+live-debugger/disassembly rigor this project already applied to the
+LOADCORE registration-list investigation (tasks #148-163) - flagged
+as the concrete next step for task #216's continuation rather than
+being fabricated now.
+
+Full 88/88 regression suite passing, clean Wii/devkitPPC rebuild
+(435872 bytes), all changes documented/committed/pushed/rsynced.

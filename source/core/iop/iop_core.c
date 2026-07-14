@@ -31,12 +31,16 @@
  *
  * NOT implemented: IOP HLE module loading beyond the registry
  * scaffold (no real IRX parsing, no real module ABI), no TLB (the
- * IOP doesn't have one on real hardware either), no interrupt-driven
- * exceptions (nothing but SYSCALL currently raises one), no timer
- * ticking (iop_timers.c is a pure register stub). See docs/ROADMAP.md
- * for the full picture and docs/STATUS.md's "First real BIOS boot
- * attempt" section for what a real BIOS dump's execution against
- * this core actually looks like today.
+ * IOP doesn't have one on real hardware either). UPDATE (task #115):
+ * real hardware-interrupt exceptions (I_STAT&I_MASK) ARE now
+ * delivered - see iop_check_hw_interrupt() below. UPDATE (tasks
+ * #215/#216): the IOP counter/timer block now really ticks and can
+ * raise IRQs (iop_timers_tick()), and a real IOP VBLANK_IN/VBLANK_OUT
+ * interrupt is now modeled (iop_check_vblank()) - see each function's
+ * own doc comment for citations. See docs/ROADMAP.md for the full
+ * picture and docs/STATUS.md's "First real BIOS boot attempt"
+ * section for what a real BIOS dump's execution against this core
+ * actually looks like today.
  */
 
 #include "core/iop/iop_core.h"
@@ -261,6 +265,55 @@ static void halt(const char *reason)
  * never this_pc-4/Cause.BD - a real interrupt landing exactly on a
  * branch's delay slot is not modeled, same honest gap already
  * documented for SYSCALL. */
+/* Task #216 (splash-screen blocker investigation, continued from
+ * #214/#215): real IOP hardware exposes its own VBLANK interrupt,
+ * distinct from the EE's already-modeled VBLANK (see ee_core.c's
+ * ee_check_vblank() comment for the EE side). Real PCSX2's
+ * IopCounters.cpp confirms this directly and was fetched/cited this
+ * round: psxVBlankStart() calls iopIntcIrq(0), psxVBlankEnd() calls
+ * iopIntcIrq(11) - independently corroborated by allkern/iris's
+ * src/iop/intc.h, which names the exact same bit positions
+ * IOP_INTC_VBLANK_IN (0x00000001, bit 0) and IOP_INTC_VBLANK_OUT
+ * (0x00000800, bit 11), and calls them from its GS vsync-start/-end
+ * handlers alongside the equivalent EE-side EE_INTC_VBLANK_IN/OUT
+ * raises - two independent real sources agreeing on both bit
+ * numbers. This is a real, continuously-firing, hardware-driven
+ * interrupt line, independent of what the IOP CPU itself is doing -
+ * the same property that made the timer-tick mechanism (#215) a
+ * candidate for waking a genuinely `idle`-parked IOP (see
+ * iop_core.h's `idle` field doc comment) - VBLANK is an even more
+ * certain real-hardware source of periodic activity than a
+ * boot-configured timer, since it requires no prior MODE-register
+ * setup by any module at all.
+ *
+ * Timing: reuses this project's own already-established, already-
+ * cited EE_CYCLES_PER_FRAME_NTSC (ee_core.c: 4921488, from the real
+ * 294.912 MHz EE clock / 59.94 Hz NTSC refresh), divided by the real
+ * ~8:1 EE:IOP clock ratio this project already documents and targets
+ * (source/core/system.c's own header comment: ~294 MHz EE vs ~33-36
+ * MHz IOP) rather than computing an independent IOP-clock figure, to
+ * stay consistent with the one ratio this project has already
+ * committed to elsewhere. VBLANK_END's offset reuses the same 1/12-
+ * of-frame approximation ee_check_vblank() already uses and
+ * documents at length (real NTSC vertical blanking is roughly 8.5%
+ * of a frame). Ticked here off `instructions_executed`, the same
+ * 1-instruction-=1-cycle simplification iop_timers_tick() and
+ * ee_check_vblank() both already use and document - no new timing
+ * model invented for this. */
+#define IOP_CYCLES_PER_FRAME_NTSC  (4921488u / 8u)
+#define IOP_CYCLES_VBLANK_DURATION (IOP_CYCLES_PER_FRAME_NTSC / 12u)
+#define IOP_INTC_IRQ_VBLANK_START  0
+#define IOP_INTC_IRQ_VBLANK_END    11
+
+static void iop_check_vblank(iop_state_t *st)
+{
+    uint64_t phase = st->instructions_executed % IOP_CYCLES_PER_FRAME_NTSC;
+    if (phase == 0)
+        iop_intc_raise(IOP_INTC_IRQ_VBLANK_START);
+    else if (phase == IOP_CYCLES_VBLANK_DURATION)
+        iop_intc_raise(IOP_INTC_IRQ_VBLANK_END);
+}
+
 static void iop_check_hw_interrupt(iop_state_t *st, uint32_t next_pc)
 {
     iop_intc_state_t *intc = iop_intc_get_state();
@@ -803,6 +856,12 @@ int iop_core_step(void)
      * extensive citation trail for the full real-hardware grounding
      * and this project's honestly-scoped-down subset of it. */
     iop_timers_tick();
+
+    /* Task #216 continuation: real IOP VBLANK, same unconditional-
+     * even-while-idle rationale as iop_timers_tick() above - see
+     * iop_check_vblank()'s own doc comment for the full citation
+     * trail. */
+    iop_check_vblank(&g_iop);
 
     /* Task #179 continued: real IOP hardware never halts after boot -
      * see the `idle` field's own doc comment in iop_core.h for the

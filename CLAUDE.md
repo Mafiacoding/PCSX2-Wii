@@ -3940,3 +3940,20 @@ Next: deep-dive what real IOP kernel code should run after IOPBTCONF
 module loading completes (or find an alternate real INTC_SBUS
 trigger not gated on it) - likely needs the same live-debugger/
 disassembly rigor as the earlier LOADCORE investigation.
+
+## Checkpoint (Round 57 - 87th finding, task #172/#214/#216 continuation)
+Implemented a real, cited IOP VBLANK_IN/VBLANK_OUT interrupt (bits
+0/11 - PCSX2 IopCounters.cpp + allkern/iris agree), unit-tested. This
+did NOT unblock the EE's pc=0x8000CFD4 poll loop (same as Round 56's
+SBUS/timer fixes) - but a new diagnostic proved exactly why: IOP COP0
+Status = 0x00000000 (IEc=0, IM2=0) at the instant the module loader's
+`idle=1` shortcut (task #179) kicks in, meaning NO interrupt source
+can ever fire under the current boot model, regardless of how
+correctly it's modeled. Root cause is almost certainly that real
+hardware's IOP thread scheduler - not any module's own init code -
+is what enables interrupts, when it dispatches its first real thread;
+this project's boot model has no equivalent concept yet. Full 88/88
+regression, clean Wii rebuild (435872 bytes). Next (task #216):
+live-debugger investigation of the real minimal thread-dispatch step
+needed, same rigor as the LOADCORE investigation (tasks #148-163) -
+not to be fabricated without a citation.

@@ -4390,3 +4390,20 @@ triggers there. PRId stays 0 in the committed build - this is real,
 partial, honestly-reported progress, not a working splash-screen path
 yet. Task #245 continues: disassemble the freshly-loaded module's own
 code at its real relocated address to find what it's spinning on.
+
+## Checkpoint (Round 78 - 118th finding, task #245)
+Precisely isolated the low-RAM spin the 117th finding flagged: a exact
+11-instruction self-loop at IOP RAM 0x54-0x8C (~3.62M hits each of 108M
+total instructions in a 40s trace - three orders of magnitude above
+anything else). Root cause: the function's epilogue never restores
+$ra from the stack before jr $ra, so it reuses a stale $ra=0x54 left
+over from an earlier internal jal, bouncing into itself forever.
+Confirmed (via a default-PRId=0 control run showing completely
+different data at that address) this is NOT caused by the 117th
+finding's ELF-load fix - it's written by an earlier real ROM boot step
+that only runs once PRId=0x1f unlocks the real path. Two live
+hypotheses not yet distinguished: real interpreter/relocation bug vs.
+deliberate idle-handler design awaiting a future event. No fix this
+round - docs-only. PRId stays 0. Next step: trace what real ROM
+function writes this stub into 0x30-0x90 and cross-check its true
+compiled form.

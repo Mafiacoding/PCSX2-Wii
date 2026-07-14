@@ -2918,3 +2918,19 @@ there). PRId stays 0 in the shipped build - not yet a working boot
 path, but real, verified, committed progress and a working foundation
 for the next round. Full regression: 90/90 pass. Clean Wii/devkitPPC
 rebuild verified, exit 0.
+
+### Round 78 (118th finding, task #245, task #172 continuation)
+Docs-only investigation round (no source change). Isolated the 117th
+finding's low-RAM spin to an exact 11-instruction self-loop
+(0x54-0x8C, ~3.62M hits each out of 108M total instructions - three
+orders of magnitude above anything else). Root cause: the function's
+epilogue (jr $ra at 0x88) never restores $ra from the stack, so it
+reuses the stale $ra=0x54 left over from an earlier internal jal,
+re-entering itself forever. Confirmed via a default-PRId=0 control run
+that this function is NOT introduced by the 117th finding's ELF-load
+fix (completely different data occupies 0x30-0x90 there) - it's
+written by an earlier real ROM boot step that only runs once PRId=0x1f
+unlocks the real boot path. Two open hypotheses: a genuine relocation/
+interpreter bug dropping an instruction, or deliberate real "idle
+handler" design pending a future overwrite/interrupt. Not yet
+distinguished - flagged as the concrete next step. PRId stays 0.

@@ -3362,6 +3362,52 @@ static int ee_step(void)
                 st->next_pc = this_pc + 8u;
                 return 1;
             }
+            if (sysnum == 124 || sysnum == -124) {
+                /* 124 (0x7C) - task #172/#234-#235 (108th finding
+                 * continued). Not a documented public ps2sdk kernel.h
+                 * API (checked directly, 107th finding's addendum) -
+                 * this is a real, BIOS-resident, OSDSYS-private
+                 * syscall, confirmed this round via the live PCSX2
+                 * DebugServer's own native disassembler, not guessed:
+                 * the real EE general exception vector's own syscall
+                 * sub-dispatch at 0x80000280 SPECIAL-CASES exactly
+                 * this number ("li k0,0x7C; bne k0,v1,->generic path;
+                 * j 0x8001123C") ahead of, and bypassing, the normal
+                 * numbered syscall table entirely. 0x8001123C is
+                 * itself real, resident BIOS exception-vector code
+                 * (mfc0 EPC, k1-scratch sq/lq save/restore, eret; its
+                 * shared epilogue at 0x80011030 is a textbook EE
+                 * exception-return routine using mtsa - task #177's
+                 * own EE MFSA/MTSA implementation). It calls onward
+                 * into 0x8000BE78, a real 16-entry jump-table command
+                 * dispatcher whose OTHER cases directly invoke
+                 * 0x8000F6E0 (OSDSYS's real per-frame dispatcher,
+                 * already confirmed reached in this project's own
+                 * boot since the 100th/103rd findings) and 0x80010A08
+                 * (the real SIF/RPC dispatch helper this project
+                 * already models, Round 53-55) - i.e. this is one
+                 * real, already-partially-working OSDSYS subsystem,
+                 * not a hypothetical dead branch. The `a0==1` case of
+                 * that dispatcher is, per the 107th finding's traced
+                 * chain, what ultimately writes RAM[0x80020B54] (the
+                 * gate this project's 96th-107th findings identified
+                 * as the single blocker for OSDSYS's only real
+                 * per-frame RPC/VU1 code path). Per this project's own
+                 * established precedent for exactly this situation
+                 * (sysnum==18/6/7/19 above, task #180's lesson: do not
+                 * guess at a real, BIOS-resident kernel routine's
+                 * internal bookkeeping - let it vector as a genuine
+                 * MIPS Syscall exception so the real, already-present
+                 * BIOS code runs verbatim), this must raise a real
+                 * exception rather than halt. Previously this fell
+                 * through to the unconditional halt() below, which -
+                 * if OSDSYS's real code ever actually issues this
+                 * syscall during this project's boot - would stop the
+                 * whole emulated machine outright instead of letting
+                 * real, correct, already-resident BIOS code run. */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
+            }
             halt("SYSCALL (no BIOS syscall table implemented)");
             return 1;
         }

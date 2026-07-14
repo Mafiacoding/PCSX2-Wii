@@ -12021,3 +12021,31 @@ every link confirmed via PCSX2's live native disassembler), this
 represents very substantial narrowing of task #172's remaining scope
 since the 96th finding first characterized this as a vague "table never
 gets populated" problem.
+
+
+## 109th finding (Round 69, task #235): syscall 124 (0x7C) identified as the exact trigger for the exception-vector chain traced in the 108th finding — implemented, tested, does not alone unblock the boot
+
+Continuing directly from the 108th finding (which traced the RAM[0x80020B54] write chain up to a genuine EE kernel exception vector at ~0x80011200-0x800112BC, reached only via `jalr` through a function-pointer table with no direct `jal` callers anywhere in the 3MB RAM dump), this round used the live PCSX2 DebugServer connection to identify the exact syscall number that routes execution into that vector.
+
+**Method**: disassembled the real EE general exception vector at `0x80000180` live via `pcsx2_disassemble`. It reads COP0 Cause, masks the ExcCode bits (`andi t9,0x7C`), and uses the result as an index into a dispatch table at `0x80012380` (`lui k0,0x8001; addu k0,t9; lw k0,0x2380(k0); jr k0`). SYSCALL's ExcCode is 8, giving table index `8*4=0x20`, i.e. table entry `0x800123A0`. Read live via `pcsx2_read_memory`: value = `0x80000280`. Disassembled `0x80000280` (the real EE kernel SYSCALL exception handler): it reads `$v1` (the real EE syscall-number register per this project's own convention), negates it if negative (`bltzl v1,->0x8000032C; subu v1,zero,v1`), then does `li k0,0x7C; bne k0,v1,->0x8000029C; ...; j ->0x8001123C`.
+
+**Result**: syscall number **124 (0x7C)** is a hardcoded special case in the real BIOS-resident SYSCALL handler, jumping DIRECTLY to `0x8001123C` — bypassing the entire normal numbered-syscall dispatch table that every other syscall goes through (the generic path at `0x8000029C` does the full thread-context-save routine). `0x8001123C` is exactly the exception-vector code this project's 108th finding already traced up from the `RAM[0x80020B54]` write chain.
+
+**Fix implemented**: `source/core/ee/ee_core.c`, syscall dispatch — added, immediately before the final `halt("SYSCALL (no BIOS syscall table implemented)")` fallback:
+
+```c
+if (sysnum == 124 || sysnum == -124) {
+    /* real, BIOS-resident, OSDSYS-private syscall (108th/109th
+     * findings) - let it vector as a real MIPS Syscall exception
+     * per this project's established precedent (task #180) rather
+     * than guess at its internal bookkeeping. */
+    ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+    break;
+}
+```
+
+This follows the exact precedent already established for syscalls 6/7/18/19 (task #180's lesson: real, BIOS-resident kernel routines should vector as genuine exceptions so the real, already-present BIOS code runs, rather than being halted or reimplemented from a guess).
+
+**Honest result — does not alone unblock the boot**: a dedicated host-native diagnostic (watching PCs `0x8000C500`, `0x8000CA84`, and `0x8001123C` across a full ~957M-instruction run to the same steady-state `pc=0x8000F810` this project has seen since the 106th finding) recorded **zero hits** on all three watched addresses. `RAM[0x80020B54]` and `RAM[0x80020B50]` remain `0x00000000`, unchanged from every prior round. This confirms the fix is correct and harmless (no regression: same steady-state pc/instruction count as before the change) but honestly does NOT by itself unblock the boot, because our current execution trace never actually issues syscall 124 in the first place. The real remaining open question (new, narrower than before) is: **what should cause our boot's own code to issue syscall 124 with the right event-struct argument** — this becomes the next investigative thread (task #172 continuation).
+
+**Verification**: full regression suite re-run clean, 90/90 `OK`, zero `COMPILE_FAIL`/`RUNTIME_FAIL` entries (`/tmp/regression_results.txt`). Clean Wii/devkitPPC rebuild (`make clean && make -j4`, exit 0, `pcsx2-wii-git.dol` produced).

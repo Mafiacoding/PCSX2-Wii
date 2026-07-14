@@ -2711,6 +2711,30 @@ genuinely never executes in this boot; finding it (and what gates
 entry to it) is the concrete next step. No source change, docs-only
 round.
 
+### Round 69 (109th finding, task #172/#234/#235 continued)
+Continuing directly from the 108th finding (chain traced to a genuine
+EE kernel exception vector at ~0x80011200-0x800112BC, reached only via
+`jalr` through a function-pointer table, no direct `jal` callers
+anywhere in the RAM dump), used the live PCSX2 DebugServer to identify
+the exact syscall number that routes into it: **124 (0x7C)**. Real EE
+general exception vector (`0x80000180`) dispatches via a real
+ExcCode-indexed table (`0x80012380`); SYSCALL's entry (`0x800123A0`)
+points at `0x80000280`, which hardcodes a special case for syscall
+0x7C, jumping directly to `0x8001123C` and bypassing the entire normal
+numbered-syscall table. Implemented `if (sysnum == 124 || sysnum ==
+-124) { ee_raise_exception(...); break; }` in `ee_core.c`, following
+the exact task #180 precedent (let real BIOS-resident kernel routines
+vector as genuine exceptions rather than guessing at their bookkeeping
+or halting). Honest result: host-native diagnostic confirms the fix
+compiles clean and does not regress the boot's steady state, but ALSO
+confirms via zero watched-PC hits across a ~957M-instruction run that
+our boot never currently issues syscall 124 - so this fix, while real
+and correct, does not by itself unblock `RAM[0x80020B54]`. Full
+regression suite: 90/90 pass, zero failures. Clean Wii/devkitPPC
+rebuild verified (441280 bytes). Next step (task #172 continues):
+identify what should cause our own boot code to actually issue syscall
+124 with the right event-struct argument.
+
 ### Round 63 (95th finding, task #172 continued)
 Implemented the user-directed "fix it" source change: real ps2sdk
 PADMAN `padArea` state-settling in the EE PADMAN RPC-open branch

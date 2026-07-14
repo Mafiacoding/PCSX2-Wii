@@ -4223,3 +4223,31 @@ strncpy warning, no new warnings). ROADMAP.md's MMI section and its
 EE MMI (SIMD) opcode coverage is now complete - every real opcode in
 the R5900 SPECIAL2 encoding space (top-level table + all four
 sa-indexed sub-tables) has a real, citation-grounded implementation.
+
+## Checkpoint (Round 69 - 109th finding, task #172/#234/#235 continued)
+Used the live PCSX2 DebugServer to push the 108th finding's traced
+exception-vector chain (RAM[0x80020B54] write -> 0x8000BFB0 ->
+0x8000BE78 real 16-entry jump-table dispatcher -> genuine EE kernel
+exception vector at ~0x80011200-0x800112BC) to a concrete answer:
+disassembled the real EE general exception vector (0x80000180) and
+its SYSCALL sub-dispatch (0x800123A0 -> 0x80000280), finding a
+hardcoded special case for syscall **124 (0x7C)** that jumps directly
+to 0x8001123C, bypassing the entire normal numbered-syscall table.
+
+Implemented in ee_core.c: `if (sysnum == 124 || sysnum == -124) {
+ee_raise_exception(...); break; }`, following the exact task #180
+precedent (real, BIOS-resident kernel routines vector as genuine
+exceptions rather than being guessed at or halted). Host-native
+diagnostic confirmed the fix compiles clean, doesn't regress the
+boot's steady state (same pc=0x8000F810, ~957M instructions), but also
+honestly confirmed via zero watched-PC hits that our boot never
+currently issues syscall 124 - so RAM[0x80020B54] remains unwritten.
+This is a real, correct, cited fix that narrows (not closes) task
+#172: the open question is now precisely "what should cause our boot
+to issue syscall 124 with the right event-struct argument."
+
+Full regression suite: 90/90 pass, 0 failures (verified via full grep,
+not just tail inspection). Clean Wii/devkitPPC rebuild: exit 0,
+pcsx2-wii-git.dol produced (441280 bytes). Task #235 marked completed
+with this honest outcome; a new follow-up task opened for the
+narrowed question.

@@ -2711,6 +2711,24 @@ genuinely never executes in this boot; finding it (and what gates
 entry to it) is the concrete next step. No source change, docs-only
 round.
 
+### Round 70 (110th finding, task #172/#236 continued)
+User asked whether something is missing to actually trigger syscall
+124, echoing this project's own earlier CDVD/ELF-loader-gap pattern.
+Exhaustive static scan of the full OSDSYS image found only ONE real
+"v1=124; syscall" site in the whole binary - a standard, unused
+libkernel numbered-syscall veneer (0x800C3AD0) - and confirmed via
+both direct JAL/J search and raw-data-reference search that NOTHING
+in the linked binary calls it (zero hits either way). So syscall 124
+is structurally dead code, not merely unreached - the 109th finding's
+fix is real/harmless but likely not how OSDSYS actually triggers this
+chain. New lead: the real Interrupt exception-vector entry (ExcCode=0,
+0x80011108) flows via a distinct path (0x8000FCE8 -> 0x8000EB88 /
+0x8001131C / 0x8000F1D0) into the same low, fixed exception-vector
+neighborhood the syscall-124 bypass also targets - hardware interrupts,
+not syscalls, look like the real trigger. Not yet confirmed whether
+this reaches 0x8000BE78/0x8000C500 - next step for task #236. Docs-only
+round, no source change.
+
 ### Round 69 (109th finding, task #172/#234/#235 continued)
 Continuing directly from the 108th finding (chain traced to a genuine
 EE kernel exception vector at ~0x80011200-0x800112BC, reached only via

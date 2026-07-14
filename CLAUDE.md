@@ -4352,3 +4352,19 @@ Full regression suite: 90/90 pass, 0 failures. Clean Wii/devkitPPC
 rebuild: exit 0, `pcsx2-wii-git.dol`/`.elf` produced. Task #172
 continues; the PRId/task #221 device-table reverse-engineering effort
 remains the next major thread the user has also asked to resume.
+
+## Checkpoint (Round 76 - 116th finding, task #221/#245 resumed)
+Docs-only round resuming the user-requested "fix the prid" effort.
+Re-disassembled the 92nd finding's device-table functions with
+Capstone. Key correction: 0xBFC4A7F0 is NOT an unconditional panic
+path - it's a real type dispatcher with normal, non-fatal return paths
+for types 0/1/2/3/4/5+. 0xBFC4AED0 is generic I-cache-flush boilerplate,
+unrelated to device logic. The real panic loop (0x80000000 write +
+infinite j) is reached specifically because device SLOT 2's own
+data-dependent function pointer is architecturally expected to never
+return (real kernel/OS hand-off) - slot 1's equivalent pointer, by
+contrast, is expected to return, and does. No fix applied - the
+concrete next step is a live trace (PRId=0x1f, disposable scratch
+copy) of the actual device-table bytes and the real resolved jalr
+target at 0xBFC4A44C. PRId remains 0. Task #245 tracks this
+continuation.

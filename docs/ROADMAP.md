@@ -2880,3 +2880,21 @@ re-scoped as "no evidence yet"). Verified via a dedicated driver
 dumping iop_timers_get_state(): t[5].mode=0x00000C70 now genuinely
 reflects the real write. Full regression suite: 90/90 pass, zero
 failures. Clean Wii/devkitPPC rebuild verified, exit 0.
+
+### Round 76 (116th finding, task #221/#245, task #172 continuation)
+Docs-only investigation round (no source change, regression/rebuild
+skipped per standing convention). Re-disassembled the 92nd finding's
+device-table functions with Capstone (better tooling than previous ad
+hoc rounds). Corrected the prior framing: 0xBFC4AED0 is a generic
+I-cache flush utility (not device logic); 0xBFC4A600 validates/parses
+one raw device-table entry; 0xBFC4A7F0 is a real, non-fatal type
+dispatcher (types 0/2/5+ return -1 harmlessly; types 1/3/4 dispatch to
+real sub-handlers and return 0 normally) - NOT an unconditional panic
+path as previously characterized. The real panic loop is reached only
+because device slot 2's own real function pointer (data-dependent,
+loaded from the parsed table entry) is architecturally expected to
+NEVER return (a genuine kernel/OS hand-off), unlike slot 1's, which is
+expected to return. Next concrete step: live-trace (PRId=0x1f,
+disposable scratch copy) the real raw device-table bytes and the
+actual resolved jalr target at 0xBFC4A44C to find out what real
+function that is and why it returns in this project's emulation.

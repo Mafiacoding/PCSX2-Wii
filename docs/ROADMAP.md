@@ -3037,3 +3037,25 @@ search's methodology. Exact writing instruction still not pinned down
 (watchpoint's reported hit PC landed on an unrelated self-loop at
 0xB694). No fix, no source change. Next: corrected register-relative
 store search over the same ~30-subroutine call graph.
+
+### Round 84 (124th finding, task #245, task #172 continuation)
+Docs-only round. Corrected register-relative store search (fixing the
+122nd finding's $zero-only blind spot) confirmed 0xBFC4D2A0 is a real,
+separately-callable sparse RAM-clear subroutine (same 8-of-32-words-
+per-block pattern as the 120th finding's inline 0xBFC02000 clear),
+called directly by kernel-main - but it clears the target region, it
+doesn't install the real content. Extending the same search to kernel-
+main's full ~10,000-instruction body produced 60 nominal hits that all
+turned out to be noise (implausibly small "base register" values -
+local variables/loop indices misidentified as addresses) - an honest
+methodological ceiling for a control-flow-blind linear register
+tracker at this scale, not a new lead. Re-examined the 123rd finding's
+capture in light of this: since the fully-populated real table was
+already present at the reported hit, despite the watchpoint covering
+the full 0x40-0x480 range (which the confirmed clear routine would
+touch first), PCSX2's IOP watchpoint granularity is likely coarser
+than single-instruction (probably per recompiled block) - meaning a
+narrower watchpoint would likely have the same imprecision. No fix,
+no source change. Next: a genuine PC-based code breakpoint at specific
+later kernel-main call sites, not yet examined individually - more
+likely to be exact than a memory watchpoint under JIT execution.

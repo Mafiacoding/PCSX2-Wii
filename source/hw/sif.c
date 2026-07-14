@@ -15,6 +15,11 @@
 
 static sif_state_t g_sif;
 
+/* task #212 continuation (82nd/83rd findings): moved ahead of
+ * sif_mmio_write32 (declaration-order fix, same class of bug as the
+ * earlier g_bind_sid_table_* case in this file). */
+static int g_iop_boot_completed_once;
+
 void sif_init(void)
 {
     memset(&g_sif, 0, sizeof(g_sif));
@@ -65,6 +70,29 @@ int sif_mmio_write32(uint32_t addr, uint32_t value)
             /* Real PCSX2: psHu32(mem) &= ~value; (EE clears flag bits
              * the IOP previously set - write-1-to-clear) */
             g_sif.smflag &= ~value;
+            /* task #212 continuation (82nd/83rd findings): see the
+             * full grounding/citation in sif.h above
+             * sif_note_iop_boot_completed_once()'s declaration - real,
+             * observed EE-side behavior clears SIF_STAT_BOOTEND
+             * (0x40000) as part of a genuine _LoadExecPS2-triggered
+             * reset/reload sequence; since this project's own IOP
+             * module loader has ALREADY, for real, completed loading
+             * every real ROMDIR module once (tracked via
+             * sif_iop_boot_completed_once()), that real fact does not
+             * become false just because the EE cleared its own status
+             * flag - re-signal the same real bits
+             * (mark_iop_boot_complete()'s own already-cited
+             * SIF_STAT_BOOTEND | SIF_STAT_CMDINIT, plus SIF_STAT_SIFINIT
+             * which this project's own task #165 fix already
+             * established gets set for real via the genuine SIFMAN
+             * handshake) immediately, rather than leaving OSDSYS
+             * parked forever on a flag this project's own model is
+             * fully entitled to consider still true. */
+            if ((value & 0x00040000u) && g_iop_boot_completed_once) {
+                g_sif.smflag |= 0x00010000u /* SIF_STAT_SIFINIT */
+                              |  0x00020000u /* SIF_STAT_CMDINIT */
+                              |  0x00040000u /* SIF_STAT_BOOTEND */;
+            }
             return 1;
         case SIF_CTRL:
             /* Bits 18/19 (IOP IRQ / IOP reset trigger) are NOT
@@ -186,6 +214,23 @@ static uint32_t g_bind_sid_table_cd[SIF_CMD_BIND_SID_TABLE_SIZE];
 static uint32_t g_bind_sid_table_sid[SIF_CMD_BIND_SID_TABLE_SIZE];
 static uint32_t g_bind_sid_table_next;
 
+/* task #212 continuation (82nd/83rd findings) - see the full
+ * grounding/citation in sif.h above sif_note_iop_boot_completed_once()'s
+ * declaration. g_iop_boot_completed_once itself is declared earlier in
+ * this file (near g_sif) so sif_mmio_write32's SIF_SMFLAG case, which is
+ * defined before this point, can see it - same fix pattern already
+ * applied once before in this file for g_bind_sid_table_*. */
+
+void sif_note_iop_boot_completed_once(void)
+{
+    g_iop_boot_completed_once = 1;
+}
+
+int sif_iop_boot_completed_once(void)
+{
+    return g_iop_boot_completed_once;
+}
+
 void sif_cmd_iop_init(void)
 {
     uint32_t i;
@@ -198,6 +243,7 @@ void sif_cmd_iop_init(void)
         g_bind_sid_table_sid[i] = 0;
     }
     g_bind_sid_table_next = 0;
+    g_iop_boot_completed_once = 0;
 }
 
 void sif_cmd_iop_handle_init_cmd(uint32_t ee_recvbuf_addr)

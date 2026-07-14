@@ -2433,3 +2433,34 @@ changes this round (pure investigation); no regression/rebuild needed.
 Also newly observed: MCSERV rpc_number=0x71 (real MC_RPCCMD_OPEN, not
 yet implemented) - a new open item for a future round. See
 docs/STATUS.md's 81st finding.
+
+## Round 55 (82nd/83rd/84th findings): MCSERV generalization + `_LoadExecPS2` real-exception fix + SIF_STAT_BOOTEND re-signal - real boot progress past the GS-output milestone
+
+Three real, cited source changes past the already-satisfied Round 54
+milestone: (1) generalized the MCSERV RPC reply from `rpc_number ==
+0x70` to a full catch-all (real shared reply epilogue confirmed via
+`mcserv.c`), unblocking `MC_RPCCMD_OPEN` (0x71); (2) gave `_LoadExecPS2`
+(EE syscall 6) real MIPS exception delivery, matching the existing
+`_ExecPS2` (syscall 7) precedent, since both are bare ROM-only
+syscall trampolines per `ee/kernel/src/kernel.S`; (3) root-caused and
+fixed a real `SIF_STAT_BOOTEND`-clearing bug: the BIOS's
+`_LoadExecPS2` reset path has the EE itself clear the BOOTEND bit via
+the (already-correct) real write-1-to-clear semantics, and nothing
+ever re-set it since the IOP module loader only runs once. Fixed via
+a new `g_iop_boot_completed_once` flag that re-signals
+SIFINIT|CMDINIT|BOOTEND when this specific clear-after-real-boot
+condition is detected.
+
+Verified via diagnostic: the previously-infinite poll loop at
+0x000820D0-0x000820E8 now exits cleanly (twice), advancing execution
+to new territory at EE pc=0x8000CFD4. New wall identified there (not
+yet a hang): a poll of EE INTC I_STAT bit 1 (real INT_SBUS), never
+set because this project's SIF/DMA model never raises a real SBUS
+interrupt - the caller just re-polls in a steady idle loop, likely
+the outer OSDSYS wait loop. Full regression: 87/87 pass. Clean Wii
+rebuild verified (434720 bytes). Also fixed a recurring
+declaration-order compile bug (g_iop_boot_completed_once used before
+its static declaration in sif.c - same bug class hit once before in
+this file). See docs/STATUS.md's 82nd/83rd/84th findings. Next: trace
+what raises (or should raise) a real SBUS interrupt, or find what the
+0x8000CFD4 caller's outer loop is actually waiting on beyond that.

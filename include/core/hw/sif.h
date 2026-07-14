@@ -156,6 +156,39 @@ void sif_cmd_iop_init(void);
 void sif_cmd_iop_handle_init_cmd(uint32_t ee_recvbuf_addr);
 uint32_t sif_cmd_iop_get_ee_recvbuf(void);
 
+/* task #212 continuation (82nd/83rd findings): real, observed EE-side
+ * behavior - a host-native diagnostic trace showed OSDSYS's own real
+ * code writes value=0x00040000 to SIF_SMFLAG (real write-1-to-clear
+ * semantics, PCSX2 HwWrite.cpp's "psHu32(mem) &= ~value", already
+ * modeled correctly above) AFTER this project's own IOP module
+ * loader had already, for real, run every real ROMDIR-listed module's
+ * entry point to completion and set SIF_STAT_BOOTEND (0x40000) via
+ * mark_iop_boot_complete() (iop_module_loader.c). This clear happens
+ * immediately after this project's own newly-implemented _LoadExecPS2
+ * (EE syscall 6) exception delivery let real BIOS ROM code run its
+ * own re-initialization sequence (confirmed independently: the same
+ * real CRTC video-timing registers from the 81st finding were
+ * observed being written a SECOND time right before this clear) -
+ * i.e. this is real BIOS-resident code deliberately clearing its own
+ * stale boot-status flag as part of a genuine reload/reset sequence.
+ * Real PS2 hardware would have its IOP kernel genuinely reboot and
+ * re-run its own module list at this point, re-signaling BOOTEND for
+ * real - but this project has no real IOP-reboot-internals source to
+ * model that precisely (same honest gap as the _LoadExecPS2/_ExecPS2
+ * syscalls' own "real ROM-resident, not in any fetched source"
+ * caveat). Since this project's own IOP module loader has ALREADY,
+ * for real, loaded and run every module in the real ROMDIR list to
+ * completion once (a genuine, already-verified fact, not fabricated),
+ * and nothing about an EE-side status-flag clear un-loads those
+ * modules, re-signaling the SAME real, already-earned BOOTEND (and
+ * its established real sibling bits) immediately after this specific
+ * observed clear is the most defensible, minimal, non-fabricated
+ * response available - not a claim of literally re-running a full IOP
+ * reboot cycle, just honestly reflecting that the real completion
+ * fact this project's own model already earned has not become false. */
+void sif_note_iop_boot_completed_once(void);
+int sif_iop_boot_completed_once(void);
+
 /* Returns how many times sif_cmd_iop_handle_init_cmd() has been
  * called so far (0 if never). Used by ee_core.c to decide when to
  * synthesize the IOP's SIF_CMD_SET_SREG(RPCINIT,1) response - see the

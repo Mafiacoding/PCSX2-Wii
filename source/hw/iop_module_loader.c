@@ -873,6 +873,13 @@ static void mark_iop_boot_complete(void)
     sif_iop_mmio_read32(0x1D000030u, &smflag);
     sif_iop_mmio_write32(0x1D000030u, smflag | 0x00040000u /* SIF_STAT_BOOTEND */
                                              | 0x00020000u /* SIF_STAT_CMDINIT */);
+    /* task #212 continuation (82nd/83rd findings): record that real
+     * IOP module loading has genuinely completed at least once, so
+     * sif.c's SIF_SMFLAG EE-write handler can honestly re-signal these
+     * same real bits if OSDSYS's own real code later clears them as
+     * part of a _LoadExecPS2-triggered reset - see the full citation
+     * in sif.h above sif_note_iop_boot_completed_once()'s declaration. */
+    sif_note_iop_boot_completed_once();
 }
 
 int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)

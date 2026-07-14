@@ -1998,6 +1998,55 @@ static int ee_step(void)
                 ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
                 break;
             }
+            if (sysnum == 6) {
+                /* _LoadExecPS2(const char *filename, s32 num_args,
+                 * char *args[]) - task #212 continuation (82nd
+                 * finding). Reached for the first time this round,
+                 * right after this project's own generalized MCSERV
+                 * catch-all (task #212) let MC_RPCCMD_OPEN/CLOSE
+                 * (rpc_number 0x71/0x72) proceed. Real, cited: ps2sdk
+                 * (ee/kernel/include/kernel.h "extern void
+                 * _LoadExecPS2(const char *filename, s32 num_args,
+                 * char *args[]) __attribute__((noreturn));",
+                 * syscallnr.h's "__NR__LoadExecPS2 6"). This is the
+                 * real kernel primitive that loads a NEW ELF (by
+                 * device:filename, e.g. real callers use this to load
+                 * and jump to another program, replacing the caller
+                 * entirely - noreturn) - a strong candidate for
+                 * exactly the mechanism that would load whatever
+                 * program actually draws OSDSYS's visible splash/
+                 * browser screen.
+                 *
+                 * Per this file's own already-established, identical
+                 * precedent for sysnum==7 (_ExecPS2, task #195/#196's
+                 * 71st finding, directly below) this project's own
+                 * fetched ee/kernel/src/kernel.S confirms
+                 * _LoadExecPS2 is ALSO a bare "SYSCALL(_LoadExecPS2)"
+                 * trampoline macro - i.e. real ps2sdk ships no C or
+                 * documented-semantics source for it either; its
+                 * entire real behavior (ELF loading, kernel state
+                 * teardown, argc/argv register convention, TLB/cache
+                 * handling, and the actual control-transfer mechanics)
+                 * lives entirely in BIOS ROM. Per this project's own
+                 * established task #180 lesson (do not guess at an
+                 * unknown real kernel syscall's internal bookkeeping
+                 * when it is a real, resident-in-ROM function this
+                 * project's own BIOS image already contains real code
+                 * for - let it vector as a real MIPS Syscall exception
+                 * instead), this is handled identically to 7/18/19
+                 * below: raise a real exception so genuine,
+                 * already-resident BIOS kernel code performs the
+                 * ENTIRE real ELF-load-and-jump mechanism itself, with
+                 * byte-exact real semantics this project could not
+                 * faithfully reimplement from guesswork (this
+                 * project's own sif_loadfile_elf_load() helper only
+                 * handles the narrower, already-cited SIF_CMD_RPC_CALL
+                 * LOADFILE protocol path, not this separate,
+                 * directly-invoked kernel syscall's own real internal
+                 * convention). */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
+            }
             if (sysnum == 7) {
                 /* _ExecPS2(void *entry, void *gp, int num_args,
                  * char *args[]) - task #195/#196 (71st finding), THE
@@ -2532,7 +2581,7 @@ static int ee_step(void)
                                 ee_mem_write32(st, call_recvbuf + 12u, 1u); /* data[3]: synthetic pad handle (placeholder) */
                                 ee_mem_write32(st, call_recvbuf + 20u, 0u); /* data[5]: synthetic extra output = 0 */
                                 ee_arm_rpc_call_pending(call_cd);
-                            } else if (call_sid == SIF_SID_MCSERV && rpc_number == 0x70u && call_recvbuf != 0u) {
+                            } else if (call_sid == SIF_SID_MCSERV && call_recvbuf != 0u) {
                                 /* task #203 (80th finding): real
                                  * MC_RPCCMD_INIT (=0x70, see the
                                  * already-fetched ee/rpc/memorycard/
@@ -2566,8 +2615,49 @@ static int ee_step(void)
                                  * (unqueried, not fabricated specific
                                  * version numbers) is the minimal,
                                  * real-struct-shaped reply needed to
-                                 * unblock OSDSYS's own WaitSema. */
-                                ee_mem_write32(st, call_recvbuf + 0u, 0u); /* mcRpcStat_t.result = 0 (success) */
+                                 * unblock OSDSYS's own WaitSema.
+                                 *
+                                 * GENERALIZED (task #212, 82nd
+                                 * finding): this branch was widened
+                                 * from "rpc_number == 0x70u" to ANY
+                                 * MCSERV rpc_number after this
+                                 * project's own diagnostic trace
+                                 * showed a real, new call,
+                                 * rpc_number=0x71 (real
+                                 * MC_RPCCMD_OPEN, per the same
+                                 * already-fetched mcRpcCmd[] table,
+                                 * "0x71, // MC_RPCCMD_OPEN"). Re-
+                                 * reading the real IOP-side handler
+                                 * (iop/memorycard/mcserv/src/
+                                 * mcserv.c's cb_rpc_S_0400()) shows
+                                 * its switch ends with a SINGLE,
+                                 * shared "return (void *)&rpc_stat;"
+                                 * for every case, including 0x71's
+                                 * "case 0x71: rpc_stat.result =
+                                 * sceMcOpen(); break;" - i.e. the
+                                 * real reply shape (12-byte
+                                 * mcRpcStat_t) is confirmed identical
+                                 * across every real MCSERV command,
+                                 * exactly like this file's own
+                                 * already-established SPU2 spuFunc()
+                                 * generalization above. Only the
+                                 * VALUE of `result` differs per real
+                                 * command and is not modeled by this
+                                 * project (this project does not
+                                 * actually run sceMcOpen()/sceMcInit()
+                                 * etc., nor track real memory-card
+                                 * presence) - so 0 (success) is used
+                                 * uniformly, consistent with this
+                                 * project's own established
+                                 * placeholder discipline. If a
+                                 * SPECIFIC rpc_number's exact result
+                                 * value turns out to matter to a real
+                                 * caller (branching on non-zero), it
+                                 * should be pulled out into its own
+                                 * cited branch above this one, the
+                                 * same way 0x70 originally was before
+                                 * this generalization. */
+                                ee_mem_write32(st, call_recvbuf + 0u, 0u); /* mcRpcStat_t.result = 0 (success) - generalized across all MCSERV commands (see comment) */
                                 ee_mem_write32(st, call_recvbuf + 4u, 0u); /* mcRpcStat_t.mcserv_version (unqueried) */
                                 ee_mem_write32(st, call_recvbuf + 8u, 0u); /* mcRpcStat_t.mcman_version (unqueried) */
                                 ee_arm_rpc_call_pending(call_cd);

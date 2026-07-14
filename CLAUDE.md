@@ -3855,3 +3855,54 @@ Next: continuing toward an actual visible splash/logo screen (full
 framebuffer contents via DISPFB1/DISPLAY1/PMODE + a real GIF-path
 draw) remains open future work; implementing MC_RPCCMD_OPEN would be
 the next concrete step in the still-ongoing RPC chain investigation.
+
+## Checkpoint (Round 55, 82nd/83rd/84th findings)
+
+Continuing past the already-reached Round 54 milestone per "implement
+everything which is needed": three real, cited fixes landed this
+round. (1) MCSERV reply generalized from `rpc_number==0x70` to a full
+catch-all (real shared reply epilogue confirmed in `mcserv.c`),
+clearing the `MC_RPCCMD_OPEN` (0x71) item flagged at the end of Round
+54. (2) `_LoadExecPS2` (EE syscall 6) now gets real MIPS exception
+delivery, matching the existing `_ExecPS2` (syscall 7) treatment,
+since `ee/kernel/src/kernel.S` confirms both are bare ROM-only
+syscall trampolines with no real C-level logic to emulate. (3) Root-
+caused and fixed a genuine `SIF_STAT_BOOTEND`-clearing bug: BIOS's
+`_LoadExecPS2` reset path has the EE itself clear the BOOTEND bit via
+this project's already-correct write-1-to-clear semantics, and
+nothing ever re-set it since the IOP module loader only runs its
+module-loading sequence once per boot. Fixed with a narrowly-scoped
+`g_iop_boot_completed_once` flag that re-signals the same three real
+status bits (SIFINIT|CMDINIT|BOOTEND) `mark_iop_boot_complete()`
+already sets, only when this specific clear-after-genuine-boot
+condition is detected - deliberately not attempting a full IOP-reboot
+resimulation, consistent with this project's "let real ROM code
+handle unknown internals" precedent.
+
+Verified via host-native diagnostic: the previously-infinite poll
+loop at EE pc=0x000820D0-0x000820E8 now exits cleanly via `jr ra`
+(observed twice, for two separate real callers), and execution
+advances into new territory at EE pc=0x8000CFD4.
+
+New wall found there (tracked as a future item under task #172, not
+yet acted on): disassembly shows a poll of the EE INTC I_STAT
+register for bit 1 (real INT_SBUS interrupt source). This project's
+SIF/DMA model never raises a real SBUS interrupt, so the bit is never
+set - not a hang, just a steady no-op poll re-invoked by its caller
+(ra=0x8000F86C), likely the outer OSDSYS idle/wait loop.
+
+Also fixed along the way: a declaration-order compile bug in
+source/hw/sif.c (g_iop_boot_completed_once used in sif_mmio_write32
+before its own static declaration - same bug class hit once before in
+this file for g_bind_sid_table_*), fixed by moving the raw
+declaration to right after g_sif near the top of the file.
+
+Full regression: 87/87 tests pass. Clean Wii/devkitPPC rebuild
+verified (434720 bytes, no new warnings). Committed, pushed, rsynced
+- see this session's git log and docs/STATUS.md's 82nd/83rd/84th
+findings for full citation detail.
+
+Next: trace what would need to raise a real SBUS interrupt (or
+otherwise satisfy whatever the 0x8000CFD4 caller's outer loop is
+polling for) to make further boot progress toward a visible splash
+screen.

@@ -9913,3 +9913,105 @@ register setup) remains open future work (would require the DISPFB1/
 DISPLAY1/PMODE registers to also be set with real framebuffer
 geometry, and an actual GIF-path draw to populate that framebuffer -
 neither observed yet in this run).
+
+---
+
+## Round 55 (82nd/83rd/84th findings): MCSERV generalization, `_LoadExecPS2`, SIF_STAT_BOOTEND re-signal fix - real boot progress past the GS-output milestone
+
+Continuing past the already-satisfied "GS output" milestone (81st
+finding) per the user's "implement everything which is needed"
+directive, this round made three real, cited changes:
+
+**82nd finding - MCSERV reply generalized from `rpc_number=0x70` to
+a full catch-all.** `iop/memorycard/mcserv/src/mcserv.c`'s real
+`cb_rpc_S_0400()` dispatch function has ONE shared reply epilogue
+(`return (void *)&rpc_stat;`) across every real MCSERV command,
+confirmed via `ee/rpc/memorycard/src/libmc.c`'s `mcRpcCmd[]` table
+(`0x71, // MC_RPCCMD_OPEN`) and the real switch in `mcserv.c` (`case
+0x71: rpc_stat.result = sceMcOpen(); break;`). Since the reply SHAPE
+is identical regardless of which specific `rpc_number` is called,
+`source/core/ee/ee_core.c`'s MCSERV branch was widened from
+`rpc_number == 0x70u && call_recvbuf != 0u` to just `call_recvbuf !=
+0u`, unblocking the previously-observed-but-unhandled
+`MC_RPCCMD_OPEN` (0x71) call (and any other real MCSERV command).
+
+**83rd finding - `_LoadExecPS2` (EE syscall 6) given real exception
+delivery.** `ee/kernel/src/kernel.S` confirms `_LoadExecPS2` is a bare
+`SYSCALL(_LoadExecPS2)` trampoline with zero C-level logic - its
+entire real behavior lives in BIOS ROM, exactly like `_ExecPS2`
+(syscall 7, already treated this way in an earlier round). Applying
+the identical treatment (`ee_raise_exception(st, EE_EXC_CODE_SYS,
+this_pc, in_delay_slot)` instead of a guessed stub) let genuine,
+already-resident BIOS ROM code handle the real load/exec semantics.
+Verified via diagnostic: this caused the real BIOS to re-run its own
+video/hardware bring-up code (a strong signal the reset semantics are
+genuine) and advanced `max_pc_seen` from `0x00218BF8` to `0x0021E4BC`,
+landing execution in new territory - a polling loop at
+`pc=0x000820D0`-`0x000820E8`.
+
+**84th finding - real root cause of that new polling loop, and the
+fix.** Manual MIPS disassembly of the new loop showed it polling EE
+`SIF_SMFLAG` (`0x1000F230`) for bit `0x00040000`
+(`SIF_STAT_BOOTEND`, "Bootup completed" per
+`ee/kernel/include/sifdma.h`). Instrumented diagnostic copies of
+`sif.c`/`iop_module_loader.c` traced the real cause: this project's
+IOP module loader already sets `SIF_STAT_BOOTEND` for real, once, via
+the existing `mark_iop_boot_complete()` (mirroring the real IOP
+module "SyncEE"'s `PostResetCallback()` calling
+`sceSifSetSMFlag(SIF_STAT_BOOTEND)`, per
+`iop/system/eesync/src/eesync.c`) - but the real BIOS's
+`_LoadExecPS2`-triggered reset then has the EE itself WRITE to
+`SIF_SMFLAG` with value `0x00040000`, which (via this project's
+ALREADY-CORRECT real write-1-to-clear semantics for EE writes to this
+register, `psHu32(mem) &= ~value`) clears exactly the bit it was
+waiting for, and nothing ever re-sets it since the IOP module loader
+only runs its module-loading sequence once per boot.
+
+**Fix implemented** (deliberately narrow, consistent with this
+project's "let real ROM code handle unknown internals" precedent -
+no attempt was made to fully re-simulate real IOP reboot internals,
+since no fetched real source describes them): a new
+`g_iop_boot_completed_once` flag (`source/hw/sif.c`,
+`include/core/hw/sif.h`) is set once by
+`sif_note_iop_boot_completed_once()`, called from
+`mark_iop_boot_complete()` (`source/hw/iop_module_loader.c`). Inside
+`sif_mmio_write32`'s `SIF_SMFLAG` case, after applying the real
+write-1-to-clear semantics, if the EE just cleared the BOOTEND bit
+AND IOP boot has genuinely completed at least once, this project
+re-signals `SIF_STAT_SIFINIT | SIF_STAT_CMDINIT | SIF_STAT_BOOTEND`
+(the same three real status bits `mark_iop_boot_complete()` already
+sets) - i.e., it re-asserts real, already-established status bits
+rather than fabricating new ones.
+
+**Verified via host-native diagnostic (300M-instruction cap):** the
+poll loop at `0x000820D0`-`0x000820E8` now observes
+`SIF_SMFLAG=0x00070000` (SIFINIT|CMDINIT|BOOTEND all set), takes the
+"bit set" exit branch, and returns cleanly via `jr ra` - twice, for
+two separate real callers. Execution then advances into new code at
+EE `pc=0x8000CFD4`.
+
+**New wall identified at `pc=0x8000CFD0`-`0x8000CFD4` (not yet
+acted on, tracked as a future item under task #172):** disassembly
+shows this is a poll of the EE INTC `I_STAT` register
+(`0xB000F000`/physical `0x1000F000`) for bit 1 (the real `INT_SBUS`
+interrupt source, per the standard EE INTC bit layout). Since this
+project's SIF/DMA model never raises a real SBUS interrupt, this bit
+is never set, so the polling function always takes its "not set,
+return immediately" path - this is NOT a hang (the caller at
+`ra=0x8000F86C` simply re-calls it in a steady idle loop, similar to
+prior steady-state IOP idle patterns already documented), but it
+means real boot progress has reached what is likely the outer OSDSYS
+idle/wait loop, still short of a visible splash screen.
+
+**Compile-order bug fixed along the way:** `g_iop_boot_completed_once`
+was initially declared in `source/hw/sif.c` textually AFTER
+`sif_mmio_write32` (which uses it) - the same declaration-order bug
+class this file hit once before for `g_bind_sid_table_*`. Fixed by
+moving the raw `static int g_iop_boot_completed_once;` declaration to
+right after the existing `static sif_state_t g_sif;` near the top of
+the file, before any function definitions.
+
+**Full regression suite: 87/87 tests pass. Clean Wii/devkitPPC
+rebuild verified (434720 bytes, no new warnings beyond one
+pre-existing benign `strncpy` truncation warning in
+`iop_module_loader.c`, unrelated to this round's changes).**

@@ -3134,3 +3134,32 @@ follows the Status/Config load. Real next step: trace forward from
 0x8000C0B8 to find where the busy-wait (~0x80005E5C, reading phys
 0x0000F230) is actually reached from - that's the concrete remaining
 lead, not EXL itself. No source change, regression/rebuild skipped.
+
+### Round 89 (129th finding, task #172/#247 continuation)
+Docs-only round. Traced the exact call path into the busy-wait via a
+PC-coverage ring-buffer (last 4000 PCs dumped at the instant the wait
+is first reached, step 29930488): 0x8000C0B8 returns normally, calls
+into 0x80006198 (two short bounded polls, not the blocker), which
+disassembles to a real async request/completion protocol - builds a
+real DMA-chain-tag-shaped descriptor (0x20000000=QWC0/ID2/CNT, real
+tag format from this project's own dma.c) at 0x8001E330, writes a
+status byte+halfword at 0x8001E104/106, writes the descriptor's
+physical address to a small kernel mailbox at phys 0x0000C430, then
+polls phys 0x0000F230 bit 16 via jal 0x80005E58 in a loop. Confirmed
+via direct address comparison against dma.c's own real DMA_BASE table
+(0x10008000+) that none of these addresses (0xC400-0xC440,
+0xF200-0xF260) are real hardware registers this project should be
+dispatching - grep across every hw model file (dma/sif/gs/ee_intc/
+ee_timers/mch) returns zero hits. This is genuine unbacked kernel RAM,
+software-driven - not a missing MMIO handler. Real hypothesis: this
+project's single flat EE instruction stream has no equivalent of a
+second concurrent context/thread scheduler to service the "async"
+half (the IOP side already has this, task #238; EE side doesn't).
+Deliberately declined to fake the completion flag - would be an
+unjustified hack, inconsistent with every prior fix in this project's
+history. No source change, regression/rebuild skipped. Next: identify
+what real kernel function should service the descriptor (candidates:
+a GS-packet-send primitive, given proximity to the already-confirmed
+SMODE/SYNCH writes; or a semaphore/thread-signal primitive) via a live
+PCSX2 comparison targeting this address range, OR scope real EE-side
+concurrent scheduling infrastructure if the gap is architectural.

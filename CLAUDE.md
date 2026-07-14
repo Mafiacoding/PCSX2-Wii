@@ -4575,3 +4575,20 @@ PS2 kernel init patterns. Four jal calls before it all return normally;
 a jal to 0x8000C0B8 follows. Real remaining lead: trace forward from
 0x8000C0B8 to find where the busy-wait (~0x80005E5C, polling phys
 0x0000F230) is actually reached from. No source change.
+
+## Checkpoint (Round 89 - 129th finding, task #172/#247)
+Traced the exact busy-wait mechanism via PC-coverage ring-buffer:
+0x8000C0B8 returns -> 0x80006198 (two short bounded polls, fine) ->
+builds a real DMA-chain-tag-shaped descriptor (0x20000000=QWC0/ID2/CNT
+format, matches this project's own dma.c tag layout) at 0x8001E330,
+writes status fields at 0x8001E104/106, writes the descriptor's
+physical address to a kernel mailbox at phys 0x0000C430, then polls
+phys 0x0000F230 bit 16 forever via jal 0x80005E58. Confirmed these
+addresses (0xC400-0xC440, 0xF200-0xF260) are NOT real hardware
+registers (dma.c's real DMA_BASE=0x10008000+ is a completely different
+range; grep across all hw model files = zero hits) - genuine
+software-internal kernel RAM. Real hypothesis: needs a second
+concurrent EE execution context (thread/scheduler) to service the
+async half - the IOP side already has this (task #238), EE doesn't.
+Deliberately did NOT fake the completion flag - no real justification,
+inconsistent with this project's fix history. No source change.

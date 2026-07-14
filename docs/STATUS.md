@@ -11411,3 +11411,77 @@ to: verify whether this project's `VPU-STAT` (VU0 status flags via
 match what real PCSX2/real hardware would report at the equivalent
 boot point, rather than continuing to chase `RAM[0x80020D24]` itself,
 which is now understood to be a symptom, not a cause.
+
+
+## 101st finding (Round 65 continued, task #172): VPU-STAT is a passive register with no real status semantics - likely reads 0, causing an early shortcut; open question whether multi-frame retry is expected real-hardware behavior too
+
+Following the 100th finding's re-scoping (verify `VPU-STAT`/
+`RAM[0x8002022C]` accuracy), checked this project's `CFC2`
+implementation: `vu0_vi_read(st, reg)` (`ee_core.c:1367`) is a plain
+`return st->cop2_ctrl[reg];` - a passive stored-value read with no
+computed busy/running semantics. Nothing in this project's VU0/VU1
+code currently drives real status bits (VPS0/VBS0/VPS1/VBS1-style
+fields) into this register; it holds whatever was last explicitly
+written via `CTC2`/`MTC2`, which for the relevant slot is very likely
+still its zero-initialized default at this point in boot.
+
+**Consequence for the control flow traced in the 99th/100th
+findings**: if `VPU-STAT` reads `0`, BOTH bit tests at
+`0x8000FD94`/`0x8000FDB4` (`andi ...,0x0002` and `andi ...,0x0200`)
+evaluate false, and execution takes an EARLY SHORTCUT straight to the
+common epilogue at `0x8000FFA0`, bypassing the entire sentinel-ladder
+and both `0x8000EF78`/`0x8000EFD0` table-lookup calls described in the
+96th/99th findings entirely. The final written status code in this
+shortcut path is simply `s2`'s value from function entry (`0x24`,
+unless the `a0==2` branch already changed it to `0x27`) - meaning the
+empty-table lookups may not even be the operative code path in the
+run this session actually observed; the write instrumentation only
+confirmed the harmless `RAM[0x80020D24]` write, not which of the two
+downstream paths (shortcut vs. full ladder) was taken afterward. This
+was not independently distinguished this round due to time budget -
+disclosed as an open verification gap, not resolved.
+
+**A new, important possibility.** Bit `0x0200` (bit 9) falls in the
+CFC2 `STAT` register's real, documented VU1-status bit range
+(bits 8-11 encode VU1's running/stopped/waiting state on real
+hardware). If real hardware's VU1 is ALSO genuinely idle/not-yet-
+dispatched at the exact same point in boot (plausible, since this is
+very early - the first vblank(s) after the LOGO module, likely before
+any real rendering microprogram has been dispatched to VU1 on ANY
+console, real or emulated), then real hardware might ALSO take this
+same shortcut path and ALSO write one of these "retry" codes on its
+first several frames - meaning the multi-frame retry behavior this
+project has been treating as a blocking bug might be partially or
+fully NORMAL, expected real-hardware behavior, with the real unblock
+condition being VU1 eventually receiving and completing a real
+microprogram dispatch (asynchronously, possibly many frames later)
+rather than anything wrong in this project's boot sequence up to this
+point.
+
+**Honest scope**: this is a plausible, disassembly-grounded hypothesis,
+not a confirmed fact - distinguishing "this project is missing a real
+VU1 dispatch that real hardware has by now" from "this is normal,
+expected multi-frame retry on real hardware too" would require either
+(a) live-stepping real hardware/PCSX2 across many real vblanks past
+this exact point (not available this round - Pine IPC still
+disconnected), or (b) auditing whether ANY code path in this
+project's captured boot ever attempts to dispatch a VU1 microprogram
+before the first vblank fires (a scoped, concrete follow-up not
+completed this round).
+
+**Net effect**: task #172 has now accumulated four consecutive rounds
+(96th-101st findings) of real, disassembly/instrumentation-grounded
+progress narrowing this specific wall from a vague "device table never
+populated" characterization down to a precise, real VBLANK-driven
+state machine with an identified, plausible (though unconfirmed)
+explanation involving VU1 dispatch timing. Given the depth already
+reached and the honest uncertainty about whether further work here
+would even represent a real bug vs. expected behavior, this specific
+thread is paused for this session in favor of other tractable work,
+with a clear, concrete resumption point recorded here for a future
+round: audit whether this project's boot ever attempts a VU1
+microprogram dispatch before the point this handler first fires, and
+if real citable PS2 boot documentation describes OSDSYS deliberately
+polling across multiple vblanks before its menu becomes interactive
+(which would confirm this is expected behavior, not a bug). No source
+change this round - docs-only investigation.

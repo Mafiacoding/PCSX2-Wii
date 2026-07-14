@@ -50,6 +50,7 @@
 #include "core/hw/iop_hle_modules.h"
 #include "core/hw/iop_module_loader.h" /* real IOP module/IRX loader - task #92 */
 #include "core/hw/iop_excb.h" /* real exception-handler priority chains at RAM[0x100] - Round 22 */
+#include "core/hw/iop_icfg.h" /* real ICFG register / EE INTC_SBUS raise - task #214, 85th finding */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -120,6 +121,9 @@ uint32_t iop_mem_read32(iop_state_t *st, uint32_t addr)
     uint32_t spu2_val;
     if (iop_spu2_mmio_read32(addr, &spu2_val))
         return spu2_val;
+    uint32_t icfg_val;
+    if (iop_icfg_mmio_read32(addr, &icfg_val))
+        return icfg_val;
 
     uint8_t *p = iop_mem_ptr(st, addr, 4);
     if (!p) return 0;
@@ -159,6 +163,8 @@ void iop_mem_write32(iop_state_t *st, uint32_t addr, uint32_t val)
         return;
     if (iop_spu2_mmio_write32(addr, val))
         return;
+    if (iop_icfg_mmio_write32(addr, val))
+        return;
 
     uint8_t *p = iop_mem_ptr(st, addr, 4);
     if (!p) return;
@@ -180,6 +186,7 @@ int iop_core_init(const bios_image_t *bios)
     iop_hle_bios_init(); /* IOP BIOS syscall trap (A0/B0/C0) - see core/hw/iop_hle_bios.h */
     iop_hle_modules_init(); /* IOP module registry scaffold - see core/hw/iop_hle_modules.h */
     iop_module_loader_reset(); /* real module/IRX boot sequencer - see core/hw/iop_module_loader.h */
+    iop_icfg_init(); /* real ICFG register - task #214, 85th finding */
 
     g_iop.ram = memalign(32, IOP_RAM_SIZE);
     if (!g_iop.ram)
@@ -785,6 +792,17 @@ int iop_core_step(void)
 {
     if (g_iop.halted)
         return 1;
+
+    /* Task #214/#215 continuation (85th/86th findings): real IOP
+     * counters/timers run off the system clock, independent of
+     * whatever the CPU itself is doing - this is called
+     * unconditionally, even while `idle` below, precisely because
+     * that's the real mechanism that lets a genuinely idle IOP
+     * thread scheduler wake back up (a periodic timer-tick interrupt
+     * fires regardless of CPU activity). See iop_timers.h's own
+     * extensive citation trail for the full real-hardware grounding
+     * and this project's honestly-scoped-down subset of it. */
+    iop_timers_tick();
 
     /* Task #179 continued: real IOP hardware never halts after boot -
      * see the `idle` field's own doc comment in iop_core.h for the

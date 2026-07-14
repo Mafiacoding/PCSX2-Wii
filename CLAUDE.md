@@ -3906,3 +3906,37 @@ Next: trace what would need to raise a real SBUS interrupt (or
 otherwise satisfy whatever the 0x8000CFD4 caller's outer loop is
 polling for) to make further boot progress toward a visible splash
 screen.
+
+## Checkpoint (Round 56, 85th/86th findings)
+
+Continuing task #214 (the EE poll loop at pc=0x8000CFD0-0x8000CFD4
+that survived Round 55's BOOTEND fix): identified and implemented the
+exact real mechanism the loop is waiting on - EE INTC_STAT bit 1
+(real INTC_SBUS), which real hardware/PCSX2 raises when the IOP
+writes bit1 to ICFG (0x1f801450, `IopHwWrite.cpp`'s `case 0x450:`).
+New `source/hw/iop_icfg.c` models this. Verifying it via diagnostic
+found the IOP itself never performs that write because it's
+permanently idle - which led to also implementing this project's
+first real IOP counter/timer tick/IRQ model (`source/hw/
+iop_timers.c`, previously a pure register stub), matching PCSX2's
+`IopCounters.cpp` MODE-write masking and target/overflow IRQ delivery
+(intentionally scoped down: no gate modes, no prescale dividers, no
+toggle-mode polarity inversion).
+
+Both fixes are real, cited, and individually correct (unit-tested,
+87/87 regression, clean Wii rebuild at 435808 bytes) - but a
+diagnostic with timer-write tracing found they don't yet unblock the
+wall, because only one real IOP timer write ever happens during boot
+(no interrupt-enable bits ever get set), since `source/hw/
+iop_module_loader.c`'s HLE trampoline permanently idles the IOP CPU
+once all real IOPBTCONF modules finish (task #179's `idle=1`
+shortcut) - so no real ROM-resident kernel code that might configure
+an interrupt-generating timer ever runs. This is a genuinely deeper
+architectural gap, structurally similar to the multi-round LOADCORE
+registration-list investigation (tasks #148-163), and is left as an
+honestly-flagged open item (task #214) rather than guessed at.
+
+Next: deep-dive what real IOP kernel code should run after IOPBTCONF
+module loading completes (or find an alternate real INTC_SBUS
+trigger not gated on it) - likely needs the same live-debugger/
+disassembly rigor as the earlier LOADCORE investigation.

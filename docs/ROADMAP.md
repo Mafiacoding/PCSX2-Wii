@@ -2464,3 +2464,40 @@ its static declaration in sif.c - same bug class hit once before in
 this file). See docs/STATUS.md's 82nd/83rd/84th findings. Next: trace
 what raises (or should raise) a real SBUS interrupt, or find what the
 0x8000CFD4 caller's outer loop is actually waiting on beyond that.
+
+## Round 56 (85th/86th findings): real ICFG/SBUS-interrupt mechanism + IOP counter/timer model - deeper architectural wall identified
+
+Implemented two real, cited fixes continuing task #214's
+investigation of the EE poll loop at pc=0x8000CFD0-0x8000CFD4: (1) a
+new `source/hw/iop_icfg.c` modeling PCSX2's real `HW_ICFG`
+(0x1f801450) write-triggers-`hwIntcIrq(INTC_SBUS)` behavior
+(`IopHwWrite.cpp`'s `case 0x450:`), and (2) a real (but intentionally
+scoped-down) IOP counter/timer tick/IRQ model in `source/hw/
+iop_timers.c`, replacing what was a pure register stub - MODE-write
+masking, COUNT-reset-on-MODE-write, and target-match/overflow
+interrupt delivery at PCSX2's real bit positions, driven
+unconditionally from `iop_core_step()` regardless of IOP idle state
+(matching real hardware: counters run off the system clock, not CPU
+execution).
+
+Both fixes are individually correct and unit-tested (`tests/
+test_iop_timers.c` rewritten with new real-semantics coverage), but a
+300M-instruction diagnostic with timer-write tracing found the actual
+reason the EE poll loop still isn't unblocked: only ONE real IOP
+timer write ever occurs during boot (T1, extSignal only, no interrupt
+enabled), because `source/hw/iop_module_loader.c`'s HLE trampoline
+permanently idles the IOP CPU once all real IOPBTCONF modules'
+entry points return (task #179's `st->idle = 1` shortcut) - so no
+real, ROM-resident kernel code that might configure an interrupt-
+generating timer ever gets to run. This is an architectural gap one
+level deeper than timers/ICFG, structurally similar to the multi-
+round LOADCORE registration-list investigation (tasks #148-163), and
+is honestly left as an open item (task #214) rather than guessed at
+without further dedicated disassembly/live-debugger investigation.
+
+Full regression: 87/87 pass. Clean Wii rebuild verified (435808
+bytes). See docs/STATUS.md's 85th/86th findings for full citation
+detail. Next: deep-dive what real IOP kernel code (if any, within
+reach of this project's methodology) should run after IOPBTCONF
+module loading completes, or find an alternate real trigger for
+INTC_SBUS that doesn't depend on it.

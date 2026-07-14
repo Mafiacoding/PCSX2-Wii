@@ -10015,3 +10015,101 @@ the file, before any function definitions.
 rebuild verified (434720 bytes, no new warnings beyond one
 pre-existing benign `strncpy` truncation warning in
 `iop_module_loader.c`, unrelated to this round's changes).**
+
+---
+
+## Round 56 (85th/86th findings): real SBUS-interrupt mechanism + IOP counter/timer model implemented, correct but insufficient alone - a deeper architectural wall identified
+
+Continuing task #214's investigation of the EE poll loop at
+pc=0x8000CFD0-0x8000CFD4 (which survived Round 55's BOOTEND fix).
+
+**85th finding - real cause and mechanism identified.** The loop
+polls EE `INTC_STAT` bit 1 (real `INTC_SBUS`, confirmed against
+PCSX2's `pcsx2/Dmac.h` `enum INTCIrqs { INTC_GS=0, INTC_SBUS, ... }`
+and ps2sdk's identical `ee/kernel/include/kernel.h` list). Tracing
+real PCSX2 source (`pcsx2/ps2/Iop/IopHwWrite.cpp`,
+`_HwWrite_16or32_Page1()`'s `case 0x450:`) found the exact real
+mechanism: `hwIntcIrq(INTC_SBUS)` fires whenever the IOP writes a
+value with bit 1 set to real IOP address `0x1f801450` - PCSX2's
+`HW_ICFG` (`pcsx2/IopHw.h`), the same address ps2sdk's
+`common/include/iop_regs.h` names `GM_IF`. Implemented as a new,
+minimal, dedicated model: `source/hw/iop_icfg.c` +
+`include/core/hw/iop_icfg.h`, wired into `iop_mem_read32`/
+`iop_mem_write32`'s dispatch chain in `source/core/iop/iop_core.c`.
+
+**86th finding - real IOP counter/timer ticking implemented,
+confirming a deeper root cause.** Verifying the 85th finding's fix
+via diagnostic found the IOP itself never actually writes to ICFG,
+because the IOP CPU sits permanently `idle` (per `iop_core.h`'s
+`idle` field) - nothing ever raises a real IOP hardware interrupt to
+wake it. Real hardware's mechanism for this is its counter/timer
+block (`pcsx2/IopCounters.cpp`): six hardware timers (T0-T5) tick
+independently of CPU execution and periodically fire real interrupts
+that wake an idle kernel thread scheduler. This project's
+`source/hw/iop_timers.c` was, until now, a deliberate plain register
+stub with NO ticking/IRQ behavior at all (explicitly documented as
+out of scope in an earlier round). Implemented a real, but
+intentionally scoped-down, subset of PCSX2's model: MODE-write
+masking (`new_mode = (value & 0x63FF) | 0x0400`, matching
+`psxRcntWmode16/32`'s `IOPCNT_MODE_WRITE_MSK`/`_FLAG_MSK` split and
+`psxRcntSetNewIntrMode`'s always-re-enable behavior), COUNT reset to
+0 on MODE write, and target-match/overflow interrupt delivery at the
+real bit positions from `psxRcntInit()` (T0-T2 = bits 4/5/6, T3-T5 =
+bits 14/15/16), driven by a new `iop_timers_tick()` called
+unconditionally from `iop_core_step()` (even while `idle`, since real
+counters run off the system clock, not CPU execution - this is
+exactly the real mechanism that would wake a genuinely idle IOP).
+Honest scope gap: gate modes (H/V-blank gating), prescale dividers,
+and toggle-mode IRQ-polarity inversion are NOT modeled - only plain
+free-running counting plus the two most common real IRQ behaviors
+(one-shot, and zero-return/repeat) are. New unit tests added to
+`tests/test_iop_timers.c` covering the write-mask formula, COUNT
+reset on MODE write, one-shot overflow IRQ delivery and
+non-repetition, and periodic zeroReturn+repeat target IRQ delivery
+(fires exactly every N ticks, matching the real common OS-tick-timer
+pattern).
+
+**Both fixes are real, cited, and individually correct - verified via
+a 300M-instruction diagnostic with an added trace on every IOP timer
+MODE write.** That diagnostic revealed why they don't yet unblock the
+EE's poll loop: across the entire run, exactly ONE real IOP timer
+write ever occurs (`T1 MODE = 0x00000100`, i.e. only the `extSignal`
+bit set - a real HBLANK-clock-source selection, per PCSX2's own
+`psxRcntWmode16`, with neither `targetIntr` nor `overflIntr` set, so
+by design it was never meant to raise an interrupt). No timer is ever
+configured with an interrupt-enable bit set, so `iop_timers_tick()`'s
+interrupt-raising path can never fire in the current boot state,
+regardless of how long the run continues.
+
+**Root cause of THAT: an architectural gap one level deeper than
+timers/ICFG.** `source/hw/iop_module_loader.c`'s HLE trampoline
+(`mark_iop_boot_complete()`'s caller, see the `st->idle = 1;` site)
+intercepts control once every real, genuinely-executed IOPBTCONF
+module's entry point has returned, and permanently idles the IOP
+CPU there - a deliberate simplification adopted in an earlier round
+(task #179) specifically because no public reference describes what
+real hardware's own kernel does immediately after module loading
+completes. This means any real, ROM-resident IOP kernel code that
+would normally run AFTER module loading (e.g. entering a genuine
+kernel scheduler main loop, configuring a periodic tick timer for
+itself) never gets the chance to execute - it's not that this
+project's timer/interrupt model is wrong, it's that the real code
+which would use it is currently unreachable.
+
+**This is honestly flagged as a new open item (task #214, still
+in_progress) rather than guessed at further**: fully resolving it
+would require the same kind of deep, dedicated disassembly/live-
+debugger investigation this project's LOADCORE registration-list
+work (tasks #148-163) required, and should not be improvised without
+that same rigor. The 85th/86th findings' fixes are real, foundational
+improvements (a genuine EE INTC_SBUS-raising mechanism, and this
+project's first-ever real IOP timer/counter model) that will matter
+once that deeper gap is closed, even though they do not singlehandedly
+reach a visible splash screen this round.
+
+**Full regression suite: 87/87 tests pass (test_iop_timers.c rewritten
+to match the new real MODE-write/tick/IRQ semantics - the old test
+asserted the previous plain-stub roundtrip behavior, which the real
+fix intentionally changes). Clean Wii/devkitPPC rebuild verified
+(435808 bytes, no new warnings beyond the one pre-existing benign
+`strncpy` warning).**

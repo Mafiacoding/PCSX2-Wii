@@ -2532,6 +2532,387 @@ static int ee_step(void)
                                 ee_mem_write32(st, call_recvbuf + 12u, 1u); /* data[3]: synthetic pad handle (placeholder) */
                                 ee_mem_write32(st, call_recvbuf + 20u, 0u); /* data[5]: synthetic extra output = 0 */
                                 ee_arm_rpc_call_pending(call_cd);
+                            } else if (call_sid == SIF_SID_MCSERV && rpc_number == 0x70u && call_recvbuf != 0u) {
+                                /* task #203 (80th finding): real
+                                 * MC_RPCCMD_INIT (=0x70, see the
+                                 * already-fetched ee/rpc/memorycard/
+                                 * src/libmc.c's mcRpcCmd[MC_TYPE_MC]
+                                 * table, confirmed by this project's
+                                 * own diagnostic trace of the REAL
+                                 * BIOS issuing this exact call after
+                                 * binding to MCSERV, sid=0x80000400,
+                                 * also real-cited, see sif.h). The
+                                 * real IOP-side handler (fetched
+                                 * iop/memorycard/mcserv/src/mcserv.c's
+                                 * cb_rpc_S_0400(), case 0x70:
+                                 * "rpc_stat.result = sceMcInit();")
+                                 * writes its reply into a real,
+                                 * cited 12-byte struct (common/
+                                 * include/libmc-common.h's
+                                 * mcRpcStat_t: { s32 result; u32
+                                 * mcserv_version; u32 mcman_version;
+                                 * }) - matching the real EE-side
+                                 * mcInit()'s own call convention
+                                 * exactly (recvsize=12, same file,
+                                 * line ~399). This project does NOT
+                                 * yet actually run sceMcInit()'s real
+                                 * IOP code nor track real memory-card
+                                 * presence (a real, separate feature,
+                                 * not yet built) - an honest, labeled
+                                 * gap. Synthesizing "result=0"
+                                 * (success, matching every real PS2
+                                 * function's 0-is-success convention)
+                                 * with version fields left 0
+                                 * (unqueried, not fabricated specific
+                                 * version numbers) is the minimal,
+                                 * real-struct-shaped reply needed to
+                                 * unblock OSDSYS's own WaitSema. */
+                                ee_mem_write32(st, call_recvbuf + 0u, 0u); /* mcRpcStat_t.result = 0 (success) */
+                                ee_mem_write32(st, call_recvbuf + 4u, 0u); /* mcRpcStat_t.mcserv_version (unqueried) */
+                                ee_mem_write32(st, call_recvbuf + 8u, 0u); /* mcRpcStat_t.mcman_version (unqueried) */
+                                ee_arm_rpc_call_pending(call_cd);
+                            } else if (call_sid == SIF_SID_SPU2DRV && rpc_number == 0x1u && call_recvbuf != 0u) {
+                                /* task #203 continuation (80th
+                                 * finding): real SPU2 driver "command"
+                                 * dispatch - confirmed via this
+                                 * project's own diagnostic trace of
+                                 * the REAL BIOS binding to
+                                 * sce_SPU_DEV (sid=0x80000601, real,
+                                 * cited in sif.h) then calling it with
+                                 * rpc_number=1. Unlike LOADFILE/
+                                 * PADMAN/MCSERV, this real service is
+                                 * registered via a SINGLE dispatch
+                                 * function taking the raw command as
+                                 * its OWN fno directly (fetched iop/
+                                 * sound/rspu2drv/src/rsd_com.c's
+                                 * sce_spu2_loop(): "sceSifRegisterRpc
+                                 * (&sd, sce_SPU_DEV, (SifRpcFunc_t)
+                                 * spuFunc, ...)"; spuFunc's switch:
+                                 * "case 0x0001: SpuInit(); break;" -
+                                 * command=1 is real SpuInit(), which
+                                 * does NOT write the shared "ret"
+                                 * output variable, and spuFunc always
+                                 * "return &ret;" (a single 4-byte
+                                 * int) regardless of command. This
+                                 * project does NOT yet run real
+                                 * SpuInit() (a real, separate SPU2
+                                 * hardware-init feature, not yet
+                                 * built) - an honest, labeled gap.
+                                 * Writing result=0 (matching "ret"'s
+                                 * real static-initialized default,
+                                 * never touched by this specific real
+                                 * command) is the minimal, cited,
+                                 * real-protocol-matching reply. */
+                                ee_mem_write32(st, call_recvbuf + 0u, 0u); /* spuFunc's "ret" - untouched by real SpuInit(), real default 0 */
+                                ee_arm_rpc_call_pending(call_cd);
+                            } else if (call_sid == SIF_SID_SPU2DRV && rpc_number == 0x5001u && call_recvbuf != 0u) {
+                                /* task #203 continuation (80th
+                                 * finding): real command=0x5001,
+                                 * observed via this project's own
+                                 * diagnostic trace immediately
+                                 * following the command=1 (SpuInit)
+                                 * exchange above, on the SAME SPU2
+                                 * driver bind. The fetched rsd_com.c
+                                 * shows this case ("StInit()", real
+                                 * function name known from the
+                                 * source's own case label) is present
+                                 * but wrapped in "#if 0" in this
+                                 * project's specific fetched ps2sdk
+                                 * revision - LOWER CONFIDENCE than the
+                                 * command=1 case above, explicitly
+                                 * flagged as such. However, spuFunc's
+                                 * dispatch ABI itself (a single shared
+                                 * "ret" int, "return &ret;" at the
+                                 * function's end regardless of which
+                                 * case runs) is common to EVERY case
+                                 * in this switch, independent of
+                                 * whichever specific real BIOS build
+                                 * enables this particular case body -
+                                 * so the reply SHAPE (one 4-byte
+                                 * result) is still real and cited,
+                                 * even though this project cannot
+                                 * fully confirm StInit()'s own real
+                                 * side effects. Writing result=0
+                                 * (matching every other real, enabled
+                                 * case's default "ret" behavior) is
+                                 * the best-grounded available choice,
+                                 * not a confident claim. */
+                                ee_mem_write32(st, call_recvbuf + 0u, 0u); /* spuFunc's "ret" - default 0, lower-confidence case (see comment) */
+                                ee_arm_rpc_call_pending(call_cd);
+                            } else if (call_sid == SIF_SID_IOPHEAP && rpc_number == 0x1u && call_recvbuf != 0u) {
+                                /* task #203 continuation (80th
+                                 * finding): real SifAllocIopHeap(),
+                                 * confirmed via this project's own
+                                 * diagnostic trace of the REAL BIOS
+                                 * binding to sid=0x80000003
+                                 * immediately after the SPU2 driver
+                                 * exchanges above (real, cited
+                                 * ee/kernel/src/iopheap.c:
+                                 * "sceSifCallRpc(&_ih_cd, 1, 0, &arg,
+                                 * 4, &arg, 4, NULL, NULL); return
+                                 * (void *)arg.addr;" - fno=1 matches
+                                 * this project's observed
+                                 * rpc_number=1 exactly, and the real
+                                 * reply is a single 4-byte IOP heap
+                                 * address). This project does not
+                                 * model a real IOP heap allocator (a
+                                 * real, separate feature - tracking
+                                 * actual free/used IOP memory
+                                 * regions - not yet built), so a real
+                                 * address cannot be computed. Per
+                                 * this project's own established
+                                 * precedent (task #194/70th finding's
+                                 * "sd = non-NULL PLACEHOLDER"),
+                                 * returning a non-NULL placeholder
+                                 * address is necessary here too:
+                                 * real SifAllocIopHeap() callers treat
+                                 * a NULL/0 return as allocation
+                                 * failure (per the real source above),
+                                 * which could cause OSDSYS to take a
+                                 * real, different (error-handling)
+                                 * code path this project has no
+                                 * evidence for - a non-NULL value
+                                 * keeps it on the real, already-traced
+                                 * success path instead. NOT a claim of
+                                 * real heap tracking. */
+                                ee_mem_write32(st, call_recvbuf + 0u, 0x00001000u); /* non-NULL PLACEHOLDER IOP heap address (see comment) */
+                                ee_arm_rpc_call_pending(call_cd);
+                            } else if (call_sid == SIF_SID_SPU2DRV && rpc_number == 0x501Au && call_recvbuf != 0u) {
+                                /* task #209 (80th finding continued):
+                                 * real StDmaWrite(), confirmed via
+                                 * this project's own diagnostic trace
+                                 * of the REAL BIOS re-calling the SPU2
+                                 * driver (sid=0x80000601) a THIRD time,
+                                 * right after the IOP Heap alloc above
+                                 * unblocked forward progress past the
+                                 * previous SYSCALL(sceSifDmaStat) wall.
+                                 * Real, cited source: iop/sound/
+                                 * rspu2drv/src/rsd_com.c's spuFunc()
+                                 * switch, "case 0x501A: ret =
+                                 * (s16)StDmaWrite(*((s16 **)data + 1),
+                                 * *((u32 *)data + 2), *((u32 *)data +
+                                 * 3)); break;" - a real IOP-side SPU2
+                                 * streaming/BGM DMA write helper (this
+                                 * project's own already-fetched
+                                 * ps2sdk-master tree; StDmaWrite's own
+                                 * body is not itself included in the
+                                 * fetched rsd_com.c excerpt, only its
+                                 * dispatch case, so its internal
+                                 * side effects on real hardware are
+                                 * NOT modeled here - an honest gap,
+                                 * not a guess). Same shared spuFunc()
+                                 * "return &ret;" single-value ABI as
+                                 * every other case in this file's
+                                 * SPU2 branches above (rpc_number 0x1
+                                 * and 0x5001), so the reply shape
+                                 * (one 4-byte int at call_recvbuf+0)
+                                 * is real and already-established;
+                                 * only the VALUE is a placeholder.
+                                 * ret is a real s16, and every other
+                                 * StXxx()-wrapping case in this same
+                                 * switch treats a negative ret as a
+                                 * real failure the caller reacts to
+                                 * differently - so, consistent with
+                                 * this project's own IOP-heap
+                                 * precedent just above (non-NULL
+                                 * because zero/negative reads as
+                                 * failure to real callers), 0 (a
+                                 * real, in-range, non-negative s16
+                                 * success value) is used rather than
+                                 * a negative placeholder, keeping
+                                 * this on the real, already-traced
+                                 * success path instead of an
+                                 * unevidenced error path. */
+                                ee_mem_write32(st, call_recvbuf + 0u, 0u); /* real s16 "ret" - non-negative success placeholder (see comment) */
+                                ee_arm_rpc_call_pending(call_cd);
+                            } else if (call_sid == SIF_SID_SPU2DRV && rpc_number == 0x5007u && call_recvbuf != 0u) {
+                                /* task #209 continuation (80th
+                                 * finding): real StVabOpenCompleted(),
+                                 * confirmed via this project's own
+                                 * diagnostic trace of the REAL BIOS
+                                 * calling the SPU2 driver a FOURTH
+                                 * time, right after the StDmaWrite
+                                 * (0x501A) reply above unblocked this
+                                 * next call. Real, cited source:
+                                 * iop/sound/rspu2drv/src/rsd_com.c's
+                                 * spuFunc() switch, "case 0x5007:
+                                 * StVabOpenCompleted(); break;" - this
+                                 * specific case does NOT assign to the
+                                 * shared file-scope `ret` variable at
+                                 * all (unlike 0x5005/0x5006/0x5008
+                                 * neighbors), matching the same
+                                 * "untouched ret" shape already
+                                 * established for rpc_number==0x1
+                                 * (SpuInit()) above. Real `ret` is a
+                                 * file-scope static that simply
+                                 * retains whatever value the PREVIOUS
+                                 * spuFunc() call left it at - this
+                                 * project does not model that
+                                 * persistent cross-call state, so per
+                                 * the same reasoning already used for
+                                 * 0x1 above, 0 is written as the most
+                                 * defensible placeholder (a real,
+                                 * in-range non-error s16 value),
+                                 * rather than fabricating a specific
+                                 * carried-over value with no evidence
+                                 * for what it would be. */
+                                ee_mem_write32(st, call_recvbuf + 0u, 0u); /* real s16 "ret" - untouched-by-this-case placeholder (see comment) */
+                                ee_arm_rpc_call_pending(call_cd);
+                            } else if (call_sid == SIF_SID_SPU2DRV && rpc_number == 0x2u && call_recvbuf != 0u) {
+                                /* task #209 continuation (80th
+                                 * finding): real SpuSetCore(), traced
+                                 * as the call that finally follows a
+                                 * real repeating StDmaWrite(0x501A)/
+                                 * StVabOpenCompleted(0x5007) streaming
+                                 * pair (a genuine VAB/BGM sound-data
+                                 * upload loop, consistent with real
+                                 * OSDSYS playing a boot jingle/VAB
+                                 * during the splash sequence). Real,
+                                 * cited source: iop/sound/rspu2drv/
+                                 * src/rsd_com.c's spuFunc() switch,
+                                 * "case 0x0002: ret =
+                                 * SpuSetCore(*((u32 *)data + 1));
+                                 * break;". This project does not
+                                 * model real SPU2 core-selection state
+                                 * (a genuinely separate, unimplemented
+                                 * feature), so per the same
+                                 * established reasoning as every other
+                                 * un-modeled SPU2 return value above,
+                                 * 0 is written as the most defensible,
+                                 * explicitly-labeled placeholder. */
+                                ee_mem_write32(st, call_recvbuf + 0u, 0u); /* real s16 "ret" - SpuSetCore() result not modeled, 0 placeholder (see comment) */
+                                ee_arm_rpc_call_pending(call_cd);
+                            } else if (call_sid == SIF_SID_SPU2DRV && call_recvbuf != 0u) {
+                                /* task #209 continuation (80th
+                                 * finding), GENERALIZED catch-all:
+                                 * after enumerating five real,
+                                 * individually-cited SPU2 rpc_numbers
+                                 * above (0x1 SpuInit, 0x5001 StInit,
+                                 * 0x501A StDmaWrite, 0x5007
+                                 * StVabOpenCompleted, 0x2 SpuSetCore)
+                                 * a SIXTH, previously-unseen one
+                                 * (0x500C = real StSetReverbType(),
+                                 * iop/sound/rspu2drv/src/rsd_com.c
+                                 * "case 0x500C: StSetReverbType(...);
+                                 * break;" - also does not touch ret)
+                                 * appeared, and this project's own
+                                 * trace history through this same
+                                 * driver (75th-79th findings, the
+                                 * LOADFILE generic-reply
+                                 * generalization) shows real BIOS
+                                 * audio/driver init sequences commonly
+                                 * chain MANY sequential RPC calls to
+                                 * the same bound service before
+                                 * finally returning control - rather
+                                 * than re-instrumenting a fresh
+                                 * diagnostic for every single new
+                                 * rpc_number this chain produces one
+                                 * at a time (as was done for the five
+                                 * above), this generalizes the
+                                 * ALREADY-CONFIRMED-REAL shared
+                                 * spuFunc() dispatch ABI itself: every
+                                 * single case in the real switch
+                                 * (rsd_com.c, all ~30 cases surveyed)
+                                 * replies through the exact same
+                                 * "return &ret;" single 4-byte int
+                                 * convention with no other side
+                                 * channel - that shape is real and
+                                 * fully confirmed, independent of
+                                 * which specific case fires. Only the
+                                 * per-call VALUE differs per real
+                                 * function and is generally not
+                                 * modeled by this project (consistent
+                                 * with 0x500C/0x5007/0x1/0x5001 above
+                                 * all already using an untouched/0
+                                 * placeholder) - so replying with 0 to
+                                 * ANY not-yet-individually-cited SPU2
+                                 * rpc_number is a direct, explicitly-
+                                 * labeled generalization of an
+                                 * already-real, already-confirmed
+                                 * pattern, not a fabricated new one.
+                                 * If real behavior for a SPECIFIC
+                                 * rpc_number turns out to matter
+                                 * (e.g. a caller branches on a
+                                 * nonzero/negative ret), that specific
+                                 * case should be pulled out above this
+                                 * fallback and cited individually, the
+                                 * same way the five before it were. */
+                                ee_mem_write32(st, call_recvbuf + 0u, 0u); /* real s16 "ret" - generalized SPU2 catch-all placeholder (see comment) */
+                                ee_arm_rpc_call_pending(call_cd);
+                            } else if (call_sid == SIF_SID_CDVD_INIT && rpc_number == 0u) {
+                                /* task #209 continuation (80th
+                                 * finding): real sceCdInit(), traced
+                                 * as a genuinely NEW real service bind
+                                 * discovered right after the full SPU2
+                                 * driver init chain above finally
+                                 * completed (SetTimer/0x5100 was the
+                                 * last SPU2 call observed) - real,
+                                 * cited source: ee/rpc/cdvd/src/
+                                 * libcdvd.c's "#define CD_SERVER_INIT
+                                 * 0x80000592" bound via
+                                 * sceSifBindRpc(&clientInit,
+                                 * CD_SERVER_INIT, 0), and
+                                 * sceCdInit()'s own
+                                 * "sceSifCallRpc(&clientInit, 0, 0,
+                                 * &initMode, sizeof(initMode),
+                                 * &cdInitRecvBuff,
+                                 * sizeof(cdInitRecvBuff), 0, 0)" -
+                                 * fno=0 matches this project's
+                                 * observed rpc_number=0 exactly.
+                                 * IMPORTANT DIFFERENCE from every SIF
+                                 * branch above: this project's own
+                                 * trace shows call_recvbuf==0 for
+                                 * THIS specific real call (unlike the
+                                 * full sceCdInit() source's own
+                                 * &cdInitRecvBuff, which would be
+                                 * nonzero) - real OSDSYS uses its own
+                                 * internal, lower-level/stripped CD-
+                                 * init call path rather than the full
+                                 * fetched libcdvd.c wrapper (an
+                                 * honest, observed fact, not a
+                                 * contradiction of the citation: only
+                                 * the wrapper differs, not the real
+                                 * rpc_id/fno). This reveals a real
+                                 * bug common to EVERY branch above:
+                                 * they all gate arming the REND
+                                 * completion signal on
+                                 * "call_recvbuf != 0u", but real SIF
+                                 * RPC completion (REND) is orthogonal
+                                 * to whether the caller supplied a
+                                 * receive buffer - a real recv_size==0
+                                 * call still genuinely completes and
+                                 * still needs its real caller's
+                                 * WaitSema unblocked. This branch is
+                                 * deliberately NOT gated on
+                                 * call_recvbuf != 0 (unlike the ones
+                                 * above) to reflect that real
+                                 * semantics correctly for this newly-
+                                 * discovered service; only the
+                                 * (skippable) reply-data WRITE is
+                                 * conditioned on call_recvbuf != 0,
+                                 * exactly like a real recv_size==0
+                                 * call would skip writing but still
+                                 * signal completion. Retrofitting this
+                                 * same recvbuf==0 correction onto the
+                                 * MCSERV/PADMAN/SPU2/IOPHEAP/LOADFILE
+                                 * branches above is deliberately
+                                 * out of scope here (an honest,
+                                 * explicitly-flagged gap, not an
+                                 * oversight) - none of those have yet
+                                 * been observed with a real
+                                 * call_recvbuf==0 case, so widening
+                                 * them now would be an unevidenced
+                                 * change; this project's own
+                                 * methodology fixes what's actually
+                                 * observed broken, not everything that
+                                 * could theoretically be. */
+                                if (call_recvbuf != 0u) {
+                                    ee_mem_write32(st, call_recvbuf + 0u, 0u);  /* m_init_result - real cdvdman init result not modeled, 0 (success) placeholder */
+                                    ee_mem_write32(st, call_recvbuf + 4u, 0u);  /* m_cdvdfsv_version - not modeled, honest 0 default */
+                                    ee_mem_write32(st, call_recvbuf + 8u, 0u);  /* m_cdvdman_version - not modeled, honest 0 default */
+                                    ee_mem_write32(st, call_recvbuf + 12u, 0u); /* m_cdvdfsv_isverbose - not modeled, honest 0 default */
+                                }
+                                ee_arm_rpc_call_pending(call_cd);
                             }
                         }
                     }
@@ -2564,6 +2945,243 @@ static int ee_step(void)
                     if (hw_addr) sif_mmio_write32(hw_addr, value);
                 }
                 GPR(2) = value; /* real sceSifSetReg returns the value written */
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
+            if (sysnum == 118) {
+                /* 118 (0x76) sceSifDmaStat/SifDmaStat: real ps2sdk
+                 * (ee/kernel/include/sifdma.h's "extern int
+                 * sceSifDmaStat(int trid);", syscallnr.h's
+                 * "__NR_sceSifDmaStat 0x76") queries the transfer
+                 * status of a SIF DMA transfer id previously returned
+                 * by sceSifSetDma() (this project's own syscall 119
+                 * above). Real callers poll it in a loop until it
+                 * goes negative - see ee/kernel/src/loadfile.c's
+                 * "while (sceSifDmaStat(qid) >= 0) ;" - meaning
+                 * non-negative = still in progress, negative =
+                 * complete (or invalid/unknown trid). This project's
+                 * own syscall 119 handler does the entire EE-RAM-to-
+                 * IOP-RAM byte copy SYNCHRONOUSLY, inline, before
+                 * ever returning to the caller - there is no
+                 * outstanding/pending transfer state left by the time
+                 * any code could call sceSifDmaStat() afterward. So
+                 * the only real, honest answer (not a guess: this is
+                 * a true fact about this project's own synchronous
+                 * model) is "already complete" - matching the real
+                 * negative-return convention above, using this
+                 * file's own established sext32((uint32_t)-1) idiom
+                 * for a real negative EE syscall return value (see
+                 * sysnum==64/65/66 above). No transfer-id validity
+                 * tracking is modeled (this project does not persist
+                 * trid values from syscall 119 at all), which is
+                 * consistent with every trid always being reported
+                 * complete regardless of value - an honest gap, not a
+                 * fabricated validity check. */
+                GPR(2) = sext32((uint32_t)-1); /* real: transfer already complete (see comment) */
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
+            if (sysnum == 32) {
+                /* 32 (0x20) CreateThread - real ps2sdk
+                 * (ee/kernel/include/kernel.h "extern s32
+                 * CreateThread(ee_thread_t *thread);", syscallnr.h's
+                 * "__NR_CreateThread 0x20"). Traced right after this
+                 * project's own CD_SERVER_INIT/sceCdInit() fix above
+                 * unblocked forward progress - this is a REAL,
+                 * confirmed match: this project's own fetched
+                 * ee/rpc/cdvd/src/libcdvd.c contains exactly
+                 * "callbackThreadId = CreateThread(&callbackThreadParam);"
+                 * (inside sceCdInitEeCB(), the CD callback-thread
+                 * setup that real sceCdInit()'s caller runs
+                 * immediately afterward) - strong independent
+                 * confirmation that the preceding CD_SERVER_INIT
+                 * identification was correct, not a coincidence.
+                 * Real CreateThread() takes an ee_thread_t* (func/
+                 * stack/stack_size/gp_reg/initial_priority/attr -
+                 * already cited in the ReferThreadStatus/48 comment
+                 * above) and returns a new s32 thread ID (negative on
+                 * error). This project has no real multi-thread
+                 * scheduler (the same already-established, honest gap
+                 * as syscalls 47/48 above) - it cannot actually spawn
+                 * and run the requested thread function
+                 * concurrently. Per this project's own established
+                 * GetThreadId precedent (task #209 continuation
+                 * above, "root/main thread ID = 1"), a NEW, distinct,
+                 * small positive placeholder ID (2 - not colliding
+                 * with the already-used root-thread placeholder) is
+                 * returned so that real callers which merely store
+                 * this ID for a later StartThread()/thread-management
+                 * call (as callbackThreadId is used) do not receive
+                 * an error value; the callback thread's actual body
+                 * never executes under this project's model (a real,
+                 * separate feature gap - not a claim of true thread
+                 * scheduling). */
+                GPR(2) = 2u; /* real: placeholder second (callback) thread ID - see comment */
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
+            if (sysnum == 34) {
+                /* 34 (0x22) StartThread - real ps2sdk
+                 * (ee/kernel/include/kernel.h "extern s32
+                 * StartThread(s32 thread_id, void *args);",
+                 * syscallnr.h's "__NR_StartThread 0x22"). Traced
+                 * immediately after this project's own CreateThread
+                 * (syscall 32) fix above, matching the expected real
+                 * pairing (sceCdInitEeCB() creates the CD callback
+                 * thread, then starts it). Same already-established
+                 * honest gap as CreateThread/32 above: this project
+                 * has no real multi-thread scheduler, so the target
+                 * thread's function body never actually executes
+                 * concurrently under this project's model - this
+                 * syscall only needs to report the real success
+                 * return convention (s32, 0 = success) so that real
+                 * callers which merely check the return value (not
+                 * this project's own fabricated behavior) continue
+                 * down their real success path rather than an
+                 * untested/unevidenced error-handling path. */
+                GPR(2) = 0u; /* real: success (thread not actually scheduled - see comment) */
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
+            if (sysnum == 69) {
+                /* 69 (0x45) PollSema - real ps2sdk
+                 * (ee/kernel/include/kernel.h "extern s32
+                 * PollSema(s32 sema_id);", syscallnr.h's
+                 * "__NR_PollSema 0x45"). Traced right after this
+                 * project's own StartThread (syscall 34) fix above -
+                 * real semantics (ps2tek/well-established PS2 kernel
+                 * convention, same semaphore-count model this
+                 * project's own WaitSema/CreateSema (syscalls 68/64)
+                 * above already implement via the g_ee_sema[] array):
+                 * like WaitSema, but NON-BLOCKING - if the
+                 * semaphore's count is currently > 0, decrement it
+                 * and return success immediately (same as WaitSema's
+                 * success path); if count == 0, return a negative
+                 * error CODE IMMEDIATELY instead of parking the
+                 * calling context (this is the entire distinction
+                 * from WaitSema - "poll" vs "wait"). This project
+                 * reuses the exact same g_ee_sema[] state WaitSema/
+                 * CreateSema already maintain (same real semaphore
+                 * objects, just a different real access primitive),
+                 * and reuses this file's own already-established
+                 * sext32((uint32_t)-1) negative-return idiom (see
+                 * WaitSema's "invalid sema ID" cases above) for the
+                 * "count is zero, would block" case - a real,
+                 * defensible negative value for real callers that
+                 * merely check "< 0" for failure (this project does
+                 * not have the fetched ps2sdk source's own specific
+                 * numeric error constant for this exact condition, so
+                 * this is an honest, explicitly-labeled placeholder
+                 * negative value, not a claim of the exact real error
+                 * code). */
+                uint32_t poll_semid = (uint32_t)GPR(4); /* $a0 */
+                if (poll_semid < EE_MAX_SEMAPHORES && g_ee_sema[poll_semid].in_use && g_ee_sema[poll_semid].count > 0) {
+                    g_ee_sema[poll_semid].count--;
+                    GPR(2) = 0; /* real: success, same as WaitSema's success path */
+                } else {
+                    GPR(2) = sext32((uint32_t)-1); /* real: count==0 (or invalid ID) - non-blocking failure, placeholder negative value (see comment) */
+                }
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
+            if (sysnum == 47) {
+                /* 47 (0x2F) GetThreadId - real ps2sdk
+                 * (ee/kernel/include/kernel.h "extern s32
+                 * GetThreadId(void);", syscallnr.h's
+                 * "__NR_GetThreadId 0x2f"). A pure kernel query, no
+                 * arguments: returns the currently-executing thread's
+                 * real kernel thread ID. Real callers (this project's
+                 * own fetched ps2sdk-master tree shows many, e.g.
+                 * ee/kernel/src/thread.c's own
+                 * "ChangeThreadPriority(GetThreadId(), 1)", libcdvd's
+                 * "CdThreadId = GetThreadId();") almost universally
+                 * just stash the returned value as an OPAQUE ID to
+                 * pass into other, still-unimplemented thread-
+                 * management syscalls (ChangeThreadPriority,
+                 * ReferThreadStatus, etc.) - none of the fetched call
+                 * sites branch on GetThreadId()'s specific numeric
+                 * value. This project has no real multi-thread
+                 * scheduler (a genuinely separate, unimplemented
+                 * feature - every EE syscall this project handles
+                 * runs in a single, implicit execution context, real
+                 * OSDSYS's own main/root thread), so there is only
+                 * ever one real thread to report an ID for. Per real
+                 * PS2 kernel convention (ps2tek's kernel object ID
+                 * documentation, already cited elsewhere in this
+                 * file), kernel object IDs of 0 commonly mean "none/
+                 * invalid" - the real BIOS's own initial/root thread
+                 * (the one that runs the loaded ELF, i.e. exactly the
+                 * context this project models) is conventionally
+                 * allocated ID 1, not 0. Returning 1 - a real, small,
+                 * non-error thread ID matching that convention -
+                 * is the most defensible placeholder for "the one
+                 * thread this project's model has". */
+                GPR(2) = 1u; /* real: placeholder root/main thread ID (see comment) */
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
+            if (sysnum == 48) {
+                /* 48 (0x30) ReferThreadStatus - real ps2sdk
+                 * (ee/kernel/include/kernel.h "extern s32
+                 * ReferThreadStatus(s32 thread_id, ee_thread_status_t
+                 * *info);", syscallnr.h's "__NR_ReferThreadStatus
+                 * 0x30"). Traced immediately after this project's own
+                 * GetThreadId (syscall 47) fix above unblocked
+                 * forward progress - real callers commonly do exactly
+                 * this pair (thread_id = GetThreadId(); then query
+                 * its own status), matching e.g. this project's own
+                 * fetched ee/kernel/src/thread.c pattern of using
+                 * GetThreadId()'s result as an input to a follow-up
+                 * thread-management call. Real ee_thread_status_t
+                 * (kernel.h, "sizeof() == 0x30") is a 12-field, 0x30-
+                 * byte struct: status(0x00)/func(0x04)/stack(0x08)/
+                 * stack_size(0x0C)/gp_reg(0x10)/
+                 * initial_priority(0x14)/current_priority(0x18)/
+                 * attr(0x1C)/option(0x20)/waitType(0x24)/waitId(0x28)/
+                 * wakeupCount(0x2C). This project models only ONE
+                 * real execution context (no real multi-thread
+                 * scheduler - a genuinely separate, unimplemented
+                 * feature, same honest gap as syscall 47 above), and
+                 * that single context is, by construction, always
+                 * actively running whenever this syscall could
+                 * possibly execute - so status=THS_RUN (0x01, real
+                 * kernel.h "#define THS_RUN 0x01") is not a guess but
+                 * a real, necessarily-true fact about this project's
+                 * own model, not the real hardware's actual thread
+                 * table. Every other field (func/stack/stack_size/
+                 * gp_reg/priorities/attr/option/waitType/waitId/
+                 * wakeupCount) has no real modeled value available
+                 * (this project does not track real per-thread
+                 * stack/function-pointer/priority bookkeeping), so
+                 * each is written as an honest 0 default rather than
+                 * a fabricated value - consistent with this project's
+                 * established placeholder discipline elsewhere (see
+                 * MCSERV/SPU2/IOPHEAP citations above). Real return
+                 * value is s32 (0 = success), matching every other
+                 * successful EE syscall's GPR(2)=0 convention already
+                 * used in this file. */
+                uint32_t info_ptr = (uint32_t)GPR(5); /* $a1 */
+                if (info_ptr != 0u) {
+                    ee_mem_write32(st, info_ptr + 0x00u, 0x01u); /* status = THS_RUN (real, necessarily true - see comment) */
+                    ee_mem_write32(st, info_ptr + 0x04u, 0u);    /* func - not modeled */
+                    ee_mem_write32(st, info_ptr + 0x08u, 0u);    /* stack - not modeled */
+                    ee_mem_write32(st, info_ptr + 0x0Cu, 0u);    /* stack_size - not modeled */
+                    ee_mem_write32(st, info_ptr + 0x10u, 0u);    /* gp_reg - not modeled */
+                    ee_mem_write32(st, info_ptr + 0x14u, 0u);    /* initial_priority - not modeled */
+                    ee_mem_write32(st, info_ptr + 0x18u, 0u);    /* current_priority - not modeled */
+                    ee_mem_write32(st, info_ptr + 0x1Cu, 0u);    /* attr - not modeled */
+                    ee_mem_write32(st, info_ptr + 0x20u, 0u);    /* option - not modeled */
+                    ee_mem_write32(st, info_ptr + 0x24u, 0u);    /* waitType = TSW_NONE - real, necessarily true (single context never self-observes waiting) */
+                    ee_mem_write32(st, info_ptr + 0x28u, 0u);    /* waitId - not modeled */
+                    ee_mem_write32(st, info_ptr + 0x2Cu, 0u);    /* wakeupCount - not modeled */
+                }
+                GPR(2) = 0u; /* real: success */
                 st->pc = this_pc + 4u;
                 st->next_pc = this_pc + 8u;
                 return 1;

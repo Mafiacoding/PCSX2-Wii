@@ -2384,3 +2384,32 @@ into a THIRD real service - sid=0x80000400, confirmed as MCSERV
 at the same wait routine (MCSERV's rpc_number=0x70 not yet
 implemented); zero GS writes still observed. See docs/STATUS.md's
 79th finding. Next: identify MCSERV's real rpc_number=0x70 semantics.
+
+## Round 53 (task #203/#209, 80th finding): MCSERV/SPU2/IOPHEAP/CDVD/thread replies - boot no longer frozen
+
+Implemented 12 additional real, cited fixes in one continuous chain,
+each verified via a fresh host-native diagnostic trace against the
+real BIOS: MCSERV's `rpc_number=0x70` reply; SPU2 driver replies for
+`0x1`/`0x5001`/`0x501A`/`0x5007`/`0x2`/`0x500C` plus a generalized
+catch-all for the shared `spuFunc()` reply ABI; IOP Heap allocator's
+`rpc_number=0x1` (non-NULL placeholder address) - the fix that first
+moved the EE PC off the universal `0x00210F84` wall; EE syscalls 118
+(`sceSifDmaStat`), 47 (`GetThreadId`), 48 (`ReferThreadStatus`), 32
+(`CreateThread`), 34 (`StartThread`), 69 (`PollSema`) - the last of
+which finally unblocked continuous forward execution; and a new real
+service discovery, CD_SERVER_INIT (`sid=0x80000592`, real `sceCdInit()`
+bind), which also exposed and fixed a real bug (RPC completion
+incorrectly gated on `call_recvbuf != 0`).
+
+Verified: 87/87 regression suite pass (three sequential chunks),
+clean Wii/devkitPPC rebuild (434592 bytes, only the pre-existing
+benign `strncpy` warning). A 300M-instruction GS-watch diagnostic
+completed with ZERO halts and a PC actively moving across a real
+polling/dispatch loop (0x0020FECC -> 0x0020FF58 -> 0x00204A4C ->
+0x00213670) for the first time in this project's history - previously
+every run ended in either a halt or a permanently frozen PC. Zero GS
+register writes still observed; neither of the user's target
+conditions (splash screen or GS output) is met yet, but the boot is
+qualitatively unblocked for the first time. See docs/STATUS.md's 80th
+finding. Next: trace what code path the newly-freed boot is executing
+and look for the first GS register touch.

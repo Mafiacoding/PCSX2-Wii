@@ -9726,3 +9726,116 @@ bytes). No BIOS bytes committed/pushed/rsynced.
 semantics from the already-fetched `ee/rpc/memorycard/src/libmc.c`/
 `iop/memorycard/mcserv/src/mcserv.c` sources and implement a cited
 reply, continuing the same real, evidence-based chain.
+
+## Update (Round 53, 80th finding): MCSERV/SPU2/IOPHEAP/CDVD/thread replies clear the first-ever SYSCALL walls - EE PC now actively running, no longer frozen
+
+Following the 79th finding's cd->sid tracking infrastructure, implemented
+real, cited replies for every remaining service bind observed in the
+boot chain, in the order they were discovered via successive
+host-native diagnostic traces against the real BIOS:
+
+- **MCSERV** (`sid=0x80000400`, `rpc_number=0x70` = real `MC_RPCCMD_INIT`):
+  a 12-byte `mcRpcStat_t` reply (`result=0`, `mcserv_version=0`,
+  `mcman_version=0`), cited to `iop/memorycard/mcserv/src/mcserv.c`'s
+  `cb_rpc_S_0400()` case 0x70 and `common/include/libmc-common.h`'s
+  `mcRpcStat_t` struct.
+- **SPU2 driver** (`sid=0x80000601`, real `sce_SPU_DEV`): individually
+  cited replies for `rpc_number=0x1` (`SpuInit()`), `0x5001` (`StInit()`,
+  lower-confidence - real case body is `#if 0`'d in the fetched source),
+  `0x501A` (`StDmaWrite()`), `0x5007` (`StVabOpenCompleted()`), `0x2`
+  (`SpuSetCore()`), `0x500C` (`StSetReverbType()`), plus a GENERALIZED
+  catch-all for any other SPU2 `rpc_number` (grounded in `spuFunc()`'s
+  confirmed-real, uniform "return &ret;" single-int reply ABI, shared
+  by every case in the real switch regardless of which one fires).
+- **IOP Heap allocator** (`sid=0x80000003`, real `SifInitIopHeap()`):
+  `rpc_number=0x1` = `SifAllocIopHeap()`, replied with a non-NULL
+  placeholder address (`0x00001000`) rather than 0, because real
+  callers treat a NULL return as allocation failure (same reasoning
+  as task #194's earlier "sd = non-NULL PLACEHOLDER" precedent). This
+  was the single fix that broke the SYSCALL-halt streak: it caused a
+  fresh diagnostic trace to show the boot's final PC moving OFF the
+  previously-universal `0x00210F84` WaitSema address for the first
+  time in this project's entire history.
+- **EE syscall 118 (`sceSifDmaStat`)**: real ps2sdk
+  (`ee/kernel/include/sifdma.h`) - queries a SIF DMA transfer's status,
+  real callers poll `while (sceSifDmaStat(qid) >= 0)`. This project's
+  own syscall 119 (`sceSifSetDma`) already performs its EE-to-IOP RAM
+  copy synchronously/inline, so by the time this syscall could ever be
+  called, the transfer is always already complete - `sext32((uint32_t)-1)`
+  (negative = complete, this file's own established idiom) is returned
+  unconditionally, an honest fact about this project's own synchronous
+  model, not a guess.
+- **EE syscall 47 (`GetThreadId`)**: no real multi-thread scheduler is
+  modeled, so a placeholder root/main thread ID of 1 is returned (per
+  ps2tek's convention that the initial/root thread is ID 1, not 0).
+- **EE syscall 48 (`ReferThreadStatus`)**: fills the real,
+  cited 0x30-byte `ee_thread_status_t` struct with `status=THS_RUN`
+  (necessarily true - this project's single modeled context is always
+  running when this syscall executes) and honest 0 defaults for every
+  other field not tracked by this project.
+- **New real service discovered: CD_SERVER_INIT** (`sid=0x80000592`,
+  real, cited `ee/rpc/cdvd/src/libcdvd.c`'s `#define CD_SERVER_INIT
+  0x80000592`, bound by `sceCdInit()`). This call's `call_recvbuf`
+  was observed as 0 - which exposed a real bug common to every
+  reply branch above: they all incorrectly gated arming the RPC
+  completion signal (REND) on `call_recvbuf != 0u`, but real SIF RPC
+  completion is orthogonal to whether a receive buffer was supplied.
+  The new CDVD branch is deliberately NOT gated that way (data is
+  only written when recvbuf is nonzero; the REND always fires) -
+  fixing this narrow, newly-observed case without retroactively
+  changing the other, not-yet-observed-with-recvbuf==0 branches
+  (explicitly out of scope, an honest gap, not an oversight).
+- **EE syscall 32 (`CreateThread`)** and **EE syscall 34
+  (`StartThread`)**: real, CONFIRMED via an independent match - this
+  project's own fetched `ee/rpc/cdvd/src/libcdvd.c` contains exactly
+  `callbackThreadId = CreateThread(&callbackThreadParam);` inside
+  `sceCdInitEeCB()`, the real CD callback-thread setup that runs
+  immediately after `sceCdInit()` - strong evidence the CD_SERVER_INIT
+  identification above was correct. No real scheduler is modeled;
+  `CreateThread` returns a placeholder second thread ID (`2`, distinct
+  from `GetThreadId`'s placeholder root ID `1`) and `StartThread`
+  returns success without actually scheduling anything.
+- **EE syscall 69 (`PollSema`)**: the non-blocking counterpart to this
+  project's own already-implemented `WaitSema`/`CreateSema` (syscalls
+  68/64) - reuses the same `g_ee_sema[]` state; decrements and returns
+  0 if `count > 0`, otherwise returns `sext32((uint32_t)-1)`
+  IMMEDIATELY instead of parking (the entire real distinction between
+  "poll" and "wait"). This was the fix that finally unblocked the
+  frozen boot: a GS-watch diagnostic afterward showed the EE program
+  counter actively moving between multiple different addresses across
+  successive status checkpoints (0x0020FECC -> 0x0020FF58 ->
+  0x00204A4C -> 0x0020FE94 -> 0x0020FEBC -> 0x00213670) for the first
+  time ever, instead of being frozen at one fixed WaitSema address for
+  the entire diagnostic run.
+
+**Verified, real, and highly significant:** this is the deepest and
+qualitatively most different real boot progress achieved in this
+project's history. Previously, every diagnostic run ended either in a
+halt or in a PC permanently frozen at a single address for the
+runduration. After this round's 12 additional real, cited fixes, a
+300-million-instruction GS-watch diagnostic completed its full run
+with ZERO halts and a PC that visibly moved through a real polling/
+dispatch loop the entire time - strong evidence OSDSYS is now
+executing genuine, previously-unreached boot logic.
+
+**Honest result:** zero GS register writes were still observed during
+this run. Neither of the user's two target conditions (visible splash/
+logo screen, or at least some GS register write) has been met yet.
+The boot is no longer frozen, but has not yet reached a code path that
+touches the GS. This is real, verified progress toward that goal, not
+a claim that the goal itself has been reached.
+
+**Verified for real:** all 87 host-native regression tests pass (0
+failures, confirmed in three sequential chunks); clean Wii/devkitPPC
+rebuild (`pcsx2-wii-git.dol`, 434592 bytes, only the pre-existing
+benign `strncpy` truncation warning in `iop_module_loader.c`, no new
+warnings or errors). No BIOS bytes committed/pushed/rsynced (verified
+via `find "$OUT/pcsx2-wii" -iname "*.bin"` returning empty after
+rsync).
+
+**Concrete next step:** with the boot now actively running rather than
+frozen, the next diagnostic round should trace what code path the EE
+is now executing during this newly-observed polling loop (likely a
+main-loop dispatch or further device-driver setup), and look
+specifically for the first GS register touch or any code path leading
+toward a visible splash/logo screen.

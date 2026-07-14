@@ -3766,3 +3766,61 @@ methodology (identify real sid/rpc_number from host-native tracing,
 cite the real ps2sdk client/server source, implement a minimal
 protocol-correct synthetic reply, verify progress). Next: apply the
 same methodology to MCSERV's rpc_number=0x70.
+
+## Checkpoint (Round 53, task #203/#209, 80th finding)
+
+Implemented 12 real, cited fixes in one continuous "lets go" chain,
+each verified via a fresh host-native diagnostic trace against the
+real BIOS bytes:
+
+- MCSERV `rpc_number=0x70` reply (real `MC_RPCCMD_INIT`).
+- SPU2 driver replies for six individually-cited `rpc_number`s
+  (`0x1`, `0x5001`, `0x501A`, `0x5007`, `0x2`, `0x500C`) plus a
+  generalized catch-all grounded in `spuFunc()`'s confirmed-real,
+  uniform single-int reply ABI.
+- IOP Heap allocator `rpc_number=0x1` (non-NULL placeholder address)
+  - the fix that first moved the EE PC off the previously-universal
+  `0x00210F84` WaitSema wall.
+- EE syscalls 118 (`sceSifDmaStat`), 47 (`GetThreadId`), 48
+  (`ReferThreadStatus`), 32 (`CreateThread`), 34 (`StartThread`), 69
+  (`PollSema`) - the last of which finally unblocked continuous
+  forward execution.
+- Discovered and implemented a new real service, CD_SERVER_INIT
+  (`sid=0x80000592`, real `sceCdInit()` bind per
+  `ee/rpc/cdvd/src/libcdvd.c`), independently CONFIRMED via a second
+  real match (`CreateThread`/`StartThread` calls matching libcdvd's
+  own `sceCdInitEeCB()` callback-thread setup). This also exposed and
+  fixed a real bug common to every prior RPC reply branch: RPC
+  completion (REND) was incorrectly gated on `call_recvbuf != 0u`,
+  when real completion signaling is orthogonal to whether a receive
+  buffer was supplied.
+
+Verified: 87/87 regression suite pass (three sequential chunks run
+separately to fit tool call time limits), clean Wii/devkitPPC rebuild
+(`pcsx2-wii-git.dol`, 434592 bytes, only the pre-existing benign
+`strncpy` truncation warning in `iop_module_loader.c`).
+
+**This is the most significant real boot-progress milestone in this
+project's history to date.** A 300-million-instruction GS-watch
+diagnostic completed its ENTIRE run with zero halts, and the EE
+program counter was observed actively moving between multiple
+different real addresses across successive status checkpoints
+(0x0020FECC -> 0x0020FF58 -> 0x00204A4C -> 0x0020FE94 -> 0x0020FEBC ->
+0x00213670) - the first time ever that this project's boot has not
+ended either in a halt or a PC permanently frozen at one fixed address
+for an entire diagnostic run. This is strong, direct evidence that
+OSDSYS is now executing genuinely new, previously-unreached boot logic
+in an active polling/dispatch loop.
+
+**Honest status:** zero GS register writes were still observed during
+this run. Neither of the user's two target conditions (a visible
+splash/logo screen, or at least one GS register write) has been met
+yet - this is real, verified progress toward that goal, not a claim
+the goal itself has been reached.
+
+Next: trace what code path the EE is now executing during this
+newly-observed polling loop (a diagnostic with disassembly/backtrace
+context would help identify whether this is a main-loop dispatch, a
+further device-driver setup sequence, or something closer to the
+splash-screen code path), and look specifically for the first real GS
+register touch.

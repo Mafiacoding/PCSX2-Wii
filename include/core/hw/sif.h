@@ -292,6 +292,10 @@ uint32_t sif_cmd_iop_get_rpc_bind_count(void);
 #define SIF_SID_LOADFILE        0x80000006u /* real, already cited (task #195/#196) */
 #define SIF_SID_PAD_BIND_ID1_OLD 0x8000010Fu /* real, ee/rpc/pad/src/libpad.c PAD_BIND_RPC_ID1_OLD */
 #define SIF_SID_PAD_BIND_ID2_OLD 0x8000011Fu /* real, ee/rpc/pad/src/libpad.c PAD_BIND_RPC_ID2_OLD */
+#define SIF_SID_MCSERV          0x80000400u /* real, ee/rpc/memorycard/src/libmc.c "rpc_id = 0x80000400" */
+#define SIF_SID_SPU2DRV         0x80000601u /* real, iop/sound/rspu2drv/src/include/rs_i.h "sce_SPU_DEV" */
+#define SIF_SID_IOPHEAP         0x80000003u /* real, ee/kernel/src/iopheap.c "sceSifBindRpc(&_ih_cd, 0x80000003, 0)" (SifInitIopHeap) */
+#define SIF_SID_CDVD_INIT       0x80000592u /* real, ee/rpc/cdvd/src/libcdvd.c "#define CD_SERVER_INIT 0x80000592", bound by sceCdInit() - task #209 continuation (80th finding) */
 
 void sif_cmd_iop_track_bind_sid(uint32_t cd_ptr, uint32_t sid);
 uint32_t sif_cmd_iop_lookup_bind_sid(uint32_t cd_ptr); /* returns 0 if not found */

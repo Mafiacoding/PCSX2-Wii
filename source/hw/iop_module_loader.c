@@ -379,29 +379,46 @@ static uint32_t load_only_one(iop_state_t *st, const char *name, iop_elf_load_re
      * the same front-loading pass - can resolve imports against it
      * once link_imports_one() runs for everyone.
      *
-     * Round 59 (90th/91st findings, corrected Round 60/93rd finding):
-     * skip this for a "P" twin whose real "I" counterpart is also
-     * present in the modlist - see module_has_i_twin()'s own comment
-     * above for the full real citation trail - but ONLY when this
-     * project's actual modeled COP0 PRId (`st->cop0[15]`) is the
-     * real retail value (`>= 16`) that makes real hardware's own
-     * `_start()` check select the "I" twin as resident in the first
-     * place. This project's PRId is currently deliberately left at
-     * its pre-91st-finding value of 0 (see iop_core.c's own citation
-     * trail for why - a real, cited PRId=0x1f causes real BIOS ROM
-     * code to take an early path this project can't yet follow past
-     * a real hardware device-table validation, dead-ending the boot
-     * before this synthesized loader is ever reached at all), so
-     * with `prid < 16`, real hardware's OWN check makes the "P" twin
-     * the resident one instead - matching this project's original,
-     * pre-Round-59 loader behavior (P always wins by load order) -
-     * and this fix intentionally does NOT override that while PRId
-     * stays at 0. Once a future round models the real early-ROM
-     * device-table check well enough to set PRId to its real value
-     * without dead-ending the boot, this same check will
-     * automatically flip to the real-hardware-correct behavior with
-     * no further changes needed here. */
-    if (st->cop0[15] < 16u || !module_has_i_twin(name)) {
+     * Round 59 (90th/91st findings, corrected Round 60/93rd finding,
+     * decoupled from PRId Round 72/112th-113th findings): skip this
+     * for a "P" twin whose real "I" counterpart is also present in
+     * the modlist - see module_has_i_twin()'s own comment above for
+     * the full real citation trail.
+     *
+     * This used to also be gated on `st->cop0[15] >= 16u` (only apply
+     * the real-hardware twin-selection when PRId matches the retail
+     * value), on the theory that this project's PRId should stay at
+     * its safe value of 0 until a future round could model the real
+     * early-ROM device/driver-table validation routine at
+     * 0xBFC4A000-0xBFC4A488 (92nd/93rd findings) well enough to set
+     * PRId=0x1f without dead-ending the boot.
+     *
+     * Round 72 (112th/113th findings) established that gate was
+     * solving the wrong layer of the problem. This project's IOP
+     * module loader (task #92) is a SYNTHESIZED substitute for real
+     * BIOS ROM boot code, not an interpretation of it - it only ever
+     * runs when the IOP's PC has escaped into memory this project
+     * doesn't model as real, fetchable ROM/RAM content (see this
+     * function's own fallback-trigger, `iop_core.c`'s `iop_step()`).
+     * With PRId left at 0, real BIOS ROM code never reaches (and this
+     * project therefore never has to interpret) the 0xBFC4A000+
+     * device-table routine at all - this loader's synthesized module
+     * list is what actually runs instead. Since that whole routine
+     * is bypassed either way while PRId=0, tying the (separate,
+     * already-fully-diagnosed - 89th/90th findings) P/I twin-export-
+     * shadowing fix to PRId's value was conflating two independent
+     * questions: "which twin's exports should a synthesized loader
+     * prefer" (answer: always the "I" twin when present - that's
+     * what every real retail console's genuine PRId=0x1f actually
+     * selects, per ps2sdk's own cited P/I convention) and "is it safe
+     * to let real ROM code re-derive that same answer for itself"
+     * (answer: not yet - the device-table routine is still
+     * unmodeled). This project's PRId register itself is intentionally
+     * left unmodified (see iop_core.c's own citation trail) - only
+     * the synthesized loader's twin-selection outcome is corrected
+     * here, independent of PRId, since it never depends on actually
+     * executing the real ROM code that would otherwise derive it. */
+    if (!module_has_i_twin(name)) {
         for (int i = 0; i < out->export_count; i++) {
             export_registry_add(out->exports[i].name,
                                  out->exports[i].addr + 20u /* fptrs[0] - see iop_elf.h layout */,

@@ -4251,3 +4251,39 @@ not just tail inspection). Clean Wii/devkitPPC rebuild: exit 0,
 pcsx2-wii-git.dol produced (441280 bytes). Task #235 marked completed
 with this honest outcome; a new follow-up task opened for the
 narrowed question.
+
+## Checkpoint (Round 73 - 113th finding, task #239 closed)
+Landed the fix Round 61/93rd finding left conditionally disabled:
+`iop_module_loader.c`'s P/I twin export-preference (89th-91st findings)
+is now unconditional (`if (!module_has_i_twin(name))`), decoupled from
+`st->cop0[15]` (PRId) entirely - PRId itself stays at 0, so this is
+zero-risk against the 92nd/93rd findings' device-table dead-end
+regression (the synthesized loader is a fallback substitute that only
+runs BECAUSE PRId stays 0; real ROM code never re-derives this answer
+in the first place, so tying the two together was solving the wrong
+layer).
+
+Mid-round, initial host-native diagnostics wrongly suggested a stale-
+pointer/ELF-relocation bug (`INTRMANI`'s table pointing into what was
+assumed to be `INTRMANP`'s address range). A more careful re-trace -
+directly reading each module's actual bump-allocated `load_addr` via
+new `[SHTREL]`/`[RELOC]` instrumentation rather than assuming ranges -
+showed this was a misdiagnosis: `iop_elf.c`'s relocation logic is
+correct, and both `INTRMANI`'s and `TIMEMANI`'s export tables are
+fully, correctly self-relocated to their own addresses. Recorded
+honestly in STATUS.md rather than silently discarded.
+
+Verified via widened PC-execution tracing (the previous round's watch
+window only covered `INTRMAN`'s address range, missing `TIMEMAN`
+entirely) that both P and I twins' own code now execute for both
+`intrman` and `timrman`. `IMASK` still reads 0 at the end of the run -
+a new, narrower open question (`TIMEMANI`'s own `AllocHardTimer` still
+not succeeding, for a reason not yet traced) - explicitly kept separate
+from this fix's own verified, working scope (P/I export-shadowing
+itself), per the user's explicit direction not to conflate half-
+diagnosed threads.
+
+Full regression suite: 90/90 pass, 0 failures. Clean Wii/devkitPPC
+rebuild: exit 0, `pcsx2-wii-git.dol`/`.elf` produced. Task #239 marked
+completed with this honest outcome; the `AllocHardTimer` question is
+the concrete next thread (task #172 continuation).

@@ -2711,6 +2711,27 @@ genuinely never executes in this boot; finding it (and what gates
 entry to it) is the concrete next step. No source change, docs-only
 round.
 
+### Round 73 (113th finding, task #239)
+Landed the fix Round 61/93rd finding left conditionally disabled: the
+P/I twin export-shadowing preference (89th-91st findings) is now
+unconditional, decoupled from PRId entirely (`iop_module_loader.c`'s
+gate is now just `if (!module_has_i_twin(name))`) - PRId itself stays
+at 0, so this carries no risk of the 92nd/93rd findings' device-table
+dead-end regression. Mid-round, initial diagnostics wrongly suggested
+a stale-pointer/relocation bug in `iop_elf.c`; a more careful re-trace
+(correctly identifying each module's actual bump-allocated load_addr)
+showed this was a misdiagnosis - `iop_elf.c`'s relocation logic is
+correct, and both `INTRMANI`'s and `TIMEMANI`'s export tables are
+fully, correctly self-relocated. Verified via widened host-native PC
+tracing that both P and I twins' own code now execute for both
+`intrman` and `timrman` (the prior round's diagnostic window only
+covered `INTRMAN`'s address range, wrongly suggesting `TIMEMANI` never
+ran at all). `IMASK` still reads 0 at the end of the run - a new,
+narrower open question (`TIMEMANI`'s own real `AllocHardTimer` still
+not succeeding for a not-yet-traced reason), explicitly NOT conflated
+with this fix's own verified scope. Full regression suite (90/90
+pass), clean Wii/devkitPPC rebuild (exit 0), docs updated, committed.
+
 ### Round 72 (112th finding, task #238 correction, task #221 resumption)
 Corrected the 111th finding: the IOP does NOT halt by design anymore -
 that was fixed at task #179 (well before this session), and a fresh

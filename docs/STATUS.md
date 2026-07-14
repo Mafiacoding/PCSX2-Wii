@@ -11202,3 +11202,90 @@ checkbox is correct as-is.
 No source changes this round (docs-only correction pass) - regression/
 rebuild skipped per this project's own standing convention for
 docs-only rounds.
+
+
+## 99th finding (Round 65, task #172 continued, investigation only): real function entry/parameters identified, empty-table lookup mechanism substantially refined - second parallel table discovered, no citable fix yet
+
+Continuing task #172 with the concrete next step from the 96th finding
+(capture the search key at the dispatcher). The live PCSX2 debugger
+session remains mismatched to our boot state (Pine IPC still not
+connected), so this round used the same "low, fixed kernel-resident
+code disassembles identically regardless of what's currently loaded"
+technique as the 96th finding, going deeper via pure static
+disassembly rather than runtime instrumentation (the host-native
+diagnostic's actual throughput in this sandbox was measured this round
+at ~2M EE+IOP instructions/sec combined - far too slow to reach this
+code path, roughly ~500M+ instructions in, within a single tool-call's
+time budget; this is a disclosed, measured limitation, not a guess).
+
+**Corrected finding**: the 96th finding characterized `0x8000FE00` as
+the dispatcher's own entry point. Full disassembly this round shows
+the REAL function entry is `0x8000FCE8` (real prologue: `addiu sp,
+-0x70`, saves ra/s0-s4), and `0x8000FE00` is actually mid-function -
+the third comparison in an internal 4-way status-value ladder. The
+function takes a mode selector in `a0` (compared against 2 at entry)
+and forwards its own `a1` into an internal helper.
+
+**Real control flow traced**: the function computes a status value via
+`cfc2 a1, VPU-STAT` (VU0 status flags) combined with
+`RAM[0x8002022C]` (a hardware/context status word also read
+elsewhere in this project's GS work), writes either `0x00008250` or
+`0xFFFF8000` into the persistent global `RAM[0x80020D24]`, then calls
+`0x8000EB88` - a small leaf helper that reads that SAME global back as
+a base pointer and returns one of several fields from it
+(`[base+0x22C]`, `[base+0x230]`, or `[base+0x240]+4`, chosen by flag
+bits at `[base+0x228]`). This return value becomes `s1`, and `*(u32*)s1`
+is compared against four sentinel values before selecting one of five
+final status codes (`0x22/0x23/0x24/0x25/0x27`) written to
+`[0x80020E4C]` - the exact field the OSDSYS per-frame loop
+(`0x8000F864-0x8000F870`) tests, confirmed via disassembly this round:
+`bnez v0, ->0x8000F768` sends OSDSYS back to the top of its per-frame
+loop on ANY nonzero value, so every one of these five codes is a
+"stay in the retry loop" outcome, not a partial-success continuation.
+
+Three of the code paths call `0x8000EF78(a0=s1)` - the empty-table
+linear search from the 96th finding, now confirmed to receive `s1`
+(not a literal constant) as its search key, exactly matching the 96th
+finding's structural guess but now with a real, disassembly-traced
+origin for that value.
+
+**New discovery: a second, parallel table.** Disassembling
+`0x8000EFD0` (called from two other paths in the same dispatcher,
+`0x8000F168`/`0x8000F1C4`) shows it is NOT a "register a new entry"
+writer as hypothesized last round - it is another iteration function,
+walking the SAME table at `0x80020E70`/count `0x80021008` with a
+callback (`0x8000ECD8`) per entry, then ALSO walking a SECOND,
+structurally identical table at `0x80020FF4`/count `0x8002100C` -
+previously unknown. Both tables are empty in the captured watch log
+from the 96th finding's instrumentation run (which covered the full
+`0x80020000-0x80021000` range), so neither loop's body ever executes.
+
+**Honest scope of what remains open.** No `jal` to `0x8000FCE8` was
+found via a full-range pattern search of the currently-resident live
+session's EE RAM (`pcsx2_find_pattern` for both the real caller-encoded
+opcode and this function's own address), meaning it is very likely
+invoked indirectly (`jalr` through a function-pointer/vtable slot -
+consistent with OSDSYS's device-dispatch style seen elsewhere in this
+investigation) rather than a direct call, so its caller and the true
+provenance of the `0x8002022C`/VPU-STAT-derived value could not be
+traced further this round. No writer for either table
+(`0x80020E70`/`0x80020FF4`) was located in currently-resident code -
+if a real writer exists, it is likely part of OSDSYS's own
+initialization sequence that either runs before the point our
+emulation's captured watch log began, or is gated behind a condition
+our boot never satisfies. Both remain real, disclosed unknowns - no
+fix is implemented this round, consistent with this project's
+no-fabrication policy.
+
+**Net effect on task #172.** Meaningfully more precise than the 96th
+finding: the real function boundaries, its two-level indirection
+through `0x8000EB88`, the true origin of the search key, and the
+existence of a second parallel table are now established facts. Task
+#172 remains in_progress, re-scoped again: (1) find the indirect
+caller of `0x8000FCE8` (likely via vtable/jump-table reverse-
+engineering rather than direct `jal` pattern search), (2) find what
+should populate `RAM[0x8002022C]`/VPU-STAT with values that route this
+state machine to a success path instead of always landing on one of
+the five retry codes. No source change this round - docs-only
+investigation; regression/rebuild skipped per this project's own
+standing convention for investigation-only rounds.

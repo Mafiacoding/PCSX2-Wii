@@ -4097,3 +4097,30 @@ project's citation-first practice - tracked as a known out-of-scope
 gap, not a near-term target. Boot restored to its best confirmed-good
 state; loader fix banked correctly for later. Task #172 (splash
 screen blockers) remains in_progress at this same baseline.
+
+## Checkpoint (Round 62 - 94th finding, task #172 continued)
+Docs-only investigation round after a sandbox reset (host-native
+diagnostic harness rebuilt from scratch against committed source
+d423c6d). Resolved an apparent ee.pc discrepancy (0x8000CFD4 vs
+0x8000F810 cited in different earlier findings): fine-grained
+single-step tracing proved both are real waypoints of the same
+active OSDSYS pad-event polling loop, not a freeze/regression -
+confirmed by checking out the exact historical commit (12e1725) and
+reproducing the identical resting point.
+
+Decisive new evidence: instrumented gs_mmio_write64() in a disposable
+scratch copy (/tmp/pcsx2-instrument, real repo never touched,
+verified clean via git status before/after) to log every
+PMODE/DISPFB1/DISPLAY1/CSR write across a full 100,000,000-instruction
+run. Result: exactly ONE GS-register write occurs in the entire boot
+(a single CSR write, val=0x200, at ee.pc=0x8000AACC) - PMODE,
+DISPFB1, and DISPLAY1 are never written even once. This confirms and
+sharpens the 81st finding's open item into a conclusive fact: OSDSYS's
+real screen/framebuffer-setup code path never executes in this boot.
+
+Next step for task #172: locate OSDSYS's real PMODE/DISPFB1/DISPLAY1
+setup routine and determine what gates entry to it - candidates
+include a still-missing RPC/syscall reply, or a real EE-side
+interrupt this project has never raised (ee_intc_raise(), per its own
+header comment, is "not yet called by anything"). No source change
+this round.

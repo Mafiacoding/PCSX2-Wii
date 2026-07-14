@@ -2640,3 +2640,21 @@ than a near-term target, since pursuing it means abandoning this
 project's citation-first discipline. Boot is back at the most
 advanced confirmed-good state (post-task-#217), now with a correct,
 conditional loader fix banked for later.
+
+### Round 62 (94th finding, task #172 continued)
+Rebuilt the host-native diagnostic harness from scratch (sandbox reset
+between sessions) and resolved an apparent discrepancy between two
+previously-cited resting PCs (0x8000CFD4 vs 0x8000F810): fine-grained
+single-step tracing proved both are real waypoints of the SAME active
+polling loop (OSDSYS's per-frame pad-event service routine,
+0x8000CFxx-0x8000D0xx / 0x8000F810-0x8000F870), not a freeze or
+regression - different sampling strides just land on different points
+in the loop's period. Instrumented gs_mmio_write64() in a disposable
+scratch copy (real repo untouched, verified clean) to log every
+PMODE/DISPFB1/DISPLAY1/CSR write across a full 100M-instruction run:
+exactly one write occurs (CSR, val=0x200, at pc=0x8000AACC) - PMODE,
+DISPFB1, and DISPLAY1 are never written at all. This conclusively
+narrows task #172: OSDSYS's real screen/framebuffer-setup code path
+genuinely never executes in this boot; finding it (and what gates
+entry to it) is the concrete next step. No source change, docs-only
+round.

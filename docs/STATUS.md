@@ -10815,3 +10815,79 @@ Source-change round: `source/core/iop/iop_core.c` (cop0[15] revert),
 `source/hw/iop_module_loader.c` (loader fix made conditional on
 cop0[15]). Full workflow completed: regression (89/89 OK), Wii
 rebuild (clean), docs (this finding), commit/push/rsync to follow.
+
+### 94th finding (Round 62, task #172 continued): resolved the ee.pc=0x8000CFD4 vs 0x8000F810 discrepancy (same active loop, not a freeze); confirmed via write-instrumentation that PMODE/DISPFB1/DISPLAY1 are NEVER written across the entire boot - the precise remaining splash-screen blocker
+
+**Context.** After Round 61's corrective revert, the sandbox environment
+was reset (all `/tmp` scratch state lost, as expected - see this
+project's own standing convention that host-native diagnostics are
+scratch-only and never committed). This round rebuilt the diagnostic
+harness from scratch against the current committed source (`d423c6d`)
+to resume task #172's investigation.
+
+**Apparent discrepancy investigated first.** A fresh diagnostic
+initially showed the boot resting at `ee.pc=0x8000F810`, not the
+`0x8000CFD4` figure cited in the 88th/93rd findings. Checking out the
+exact historical commit (`12e1725`, Round 58/88th finding) and
+running the identical diagnostic against it reproduced the SAME
+`0x8000F810` resting point - ruling out any regression from Round
+59-61's changes (which are fully neutral on top of `12e1725`, as
+intended). A finer-grained trace (single-slice stepping, printing
+`ee.pc` on every change) proved the resolution: this is not a frozen
+PC at all - it's a genuinely active polling loop cycling through
+`0x8000CFC4-0x8000D01C` and `0x8000F810-0x8000F870` (at least 12
+distinct addresses observed in one cycle). Earlier diagnostics (this
+round's and, very plausibly, the historical ones behind the 88th/93rd
+findings) simply have their periodic sampling stride land on
+different points within this same loop's period - both `0x8000CFD4`
+and `0x8000F810` are real, correct waypoints of the identical resting
+loop, matching this project's own 53rd finding's description of a
+"bounded loop repeatedly visiting `0x8000CF88-0x8000D01C`,
+`0x8000F768-...`". No bug, no regression - just two different valid
+snapshots of the same steady-state loop.
+
+**Disassembly of the loop (via live PCSX2 debugger, matched
+byte-for-byte against our own emulator's execution).** The
+`0x8000F700`-`0x8000F870` function is OSDSYS's real per-frame service
+routine: it checks pad-connect/disconnect flags at `s0+0xE28`,
+`s5+0xE30`, `s4+0xE3C` and a "pad-changed" flag at `s6+4`, and a
+global flag at `0x80021020`; if nothing changed, it falls through to
+`0x8000F864` and loops back around via the caller
+(`0x8000CFxx-0x8000D0xx`). Read on the live PCSX2 reference debugger,
+`[0x80021020]` is ALSO `0` on real, fully-booted hardware at rest -
+this is a legitimate, expected steady state (a real console's menu
+loop also spins forever polling for pad/disc events once nothing is
+happening), not evidence of a stall by itself.
+
+**Decisive new data point: GS-register write instrumentation.** To
+settle whether OSDSYS's screen-setup code is ever reached at all (as
+opposed to just this specific idle loop being expected/correct), a
+scratch-instrumented copy of `gs_mmio_write64()` (in
+`/tmp/pcsx2-instrument`, a throwaway copy - the real repo was never
+touched, verified clean via `git status --short` before and after)
+logged every write to PMODE (`0x12000000`), DISPFB1 (`0x12000070`),
+DISPLAY1 (`0x12000080`), and CSR (`0x12001000`) across a full
+100,000,000-instruction run. Result: **exactly ONE GS-register write
+occurs in the entire run** - a single CSR write (`val=0x200`) at
+`ee.pc=0x8000AACC`, early in boot. PMODE, DISPFB1, and DISPLAY1 are
+never written even once. This directly confirms and sharpens the
+81st finding's open item ("neither observed yet in this run") into a
+conclusive, instrumented fact for the current (post-Round-61,
+functionally-identical-to-Round-58) boot state: whatever real OSDSYS
+code path is responsible for configuring the display circuit
+(PMODE) and framebuffer geometry (DISPFB1/DISPLAY1) for the visible
+browser/menu screen genuinely never executes during this boot - it
+is not merely "not yet checked", it is empirically absent.
+
+**Not yet resolved this round.** This finding narrows task #172's
+target precisely (find/trace OSDSYS's real PMODE/DISPFB1/DISPLAY1
+setup routine and determine why it's never reached - candidates
+include: it being gated behind a real condition this project doesn't
+yet satisfy, e.g. a still-missing RPC/syscall reply, or a real EE-side
+interrupt this project has never raised - `ee_intc_raise()`, per its
+own header comment, is "not yet called by anything") but does not yet
+identify the specific mechanism or implement a fix. No source change
+this round - pure diagnostic/investigation, repo verified clean before
+and after. Full workflow: docs-only round, regression/rebuild skipped
+per this project's own standing convention for investigation-only
+rounds; docs updated, committed, pushed, rsynced.

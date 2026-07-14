@@ -2995,3 +2995,23 @@ finding) is <0x59, so real hardware takes the SAME 0xBFC02000 branch
 as this project's default build - the other branch (0xBFC00800,
 PRId>=0x59) is not a productive next step and was removed from the
 write-up. No fix, no source change. Next step: disassemble 0xBFC4B800.
+
+### Round 82 (122nd finding, task #245, task #172 continuation)
+Docs-only round. Disassembled 0xBFC4B800: a second-stage bootstrap
+(BSS clear, kernel stack setup, 3 boot-parameter scalars stored to
+RAM 0x60/0x64/0x68) that jumps unconditionally to 0xBFC5289C - the
+real IOP kernel-main init dispatcher. Host-native trace confirms both
+addresses are reached exactly once, in the right order (0xBFC4B800 at
+step 7941, 0xBFC5289C at step 20228); a look-alike PRId dispatch fork
+at 0xBFC4B900 (adjacent in ROM, not causally connected) is confirmed
+NOT part of this path (0 hits). Mapped ~30 first-level subroutines
+called from the kernel-main dispatcher (SPU2 mute, DMA channel clear,
+boot-progress print helper, more ROMDIR-catalog-scan instances).
+Automated search of all ~30 targets for a direct constant-offset
+store into RAM 0x3F0-0x490 (the vector-table region) found nothing -
+rules out a trivial single-instruction install at this level, but
+does not rule out a register-relative copy loop or a deeper call
+nest. No live watchpoint attempt this round (existing GT3 session is
+past boot; MCP tools have no reset capability). No fix, no source
+change. Next: copy-loop pattern search, or a live watchpoint on a
+freshly-restarted GT3 session.

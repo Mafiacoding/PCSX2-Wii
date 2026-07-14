@@ -110,6 +110,7 @@
 #include "core/ee/ee_core.h"
 #include "core/hw/dma.h"
 #include "core/hw/ee_intc.h"
+#include "core/hw/ee_timers.h" /* Round 87 (127th finding) */
 #include "core/hw/gs.h"
 #include "core/hw/gif.h"
 #include "core/hw/vif.h"
@@ -525,6 +526,57 @@ static void ee_check_vblank(ee_state_t *st)
         ee_intc_raise(EE_INTC_IRQ_VBLANK_END);
 }
 
+/* Round 87 (127th finding, task #172 continuation): real GS VSYNC
+ * interrupt - the last unraised EE external interrupt source, and the
+ * strongest remaining candidate for why PMODE/DISPFB1/DISPLAY1 are
+ * never written (94th/126th findings) even after real code reaches
+ * and writes SMODE1/SMODE2/SRFSH/SYNCH1/SYNCH2/SYNCV (confirmed live
+ * in the 126th finding's re-verification).
+ *
+ * Real EE_INTC source 0 is "GS" (this file's own EE_INTC_IRQ_VBLANK_*
+ * citation above already lists PCSX2's real Hw.h enum: "0=GS,1=SBUS,
+ * 2=VBLANK_S,3=VBLANK_E,..."), and `source/hw/gs.c`'s own header
+ * comment on GS_CSR has said outright, since this project's GS
+ * register skeleton was first written, "we don't generate real GS
+ * interrupts yet" - a self-documented, previously-unaddressed gap,
+ * not a new hypothesis invented this round.
+ *
+ * Real GS_CSR/GS_IMR bit layout (widely documented for real PS2
+ * hardware, e.g. PCSX2's GS.h and community hardware references):
+ * bit 0 = SIGNAL, bit 1 = FINISH, bit 2 = HSYNC, bit 3 = VSYNC,
+ * bit 4 = EDWRITE - each CSR status bit has a matching IMR mask bit
+ * at the same position (IMR bit set = that source's interrupt is
+ * masked/disabled), and EE_INTC bit 0 (GS) is real hardware's logical
+ * OR of all five CSR-status-bits-that-aren't-masked-by-IMR. This
+ * project only models the VSYNC source (bit 3) - the one every real
+ * BIOS/OSDSYS display-setup routine needs, and the one directly tied
+ * to the SAME real, already-modeled NTSC frame timing this file uses
+ * for EE_INTC_IRQ_VBLANK_START/END (real vsync and vblank-start are
+ * the same physical vertical-sync edge) - SIGNAL/FINISH/HSYNC/EDWRITE
+ * remain unmodeled, matching gs.c's own documented scope limits.
+ *
+ * Gated on GS_IMR bit 3 (not hardcoded on): if real software hasn't
+ * unmasked VSYNC yet, real hardware would not raise EE_INTC bit 0
+ * either - this project's own gs_mmio_write64() already stores
+ * whatever value real code writes to GS_IMR (0x12001010) unchanged,
+ * so checking it here reflects real software's own configuration
+ * rather than assuming a specific reset default this project has no
+ * cited real value for. */
+#define GS_CSR_VSYNC_BIT   3
+#define GS_IMR_VSMSK_BIT   3
+#define EE_INTC_IRQ_GS     0
+
+static void ee_check_gs_vsync(ee_state_t *st)
+{
+    uint64_t phase = st->instructions_executed % EE_CYCLES_PER_FRAME_NTSC;
+    if (phase != 0)
+        return;
+    gs_state_t *gs = gs_get_state();
+    gs->csr |= (1ull << GS_CSR_VSYNC_BIT);
+    if (!(gs->imr & (1ull << GS_IMR_VSMSK_BIT)))
+        ee_intc_raise(EE_INTC_IRQ_GS);
+}
+
 static inline uint8_t *ee_mem_ptr(ee_state_t *st, uint32_t addr, uint32_t size)
 {
     /* R5900 Scratchpad RAM (SPR): a real, dedicated 16KB on-chip buffer
@@ -666,6 +718,8 @@ uint32_t ee_mem_read32(ee_state_t *st, uint32_t addr)
         return hw_val;
     if (ee_intc_mmio_read32(hw_addr, &hw_val)) /* task #176 */
         return hw_val;
+    if (ee_timers_mmio_read32(hw_addr, &hw_val)) /* Round 87 (127th finding) */
+        return hw_val;
 
     uint8_t *p = ee_mem_ptr(st, addr, 4);
     if (!p) { ee_mem_check_tlb_fault(st, addr, 0); return 0; }
@@ -727,6 +781,8 @@ void ee_mem_write32(ee_state_t *st, uint32_t addr, uint32_t val)
     if (mch_mmio_write32(hw_addr_w, val))
         return;
     if (ee_intc_mmio_write32(hw_addr_w, val)) /* task #176 */
+        return;
+    if (ee_timers_mmio_write32(hw_addr_w, val)) /* Round 87 (127th finding) */
         return;
 
     uint8_t *p = ee_mem_ptr(st, addr, 4);
@@ -1263,6 +1319,7 @@ int ee_core_init(const bios_image_t *bios)
 
     dma_init(); /* EE DMA controller register block - see core/hw/dma.h */
     ee_intc_init(); /* task #176: EE interrupt controller (INTC_STAT/MASK) - see core/hw/ee_intc.h */
+    ee_timers_init(); /* Round 87 (127th finding): EE peripheral timers T0-T3 - see core/hw/ee_timers.h */
     gs_init();  /* GS privileged register block - see core/hw/gs.h */
     sif_init(); /* EE-side SIF/SBUS mailbox registers - see core/hw/sif.h */
     sif_cmd_iop_init(); /* task #186: minimal IOP-side SIFCMD consumer model - see core/hw/sif.h */
@@ -1907,6 +1964,8 @@ static int ee_step(void)
                         st->cop0[9]++;
                         ee_latch_timer_interrupt(st);
                         ee_check_vblank(st);
+                        ee_check_gs_vsync(st); /* Round 87 (127th finding) */
+                        ee_timers_tick(); /* Round 87 (127th finding): EE peripheral timers T0-T3 */
                         ee_check_rpcinit_pending(st);
                         ee_check_rpc_bind_pending(st);
                         if (!st->branch_pending) {
@@ -6015,6 +6074,8 @@ static int ee_step(void)
      * ee_check_intc_interrupt() below) is deferred to a genuine
      * instruction boundary. */
     ee_check_vblank(st);
+    ee_check_gs_vsync(st); /* Round 87 (127th finding) */
+    ee_timers_tick(); /* Round 87 (127th finding): EE peripheral timers T0-T3 */
     ee_check_rpcinit_pending(st); /* task #187 (63rd finding) */
     ee_check_rpc_bind_pending(st); /* task #192 (68th finding) */
     if (!st->branch_pending) {

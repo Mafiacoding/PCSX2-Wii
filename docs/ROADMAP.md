@@ -3092,3 +3092,29 @@ BUMP_BASE, not yet investigated further). No fix, no source change.
 Next: live PCSX2 comparison tracing forward from the SMODE/SYNCH
 writes (a point this project's boot now demonstrably reaches) rather
 than re-deriving the whole chain from scratch.
+
+### Round 87 (127th finding, task #172 continuation)
+Real fixes, not investigation-only. Implemented the GS VSYNC interrupt
+(EE_INTC bit 0, gated on GS_IMR bit 3) - fires correctly (162x/100M
+instructions) but INTC_MASK=0x00001002 shows real software isn't
+listening for GS/VBLANK yet, so zero effect on the GS-write diagnostic
+alone. Implemented EE peripheral Timers T0-T3 (include/core/hw/
+ee_timers.h, source/hw/ee_timers.c) - previously completely
+unimplemented (confirmed via grep + ee_core.c's own MMIO-dispatch
+comment). Live evidence: real BIOS code configures all 4 timers
+immediately (T0/T1 plain counting, T2/T3 with overflow IRQ enabled),
+COMP=0xFFFF on all four - the exact 16-bit max, which caught and fixed
+a real bug (first draft modeled COUNT as 32-bit; fixed to 16-bit
+wraparound matching the live evidence and the IOP's own T0-T2 model).
+After the fix, T2/T3 overflow IRQs genuinely fire and reach INTC_STAT
+(TIMER2/TIMER3 bits set, TIMER3 unmasked+pending) - ee_intc_pending()
+now correctly returns 1 for the first time. New, more fundamental
+blocker found: Status.EXL=1 is permanently stuck, which unconditionally
+blocks ee_check_intc_interrupt()/ee_check_dmac_interrupt() from ever
+firing (correct real MIPS gating, but nothing clears EXL). Resting PC
+0x80005E5C (same across 94th/122nd/126th findings, pre-existing, not
+caused by this round) is a plain busy-wait reading physical 0x0000F230,
+an ordinary RAM address nothing in this project writes. Full regression
+(90/90) and clean Wii rebuild both pass. Next: trace why EXL never
+clears via ERET (already implemented, funct 0x18), and/or what real
+mechanism should write phys 0x0000F230.

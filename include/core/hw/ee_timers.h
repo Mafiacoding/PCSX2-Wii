@@ -1,0 +1,103 @@
+#ifndef PCSX2WII_EE_TIMERS_H
+#define PCSX2WII_EE_TIMERS_H
+
+#include <stdint.h>
+
+#define EE_TIMERS_COUNT 4
+
+/*
+ * ee_timers.h - EE peripheral counter/timer register block
+ * (T0_COUNT/T0_MODE/T0_COMP/T0_HOLD .. T3_COUNT/T3_MODE/T3_COMP) +
+ * real tick/IRQ model.
+ *
+ * Round 87 (task #172 continuation): this project had NO EE
+ * peripheral-timer model at all before this - only the COP0
+ * Count/Compare mechanism (ee_check_timer_interrupt() in ee_core.c,
+ * Cause.IP7) was ever implemented. These are a completely separate,
+ * real piece of EE hardware (pcsx2/Hw.h's EERegisterAddresses T0_COUNT
+ * etc., pcsx2/Counters.cpp's vSyncInfo/EE counters), confirmed
+ * unimplemented by grepping this codebase (zero hits) and by
+ * ee_mem_read32/write32's own pre-existing comment in ee_core.c
+ * explicitly stating "timers, INTC, SIO, GIF/VIF/IPU control regs
+ * still fall through to the silent-no-op ... path". Found while
+ * investigating why real BIOS code (per the 127th finding's
+ * INTC_MASK=0x00001002 live capture) unmasks EE_INTC bit 12
+ * (TIMER3) specifically - a source that could never fire while this
+ * peripheral didn't exist.
+ *
+ * Real PS2 EE counter base addresses (pcsx2/Hw.h EERegisterAddresses,
+ * T0_COUNT=0x10000000/T0_MODE=0x10000010/T0_COMP=0x10000020/
+ * T0_HOLD=0x10000030, each subsequent timer offset by +0x800 from the
+ * previous: T1=0x10000800, T2=0x10001000, T3=0x10001800). Real
+ * hardware: only T0/T1 implement HOLD (used for gate-mode external
+ * counter capture); T2/T3 do not have a HOLD register at all.
+ *
+ * Modeled here, following this project's established "1 instruction
+ * = 1 cycle" simplification (already used for COP0 Count/Compare and
+ * for iop_timers.c - see that file's own header comment for the
+ * identical rationale) and the same honestly-scoped-down approach:
+ *   - Real free-running COUNT increment, one per EE cycle
+ *     (ee_timers_tick(), called once per instruction step exactly
+ *     like iop_timers_tick() already is for the IOP side).
+ *   - Real target-match (COMP) and overflow-triggered IRQ delivery,
+ *     gated on the real MODE bits (CUE count-enable, CMPE
+ *     compare-irq-enable, per pcsx2/Counters.cpp's rcntUpdate()/
+ *     rcntWmode() real bit semantics), raised via the existing
+ *     ee_intc_raise() hook (EE_INTC bits 9-12 = TIMER0-3, per
+ *     ee_intc.h's real 10-source EERegisterAddresses citation).
+ *   - Real EQUF/OVFF flag bits set on match/overflow (read-only
+ *     status, cleared by software rewriting MODE - same convention
+ *     iop_timers.c already uses for its own TARGET_FLAG/OVERFLOW_FLAG).
+ *
+ * Explicitly NOT modeled (matching iop_timers.h's own scope
+ * disclaimer): CLKS alternate clock-source selects (BUSCLK/8/16/256 -
+ * real hardware's non-1:1 dividers), GATE modes, ZRET's exact
+ * zero-return timing edge cases beyond a plain wrap-on-match, and
+ * T0/T1's HOLD-latch-on-external-signal behavior (HOLD is modeled as
+ * a plain read/write register with no real gate-triggered latching).
+ */
+
+typedef struct {
+    uint32_t count;
+    uint32_t mode;
+    uint32_t comp;
+    uint32_t hold; /* only meaningful for T0/T1 on real hardware; T2/T3 keep it inert */
+} ee_timer_t;
+
+typedef struct {
+    ee_timer_t t[EE_TIMERS_COUNT];
+} ee_timers_state_t;
+
+/* Real EE T*_MODE bit layout (pcsx2/Counters.h's tCOUNTER/rcntMode
+ * union), see the file-level comment above for which of these this
+ * project's simplified tick model actually honors. */
+#define EE_CNT_MODE_CLKS        0x0003u /* bits 0-1, clock source, not modeled (always treated as BUSCLK/1:1) */
+#define EE_CNT_MODE_GATE_ENABLE 0x0004u /* not modeled */
+#define EE_CNT_MODE_GATE_MODE   0x0018u /* bits 3-4, not modeled */
+#define EE_CNT_MODE_ZERO_RETURN 0x0020u
+#define EE_CNT_MODE_CMP_ENABLE  0x0040u /* CMPE: compare-match IRQ enable */
+#define EE_CNT_MODE_OVF_ENABLE  0x0080u /* OVFE: overflow IRQ enable */
+#define EE_CNT_MODE_REPEAT_IRQ  0x0100u /* real bit8: repeat vs one-shot IRQ */
+#define EE_CNT_MODE_TOGGLE_IRQ  0x0200u /* not modeled */
+#define EE_CNT_MODE_CUE         0x0400u /* count-enable */
+#define EE_CNT_MODE_EQUF        0x0800u /* compare-match flag */
+#define EE_CNT_MODE_OVFF        0x1000u /* overflow flag */
+
+void ee_timers_init(void);
+
+/* Returns 1 and fills *out if addr (already KSEG0/1-masked by the
+ * caller, same convention as dma_mmio_read32/ee_intc_mmio_read32) is
+ * one of the 4 timers' COUNT/MODE/COMP/HOLD registers, 0 otherwise. */
+int ee_timers_mmio_read32(uint32_t addr, uint32_t *out);
+int ee_timers_mmio_write32(uint32_t addr, uint32_t value);
+
+/* Advances every counter by one tick and delivers any real
+ * compare-match/overflow interrupt this causes via ee_intc_raise()
+ * (bits 9-12 = TIMER0-3). Must be called unconditionally once per EE
+ * instruction step, same placement/rationale as ee_check_vblank()/
+ * ee_check_gs_vsync() in ee_core.c. */
+void ee_timers_tick(void);
+
+ee_timers_state_t *ee_timers_get_state(void);
+
+#endif

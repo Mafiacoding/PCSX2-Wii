@@ -2861,3 +2861,22 @@ low-EE-RAM globals block (0x80020000), not a dynamically-supplied
 fields really represent. Full regression suite: 89/89 pass (after
 fixing a harness self-include-exclusion bug that had mis-reported 29
 as COMPILE_FAIL). Clean Wii/devkitPPC rebuild verified (436192 bytes).
+
+### Round 75 (115th finding, tasks #242/#243/#244, task #172 continuation)
+Directly resolved the 114th finding's own flagged follow-up: gathered
+live evidence (generic width-tracking diagnostic hook across
+iop_dma/iop_timers/iop_icfg's full address ranges, scratch copy, never
+committed) rather than assuming the same 16-bit dispatch gap applies
+uniformly to all three blocks. Result: iop_dma verified clean (237
+logged events, all 32-bit, 0 narrower - no fix needed, task #242
+closed). iop_timers confirmed buggy (real 16-bit writes to T5's MODE
+register, 0xBF8014A4, values 0x0000/0x0070 - silently dropped) and
+fixed (source/core/iop/iop_core.c: iop_mem_read16/write16 now dispatch
+to iop_timers_mmio_read32/write32, uniformly across all 6 channels
+since the evidence contradicts the ps2sdk-derived T0-T2-only
+assumption - task #243 closed). iop_icfg inconclusive (0x1F801450
+never touched in the 44s trace window - task #244 left open,
+re-scoped as "no evidence yet"). Verified via a dedicated driver
+dumping iop_timers_get_state(): t[5].mode=0x00000C70 now genuinely
+reflects the real write. Full regression suite: 90/90 pass, zero
+failures. Clean Wii/devkitPPC rebuild verified, exit 0.

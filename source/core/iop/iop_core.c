@@ -125,6 +125,39 @@ uint16_t iop_mem_read16(iop_state_t *st, uint32_t addr)
             return (uint16_t)intc_val;
     }
 
+    /* Round 75 (115th finding, task #243, task #172 continuation):
+     * same class of bug as the 114th finding above, this time for the
+     * IOP counter/timer block (core/hw/iop_timers.h). Live host-native
+     * tracing (scratch copy, never committed) of a real BIOS boot to
+     * the current idle=1 steady state captured a genuine real 16-bit
+     * `sh`-class write of value 0x0070 (preceded by a 0x0000 write) to
+     * address 0xBF8014A4 - T5's MODE register (T5 base 0x1F8014A0 +
+     * 0x04, see iop_timers.c's s_ranges[5]) - which this project's own
+     * ps2sdk timrman.c citation (see iop_timers.h) says SHOULD be
+     * 32-bit-only on real hardware (only T0-T2 use 16-bit access per
+     * that community-reimplementation source). Per this session's
+     * established discipline (trust live tracing over the ps2sdk
+     * reference, which is a reimplementation, not the retail ROM),
+     * the live evidence wins: real BIOS-resident code genuinely
+     * issues a 16-bit access to a timer register this project
+     * classified as 32-bit-only, and it was previously silently
+     * falling through to a plain-RAM 16-bit load/store instead of
+     * reaching the timer model at all - meaning the real MODE=0x70
+     * configuration write was being dropped. iop_timers_mmio_read32()
+     * internally calls find_timer(), which already masks off the
+     * KUSEG/KSEG0/KSEG1 segment-select bits (phys = addr &
+     * 0x1FFFFFFFu) before matching - so passing the raw addr through
+     * here (unlike the intc check above, which needed its own literal
+     * range gate) correctly resolves the observed KSEG1-aliased
+     * 0xBF8014A4 form. No narrower per-timer width restriction is
+     * applied since the evidence directly contradicts the assumption
+     * that would have motivated one. */
+    {
+        uint32_t timer_val;
+        if (iop_timers_mmio_read32(addr, &timer_val))
+            return (uint16_t)timer_val;
+    }
+
     uint8_t *p = iop_mem_ptr(st, addr, 2);
     if (!p) return 0;
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -184,6 +217,16 @@ void iop_mem_write16(iop_state_t *st, uint32_t addr, uint16_t val)
      * I_STAT/I_CTRL. */
     if (addr >= 0x1F801070u && addr <= 0x1F80107Bu) {
         if (iop_intc_mmio_write32(addr, (uint32_t)val))
+            return;
+    }
+
+    /* Round 75 (115th finding, task #243) - see iop_mem_read16()'s
+     * matching comment above for the full citation/evidence trail.
+     * Zero-extending mirrors the intc fix's treatment and this
+     * project's existing "plain assignment" write semantics for
+     * COUNT/MODE/TARGET (iop_timers_mmio_write32's own cases). */
+    {
+        if (iop_timers_mmio_write32(addr, (uint32_t)val))
             return;
     }
 

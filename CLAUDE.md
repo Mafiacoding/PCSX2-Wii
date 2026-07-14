@@ -4317,3 +4317,38 @@ rebuild: exit 0, `pcsx2-wii-git.dol`/`.elf` produced. Task #172
 continues (not closed - the boot's next milestone toward a splash
 screen is still open) but this closes a real, long-standing gap first
 identified at task #218.
+
+## Checkpoint (Round 75 - 115th finding, tasks #242/#243/#244)
+Directly resolved the 114th finding's own flagged follow-up ("iop_dma/
+iop_timers/iop_icfg likely share the same gap... no live evidence yet")
+per the user's explicit "now time to fix the iop dma iop timers and
+iop icfg" direction. Gathered live evidence with a generic width-
+tracking diagnostic (scratch copy, never committed) across all three
+blocks' full address ranges before touching any code.
+
+Result: `iop_dma` verified CLEAN - 237 logged events across the boot
+trace, every single one 32-bit, zero narrower accesses. No fix applied
+(no bug found); task #242 closed as verified-correct.
+
+`iop_timers` CONFIRMED buggy - real 16-bit writes to T5's MODE register
+(0xBF8014A4, values 0x0000 then 0x0070) were being silently dropped
+into plain RAM. This contradicts the ps2sdk-derived assumption that
+only timers 0-2 use 16-bit access, but per this session's established
+discipline (trust live tracing of the real ROM over that community-
+reimplementation source), the evidence wins. Fixed
+(`source/core/iop/iop_core.c`): `iop_mem_read16`/`write16` now
+unconditionally try `iop_timers_mmio_read32`/`write32` (which already
+mask KUSEG/KSEG0/KSEG1 segment bits internally via `find_timer()`)
+across all 6 channels uniformly. Verified via a dedicated state-dump
+driver: `t[5].mode=0x00000C70` now genuinely reflects the real write.
+Task #243 closed.
+
+`iop_icfg` INCONCLUSIVE - 0x1F801450 was never touched at all (0
+accesses of any width) in the 44s trace window. Left untouched per the
+same no-guessing discipline; task #244 re-scoped as "no evidence yet,
+revisit when boot progress reaches this code path."
+
+Full regression suite: 90/90 pass, 0 failures. Clean Wii/devkitPPC
+rebuild: exit 0, `pcsx2-wii-git.dol`/`.elf` produced. Task #172
+continues; the PRId/task #221 device-table reverse-engineering effort
+remains the next major thread the user has also asked to resume.

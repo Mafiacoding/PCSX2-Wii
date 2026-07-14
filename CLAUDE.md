@@ -4514,3 +4514,19 @@ watchpoint would probably have the same imprecision. No fix, no
 source change. Next: a PC-based code breakpoint at specific later
 kernel-main call sites, more likely to be exact than a memory
 watchpoint under JIT execution.
+
+## Checkpoint (Round 85 - 125th finding, task #245)
+Second live capture with a deliberately different watchpoint (narrow
+4-byte onchange on 0x440, vs. the 123rd finding's wide write on
+0x40-0x480) on a fresh GT3 cold boot. Result byte-for-byte identical
+to the 123rd finding's capture (same hit PC 0x0000B694, same full
+register state, same memory dump) - conclusively proves this
+debugger's watchpoints aren't instruction-precise here (most likely a
+fixed-time pause landing on a real, unrelated post-boot idle loop,
+not a true trigger-gated break). Closes the live-watchpoint avenue for
+this specific goal. Task #245 overall state: real install mechanism's
+surrounding context, exact table content, and real semantics are
+thoroughly documented and twice independently verified (116th-125th
+findings); the exact writing instruction remains unidentified and
+would need true single-instruction stepping to pin down - substantially
+more time-intensive, not attempted. No fix, no source change.

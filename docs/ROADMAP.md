@@ -3059,3 +3059,21 @@ narrower watchpoint would likely have the same imprecision. No fix,
 no source change. Next: a genuine PC-based code breakpoint at specific
 later kernel-main call sites, not yet examined individually - more
 likely to be exact than a memory watchpoint under JIT execution.
+
+### Round 85 (125th finding, task #245, task #172 continuation)
+Docs-only round. Second live capture with a deliberately different
+watchpoint (narrowed to a single 4-byte word at 0x440, type onchange
+instead of write) on a fresh GT3 cold boot, same user-driven reset
+procedure as Round 83. Result is byte-for-byte identical to the 123rd
+finding's capture - same hit PC (0x0000B694), same full register
+state, same 0x40-0x480 memory dump. Two structurally different
+watchpoint configs producing an identical stop point conclusively
+demonstrates this debugger's watchpoint reports are not instruction-
+precise for this goal - most likely a fixed-time pause landing on
+whatever the IOP is doing then (a real, unrelated post-boot idle
+loop), not a genuine trigger-condition-gated break. Closes out the
+live-watchpoint avenue for pinpointing the exact install instruction;
+a third attempt would very likely reproduce the same result. No fix,
+no source change. Task #245 next step if pursued further: true
+single-instruction stepping from an earlier known point, substantially
+more time-intensive than watchpoints and not yet attempted.

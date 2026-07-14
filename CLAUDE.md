@@ -4564,3 +4564,14 @@ busy-wait reading physical 0x0000F230, an address nothing in this
 project writes. Full regression (90/90) + clean Wii rebuild both pass.
 Next: trace why EXL never clears via ERET, and/or what should write
 phys 0x0000F230.
+
+## Checkpoint (Round 88 - 128th finding, task #172/#247)
+Session-limit-constrained docs round. Corrected Round 87's framing:
+Status.EXL=1 is NOT a stuck/leaked exception (zero exceptions ever
+raised in a 30M-instruction trace) - it's real, deliberate kernel
+bootstrap code at pc=0x80001050 loading a canonical Status constant
+(0x70030c13) from a fixed data table via MTC0, exactly matching real
+PS2 kernel init patterns. Four jal calls before it all return normally;
+a jal to 0x8000C0B8 follows. Real remaining lead: trace forward from
+0x8000C0B8 to find where the busy-wait (~0x80005E5C, polling phys
+0x0000F230) is actually reached from. No source change.

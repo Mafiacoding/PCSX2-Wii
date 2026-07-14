@@ -3118,3 +3118,19 @@ an ordinary RAM address nothing in this project writes. Full regression
 (90/90) and clean Wii rebuild both pass. Next: trace why EXL never
 clears via ERET (already implemented, funct 0x18), and/or what real
 mechanism should write phys 0x0000F230.
+
+### Round 88 (128th finding, task #172/#247 continuation)
+Docs-only round (session-limit-constrained). Corrected the 127th
+finding's framing: instrumented ee_raise_exception() (zero calls in a
+30M-instruction run - no exception ever raised, so no "stuck handler")
+and every MTC0-to-Status write (exactly two: early ROM boot, then
+pc=0x80001050 val=0x70030c13). Disassembled around 0x80001050: real,
+deliberate kernel bootstrap code loading canonical Status/Config
+constants from a fixed data table (0x80012484/0x80012488) via MTC0 +
+SYNC, matching a genuine real-kernel pattern - EXL=1 is intentional,
+not a bug. The four jal calls leading up to it (0x80005B90/0x80002050/
+0x8000AE88/0x80004EC8) all return normally; a fifth jal (0x8000C0B8)
+follows the Status/Config load. Real next step: trace forward from
+0x8000C0B8 to find where the busy-wait (~0x80005E5C, reading phys
+0x0000F230) is actually reached from - that's the concrete remaining
+lead, not EXL itself. No source change, regression/rebuild skipped.

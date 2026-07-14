@@ -4443,3 +4443,21 @@ to the already-solved 117th finding's device-table mechanism - not yet
 disassembled. Task #244 closed. Task #245 next step: disassemble
 0xBFC02600 and its table entries (0xBFC02478-0xBFC024A8). No fix, no
 source change. PRId stays 0.
+
+## Checkpoint (Round 81 - 121st finding, task #245)
+Disassembled 0xBFC02600: a real ROMDIR-catalog scanner over a table
+at 0xBFC02700+ containing genuine IOP module names (RESET, ROMDIR,
+EXTINFO, SBIN, LOGO, IOPBTCONF, SYSMEM, LOADCORE, EXCEPMAN, SIFMAN,
+SIFCMD, INTRMAN, ...). Used to configure the real RAM_SIZE register
+(0xBF801060) and optionally boot an alternate ROM-bank image; failing
+both banks is a real fatal trap (progress=0xFA, infinite self-
+branch). Host-native trace confirms this project's own boot never
+hits that trap (scan succeeds, matching real hardware) and escapes to
+0xBFC4B800 - directly adjacent to the already-solved device-table
+mechanism (116th-119th findings), closing the gap from the raw reset
+vector to that thread. Caught a reasoning error before writing it
+down: real PS2's own PRId (0x1f, per the 91st finding's psxReset()
+citation) is <0x59, so real hardware takes the SAME 0xBFC02000 branch
+as this project's default build - 0xBFC00800 is not a live lead and
+was dropped from the next-step recommendation. No fix, no source
+change. Next: disassemble 0xBFC4B800.

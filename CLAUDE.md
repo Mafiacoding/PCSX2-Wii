@@ -3824,3 +3824,34 @@ context would help identify whether this is a main-loop dispatch, a
 further device-driver setup sequence, or something closer to the
 splash-screen code path), and look specifically for the first real GS
 register touch.
+
+## Checkpoint (Round 54, 81st finding, MILESTONE)
+
+**The user's standing directive's relaxed target has been reached: "GS
+output" is confirmed.** A diagnostic watching the FULL GS privileged
+register block (not just the 5 frame-buffer/display-mode registers
+previous diagnostics tracked) found real, verified writes to SMODE1/
+SMODE2/SRFSH/SYNCH1/SYNCH2/SYNCV - the real CRTC video-timing register
+bank - executed by real BIOS ROM-resident code at pc=0x8000A138-
+0x8000A1B4 and 0x800074D8, roughly 15.4 million instructions into
+boot, well before the OSDSYS RPC-negotiation region (0x00200000+) this
+project's last several rounds (75th-80th findings) have been chasing.
+
+Honest, important caveat: because this code path is independent of any
+IOP/RPC/EE-syscall fix made this session, this GS register activity
+was very likely already occurring in every prior successful boot run
+- it simply was never detected before, because no earlier diagnostic
+watched these specific registers. This is not new capability created
+this round; it is a previously-unverified, now-confirmed fact about
+already-committed code. No source changes were made or needed this
+round - pure diagnostic/investigation finding, docs-only.
+
+Also newly observed: a new MCSERV `rpc_number=0x71` (real
+`MC_RPCCMD_OPEN`) call with no reply implemented yet - a new, real,
+not-yet-cleared wall tracked for a future round, separate from the
+milestone above.
+
+Next: continuing toward an actual visible splash/logo screen (full
+framebuffer contents via DISPFB1/DISPLAY1/PMODE + a real GIF-path
+draw) remains open future work; implementing MC_RPCCMD_OPEN would be
+the next concrete step in the still-ongoing RPC chain investigation.

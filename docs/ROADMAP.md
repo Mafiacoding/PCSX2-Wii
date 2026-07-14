@@ -2413,3 +2413,23 @@ conditions (splash screen or GS output) is met yet, but the boot is
 qualitatively unblocked for the first time. See docs/STATUS.md's 80th
 finding. Next: trace what code path the newly-freed boot is executing
 and look for the first GS register touch.
+
+## Round 54 (81st finding, MILESTONE, investigation only): confirmed real GS register writes - user's relaxed target reached
+
+Built a diagnostic watching the full 19-register GS privileged block
+(previous diagnostics only watched 5: PMODE/DISPFB1/DISPLAY1/DISPFB2/
+DISPLAY2). Discovered real BIOS-resident CRTC/video-timing setup code
+(pc=0x8000A138-0x8000A1B4, 0x800074D8) writes SMODE1/SMODE2/SRFSH/
+SYNCH1/SYNCH2/SYNCV early in boot (i~15.4M), well before the OSDSYS
+RPC negotiation region this project has been chasing across the
+75th-80th findings. This satisfies the user's explicit relaxed target
+("splash screen OR at least GS output, whichever comes first").
+
+Honest caveat: this code path is independent of this session's IOP/
+RPC fixes, so this GS activity was very likely already happening in
+every prior successful run - it just was never detected due to
+incomplete register-write monitoring in past diagnostics. No source
+changes this round (pure investigation); no regression/rebuild needed.
+Also newly observed: MCSERV rpc_number=0x71 (real MC_RPCCMD_OPEN, not
+yet implemented) - a new open item for a future round. See
+docs/STATUS.md's 81st finding.

@@ -11690,3 +11690,49 @@ Sony OSD software is actually built, increasing confidence in the
 byte-exact real value or initialization source for `RAM[0x80020B54]`
 in the SPECIFIC binary (console OSDSYS, not HDDOSD) this project's
 boot runs - that remains open. No source change this round.
+
+
+## 105th finding (Round 65 continued, task #172/#232): evaluated CrystalOSD - deeper MIT-licensed decompilation, same "different binary" limitation applies
+
+User pointed at a second resource: github.com/JeanxPereira/CrystalOSD, a
+"clean-room reconstruction of the PlayStation 2 OSDSYS". Investigated in
+depth since the name suggested it might target the console's built-in
+OSDSYS (our actual subject) rather than a different disc's OSD variant.
+
+**What it actually is**: an active, MIT-licensed, byte-perfect decompilation
+project (2,008 functions, 894 named, ELF rebuild verified byte-identical
+to the original, 3,864,601 bytes) - genuinely higher-quality and more far
+along than `ps2re/osdsys_re`. It uses splat to split the binary into
+per-function asm, then progressively replaces asm with matched C source
+(9 subsystems: browser, opening, clock, config, sound, graph, cdvd,
+history, module).
+
+**Critical finding on target identity**: CrystalOSD's own project state
+file (`PS2_PROJECT_STATE.md`) states its source ELF is
+`OSDSYS_A_XLF_decrypted_unpacked.elf`, explicitly labeled "HDD Utility
+Disc 1.10U from SUDC4" - the SAME binary `ps2re/osdsys_re` targets (in
+fact CrystalOSD directly imports osdsys_re's 6,372-entry symbol map as
+its starting point). So this is a deeper, more actively-decompiled
+descendant of the SAME different-binary lineage already evaluated in the
+104th finding, not the console's built-in SCPH-10000 OSDSYS this project
+reverse-engineers. All its addresses live in the 0x00200000-0x00280000
+range (HDDOSD's own load address), not our target's 0x8000xxxx KUSEG
+range - so, as before, no address correspondence and no byte-exact
+citable source for `RAM[0x80020B54]`.
+
+**What IS new and valuable**: unlike the bare symbol map, CrystalOSD ships
+actual human-readable C reconstructions (not just names) for real Sony
+OSD logic - e.g. a fully analyzed LZ77-variant decompression algorithm
+used for embedded modules/icons/fonts, real config-changed-callback
+table patterns, and (per its README) a started "module" dynamic module
+system subsystem and a "graph" GS/VIF1/framebuffer subsystem. This is a
+substantially richer, appropriately-licensed (MIT) reference than
+anything found so far, and worth keeping as a citable corroborating
+source for THIS project's own future GS/VIF/module-table work, even
+though it cannot supply exact values for our target binary.
+
+**Net effect on task #172/#232**: no fix. Confirms the pattern found in
+the 104th finding at a deeper level of detail. Bookmarking
+`github.com/JeanxPereira/CrystalOSD` (MIT) alongside `ps2re/osdsys_re`
+(MIT) as standing reference material for future rounds. No source change
+this round.

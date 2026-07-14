@@ -10196,3 +10196,50 @@ being fabricated now.
 
 Full 88/88 regression suite passing, clean Wii/devkitPPC rebuild
 (435872 bytes), all changes documented/committed/pushed/rsynced.
+
+### Addendum to the 87th finding: live-debugger probe (task #217, in progress)
+
+Connected to a live, running real PCSX2 instance via its DebugServer
+(confirmed connected: EE PC=0x0061bbe0, ~2.86B cycles in - i.e. well
+past boot, mid-gameplay, not at the module-loading transition this
+project needs to observe). Two concrete, useful observations before
+pausing further live-instance work for this round:
+
+1. DebugServer's register-read API does not expose the IOP's COP0
+   registers (category=1 returns an empty/invalid category for
+   cpu="iop" - only GPR, category 0, is available), and
+   `pcsx2_evaluate`'s symbol table doesn't recognize IOP COP0
+   mnemonics ("sr"/"status" both fail as unknown symbols). So this
+   project's specific open question - what real value real hardware
+   puts in IOP Status.IEc/IM immediately after module loading - can't
+   be answered from a live *running* instance's current register
+   state through this tool; it needs a breakpoint-based trace from a
+   fresh boot (arming a breakpoint before the console starts, same
+   as the task #148-163 LOADCORE investigation did), not a snapshot
+   of an already-running game.
+
+2. One incidental, real, useful data point: the live IOP's current PC
+   sits at a genuine `j 0x0000AE94 / nop` self-loop (confirmed via
+   native disassembly) when otherwise idle between interrupts - i.e.
+   real IOP kernel idle time really is spent in a literal tight
+   spin-loop, not a dedicated "wait for interrupt" instruction (the
+   R3000A has none). This is a small but genuine confirmation that
+   this project's own `idle` mechanism (park the interpreter, keep
+   evaluating I_STAT/I_MASK/Status every step without executing
+   fabricated instruction content - see iop_core.h's `idle` field
+   doc comment) is a reasonable functional analogue of real hardware
+   behavior; the outstanding gap is specifically about VALUES
+   (Status.IEc/IM never getting set), not about the general shape of
+   this project's idle strategy.
+
+Task #217 (continuation) remains open: a real fix requires a
+breakpoint-based live trace from a fresh boot, arming a breakpoint at
+IOP kernel addresses reached only after module loading completes, to
+capture the real code path (if any, within the modules this project
+already loads) that sets Status.IEc/IM2 - or to conclusively confirm
+it happens later than any module's own entry point, in which case a
+minimal real thread-dispatch model becomes the target. Deferred
+rather than rushed, since it requires deliberately resetting/
+re-booting the live instance with breakpoints armed in advance, which
+wasn't safe to do blind against an already-running, unknown game
+state this round.

@@ -10562,3 +10562,77 @@ TIMEMAN-only patch.
 Docs-only round (no source change this round either); working tree
 verified clean via `git diff --stat` before this addendum was
 written.
+
+---
+
+## 91st finding (Round 59 continued, tasks #218/#219 - FIX IMPLEMENTED):
+real IOP COP0 PRId initialized + P/I export-shadowing bug fixed -
+IOP boot progresses past the entire module-loading phase for the
+first time in this project's history
+
+**Fix 1 - `source/core/iop/iop_core.c`, `iop_core_init()`.** Real
+PCSX2's `psxReset()` (`pcsx2/R3000A.cpp`) sets `psxRegs.CP0.n.PRid =
+0x0000001f;` on the exact same line group already cited in this
+project for `Status.BEV=1` (`g_iop.cop0[12] = 0x00400000u;`, present
+since an earlier round) - the PRid half of that same real
+initialization was never carried over, leaving IOP COP0 register 15
+at its zero-initialized default. Added `g_iop.cop0[15] =
+0x0000001fu;` right after the existing BEV line, citing the same
+source. Real ps2sdk boot code (intrman.c/timrman.c/sifman.c/
+udnl.c/modload.c/igreeting.c, independently confirmed via grep.app
+this round) reads this value via `get_mips_cop_reg(0, COP0_REG_PRId)`
+to decide P/I module-twin residency (`prid >= 16` selects the retail
+PS2 "I" build, matching this project's own `iop_icfg_init()` default
+of 0 for the same real `iop_sbus_ctrl` bit these checks also read) -
+with PRId left at 0, every twin's real `_start()` code was reaching
+the opposite of the real hardware decision.
+
+**Fix 2 - `source/hw/iop_module_loader.c`.** Added `module_has_i_twin()`
+(matches ps2sdk's own real P/I ROMDIR naming convention - not a
+guess) and gated `load_only_one()`'s export-table registration on it:
+a "P"-suffixed module whose "I"-suffixed twin is also present in the
+modlist no longer has its exports registered, letting the (later-
+loading, real-hardware-resident) "I" twin's registration be the only
+one visible to `export_registry_find()`'s first-match scan - directly
+fixing the 90th finding's root cause. The P twin is still fully
+loaded and its own real entry-point code still runs (now correctly
+reaching its own early `MODULE_NO_RESIDENT_END` return, thanks to
+Fix 1) - only its export *visibility* is suppressed, matching what
+real hardware does for a genuinely non-resident module.
+
+**Verified - full regression, clean rebuild.** Both changes compile
+clean (`gcc -fsyntax-only`). Full 89/89 regression suite passes
+unchanged. Clean Wii/devkitPPC rebuild: 436064 bytes (`pcsx2-wii-
+git.dol`), no new warnings beyond one pre-existing, unrelated
+`strncpy` truncation note in `locate_and_parse_romdir`.
+
+**Verified via diagnostic - major, structural, measurable progress.**
+A fresh host-native diagnostic re-run (same driver/BIOS as every
+prior round) shows a result never seen before in this project's
+entire history: the IOP no longer settles into the old idle=1
+shortcut inside module loading. Instead, `iop.idle=0` and
+`iop.halted=0` continuously across a 160,000,000+ instruction window,
+with **`iop.pc=0xBFC4A45C`** - real IOP boot ROM address space
+(`0xBFC0xxxx`), not RAM, and not any module's own load range - held
+steady across 8 sampled checkpoints spanning instr 20M-160M. This
+means the IOP has, for the first time, executed all the way through
+module loading and back into real post-boot ROM code, rather than
+stopping at the loader's own synthetic "all modules done" shortcut.
+The EE side also shows new behavior: PC now cycles through a tight
+`0x80005ExX-0x8000B8A4` range (previously parked at a fixed
+`0x8000CFD4`), consistent with genuine EE-side scheduler/dispatch
+activity rather than a dead poll loop. No crash, no assertion, no
+error output across the entire run.
+
+**Not yet the splash screen.** GS privileged registers (SMODE1/
+SYNCH1/SYNCH2/SYNCV/SMODE2/SRFSH) show the same real-looking values
+already seen in earlier rounds (real display-timing register writes,
+around instr 15.4M, pc=0x8000A138-0x800074D8) - no NEW GS/display
+activity (PMODE, DISPFB, framebuffer writes) was observed in this
+run. `iop.pc=0xBFC4A45C` staying fixed across 140M+ instructions
+despite `idle=0` indicates a genuinely NEW spin loop at that exact
+ROM address - the concrete next wall, not yet investigated (what
+real code lives there, and what condition it's waiting on).
+
+Docs to follow this finding: full docs→commit→push→rsync→TaskUpdate
+per this project's mandatory workflow for a source-changing round.

@@ -288,6 +288,47 @@ static const export_registry_entry_t *export_registry_find(const char *name)
     return NULL;
 }
 
+/* Round 59 (90th/91st findings, task #219): real ps2sdk ships several
+ * modules as a "P"/non-P ("I") twin pair sharing one ROMDIR name
+ * prefix (INTRMANP/INTRMANI, TIMEMANP/TIMEMANI, ...) - each twin's
+ * own real `_start()` reads COP0 PRId + this project's own already-
+ * modeled `iop_sbus_ctrl`/ICFG bit 3 (see iop_icfg.c) to decide,
+ * independently, whether IT is the one that should register itself
+ * as resident on real hardware; on a real PS2 booting natively (not
+ * PS1-BC mode - the 91st finding fixed this project's own PRId to
+ * confirm this), the non-P ("I") twin is always the real winner.
+ *
+ * Until now, this project's `load_only_one()` (below) registered
+ * BOTH twins' export tables unconditionally at ELF-parse time,
+ * regardless of that real runtime decision, and `export_registry_
+ * find()`'s first-match-wins scan meant whichever twin happened to
+ * load earlier in the boot list (always the P twin, per every real
+ * ROMDIR ordering observed so far) permanently shadowed the other -
+ * the 90th finding's root cause for TIMEMAN's `AllocHardTimer`
+ * resolving against the wrong (restricted, 16-bit-only) table.
+ *
+ * This is a narrow, name-pattern-based fix (matches ps2sdk's own
+ * real P/I naming convention exactly, not a guess) rather than the
+ * fuller "trace real RegisterLibraryEntries calls" architecture
+ * change floated in the 90th finding - lower risk, directly targets
+ * the one real, confirmed symptom, and doesn't touch load order or
+ * timing for any module outside a real P/I pair. */
+static int module_has_i_twin(const char *name)
+{
+    size_t len = strlen(name);
+    if (len == 0 || len >= MODNAME_MAX || name[len - 1] != 'P')
+        return 0;
+    char twin[MODNAME_MAX];
+    memcpy(twin, name, len - 1);
+    twin[len - 1] = 'I';
+    twin[len] = '\0';
+    for (int i = 0; i < g.modlist_count; i++) {
+        if (strcmp(g.modlist[i], twin) == 0)
+            return 1;
+    }
+    return 0;
+}
+
 /* Loads one module by ROMDIR name and registers its own exports.
  * Returns its entry point (or 0 on any failure - missing ROMDIR
  * entry, malformed ELF, etc; the caller decides whether to skip it).
@@ -336,11 +377,23 @@ static uint32_t load_only_one(iop_state_t *st, const char *name, iop_elf_load_re
     /* Register this module's own export table(s) immediately (not
      * deferred) so EVERY module - including ones loaded earlier in
      * the same front-loading pass - can resolve imports against it
-     * once link_imports_one() runs for everyone. */
-    for (int i = 0; i < out->export_count; i++) {
-        export_registry_add(out->exports[i].name,
-                             out->exports[i].addr + 20u /* fptrs[0] - see iop_elf.h layout */,
-                             out->exports[i].fptr_count);
+     * once link_imports_one() runs for everyone.
+     *
+     * Round 59 (90th/91st findings): skip this for a "P" twin whose
+     * real "I" counterpart is also present in the modlist - see
+     * module_has_i_twin()'s own comment above for the full real
+     * citation trail. The P twin is still LOADED (its own real code
+     * still runs, and - now that the 91st finding's PRId fix is in
+     * place - its own real _start() genuinely reaches its own
+     * MODULE_NO_RESIDENT_END early-return, matching real hardware);
+     * only its EXPORT VISIBILITY is suppressed, since real hardware
+     * never lets a non-resident module's exports be called at all. */
+    if (!module_has_i_twin(name)) {
+        for (int i = 0; i < out->export_count; i++) {
+            export_registry_add(out->exports[i].name,
+                                 out->exports[i].addr + 20u /* fptrs[0] - see iop_elf.h layout */,
+                                 out->exports[i].fptr_count);
+        }
     }
 
     return out->entry;

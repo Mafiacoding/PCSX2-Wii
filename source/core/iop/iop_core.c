@@ -211,6 +211,31 @@ int iop_core_init(const bios_image_t *bios)
      * "normal" vector (0x80000080) from the very start. */
     g_iop.cop0[12] = 0x00400000u;
 
+    /* Round 59 (91st finding, task #219): real PCSX2's psxReset()
+     * (pcsx2/R3000A.cpp, the EXACT SAME function already cited two
+     * lines above for Status.BEV) sets `psxRegs.CP0.n.PRid =
+     * 0x0000001f;` right next to that Status line - this project
+     * carried over the Status half but never the PRid half, leaving
+     * IOP COP0 register 15 at its zero-initialized default from the
+     * memset() above. Real ps2sdk boot code (intrman.c/timrman.c/
+     * sifman.c/udnl.c/modload.c/igreeting.c's real `_start()`
+     * functions, all independently reading `get_mips_cop_reg(0,
+     * COP0_REG_PRId)`) uses this value to decide which of a P/I
+     * "twin" module pair (INTRMANP vs INTRMANI, TIMEMANP vs
+     * TIMEMANI, ...) should treat itself as resident on real
+     * hardware: `prid >= 16` selects the non-P ("I") build as
+     * resident (given this project's `iop_icfg_init()` default of 0
+     * for the same real `iop_sbus_ctrl`/bit-3 the P/I check also
+     * reads) - matching real retail PS2 hardware, not PS1-BC mode.
+     * With PRId left at 0 (`< 16`), every P/I twin's real _start()
+     * code was reaching the OPPOSITE of the real hardware's actual
+     * residency decision - not yet a functional fix by itself (see
+     * the loader-side export-registration change below, which is
+     * the piece that actually makes this decision affect anything
+     * observable), but a genuine, cited correctness gap closed on
+     * its own, directly analogous to task #59's EE-side PRId fix. */
+    g_iop.cop0[15] = 0x0000001fu;
+
     /* Round 22: real RAM[0x100] exception-handler priority-chain
      * table + array, all-empty (no handler registered) - see
      * include/core/hw/iop_excb.h. Must run after g_iop.ram is

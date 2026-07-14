@@ -2568,3 +2568,20 @@ a modeling gap - affects every P/I twin pair, only visible now because
 TIMEMAN's P vs non-P builds are the first pair whose behavior
 actually differs (3 vs 6 timers). Fix needs its own dedicated,
 regression-tested round (task #219) - not attempted this round.
+
+### Round 59 fix (91st finding, tasks #218/#219 closed)
+Two real, cited fixes: (1) IOP COP0 PRId initialized to 0x1f (real
+PCSX2 R3000A.cpp, same line group already cited for Status.BEV=1 in
+this project - the PRid half was simply never carried over); (2)
+iop_module_loader.c's load_only_one() now skips a P-suffixed module's
+export registration when its real I-suffixed twin is also present in
+the modlist, fixing the 90th finding's static-registration shadowing
+bug. Full 89/89 regression, clean Wii rebuild (436064 bytes). Result:
+IOP boot progresses past the ENTIRE module-loading phase for the
+first time ever - now executing real post-boot ROM code at
+pc=0xBFC4A45C (idle=0, no longer using the old idle=1 shortcut),
+held across 160M+ instructions. EE PC also shows new dispatcher-like
+activity (0x80005ExX-0x8000B8A4 range) instead of the old fixed
+0x8000CFD4 park. Splash screen not yet reached - no new GS/display
+register activity observed; 0xBFC4A45C is a new spin-loop wall, not
+yet investigated. Next: disassemble/trace real code at 0xBFC4A45C.

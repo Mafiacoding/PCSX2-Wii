@@ -4010,3 +4010,28 @@ decision real `_start()` makes, instead of static/immediate
 registration - a real architectural change, intentionally deferred
 to its own dedicated, regression-tested round (task #219) rather than
 rushed here. Docs-only round, no source change.
+
+## Checkpoint (Round 59 fix - 91st finding, tasks #218/#219 closed)
+Implemented both fixes scoped by the 89th/90th findings: IOP COP0
+PRId initialized to the real 0x1f (PCSX2 R3000A.cpp, same citation
+already used for Status.BEV=1), and iop_module_loader.c's
+load_only_one() now skips a P-suffixed module's export registration
+when its real "I" twin is also in the modlist (module_has_i_twin()),
+fixing the static first-match-wins shadowing bug. Full 89/89
+regression, clean Wii rebuild (436064 bytes).
+
+Result is the biggest structural jump in this project's boot
+progress in a long time: the IOP no longer settles into the old
+idle=1 module-loader shortcut at all - it now genuinely executes
+past the entire module-loading phase into real post-boot ROM code
+(pc=0xBFC4A45C, idle=0, held steady across a 160M+ instruction
+diagnostic window). EE PC also shows new activity (0x80005ExX-
+0x8000B8A4 range, not the old fixed 0x8000CFD4 park). No crash, no
+regressions.
+
+Splash screen still not reached - no new GS/display register writes
+observed yet, and 0xBFC4A45C is evidently a NEW spin-loop wall (PC
+frozen there across 140M+ instructions despite idle=0). This is the
+concrete next target: disassemble/trace real code at that address
+to find what it's waiting on - not yet started. Tasks #218/#219
+closed; opening a new task for this.

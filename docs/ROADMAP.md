@@ -2711,6 +2711,30 @@ genuinely never executes in this boot; finding it (and what gates
 entry to it) is the concrete next step. No source change, docs-only
 round.
 
+### Round 74 (114th finding, task #172 continuation)
+Root-caused and fixed the remaining `IMASK=0x00000000` gap left open by the
+113th finding. Traced `AllocHardTimer`/`RegisterIntrHandler`/`EnableIntr`'s
+real, live call chain (real ps2sdk timrman.c fetched only to identify
+calling conventions, explicitly NOT assumed to match the proprietary
+retail ROM's internal layout byte-for-byte) and confirmed the P/I twin
+fix (task #239) already resolved the 89th finding's `irq=-1` symptom -
+`EnableIntr` now receives a real, valid `irq=16`. The remaining bug:
+`iop_mem_write16()`/`iop_mem_read16()` (backing MIPS `SH`/`LH`) never
+dispatched to the interrupt controller at all - only the 32-bit path
+did - so real 16-bit writes to I_MASK (confirmed live: `val=0x0001`,
+`0x0008`) were silently swallowed into plain RAM. Fixed by routing
+`0x1F801070-0x1F80107B` through `iop_intc_mmio_read32/write32` from
+both 16-bit accessors. Verified: `imask=0x00000009` at run's end (first
+-ever nonzero value since task #218). Module-completion count shifting
+(28->21 of 29) is expected: real interrupts can now actually fire
+during module bring-up, taking some modules through a real interrupt
+detour instead of running uninterrupted - not a regression (final
+state stays clean/healthy). `iop_dma`/`iop_timers`/`iop_icfg` likely
+have the same structural gap but were left untouched (no live evidence
+yet) - flagged as a concrete next-round candidate. Full regression
+suite (90/90 pass), clean Wii/devkitPPC rebuild (exit 0), docs updated,
+committed.
+
 ### Round 73 (113th finding, task #239)
 Landed the fix Round 61/93rd finding left conditionally disabled: the
 P/I twin export-shadowing preference (89th-91st findings) is now

@@ -99,6 +99,32 @@ uint16_t iop_mem_read16(iop_state_t *st, uint32_t addr)
     if (iop_spu2_mmio_read16(addr, &spu2_val))
         return spu2_val;
 
+    /* Round 74 (114th finding, task #172 continuation): the IOP
+     * interrupt controller (I_STAT/I_MASK/I_CTRL, core/hw/iop_intc.h)
+     * previously had ONLY a 32-bit read/write path wired up here -
+     * iop_mem_read32()/iop_mem_write32() dispatch to it, but this
+     * 16-bit path never did. Live host-native tracing (scratch copy,
+     * never committed) proved real BIOS-resident code genuinely
+     * issues 16-bit `sh`/`lh`-class accesses to 0x1F801074 (I_MASK) -
+     * observed real writes of value 0x0001 and 0x0008 following a
+     * live, correctly-resolved EnableIntr(16) call (see the 113th/
+     * 114th findings) - which were previously silently falling
+     * through to a plain-RAM 16-bit store/load instead of reaching
+     * the interrupt-controller model at all, explaining why I_MASK
+     * stayed 0x00000000 even after the P/I twin-export-shadowing fix
+     * (task #239) made EnableIntr's argument correct. Widening to the
+     * full 32-bit read and truncating to the low 16 bits matches this
+     * project's own existing "plain assignment" semantics for this
+     * register (see iop_intc.c's write32 case) - every real access to
+     * this register observed in tracing was 16-bit, so there is no
+     * evidence of a competing 32-bit access whose upper half would
+     * need preserving separately. */
+    if (addr >= 0x1F801070u && addr <= 0x1F80107Bu) {
+        uint32_t intc_val;
+        if (iop_intc_mmio_read32(addr, &intc_val))
+            return (uint16_t)intc_val;
+    }
+
     uint8_t *p = iop_mem_ptr(st, addr, 2);
     if (!p) return 0;
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -148,6 +174,18 @@ void iop_mem_write16(iop_state_t *st, uint32_t addr, uint16_t val)
 {
     if (iop_spu2_mmio_write16(addr, val))
         return;
+
+    /* Round 74 (114th finding) - see iop_mem_read16()'s matching
+     * comment above for the full citation/evidence trail. Zero-
+     * extending the 16-bit value into iop_intc_mmio_write32() mirrors
+     * every real access to this register this round's tracing
+     * observed (all 16-bit, none 32-bit), and matches this project's
+     * own existing "plain assignment" write semantics for I_MASK/
+     * I_STAT/I_CTRL. */
+    if (addr >= 0x1F801070u && addr <= 0x1F80107Bu) {
+        if (iop_intc_mmio_write32(addr, (uint32_t)val))
+            return;
+    }
 
     uint8_t *p = iop_mem_ptr(st, addr, 2);
     if (!p) return;

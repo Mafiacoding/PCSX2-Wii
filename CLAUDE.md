@@ -4287,3 +4287,33 @@ Full regression suite: 90/90 pass, 0 failures. Clean Wii/devkitPPC
 rebuild: exit 0, `pcsx2-wii-git.dol`/`.elf` produced. Task #239 marked
 completed with this honest outcome; the `AllocHardTimer` question is
 the concrete next thread (task #172 continuation).
+
+## Checkpoint (Round 74 - 114th finding, task #172 continuation)
+Root-caused and fixed the `IMASK=0x00000000` gap the 113th finding left
+open. Live tracing (real ps2sdk timrman.c fetched only for calling-
+convention identification, not assumed to match the proprietary retail
+ROM byte-for-byte) confirmed the P/I twin fix (task #239) already
+resolved the 89th finding's `irq=-1` symptom - `EnableIntr` now gets a
+real `irq=16`. The actual remaining bug: `iop_mem_write16()`/
+`iop_mem_read16()` (MIPS `SH`/`LH`) never dispatched to the interrupt
+controller - only the 32-bit path did - silently swallowing real
+16-bit writes to I_MASK (confirmed live: values 0x0001, 0x0008) into
+plain RAM instead.
+
+Fix (`source/core/iop/iop_core.c`): route `0x1F801070-0x1F80107B`
+through `iop_intc_mmio_read32/write32` from both 16-bit accessors,
+widening/truncating as needed. Verified: `imask=0x00000009` at run end
+- first-ever nonzero value since task #218 opened this whole thread.
+Module-completion count shift (28->21 of 29) is expected/healthy: real
+interrupts can now fire during module bring-up for the first time.
+
+`iop_dma`/`iop_timers`/`iop_icfg` likely share the same structural gap
+(real hardware timers 0-2 are 16-bit per ps2sdk source) but were left
+untouched - no live evidence yet, flagged as a concrete next-round
+candidate rather than guessed at.
+
+Full regression suite: 90/90 pass, 0 failures. Clean Wii/devkitPPC
+rebuild: exit 0, `pcsx2-wii-git.dol`/`.elf` produced. Task #172
+continues (not closed - the boot's next milestone toward a splash
+screen is still open) but this closes a real, long-standing gap first
+identified at task #218.

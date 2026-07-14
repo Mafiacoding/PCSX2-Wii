@@ -4162,3 +4162,64 @@ generic #include self-exclusion logic, all 29 re-ran clean). Clean
 Wii/devkitPPC rebuild: exit 0, pcsx2-wii-git.dol/.elf produced
 (436192 bytes, same pre-existing benign strncpy warning, no new
 warnings).
+
+
+## Checkpoint (Round 64 - 96th finding, task #172 continued, investigation only)
+Live PCSX2 debugger session was mismatched to our boot state (Pine IPC
+disconnected, can't force-load a matching save state), so pivoted to
+self-contained memory-write instrumentation (proven technique from
+prior rounds) plus disassembly of LOW, FIXED kernel-resident addresses
+(0x8000CFxx-0x8000FFxx) that stay identical regardless of what's
+currently loaded live. Found the 0x80020000 globals block (mischar-
+acterized as PADMAN-only in the 95th finding) also contains a real
+ASCII version-banner string, and - more importantly - a second,
+previously-unknown EE-side registration-table lookup: a 12-byte-entry
+table at 0x80020E70 with its count at 0x80021008, walked by a linear
+search at 0x8000EF78, called from a switch-dispatcher at
+0x8000FE00-0x8000FFD0 whose shared epilogue (pc=0x8000FFAC) writes
+OSDSYS's actual loop-continuation field ([0x80020E4C]) to 0x24.
+Watch-log confirmed the table is NEVER populated during the captured
+run - structurally identical to this project's own previously-fixed
+LOADCORE registration-list bugs (tasks #124/#132/#151-163), but a
+different table, never previously identified.
+
+Honest scope limit: capturing the search key ($s1) and identifying the
+real kernel mechanism that should populate the table were NOT
+completed this round (background diagnostic processes don't survive
+across separate tool-call sandboxes here, ruling out multi-minute
+unattended capture runs). No source fix implemented - re-scoped task
+#172 to these two concrete next steps rather than fabricate a fix.
+Docs-only round: no source change, regression/rebuild skipped per this
+project's standing convention.
+
+## Checkpoint (Round 64 - 97th finding): EE MMI opcode coverage completed - final 19 opcodes implemented
+User directive: "inject all 23 remaining MMI Opcodes." Corrected the
+project's own prior "~23" estimate to a precise 19 by cross-
+referencing PCSX2 v1.6.0's real `tbl_MMI[64]`/`tbl_MMI0-3[32]`
+encoding tables (`R5900OpcodeTables.cpp`) against `ee_core.c`'s actual
+case list - several previously-assumed-missing opcodes (PLZCW,
+MFHI1-MTLO1, PSLLW/PSRLW/PSRAW) turned out already implemented.
+Implemented, citing PCSX2 v1.6.0's `MMI.cpp` (current master no longer
+retains interpreter MMI bodies): MADD1/MADDU1 (pipe-1 HI:LO
+accumulate), QFSRV (128-bit funnel-shift via SA register), PMFHL/
+PMTHL, and the MMI2/MMI3 HI/LO-touching arithmetic family - PMADDW/
+PMSUBW/PMULTW/PDIVW, PMADDH/PHMADH/PMSUBH/PHMSBH/PMULTH, PDIVBW,
+PMADDUW/PSRAVW/PMULTUW/PDIVUW. Real hardware quirks preserved
+verbatim: division-by-zero voodoo (LO=+-1 by divisor sign, HI=
+dividend); PMULTH-family's even-lane-only GPR capture (lanes 0/2/4/6,
+never the odd lanes); PMULTUW's full-64-bit-unsigned-product GPR
+capture (distinct from the sign-extended-low32 LO/HI split elsewhere).
+
+New test `tests/test_ee_mmi_hilo2.c` (36 checks, all pass) caught two
+of its own authoring mistakes during development (PMULTH and PMULTUW
+expected values initially wrong) - both corrected by re-reading the
+real PCSX2 source rather than adjusting the implementation, confirming
+the ee_core.c code was right both times. Full 90-test regression
+suite: 90/90 pass, 0 regressions. Clean Wii/devkitPPC rebuild: exit 0,
+0 errors, pcsx2-wii-git.dol/.elf produced (same single pre-existing
+strncpy warning, no new warnings). ROADMAP.md's MMI section and its
+"lower priority, deferred" summary both updated to reflect completion.
+
+EE MMI (SIMD) opcode coverage is now complete - every real opcode in
+the R5900 SPECIAL2 encoding space (top-level table + all four
+sa-indexed sub-tables) has a real, citation-grounded implementation.

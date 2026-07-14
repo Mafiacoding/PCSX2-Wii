@@ -67,14 +67,27 @@ splash screen, not just difficulty.
       Ported from PCSX2's `MMI.cpp`. Unit tested in
       `tests/test_ee_mmi_pvshift.c` (6/6 checks). Brings EE MMI
       coverage from ~65 to ~67 of the roughly 90 real opcodes.
-- [ ] Remaining ~23 MMI opcodes: QFSRV (needs the SA hardware register
-      and MTSA/MTSAB/MTSAH to set it, none of which exist yet);
-      PMADDW/H, PMSUBW/H, PMULTW/H, PDIVW/PDIVBW, PMULTUW/PDIVUW/
-      PMADDUW (the remaining MMI2/MMI3 HI/LO-touching arithmetic -
-      PMADDW/PMSUBW in particular have a documented real-hardware
-      "division voodoo" rounding quirk in PCSX2's own source worth
-      extra care when eventually ported); PMFHL/PMTHL clamping
-      variants
+- [x] Final 19 MMI opcodes (Round 64, 97th finding) - the project's
+      own prior "~23" estimate was corrected to a precise 19 by
+      cross-referencing PCSX2 v1.6.0's real `tbl_MMI[64]`/
+      `tbl_MMI0-3[32]` encoding tables (several previously-assumed-
+      missing opcodes - PLZCW, MFHI1-MTLO1, PSLLW/PSRLW/PSRAW - turned
+      out to already be implemented). MADD1/MADDU1 (pipe-1 HI:LO
+      accumulate, matching this project's existing MULT1/DIV1/MFHI1
+      pipe-1 convention); QFSRV (128-bit funnel-shift using the SA
+      register, already implemented via MFSA/MTSA in task #177);
+      PMADDW/PMSUBW/PMULTW/PDIVW, PMADDH/PHMADH/PMSUBH/PHMSBH/PMULTH,
+      PDIVBW (real division-by-zero "voodoo" preserved: LO=+-1 by
+      divisor sign, HI=dividend); PMADDUW/PSRAVW/PMULTUW (full raw
+      64-bit unsigned product into GPR, a distinct behavior from the
+      sign-extended-low32 LO/HI split)/PDIVUW; PMFHL/PMTHL clamping
+      variants. All ported bit-exact from PCSX2 v1.6.0's `MMI.cpp`
+      (current master no longer has interpreter MMI bodies). Unit
+      tested in `tests/test_ee_mmi_hilo2.c` (36/36 checks, including
+      the even/odd-lane GPR-capture asymmetry for PMULTH-family
+      opcodes). Brings EE MMI coverage to complete: every real MMI
+      opcode in the R5900 SPECIAL2 encoding space now has a real
+      implementation. Full 90-test regression suite: 90/90 pass.
 - [x] LWL/LWR/SWL/SWR (unaligned word load/store) - ported from
       R5900OpcodeImpl.cpp, unit tested in `tests/test_ee_unaligned.c`
       (also gave the IOP core this ability first, then brought it to
@@ -1649,8 +1662,9 @@ already documented, rather than truly returning from the syscall.
    implementing MTBA=1 auto mip-address calculation (currently falls
    back to level 0).
 
-6. Lower priority, deferred: the remaining ~23 EE MMI opcodes (section
-   1), Pad/memory card (section 7).
+6. Lower priority, deferred: Pad/memory card (section 7). (EE MMI
+   opcode coverage, previously listed here as "~23 remaining," was
+   completed in Round 64 - see section 1 and the 97th finding.)
 
 **Honest distance-to-splash-screen assessment (Round 18)**: this
 project has now spent many rounds (see STATUS.md in full) each finding

@@ -10976,3 +10976,173 @@ regressions from the PADMAN change. Clean Wii/devkitPPC rebuild: exit
 0, `pcsx2-wii-git.dol`/`.elf` produced (436192 bytes, same
 pre-existing benign `strncpy` truncation warning as prior rounds, no
 new warnings).
+
+### 96th finding (Round 64, task #172 continued): [s7+0xE4C] traced to a SECOND, previously-unknown EE-side registration table (0x80020E70/count at 0x80021008) that is confirmed to stay empty for the entire run - real progress, no fix implemented yet
+
+**Method.** Since the live PCSX2 reference debugger's current session is
+paused deep inside an unrelated program (EE pc=0x0061BBE0, ~415M
+cycles in - not our BIOS boot, and Pine/save-state loading isn't
+connected to force a matching state), this round's investigation used
+a different, self-contained technique instead: instrumented
+`ee_mem_write8/16/32()` in a disposable scratch copy
+(`/tmp/pcsx2-instrument3`, real repo untouched, verified clean via
+`git status` before/after) to log every write in the range
+`0x80020000-0x80021000`, tagged with the writing instruction's PC
+(`st->exc_this_pc`). This is the same instrumentation technique
+already used successfully this session for the GS-register and
+MTC0-Status investigations - no live debugger dependency needed for
+this class of question.
+
+**What the watch log shows.** The block is NOT a PADMAN pad-status
+struct (the 95th finding's fix target) - it's genuinely more varied:
+an ASCII text string gets copied byte-by-byte into
+`0x80020C30-0x80020C6B` by a copy loop at pc=0x8000D58C (a real
+version/build banner string, e.g. readable fragments like "...EE
+DEC I2 Manager version 0.06 December 10 1996 ... :47:37" - not yet
+identified as belonging to a specific citable module by name, but
+clearly genuine boot-time banner text, not fabricated). Separately,
+`[0x80020E4C]` - the exact field the OSDSYS per-frame loop
+(0x8000F864-0x8000F870, from the 94th finding) tests to decide
+whether to keep looping - is written at `pc=0x8000FFAC` with value
+`0x24` (36 decimal).
+
+**Disassembly of the write site (live PCSX2 debugger - this low,
+fixed kernel-resident code IS shared across any real PS2 session
+regardless of what's currently loaded, unlike higher game-specific
+addresses, so it disassembles identically even with an unrelated
+program paused elsewhere).** `0x8000FE00-0x8000FFD0` is a single
+function: a `switch`-shaped dispatcher (explicit `li s2, 0x22` /
+`li s2, 0x23` / `li s2, 0x25` case constants seen at three different
+branches, each falling through to the same shared
+`sw s2, 0xE4C(v0)` epilogue at 0x8000FFAC) implementing what looks
+like a device/RPC "open or look up a registered service" operation,
+gated by a retry/countdown counter at `[0x80020000+0xE44]`. Critically,
+it calls a genuine linear-search subroutine at `0x8000EF78`: walk a
+table of 12-byte entries starting at `0x80020000+0xE70`
+(`0x80020E70`), for a count stored at `0x80021008`, comparing each
+entry's first field against a search key (`a0`, forwarded from the
+outer function's own first argument, `$s1`) - structurally IDENTICAL
+in shape to this project's own previously-diagnosed-and-fixed
+LOADCORE/device-registration-list bugs (tasks #124/#132/#151-163,
+#218/#219), but this is a DIFFERENT table, at a different address,
+never previously identified.
+
+**Empirical confirmation.** The watch log's full capture (which
+includes every write anywhere in `0x80020000-0x80021000`) contains
+zero writes to `0x80020E70`-`0x80020EA0` (the entry-table region) or
+to `0x80021008` (the count) at any point. The count therefore stays at
+its zeroed reset value for the entire run, meaning the lookup call at
+`0x8000EF78` always finds nothing (its own `beqz v1,->0x8000EFC4`
+early-return-NULL path on a zero count fires every time), which
+directly explains why the dispatcher lands on an error/status branch
+instead of a success path.
+
+**Honest scope of what is NOT yet established.** Two concrete follow-
+ups were attempted but did not complete within this round's compute
+budget: (1) capturing the search key (`$s1`) value passed into this
+function, to identify what service/device is being looked up by name;
+(2) identifying what real kernel call is supposed to populate entries
+at `0x80020E70` before this dispatcher runs (no citable real source for
+this specific table has been found yet - unlike the LOADCORE table,
+which this project already has real, cited disassembly for). A
+targeted instrumentation pass (logging EE pc==0x8000FFD0 at function
+entry, to read `$a0`/`$s1` directly) was added but the heavily-
+instrumented interpreter build did not advance far enough within the
+available wall-clock budget per diagnostic run to hit it - background
+processes do not persist across tool calls in this sandbox, so multi-
+minute unattended runs aren't currently possible here. This is a
+disclosed compute-budget limitation, not a dead end.
+
+**Net effect on task #172.** This is real, concrete forward progress -
+the exact write site, its call chain, and the structural nature of the
+bug (an empty, second, previously-unknown registration table) are now
+established facts, not guesses, going well beyond the 95th finding's
+negative result. But per this project's own no-fabrication policy, no
+source fix is implemented this round: doing so without knowing what
+the search key is or what real function should populate the table
+would mean inventing behavior with no citation behind it. Task #172
+remains in_progress, now re-scoped concretely: (1) capture `$s1` at
+`pc=0x8000FFD0` to identify the search key, (2) find what real kernel
+mechanism should register an entry at `0x80020E70` first. No source
+change this round - docs-only investigation; regression/rebuild
+skipped per this project's own standing convention for investigation-
+only rounds.
+
+
+## 97th finding (Round 64): all 19 real remaining MMI (SIMD) opcodes implemented and verified - MMI opcode coverage now complete
+
+**Scope correction first.** The project's own prior estimate ("~23
+remaining MMI opcodes") was not precise. Cross-referencing PCSX2
+v1.6.0's real, authoritative encoding tables (`pcsx2/R5900OpcodeTables.cpp`
+- `tbl_MMI[64]` for the top-level SPECIAL2 funct dispatch, and
+`tbl_MMI0[32]`/`tbl_MMI1[32]`/`tbl_MMI2[32]`/`tbl_MMI3[32]` for the four
+sa-indexed sub-tables) against `ee_core.c`'s actual current `case`
+list showed several opcodes previously assumed missing were already
+implemented in earlier rounds (PLZCW, MFHI1-MTLO1, PSLLW/PSRLW/PSRAW).
+The real, precise gap was 19 opcodes:
+
+- Top-level SPECIAL2 funct: MADD1 (0x20), MADDU1 (0x21), PMFHL (0x30),
+  PMTHL (0x31)
+- MMI1 (funct 0x28) sub-opcode: QFSRV (sa 0x1B)
+- MMI2 (funct 0x09) sub-opcodes: PMADDW (0x00), PMSUBW (0x04), PMULTW
+  (0x0C), PDIVW (0x0D), PMADDH (0x10), PHMADH (0x11), PMSUBH (0x14),
+  PHMSBH (0x15), PMULTH (0x1C), PDIVBW (0x1D)
+- MMI3 (funct 0x29) sub-opcodes: PMADDUW (0x00), PSRAVW (0x03),
+  PMULTUW (0x0C), PDIVUW (0x0D)
+
+**Source.** All 19 bodies were ported bit-exact from PCSX2 v1.6.0's
+`pcsx2/MMI.cpp` (the last PCSX2 release with full, non-recompiler
+interpreter semantics for MMI in a single readable source file;
+current master only retains x86 recompiler emission plus an
+`MMI_Unknown()` stub, so v1.6.0 was fetched specifically as the
+citation source for this round). Real hardware quirks were preserved
+verbatim rather than "cleaned up," each with a citation comment in
+`ee_core.c`:
+
+- MADD1/MADDU1 accumulate into the pipe-1 HI:LO pair (`.ud1`), matching
+  this project's pre-existing MULT1/DIV1/MFHI1 pipe-1 convention.
+- PDIVW/PDIVUW/PDIVBW preserve the real division-by-zero "voodoo"
+  behavior (LO = +-1 depending on divisor sign, HI = dividend) rather
+  than a sanitized 0/undefined result.
+- PMULTH/PHMADH/PHMSBH only ever capture the "even" lanes (0,2,4,6)
+  into the GPR destination (`LO.UL[0]/HI.UL[0]/LO.UL[2]/HI.UL[2]`) -
+  the "odd" lanes (1,3,5,7) land only in LO/HI, never GPR. This is a
+  real, easy-to-get-wrong asymmetry that was initially gotten wrong in
+  this round's own test file (see below) before being corrected
+  against the real PCSX2 source.
+- PMULTUW stores the FULL raw 64-bit unsigned product directly into
+  the GPR destination - a different, separate behavior from the
+  sign-extended-low32 LO/HI split other pipe opcodes use.
+- QFSRV implements the real 128-bit funnel-shift-right-by-variable-
+  amount (0-127 bits, taken from `sa_reg & 0xF`, times 8) across the
+  Rs:Rt 128-bit pair, including the exact-64-bit and >64-bit boundary
+  cases from the real algorithm.
+
+**Testing.** A new regression test, `tests/test_ee_mmi_hilo2.c` (273
+lines, 36 hand-derived CHECK() assertions covering all 19 opcodes,
+including pipe0/pipe1 independence, division-by-zero voodoo, and the
+even/odd-lane GPR-capture asymmetry), was written following this
+project's existing single-translation-unit test convention
+(`#include "core/ee/ee_core.c"`). Two test-authoring mistakes were
+found and fixed during development (PMULTH's expected GPR value
+initially assumed both lanes landed in GPR; PMULTUW's expected GPR
+value initially assumed the sign-extended-low32 split) - both were
+corrected by re-reading the real PCSX2 v1.6.0 source rather than
+adjusting the implementation to match a possibly-wrong test. Final
+result: **all 36 checks pass, 0 failures.**
+
+**Full regression suite.** All 90 test files in `tests/` (89 pre-
+existing + the 1 new file) were re-run after these `ee_core.c`
+changes: **90/90 pass, 0 regressions.**
+
+**Wii/devkitPPC rebuild.** `make clean && make` completed with exit 0,
+0 errors (1 pre-existing, unrelated `strncpy` truncation warning in
+`iop_module_loader.c`, not touched this round), producing
+`pcsx2-wii-git.elf` and `pcsx2-wii-git.dol`.
+
+**Net effect.** EE MMI (SIMD) opcode coverage is now complete: every
+real MMI opcode defined in the R5900's SPECIAL2 encoding space (across
+the top-level table and all four sa-indexed sub-tables) has a real,
+citation-grounded implementation in `ee_core.c`. This closes out the
+"EE remaining MMI opcodes" item from this session's not-yet-implemented
+feature list.

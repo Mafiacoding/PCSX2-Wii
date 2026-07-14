@@ -2551,3 +2551,20 @@ invalid timer_id that `GetHardTimerIntrCode()` legitimately maps to
 allocation-eligibility logic against this project's own
 `iop_timers.c` T0-T5 model. Docs-only round, no source change; full
 89/89 regression and Wii build unaffected (unchanged from Round 58).
+
+### Round 59 continued (90th finding, task #218/#219)
+Fetched real TIMEMAN source (ps2sdk timrman.c) and confirmed
+AllocHardTimer(1,32,1) genuinely fails under the P-variant's
+restricted 3x16-bit-only timer table, explaining the -1 irq from the
+89th finding. Deeper root cause found by reading this project's own
+loader: source/hw/iop_module_loader.c's load_only_one() registers
+every module's export table unconditionally at ELF-parse time, and
+export_registry_find() returns the first name match - so whichever
+P/I twin loads first (TIMEMANP, modlist[7], before TIMEMANI,
+modlist[8]) always wins, regardless of which one's real _start()
+would actually judge itself resident via the real PRId/sbus_ctrl
+check. A genuine architectural bug in this project's own loader, not
+a modeling gap - affects every P/I twin pair, only visible now because
+TIMEMAN's P vs non-P builds are the first pair whose behavior
+actually differs (3 vs 6 timers). Fix needs its own dedicated,
+regression-tested round (task #219) - not attempted this round.

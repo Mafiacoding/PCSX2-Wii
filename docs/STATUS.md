@@ -10477,3 +10477,88 @@ build and run standalone host-native diagnostic binaries against
 *copies* of the tracked source; the working tree was restored to the
 exact committed state (verified via `git diff --stat` showing no
 changes) before this finding was written up.
+
+---
+
+## 90th finding (Round 59 continued, task #218/#219): the actual
+architectural root cause - this project's own loader statically
+registers BOTH P/I twin modules' export tables, so the wrong one
+(loaded first) always wins
+
+**Fetched real TIMEMAN source** (`iop/system/timrman/src/timrman.c`,
+ps2sdk, full file) to check `AllocHardTimer(1, 32, 1)`'s real logic
+against the `irq=-1` symptom from the 89th finding. Confirmed: real
+TIMEMAN is built in two variants exactly like INTRMAN (`BUILDING_
+TIMRMANP` selects `NUM_TIMERS=3`, a restricted `sTimerTable[]` of
+only the three original 16-bit-only timers T0-T2; the non-P build
+uses the real `NUM_TIMERS=6`, including the three 32-bit timers
+T3-T5). `AllocHardTimer`'s real loop rejects any timer whose
+`->size != size` - so under the P (3-timer, all 16-bit) build,
+`AllocHardTimer(source=1, size=32, prescale=1)` (THREADMAN's real
+`init_timer()` call, cited previously) can *never* match any entry
+and falls through to `return KE_NO_TIMER;`. `GetHardTimerIntrCode()`
+then computes `timer = (timid >> 28) - 1`; for a small negative
+`KE_NO_TIMER` value, MIPS arithmetic right-shift sign-extends,
+yielding `timer` far outside `[0, NUM_TIMERS)`, so it takes its own
+`return KE_ILLEGAL_TIMERID;` path - which, if (as is conventional for
+this class of ps2sdk sentinel) `KE_ILLEGAL_TIMERID == -1`, exactly
+reproduces the observed `irq=0xFFFFFFFF` at both call sites from the
+89th finding.
+
+**Why the P (3-timer, wrong) build's table is the one actually in
+effect.** This project's own `source/hw/iop_module_loader.c`,
+`load_only_one()` (read directly, not inferred): every module's
+export table is registered into the global registry
+*unconditionally*, at ELF-parse time, immediately after loading -
+"Register this module's own export table(s) immediately (not
+deferred) so EVERY module... can resolve imports against it" (the
+function's own comment, confirming this is deliberate, documented
+behavior from an earlier round - not an oversight introduced this
+round). `export_registry_find()` (also read directly) does a linear
+scan and returns the *first* name match. Since `TIMEMANP` is
+`modlist[7]` and `TIMEMANI` is `modlist[8]` (confirmed this round via
+a one-off `[MODRANGE]` dump), TIMEMANP's export table - built with
+`NUM_TIMERS=3` - is always registered first and permanently shadows
+TIMEMANI's real 6-timer table for every future import resolution,
+*regardless* of which one real `_start()` code would actually judge
+"resident" via the real PRId/`iop_sbus_ctrl` bit-3 check (both
+modules' real `_start()` do run to natural completion per this
+project's own interpreter, per the already-established MODCOMPLETE
+trace - but that runtime residency decision has zero effect on which
+export table THREADMAN's imports actually resolve against, because
+resolution already happened earlier, at static load time).
+
+This is a genuine, previously-undiscovered bug in this project's own
+architecture - not a gap in modeling real IOP hardware/software, and
+not specific to TIMEMAN. The same shadowing applies to every P/I
+twin pair in the boot list (INTRMANP/INTRMANI, TIMEMANP/TIMEMANI,
+EXCEPMAN has no twin, etc.); it has stayed invisible everywhere else
+so far only because the P and non-P builds of those other modules
+happen to behave identically for every function actually called
+during this project's current boot coverage (e.g. `CpuSuspendIntr`/
+`CpuResumeIntr` operate on the same `iop_sbus_info` register in both
+INTRMAN builds) - TIMEMAN's `AllocHardTimer` is the first real
+function this project's boot has reached whose real P vs. non-P
+behavior genuinely differs (3 vs. 6 timers, 16-bit-only vs.
+16/32-bit), which is why this specific bug only surfaced now.
+
+**Fix direction for task #219 (not implemented this round - a
+correct fix needs its own dedicated, tested round, not a rushed
+change on top of an already-deep investigation).** The real,
+generically-correct fix is to make export visibility respect the
+same runtime PRId/`iop_sbus_ctrl`-bit-3 residency decision real
+`_start()` code makes for itself, rather than this project's current
+static/immediate registration - most likely by tracing/intercepting
+real `RegisterLibraryEntries` calls (a real LOADCORE-exported
+function, already proven reachable via this project's own import
+linking) instead of relying on ELF-parse-time export-table presence
+as a proxy for "this module chose to register." This is a real
+architectural change touching the load order/registration timing
+this project has relied on since the loader was written (task #92),
+so it needs full regression coverage across every already-passing
+IOP module-loading test before being trusted, not just a targeted
+TIMEMAN-only patch.
+
+Docs-only round (no source change this round either); working tree
+verified clean via `git diff --stat` before this addendum was
+written.

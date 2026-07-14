@@ -3990,3 +3990,23 @@ path - not yet located) and cross-check its allocation-eligibility
 logic against this project's `source/hw/iop_timers.c` T0-T5 model;
 implement whichever fix that comparison reveals, then re-run the
 same J/JAL call trace to confirm `irq` is no longer -1.
+
+## Checkpoint (Round 59 continued - 90th finding, task #218/#219)
+Traced the 89th finding's irq=-1 all the way to a genuine
+architectural bug in this project's OWN loader (not a modeling gap):
+`iop_module_loader.c`'s `load_only_one()` registers every module's
+export table unconditionally at ELF-parse time; `export_registry_
+find()` returns the first name match; TIMEMANP (modlist[7], a
+restricted 3x16-bit-timer build per real ps2sdk timrman.c) always
+loads and registers before TIMEMANI (modlist[8], real 6-timer
+build), so THREADMAN's `AllocHardTimer(1,32,1)` always resolves
+against the wrong (P) table and can never find a 32-bit timer -
+matching real TIMEMAN's own cited `KE_NO_TIMER`/`KE_ILLEGAL_TIMERID`
+fallback exactly. This silently affects every P/I twin pair in the
+boot list; it's only visible now because TIMEMAN is the first pair
+whose P vs. non-P behavior genuinely differs. Real fix: make export
+visibility respect the same runtime PRId/`iop_sbus_ctrl`-bit-3
+decision real `_start()` makes, instead of static/immediate
+registration - a real architectural change, intentionally deferred
+to its own dedicated, regression-tested round (task #219) rather than
+rushed here. Docs-only round, no source change.

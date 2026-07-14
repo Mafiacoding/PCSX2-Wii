@@ -11736,3 +11736,96 @@ the 104th finding at a deeper level of detail. Bookmarking
 `github.com/JeanxPereira/CrystalOSD` (MIT) alongside `ps2re/osdsys_re`
 (MIT) as standing reference material for future rounds. No source change
 this round.
+
+
+## 106th finding (Round 66, task #172/#232): SIF/RPC hypothesis ruled out; real writer function for the sibling struct field found via full static reverse-engineering, but its entire call chain is unreached dead code in our boot
+
+Directly following the user's explicit direction: try the SIF/RPC
+hypothesis first for `RAM[0x80020B54]`; if that is not it, reverse-
+engineer the real binary to find the actual writer instead of guessing.
+
+**Part 1: SIF/RPC hypothesis - ruled out.** Enumerated every real SIF
+RPC service this project's boot ever binds, by grepping the actual
+service-ID table in `include/core/hw/sif.h` and the dispatch logic in
+`ee_core.c`: `SIF_SID_LOADFILE` (0x80000006), `SIF_SID_PAD_BIND_ID1/2_OLD`
+(0x8000010F/0x8000011F), `SIF_SID_MCSERV` (0x80000400),
+`SIF_SID_SPU2DRV` (0x80000601), `SIF_SID_IOPHEAP` (0x80000003),
+`SIF_SID_CDVD_INIT` (0x80000592) - six real, cited services (ps2sdk-
+sourced), matching every `[RPCBIND]` ever logged in this project's
+captured boot across all prior rounds. All six are already answered by
+this project's own reply logic. Real ps2sdk has no VU1/graphics-
+dispatch RPC service at all - VU1 is EE-local hardware, driven directly
+by the EE, never through an IOP RPC round-trip. There is no unbound or
+unanswered SIF service anywhere in this project's boot capture that
+could plausibly be the source of `RAM[0x80020B54]`. This hypothesis is
+now conclusively closed, not just deprioritized.
+
+**Part 2: full static reverse-engineering of the real binary.** Built a
+new diagnostic (`/tmp/diag_dumpram.c`) that boots this project's own
+emulator to its established steady state (confirmed reproducible:
+908-940M EE instructions, landing at the same `pc=0x8000F810` as prior
+rounds) and dumps the full decompressed OSDSYS code+data region
+(`RAM[0x80000000-0x80300000]`, 3,145,728 bytes) to a file. Wrote a
+from-scratch MIPS reaching-definition scanner (`/tmp/scan_dump3.py`)
+that performs a real (not textual-grep) single-pass dataflow analysis
+over all 786,432 decoded instructions: tracks each of the 32 GPRs'
+known-constant state through `lui`/`ori`/`addiu` sequences, correctly
+invalidating on any intervening write (verified against a sanity check
+that recovers 87 real `lui 0x8002; store` pairs at plausible legitimate
+targets, ruling out a broken/no-op scanner).
+
+Result: **zero** instructions anywhere in the entire 3MB dump construct
+the address `0x80020B54` and store through it, via either compiler
+idiom (`lui+immediate-offset-store`, the standard pattern for this
+binary's `-G0`, no-gp-relative compilation per CrystalOSD's documented
+build flags, or `lui+ori/addiu` then indexed store). This is not "not
+yet executed" - it is absent from the reachable static instruction
+stream entirely, at least under the two addressing idioms real PS2
+compilers use for this construct.
+
+**The sibling field IS written, elsewhere.** The same scanner, run
+against nearby offsets, found `RAM[0x80020B50]` (offset 0 of the exact
+same struct our gate reads offset +4 from, i.e. `s6+0` vs. the gate's
+`s6+4`) genuinely IS written, twice, by a real disassembled function at
+`0x8000BB08` (prologue `addiu sp,-80`): it stores its own third
+argument (`a2`) into `struct[0]`, then calls a companion linear-search
+helper (`0x8000BAB8`) against a 12-byte-record array based at
+`0x80020B60`, in the same self-registration style already found and
+fixed twice this session (the IOP LOADCORE module list, and OSDSYS's
+own two earlier tables at `0x80020E70`/`0x80020FF4` from the 96th/99th
+findings) - now a third, independently-confirmed instance of this
+project's recurring "registration list function exists in the real
+binary, but nothing calls it" bug family. A sibling function at
+`0x8000BBC8` (prologue `addiu sp,-128`) reads the same struct field
+back out.
+
+**Confirmed via direct execution-trace instrumentation.** Found all six
+real, direct `jal` call sites to these two functions via an exhaustive
+scan of every `jal` instruction in the dump
+(`0x8000C618->0x8000BBC8`; `0x8000CA84`, `0x8000CBEC`, `0x8000CC30`,
+`0x80010C08`, `0x80010C80` -> `0x8000BB08`) - no indirect/vtable
+dispatch this time, all direct calls. Instrumented this project's own
+emulator to watch entry to both functions AND all six call sites
+across a fresh ~908-940M-instruction run. Result: **zero hits on every
+single one** - not merely "the call is skipped," but this project's
+boot never executes ANY instruction anywhere in the `0x8000C350-
+0x8000D100` / `0x80010B00-0x80010D00` code regions at all. This is a
+whole dead subsystem in our current boot, not a single missed branch.
+
+**Conclusion for task #172/#232.** The SIF/RPC hypothesis is closed.
+The real writer for the sibling field (and, by strong structural
+inference, very likely the intended path toward `RAM[0x80020B54]`
+itself) has been found via genuine reverse-engineering, not guessed -
+but this project's no-fabrication policy still blocks writing a value
+to `RAM[0x80020B54]` directly, since no code path in the real binary
+demonstrably reaches it under any addressing idiom this round's scanner
+modeled, and hand-writing a value would be exactly the kind of
+unfounded guess this project's standing discipline exists to avoid.
+The scope has narrowed further, though: the open question is no longer
+"what writes this address" (a whole unreached subsystem has now been
+precisely bounded) but "what real trigger is supposed to make this
+project's boot enter the `0x8000C350`+ registration subsystem at all" -
+consistent with, and a third confirmation of, this project's
+established registration-list bug family. No source change this round
+- docs-only investigation; regression/rebuild skipped per this
+project's own standing convention.

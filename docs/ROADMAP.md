@@ -2711,6 +2711,29 @@ genuinely never executes in this boot; finding it (and what gates
 entry to it) is the concrete next step. No source change, docs-only
 round.
 
+### Round 71 (111th finding, task #172/#237 continued)
+Live-instrumented (not hand-disassembled) the real interrupt-dispatch
+chain across a full ~893M-instruction run. Confirmed our EE_EXC_CODE_INT
+-> offset 0x200 vectoring is correct: real interrupts (Cause=0x8800,
+Timer+DMAC combo) fire 149 times and correctly reach real BIOS-resident
+dispatch code - 0x80000200 -> 0x800004C0 (real per-cause INTC dispatcher,
+matches ps2sdk's AddIntcHandler mechanism) -> 0x80001798 (real handler-
+list walker, 12-byte records, cause-indexed). For our current cause,
+the handler list is empty (count<=0) - correct, expected behavior, not
+a bug. Corrected a hand-decoding error from Round 70 (raw MIPS bytes
+without a trace suggested a different, wrong destination). Crucially,
+zero Cause.IP2 (VBLANK/SBUS group) hits occurred in the whole run,
+independently confirming this project's own existing 50th finding
+(task #176): VBLANK fires once early then goes quiet, and the real
+0x8000F768 poll loop's two exit conditions (SIF2 DMA completion, SBUS)
+can never be met because the IOP core intentionally halts by design
+after module bring-up (task #92) instead of running a persistent real
+idle/scheduler loop like real hardware. Answered the user's question
+directly: the real missing piece is not a further EE-side syscall or
+interrupt-vector fix (confirmed working this round) but implementing a
+persistent IOP idle loop instead of halting - flagged as new task #238.
+Docs-only round, no source change.
+
 ### Round 70 (110th finding, task #172/#236 continued)
 User asked whether something is missing to actually trigger syscall
 124, echoing this project's own earlier CDVD/ELF-loader-gap pattern.

@@ -2711,6 +2711,26 @@ genuinely never executes in this boot; finding it (and what gates
 entry to it) is the concrete next step. No source change, docs-only
 round.
 
+### Round 72 (112th finding, task #238 correction, task #221 resumption)
+Corrected the 111th finding: the IOP does NOT halt by design anymore -
+that was fixed at task #179 (well before this session), and a fresh
+diagnostic confirms it's genuinely idle-but-interrupt-responsive
+(iop.halted=0, iop.idle=1, timers/VBLANK checked every step). Task
+#238 is unnecessary - closed. The REAL remaining gap, confirmed live,
+is the already-known 89th/90th finding (Round 59): INTC_MASK stays
+0x00000000 for the entire run because of the P/I twin-module export-
+shadowing issue, whose real fix (PRId=0x1f) is gated off because it
+dead-ends the boot in an unmodeled device-table validation routine
+(92nd/93rd findings, task #221 - deprioritized). This round's fresh
+disassembly of the real ROM bytes shows that routine is bigger than
+previously scoped: a config-string parser feeding a 2-slot device
+table walk through at least 4 more unmodeled real functions, with an
+unconditional-looking panic loop whose real bypass condition isn't
+yet understood. No source change - reverse-engineering this safely
+needs real understanding of the config-string format and device-table
+contents first, per this project's own no-guessing discipline.
+Docs-only round.
+
 ### Round 71 (111th finding, task #172/#237 continued)
 Live-instrumented (not hand-disassembled) the real interrupt-dispatch
 chain across a full ~893M-instruction run. Confirmed our EE_EXC_CODE_INT

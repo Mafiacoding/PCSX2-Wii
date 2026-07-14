@@ -2658,3 +2658,24 @@ narrows task #172: OSDSYS's real screen/framebuffer-setup code path
 genuinely never executes in this boot; finding it (and what gates
 entry to it) is the concrete next step. No source change, docs-only
 round.
+
+### Round 63 (95th finding, task #172 continued)
+Implemented the user-directed "fix it" source change: real ps2sdk
+PADMAN `padArea` state-settling in the EE PADMAN RPC-open branch
+(`source/core/ee/ee_core.c`), settling both double-buffered 64-byte
+`pad_data_old` slots to `state=PAD_STATE_DISCONN`,
+`reqState=PAD_RSTAT_COMPLETE`, matching real `libpad.c`/`libpad.h`
+semantics (fetched/cited from ps2dev/ps2sdk). Also corrected a stale
+`ee_intc.h` doc comment claiming `ee_intc_raise()` is uncalled - it is,
+in fact, already wired via `ee_check_vblank()`; instrumented MTC0
+writes and disassembled the real interrupt-entry stub via the live
+PCSX2 debugger to conclusively rule out broken EE interrupt delivery
+as the blocker. Honest result: the PADMAN fix, while real/cited/safe,
+does NOT change the resting loop - `[s7+0xE4C]` (the loop's actual
+gating value) is unaffected, because `s7` etc. point at a FIXED
+low-EE-RAM globals block (0x80020000), not a dynamically-supplied
+`padArea`. Kept the fix (independently correct) and re-scoped task
+#172's next step to identifying what that fixed globals block's
+fields really represent. Full regression suite: 89/89 pass (after
+fixing a harness self-include-exclusion bug that had mis-reported 29
+as COMPILE_FAIL). Clean Wii/devkitPPC rebuild verified (436192 bytes).

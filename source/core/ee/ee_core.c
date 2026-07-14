@@ -2580,6 +2580,92 @@ static int ee_step(void)
                                  * handler's own source. */
                                 ee_mem_write32(st, call_recvbuf + 12u, 1u); /* data[3]: synthetic pad handle (placeholder) */
                                 ee_mem_write32(st, call_recvbuf + 20u, 0u); /* data[5]: synthetic extra output = 0 */
+
+                                /* Round 63 (95th finding, task #172
+                                 * continued): the reply above unblocks
+                                 * padPortOpen()'s OWN RPC return value,
+                                 * but real padPortOpen() (fetched
+                                 * ee/rpc/pad/src/libpad.c) does its
+                                 * REAL "is a controller connected"
+                                 * work entirely differently: it
+                                 * pre-fills the CALLER-supplied
+                                 * "padArea" buffer with
+                                 * "pdata->state = PAD_STATE_EXECCMD"
+                                 * (5, "still detecting") BEFORE even
+                                 * sending this RPC, and real IOP-side
+                                 * PADMAN (rom0:padman) subsequently
+                                 * DMAs fresh status into that SAME
+                                 * buffer in the background as pad
+                                 * hardware is polled - eventually
+                                 * settling `state` at
+                                 * PAD_STATE_DISCONN (0, per libpad.h's
+                                 * real, cited enum) once it determines
+                                 * no controller is present, or
+                                 * PAD_STATE_STABLE (6) once one is
+                                 * found. padGetState()'s own doc
+                                 * comment: "Wait until state == 6
+                                 * (Ready) before trying to access the
+                                 * pad" - any caller (libpad's own
+                                 * padGetState(), or this real BIOS/
+                                 * OSDSYS's lower-level equivalent
+                                 * polling the same real, DMA'd buffer
+                                 * directly) that busy-polls this field
+                                 * waiting for it to LEAVE EXECCMD would
+                                 * spin forever if nothing ever updates
+                                 * it - exactly the resting loop this
+                                 * project traced in the 94th finding
+                                 * (pc=0x8000F810 area, checking several
+                                 * fixed-offset flags including one
+                                 * that never changes). This project
+                                 * does not model a real, continuous
+                                 * IOP->EE PADMAN DMA stream (a real,
+                                 * separate feature - genuine periodic
+                                 * pad-hardware polling - not yet
+                                 * built), but CAN perform the single,
+                                 * real, well-cited step real PADMAN
+                                 * would have completed almost
+                                 * immediately with no controller
+                                 * physically present (this project's
+                                 * own Wii port has no PS2 controller
+                                 * to report either way): settle the
+                                 * caller's padArea buffer straight to
+                                 * PAD_STATE_DISCONN, matching real
+                                 * pad_data_old's exact, cited 64-byte
+                                 * layout ("rom0:padman has only 64
+                                 * byte of pad data" - libpad.c comment
+                                 * - frame:u32@0, state:u8@4,
+                                 * reqState:u8@5, ok:u8@6) for BOTH
+                                 * double-buffered copies (real
+                                 * padGetDmaStrOld() picks whichever of
+                                 * the two 64-byte slots has the
+                                 * higher `frame` count - writing both
+                                 * identically at frame=1 makes the
+                                 * choice immaterial). padArea itself
+                                 * is read from the request's own real,
+                                 * cited struct padOpenArgs layout
+                                 * (command@0, port@4, slot@8,
+                                 * unknown@12, padArea@16) - the same
+                                 * buffer this branch already reads/
+                                 * writes at other offsets, per the
+                                 * comment above (recvbuf == request
+                                 * buffer). Only touches memory when
+                                 * padArea is non-NULL and non-zero, to
+                                 * avoid writing through a bad pointer
+                                 * on any call shape this project
+                                 * hasn't verified. */
+                                {
+                                    uint32_t pad_area = ee_mem_read32(st, call_recvbuf + 16u);
+                                    if (pad_area != 0u) {
+                                        int slot_i;
+                                        for (slot_i = 0; slot_i < 2; slot_i++) {
+                                            uint32_t base = pad_area + (uint32_t)(slot_i * 64);
+                                            ee_mem_write32(st, base + 0u, 1u);  /* frame (both slots equal - real tie-break picks slot 0) */
+                                            ee_mem_write8(st, base + 4u, 0u);   /* state = PAD_STATE_DISCONN (real libpad.h enum) */
+                                            ee_mem_write8(st, base + 5u, 0u);   /* reqState = PAD_RSTAT_COMPLETE */
+                                            ee_mem_write8(st, base + 6u, 0u);   /* ok = 0 (no real report yet, honest placeholder) */
+                                        }
+                                    }
+                                }
                                 ee_arm_rpc_call_pending(call_cd);
                             } else if (call_sid == SIF_SID_MCSERV && call_recvbuf != 0u) {
                                 /* task #203 (80th finding): real

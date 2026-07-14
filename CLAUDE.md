@@ -4124,3 +4124,41 @@ include a still-missing RPC/syscall reply, or a real EE-side
 interrupt this project has never raised (ee_intc_raise(), per its own
 header comment, is "not yet called by anything"). No source change
 this round.
+
+## Checkpoint (Round 63 - 95th finding, task #172 continued)
+User explicitly directed "fix it" - an actual source-code fix, not
+further investigation. Implemented real ps2sdk PADMAN padArea
+state-settling in source/core/ee/ee_core.c's PADMAN RPC-open branch:
+per real libpad.c/libpad.h (fetched/cited from ps2dev/ps2sdk), settles
+both double-buffered 64-byte pad_data_old slots in the caller-supplied
+padArea buffer (read from the RPC request payload at offset 16) to
+state=PAD_STATE_DISCONN, reqState=PAD_RSTAT_COMPLETE - an honest "scan
+complete, nothing connected" report, no fabricated data. Compiles
+clean.
+
+Also corrected a stale doc comment: ee_intc.h claims ee_intc_raise()
+is "not yet called by anything," but ee_core.c already implements and
+calls ee_check_vblank() every frame. Instrumented MTC0-to-Status
+writes and disassembled the real R5900 interrupt-entry stub via the
+live PCSX2 debugger - EE interrupt delivery is confirmed genuinely
+working (IEc toggles via real critical sections, handler dispatches
+correctly). Ruled out as the blocker.
+
+Honest negative result: before/after register-state diagnostics show
+[s7+0xE4C] - OSDSYS's actual loop-continuation condition - is
+UNCHANGED by the PADMAN fix (still 0x00000024). Root cause: s0/s4/s5/
+s7/fp all point at the SAME fixed low-EE-RAM address (0x80020000, an
+EELOAD/kernel-resident globals block), not a dynamically-supplied
+padArea pointer a real padPortOpen() caller would provide. The fix is
+kept (independently correct, regression-safe) but does not resolve
+the actual blocker. Task #172's next step is re-scoped: identify what
+the fixed 0x80020000-based globals block's fields (+0xE28, +0xE30,
++0xE3C, +0xE4C, s6+0xB50) really represent - likely OSDSYS's own
+static/BSS data.
+
+Verification: full regression suite 89/89 pass (a harness bug this
+round had mis-reported 29 as COMPILE_FAIL - fixed the harness's
+generic #include self-exclusion logic, all 29 re-ran clean). Clean
+Wii/devkitPPC rebuild: exit 0, pcsx2-wii-git.dol/.elf produced
+(436192 bytes, same pre-existing benign strncpy warning, no new
+warnings).

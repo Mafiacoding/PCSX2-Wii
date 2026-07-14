@@ -10891,3 +10891,88 @@ this round - pure diagnostic/investigation, repo verified clean before
 and after. Full workflow: docs-only round, regression/rebuild skipped
 per this project's own standing convention for investigation-only
 rounds; docs updated, committed, pushed, rsynced.
+
+### 95th finding (Round 63, task #172 continued): real PADMAN `padArea`
+state-settling fix implemented and regression-verified, but empirically
+does NOT resolve the resting loop - correcting a stale doc comment and
+re-scoping the next step
+
+**Correction to the 94th finding's framing.** That finding's "not yet
+resolved" note repeated `ee_intc.h`'s own header comment that
+`ee_intc_raise()` is "not yet called by anything." This is stale
+documentation from an earlier round: `ee_core.c` (~line 508-525) has,
+in fact, already implemented `static void ee_check_vblank(ee_state_t
+*st)`, which computes `EE_CYCLES_PER_FRAME_NTSC` (4921488, from
+294.912MHz/59.94Hz per ps2tek) and calls `ee_intc_raise()` for
+`EE_INTC_IRQ_VBLANK_START`/`_END` (bits 2/3) once per frame's worth of
+executed instructions, and it IS called from `ee_core_step()`. This
+session instrumented every `MTC0`-to-Status write in a throwaway copy
+(`/tmp/pcsx2-instrument2`, real repo never touched) and confirmed
+`Status.IEc` toggles 0<->1 repeatedly via genuine critical-section
+EI/DI-equivalent pairs, and disassembled the real R5900
+exception/interrupt entry stub at `pc=0x800004E0-0x80000554` via the
+live PCSX2 reference debugger to confirm it's a real handler (saves
+EPC, masks Status, dispatches to `0x80001300`) that our emulator's
+delivery matches instruction-for-instruction. **Conclusion: EE
+interrupt delivery is not the blocker** - this hypothesis is now ruled
+out, not just undocumented. `ee_intc.h`'s comment should be treated as
+outdated; the real gap is downstream of interrupt delivery, not in it.
+
+**The "fix it" implementation.** Per real ps2sdk `libpad.c`/`libpad.h`
+(fetched from `raw.githubusercontent.com/ps2dev/ps2sdk/master/ee/rpc/pad/`),
+`padPortOpen()`'s EE-side code passes a caller-owned `padArea` buffer
+pointer at offset 16 of the RPC request payload (matching this
+project's existing `padOpenArgs`-shaped struct:
+`command@0,port@4,slot@8,unknown@12,padArea@16`), and the real IOP-side
+PADMAN continuously updates a double-buffered 64-byte `pad_data_old`
+struct in that buffer via background DMA - `padGetState()` reads this
+LOCAL buffer directly, it is not itself an RPC call. This project's
+existing PADMAN RPC branch (`SIF_SID_PAD_BIND_ID1_OLD` /
+`_ID2_OLD`) replied to the bind/open call but never touched the
+caller's `padArea` buffer at all. Implemented (in
+`source/core/ee/ee_core.c`, immediately after the existing reply-word
+writes, before `ee_arm_rpc_call_pending`): read `pad_area` from
+`call_recvbuf+16`, and if non-zero, write both 64-byte double-buffer
+slots' `frame=1`, `state=PAD_STATE_DISCONN(0)`,
+`reqState=PAD_RSTAT_COMPLETE(0)`, `ok=0` - i.e. honestly report "scan
+complete, no controller connected," matching real
+`libpad.h` enum values exactly (no fabricated "connected" state).
+Compiles clean (`gcc -fsyntax-only`).
+
+**Honest negative result.** Register-state diagnostics
+(`/tmp/diag_regs.c`/`diag_regs2_bin`) taken both BEFORE and AFTER this
+fix show `[s7+0xE4C]` - the actual value the OSDSYS per-frame service
+loop at `0x8000F864-0x8000F870` branches on to decide whether to keep
+looping - is **unchanged**, still exactly `0x00000024` (36) in both
+runs. The reason: `s0=s4=s5=s7=fp=0x80020000` is a FIXED, low-EE-RAM
+address (an EELOAD/kernel-resident globals block), not a
+dynamically-allocated buffer OSDSYS receives back from a
+`padPortOpen()` call - `padArea` pointers real PS2 titles use are
+supplied by the caller and would live at a different, likely
+higher/heap-allocated address the game/OSDSYS itself chooses, not this
+fixed low base. **This fix, while a real, correctly-cited, and
+regression-safe implementation of genuine ps2sdk PADMAN semantics
+(kept because it's independently correct and will matter once a real
+`padArea`-consuming call path is exercised), does not resolve the
+observed resting loop** - it was not, in fact, the loop's gating
+condition. Task #172's concrete next step is therefore re-scoped:
+identify what the fixed `0x80020000`-based globals block's fields
+(`+0xE28`, `+0xE30`, `+0xE3C`, `+0xE4C`, and `s6+0xB50`) actually
+represent within real EELOAD/kernel memory layout - this is very
+likely OSDSYS's own static/BSS data, not a PADMAN buffer, and will
+need a different research angle (e.g. live-debugger memory-layout
+cross-reference against a real, comparably-progressed boot state)
+since no citable public source has been found yet describing OSDSYS's
+own internal globals layout.
+
+**Verification.** Full regression suite: all 89/89 test files pass (0
+RUNTIME_FAIL, 0 COMPILE_FAIL) - the harness itself had a bug this
+round (see below) that initially mis-reported 29 tests as
+COMPILE_FAIL; after fixing the harness's source-exclusion logic to
+generically detect `#include "<path>.c"` self-inclusion (not just for
+`ee_core.c`/`iop_core.c`, but any of the 25 source files), all 29
+re-ran clean, confirming the failures were harness artifacts, not
+regressions from the PADMAN change. Clean Wii/devkitPPC rebuild: exit
+0, `pcsx2-wii-git.dol`/`.elf` produced (436192 bytes, same
+pre-existing benign `strncpy` truncation warning as prior rounds, no
+new warnings).

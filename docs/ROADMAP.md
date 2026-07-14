@@ -2934,3 +2934,21 @@ unlocks the real boot path. Two open hypotheses: a genuine relocation/
 interpreter bug dropping an instruction, or deliberate real "idle
 handler" design pending a future overwrite/interrupt. Not yet
 distinguished - flagged as the concrete next step. PRId stays 0.
+
+### Round 79 (119th finding, task #245, task #172 continuation)
+Docs-only round. Connected to a live PCSX2 DebugServer session with a
+real, legally-dumped GT3 disc to compare against the 118th finding's
+low-RAM self-loop. Real hardware's actual code at these addresses:
+0x00-0x0C = UTLB-refill vector (nops), 0x10-0x3C = unused break
+padding, 0x40-0x74 = a real exception-context-save routine indexing a
+fixed slot of a RAM-resident handler table, and critically 0x80-0xB4
+= the real, canonical MIPS general-exception vector (Cause.ExcCode-
+indexed jump table based at RAM 0x440-0x47C). This project's own
+PRId=0x1f trace has completely different content at every one of
+these addresses (the 118th finding's mystery self-loop function
+instead). Conclusively resolves the 118th finding in favor of "our
+emulator's PRId=0x1f path never installs the real exception-vector
+table" rather than deliberate idle-handler design. Reframes task #245:
+the real gap is earlier and more foundational than the device-table
+mechanism - need to find why the universal vector-table install step
+doesn't run. No fix this round, no source change. PRId stays 0.

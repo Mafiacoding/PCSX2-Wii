@@ -4407,3 +4407,21 @@ deliberate idle-handler design awaiting a future event. No fix this
 round - docs-only. PRId stays 0. Next step: trace what real ROM
 function writes this stub into 0x30-0x90 and cross-check its true
 compiled form.
+
+## Checkpoint (Round 79 - 119th finding, task #245)
+Used a live PCSX2 DebugServer connection with a real GT3 disc to
+directly compare real IOP hardware's low-RAM content against this
+project's PRId=0x1f trace at the exact same addresses. Real hardware:
+0x40-0x74 is a genuine context-save dispatcher, and 0x80-0xB4 is the
+REAL, canonical MIPS general-exception vector (Cause.ExcCode-indexed
+jump table at RAM 0x440-0x47C) - completely different from what this
+project's PRId=0x1f run has there (the 118th finding's mystery self-
+loop function occupies both addresses instead). This conclusively
+resolves the 118th finding: it's a genuine gap (this project's
+PRId=0x1f path never installs the real exception-vector table), not
+deliberate idle-handler design. Reframes task #245 - the real missing
+piece is earlier/more foundational than the device-table logic: real
+hardware installs this vector table as one of the very first cold-boot
+steps, before any module-specific code runs. No fix yet - next step is
+finding what real ROM function is responsible and why our PRId=0x1f
+path skips it. PRId stays 0 in the shipped build.

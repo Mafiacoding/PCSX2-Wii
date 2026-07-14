@@ -10296,3 +10296,86 @@ module's entry point returns" and "first real thread begins running"
 (very plausibly a short, findable real BIOS ROM routine, analogous to
 how the LOADCORE registration list was eventually traced in tasks
 #148-163), rather than continuing to guess at Status bit values.
+
+## Round 58 (88th finding): real fix for syscall 0x08 (CpuEnableIntr) - Status.IEc/IM2 finally leave 0x00000000, new blocker identified (I_MASK)
+
+**Context.** Round 56/57 implemented real, cited SBUS/timer/VBLANK
+interrupt-raise mechanisms and proved (87th finding) that none of
+them could ever fire because IOP COP0 Status stayed 0x00000000
+(IEc=0, IM2=0) through the entire real BIOS boot - the interrupt
+*gate* itself was never opened by anything. Task #217 continued the
+investigation with a live PCSX2 DebugServer connection and further
+source research.
+
+**Root cause found.** Fetched real ps2sdk source
+(`iop/system/intrman/src/intrman.c`) and conclusively identified IOP
+syscall $v0=8 as `intrman_syscall_08_CpuEnableIntr` - the real
+mechanism backing `CpuEnableIntr()`. Its real handler body
+(`syscall_handler_08_CpuEnableIntr`, inline in the same file's
+`exception_system_handler_code`) ORs bits 2 (IEp) and 10 (IM2) into
+the pre-exception Status value, writes it back via MTC0, and returns
+via a real RFE (`.word 0x42000010`) - which shifts IEp into IEc. Net,
+documented, real effect once `CpuEnableIntr()` returns: Status.IEc=1
+and Status.IM2=1.
+
+This project's task #164 had already identified syscall $v0=8's real
+CALLING convention (correctly, from live-traced register state) but,
+without a citable real target at the time, treated it as a pure no-op
+bypass - the exact gap this round closes. Further live-traced (this
+project's own new module-completion tracing, added this round):
+THREADMAN's real `_start()` (ps2sdk's
+`iop/system/threadman/src/thcommon.c`) runs to completion via a
+natural return in this project's own interpreter, and its own last
+real action before returning `MODULE_RESIDENT_END` is exactly this
+call - confirming the fix targets real, reachable, exercised code in
+this project's own boot, not a hypothetical.
+
+**Fix implemented.** `source/core/iop/iop_core.c`'s SYSCALL case:
+`syscall_num == 0x08` now sets `st->cop0[12] |= (0x1u | 0x400u)`
+(IEc + IM2) before returning 0 and resuming past the syscall, same
+"intercept before any real exception" convention already established
+for 0x10/0x14 (left untouched, still pure no-ops - both are always
+paired 1:1 around real critical sections, so leaving both inert
+cannot itself cause a net IEc/IM2 change, and implementing only one
+half without further evidence risked introducing a spurious
+re-disable). New unit test `tests/test_iop_cpuenableintr.c` (8
+checks, all passing) verifies the real net effect for $v0=8 and
+confirms unrelated syscall numbers are unaffected.
+
+**Verified via diagnostic - real, measurable progress.** A live
+diagnostic re-run (with a temporary trace at the `idle=1` point) shows
+IOP COP0 Status finally leaves `0x00000000` for the first time in this
+project's history: **`cop0_status=0x00000401`** (IEc=1, IM2=1) at
+module-loading completion - a real, verified state change, not a
+guess.
+
+**New blocker identified (not yet fixed).** Despite the CPU-side gate
+now correctly open, a 300M-instruction diagnostic re-run still shows
+the EE parked at pc=0x8000CFD4 (unchanged). Tracing further: IOP
+hardware interrupt delivery (`iop_check_hw_interrupt()`, task #115)
+requires BOTH `Status.IEc/IM2` (now correctly 1/1) AND
+`I_STAT & I_MASK` != 0 - the peripheral-side gate. A diagnostic read
+of both registers at idle=1 shows **`istat=0x00000801`** (bits 0 and
+11 - this project's own VBLANK_IN/VBLANK_OUT, genuinely raised) but
+**`imask=0x00000000`** - I_MASK, the per-source interrupt-enable mask
+real drivers set via `EnableIntr()`, is still completely unset. Since
+`idle=1` means no further real instructions ever execute, this value
+is final: no interrupt can ever be recognized without it, regardless
+of how many real IRQ sources this project raises correctly.
+
+`EnableIntr()` is a plain library function (not a syscall trap) real
+modules reach via this project's own already-proven-correct
+inter-module import-linking (355/355 resolved, 86th finding) - so if
+reachable, real code, it should already work. THREADMAN's own real
+`init_timer()` (same `thcommon.c`) calls
+`EnableIntr(GetHardTimerIntrCode(timer_id))` as part of its own
+natural, already-confirmed-reached `_start()` - meaning the exact real
+call that should set an I_MASK bit is provably in-scope, but observably
+doesn't leave a mark. Flagged as the concrete next step (task #218):
+trace whether `AllocHardTimer`/`GetHardTimerIntrCode`/`EnableIntr`
+genuinely execute correctly against this project's own
+`source/hw/iop_timers.c`/`iop_intc.c` models within THREADMAN's real
+code, or diverge somewhere upstream of the `EnableIntr` call itself.
+
+Full 89/89 regression suite passing, clean Wii/devkitPPC rebuild
+(435936 bytes), all changes documented/committed/pushed/rsynced.

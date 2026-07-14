@@ -531,7 +531,67 @@ static int iop_step(void)
              * not yet identified, e.g. could be a real
              * RegisterIntrHandler/CpuEnableIntr-style kernel call).
              * Same precedent, same generic default-return convention. */
-            if (syscall_num == 0x10u || syscall_num == 0x08u || syscall_num == 0x14u) {
+            /* Task #217 (88th finding): real ps2sdk source
+             * (iop/system/intrman/src/intrman.c, fetched and cited
+             * this round) conclusively identifies syscall 0x08 as
+             * `intrman_syscall_08_CpuEnableIntr` - the exact real
+             * mechanism backing CpuEnableIntr(). Its real assembly
+             * body (`syscall_handler_08_CpuEnableIntr` in the same
+             * file's inline exception_system_handler_code) is:
+             *   lw   $t0, 0x408($zero)   ; pre-exception Status,
+             *                            ; saved by the generic ROM
+             *                            ; exception-entry stub
+             *   ori  $t0, $t0, 0x404     ; set bit2 (IEp) + bit10
+             *                            ; (IM2, this project's
+             *                            ; IOP_STATUS_IM2 - see
+             *                            ; iop_check_hw_interrupt())
+             *   mtc0 $t0, $12
+             * ...followed by a real RFE at return (same file's
+             * `syscall_handler_00_return_from_exception`, ends in
+             * `.word 0x42000010` - COP0 RFE, exactly this project's
+             * own already-implemented IOP RFE, task #113), which
+             * shifts IEp into IEc. Net, real, documented effect once
+             * CpuEnableIntr() returns: Status.IEc=1 and Status.IM2=1.
+             *
+             * This project's own diagnostic (STATUS.md's 87th
+             * finding) proved Status stays 0x00000000 through the
+             * entire real BIOS boot specifically because this exact
+             * syscall was, until now, treated as a pure no-op by the
+             * bypass below (inherited from task #164, which correctly
+             * identified the CALLING convention - v0=8, module-
+             * agnostic - but not yet this real target semantic).
+             * Live-traced (this project's own module-completion
+             * tracing, this round): THREADMAN's real _start() runs to
+             * completion via a natural return and its own real last
+             * action before returning is exactly this call
+             * (ps2sdk's iop/system/threadman/src/thcommon.c _start(),
+             * last line before `return MODULE_RESIDENT_END;`) -
+             * confirming this is reachable, real, exercised code in
+             * this project's own boot, not a hypothetical.
+             *
+             * 0x10 (CpuSuspendIntr) and 0x14 (CpuResumeIntr) are also
+             * now known precisely (same file: 0x10 ANDs the saved
+             * status with 0x414 as its return value then clears bits
+             * 2/4/10; 0x14 clears those same bits then ORs in the
+             * caller-supplied prior state) but are deliberately left
+             * as before (pure no-ops, no Status effect) - real code
+             * always pairs them 1:1 around a critical section, so
+             * leaving both inert cannot itself cause a net IEc/IM2
+             * change, and implementing only one half in an unproven
+             * way risked *introducing* a spurious re-disable after
+             * this fix's real CpuEnableIntr() runs. Not applying an
+             * unverified fix without a proven failure is this
+             * project's own established discipline (see docs/
+             * STATUS.md's repeated "not fabricated without citation"
+             * notes). */
+            if (syscall_num == 0x08u) {
+                st->cop0[12] |= (0x1u | 0x400u); /* real net effect of CpuEnableIntr(): IEc (bit0) + IM2 (bit10) */
+                st->gpr[2] = 0;
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                break;
+            }
+            if (syscall_num == 0x10u || syscall_num == 0x14u) {
                 st->gpr[2] = 0; /* same generic default-return convention as iop_hle_bios.c / task #149/#156 */
                 st->pc = this_pc + 4u;
                 st->next_pc = this_pc + 8u;

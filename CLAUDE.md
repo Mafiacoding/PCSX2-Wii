@@ -3957,3 +3957,16 @@ regression, clean Wii rebuild (435872 bytes). Next (task #216):
 live-debugger investigation of the real minimal thread-dispatch step
 needed, same rigor as the LOADCORE investigation (tasks #148-163) -
 not to be fabricated without a citation.
+
+## Checkpoint (Round 58 - 88th finding, task #217 continuation)
+Real, cited fix: IOP syscall 0x08 = CpuEnableIntr() (ps2sdk's
+intrman.c), now sets Status.IEc+IM2 instead of being a no-op. Verified
+via diagnostic: Status finally leaves 0x00000000 (now 0x00000401) for
+the first time in this project's history - real, measurable progress.
+Splash screen still not reached: I_MASK stays 0 despite I_STAT showing
+real raised bits (VBLANK) - the peripheral-side interrupt-enable mask
+that real EnableIntr() calls should set never leaves a mark, even
+though THREADMAN's real init_timer() (which calls it) is confirmed to
+run to completion. Full 89/89 regression, clean Wii rebuild (435936
+bytes). Next (task #218): trace EnableIntr()'s real call chain against
+this project's timer/intc models.

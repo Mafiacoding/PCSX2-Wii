@@ -2521,3 +2521,16 @@ Next: confirm via live-debugger/disassembly (same rigor as the
 LOADCORE investigation, tasks #148-163) what minimal real thread-
 dispatch step is needed, rather than fabricating Status bit values.
 Full 88/88 regression, clean Wii rebuild (435872 bytes).
+
+### Round 58 (88th finding)
+Real fix for IOP syscall 0x08 (CpuEnableIntr), cited from ps2sdk's
+intrman.c: sets Status.IEc+IM2 (0x401), previously a no-op. Verified
+via diagnostic - Status finally leaves 0x00000000 for the first time.
+Still doesn't reach the splash screen: I_MASK (the peripheral-side
+interrupt-enable mask) stays 0x00000000 even though I_STAT correctly
+shows raised bits (VBLANK) - EnableIntr() is real, reachable code
+(proven via import linking + THREADMAN's own confirmed-reached
+init_timer()) but its effect isn't observed. Next (task #218): trace
+EnableIntr()'s real call chain (AllocHardTimer/GetHardTimerIntrCode)
+against this project's own timer/intc models to find where it
+diverges. Full 89/89 regression, clean Wii rebuild (435936 bytes).

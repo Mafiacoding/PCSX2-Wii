@@ -11289,3 +11289,125 @@ state machine to a success path instead of always landing on one of
 the five retry codes. No source change this round - docs-only
 investigation; regression/rebuild skipped per this project's own
 standing convention for investigation-only rounds.
+
+
+## 100th finding (Round 65 continued, task #172): real caller identified via own-emulator instrumentation - 0x8000FCE8 is a VBLANK interrupt sub-handler, sentinel value strongly implicates a missing earlier initialization
+
+Continuing directly from the 99th finding's open question (who calls
+`0x8000FCE8`, and what determines the search key). The live PCSX2
+debugger's mismatched-session limitation made a pure static trace of
+the caller unreliable (a `pcsx2_find_pattern` search across the live
+session's resident RAM for both a direct `jal` encoding to
+`0x8000FCE8` and the raw address as a stored function pointer found
+zero matches - expected, since a per-boot vtable/interrupt-vector
+value from an UNRELATED live game session has no reason to match our
+own boot's values). This round instead went back to instrumenting
+THIS PROJECT'S OWN emulator (the same disposable-scratch-copy
+technique from the 96th finding), with one change: only watching
+`pc==0x8000FCE8` (dropping the two other watch points and the
+full-range write logging from the 96th finding's build, which had
+made each diagnostic run too slow to reach this deep into boot within
+one tool call's wall-clock budget - confirmed this round by direct
+measurement: ~2M EE+IOP instructions/sec combined in this sandbox).
+With the lighter instrumentation, the target was reached well within
+budget - no checkpoint/resume scaffolding was even needed in the end,
+though a working one (dumping/restoring all writable process memory
+between separate `setarch -R`-launched runs, verified deterministic
+across 3 round-trips) was built and is available for future rounds if
+a deeper target requires it.
+
+**Real result, from our own emulator's actual boot (not a mismatched
+session)**: `0x8000FCE8` was hit with `a0=1`, `a1=-184`,
+`ra=0x80011190`. Disassembling around the return address reveals a
+real MIPS exception/interrupt vector stub at `0x80011180-0x800111A0`:
+saves `ra`/`v0` via `k1`-based scratch addressing (classic PS2
+interrupt-entry convention), calls two dispatch helpers
+(`0x80010F58`, `0x80010F34`), then `jal 0x8000FCE8` with `a0=1`,
+another call to `0x80011030`, restores `ra`, and `eret`s. A second,
+near-identical stub immediately follows at `0x800111A4-0x800111EC`,
+calling the SAME `0x8000FCE8` with `a0=2` instead. A third, similar
+stub at `0x800111F0+` calls a DIFFERENT function, `0x8000CF68`
+(adjacent to the `0x8000CF88` OSDSYS per-frame-loop entry
+characterized earlier this session). This is conclusively a real
+VBLANK interrupt handler table: `a0=1`/`a0=2` are the two VBLANK
+sub-causes (start/end), matching standard PS2 kernel convention. This
+CONFIRMS this project's own EE interrupt delivery (tasks #66-68, #217)
+correctly reaches and invokes OSDSYS's real per-vblank update logic -
+not a coincidence or fabrication, but genuine evidence the interrupt
+pipeline built earlier in this project works end-to-end into real
+BIOS/OSDSYS code.
+
+**Sentinel-value red flag.** Per the 99th finding's trace, the `a0==1`
+path (our observed, common case) is the "not equal to 2" branch at
+`0x8000FD3C`, which writes `0xFFFF8000` (-32768 as a signed 32-bit
+value) into the persistent global `RAM[0x80020D24]` before calling
+`0x8000EB88`, which reads that value straight back as a BASE POINTER
+and dereferences `[base+0x228]`/`[base+0x22C]`/`[base+0x230]`/
+`[base+0x240]`. A legitimate GS/VU rendering-context pointer would not
+plausibly be `0xFFFF8000` (well outside any valid EE KSEG0/KUSEG
+range for a real allocated struct) - this has the shape of a
+deliberate real-kernel "not yet initialized" sentinel, strongly
+suggesting `RAM[0x80020D24]` is supposed to be set to a REAL context
+pointer by some earlier OSDSYS initialization routine that either
+never runs, or runs after this VBLANK handler first fires, in this
+project's current boot ordering.
+
+**Honest scope of what remains open.** No writer of a plausible-looking
+real pointer value to `RAM[0x80020D24]` was located this round (a
+targeted search was not completed - this is the concrete next step).
+Without identifying that real initializer and a citable reason it
+isn't running (or runs too late) in this emulation, no fix is
+implemented this round - continuing this project's no-fabrication
+discipline. It remains possible, but unconfirmed, that this
+initializer depends on something this project doesn't yet model (e.g.
+a specific IOP->EE handoff signal, or GS-context allocation the real
+BIOS performs during an earlier, not-yet-reached phase of OSDSYS
+startup).
+
+**Net effect on task #172.** The single biggest open question from the
+96th/99th findings - who calls this dispatcher, and under what
+identity - is now conclusively answered with real, own-emulator-
+verified evidence, not speculation: it is OSDSYS's per-vblank update
+handler, and it fails on effectively every call because a context
+pointer global is never properly initialized before the first vblank
+fires. Task #172 remains in_progress, re-scoped to: find the real
+initializer (or its absence) for `RAM[0x80020D24]`. No source change
+this round - docs-only investigation; regression/rebuild skipped per
+this project's own standing convention for investigation-only rounds.
+
+
+## 100th finding addendum (same round): the sentinel write is inline, not a missing separate initializer - re-scoping task #172 accordingly
+
+A follow-up watch on writes to `RAM[0x80020D24]` specifically (same
+fast own-emulator instrumentation, watching only this one address
+rather than the full `0x80020000-0x80021000` range) confirms: across
+the entire run up to and including the first `0x8000FCE8` hit, there
+is exactly ONE write to this global, at `pc=0x8000FD50`, value
+`0xFFFF8000` - matching the 99th finding's own disassembly of that
+exact instruction inline within `0x8000FCE8` itself. There is no
+earlier, separate initializer that writes a "real" context pointer
+here before the VBLANK handler runs - the 100th finding's original
+"missing earlier initialization" hypothesis is corrected: this global
+is a SCRATCH value, freshly recomputed by the handler itself on every
+single invocation, always to one of exactly two hard-coded-shape
+values (`0x00008250` on the `a0==2` path, `0xFFFF8000` on the `a0==1`
+path observed here) depending only on the VBLANK sub-cause - not
+loaded from, or dependent on, any persistent prior state.
+
+This re-focuses the open question: the bug (if it is one) is not a
+missing prior initialization, but either (a) this really is intended,
+correct real-kernel behavior, and the actual failure lies in how
+`0x8000EB88` or the sentinel-comparison ladder interprets these two
+fixed values on THIS project's boot vs. real hardware's, or (b) one of
+the OTHER inputs to this state machine - `VPU-STAT` (`cfc2`) or
+`RAM[0x8002022C]` - differs from what real hardware would report at
+this point in boot, causing the `a0==1`/"not equal to 2" branch to be
+taken when real hardware would instead take the `a0==2` branch (or
+vice versa). Both `VPU-STAT` and `RAM[0x8002022C]` are values this
+project's VU0/GS-adjacent emulation produces itself, making this a
+plausible, concrete next investigative target - re-scoping task #172
+to: verify whether this project's `VPU-STAT` (VU0 status flags via
+`cfc2`) and `RAM[0x8002022C]` values at the moment of the first VBLANK
+match what real PCSX2/real hardware would report at the equivalent
+boot point, rather than continuing to chase `RAM[0x80020D24]` itself,
+which is now understood to be a symptom, not a cause.

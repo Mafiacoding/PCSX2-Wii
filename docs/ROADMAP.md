@@ -3015,3 +3015,25 @@ nest. No live watchpoint attempt this round (existing GT3 session is
 past boot; MCP tools have no reset capability). No fix, no source
 change. Next: copy-loop pattern search, or a live watchpoint on a
 freshly-restarted GT3 session.
+
+### Round 83 (123rd finding, task #245, task #172 continuation)
+Live-capture round (docs-only, no source change). User armed a write
+watchpoint on IOP RAM 0x40-0x480 and reset GT3 themselves (avoiding
+tool-side pause/continue friction); the watchpoint fired and captured
+a full register + memory report. Confirmed the real exception-vector
+table's exact byte content: context-save code at 0x40-0x74, general-
+exception vector at 0x80-0xB4, and a fully-populated 16-entry
+Cause.ExcCode jump table at 0x440-0x47C with real semantic structure
+(ExcCode=0/Interrupt and ExcCode=8/Syscall each get dedicated
+handlers, the other 14 codes share one generic handler). Searched
+/tmp/real_bios.bin for this exact byte sequence - no match found,
+ruling out a simple verbatim ROM-to-RAM template copy and indicating
+the table is assembled at runtime from computed/relocated addresses.
+This retroactively explains why Round 82's automated constant-offset
+search found nothing: it only matched sw/sh/sb with a literal
+$zero-relative immediate, not register-relative stores through a
+separately-loaded base register - a real, now-documented gap in that
+search's methodology. Exact writing instruction still not pinned down
+(watchpoint's reported hit PC landed on an unrelated self-loop at
+0xB694). No fix, no source change. Next: corrected register-relative
+store search over the same ~30-subroutine call graph.

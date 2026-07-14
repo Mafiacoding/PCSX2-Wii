@@ -4479,3 +4479,21 @@ not a register-relative copy loop or a deeper call nest. No live
 watchpoint attempt (existing GT3 session already past boot; no reset
 tool available). No fix, no source change. Next: copy-loop pattern
 search, or a live watchpoint on a freshly-restarted GT3 session.
+
+## Checkpoint (Round 83 - 123rd finding, task #245)
+User-triggered live capture: armed a write watchpoint on IOP RAM
+0x40-0x480, user reset GT3 and kept PCSX2 focused themselves
+(avoiding the pause/continue friction from tool-driven attempts).
+Watchpoint fired, captured the real exception-vector table's exact
+byte content for the first time: context-save code at 0x40-0x74,
+general vector at 0x80-0xB4, and a fully-populated 16-entry
+Cause.ExcCode jump table at 0x440-0x47C (ExcCode=0/Interrupt and
+ExcCode=8/Syscall get dedicated handlers, the rest share one generic
+handler - real, correct MIPS dispatch semantics). Searched the ROM
+binary for this exact byte sequence - not found, ruling out a
+verbatim memcpy-from-ROM install and pointing to a runtime-assembled
+table. This explains why Round 82's constant-$zero-offset search came
+up empty - real gap in that search's methodology, now documented.
+Exact writing instruction still not identified (watchpoint's hit PC
+landed on an unrelated self-loop at 0xB694). No fix, no source
+change. Next: corrected register-relative store search.

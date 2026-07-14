@@ -4368,3 +4368,25 @@ concrete next step is a live trace (PRId=0x1f, disposable scratch
 copy) of the actual device-table bytes and the real resolved jalr
 target at 0xBFC4A44C. PRId remains 0. Task #245 tracks this
 continuation.
+
+## Checkpoint (Round 77 - 117th finding, task #221/#245)
+Major discovery: the "device table" entries from the 92nd/116th
+findings are genuine embedded IOP IRX/ELF modules (real ELF magic,
+e_machine=8, vendor e_type=0xFF80) - the SAME format iop_elf.c already
+loads for ROMDIR modules. Implemented an intercept (iop_core.c's JAL/
+JALR cases) that ELF-loads these via the existing iop_elf_load() and
+redirects the real ROM's own two device-init JALR call sites to the
+correctly relocated entry point, instead of a raw/unrelocated ELF
+header field (previously observed jumping to 0x890/0x30 - garbage).
+Gated entirely on cop0[15]==0x1f, so it's dead code and verified inert
+(90/90 regression, clean rebuild) at the shipped default PRId=0.
+Live-tested with PRId=0x1f temporarily forced (scratch-only): the IOP
+genuinely escapes the exact literal panic-loop PC for the first time
+in this whole investigation thread, but then spins at very low RAM
+addresses (0x50-0x90) - a further, deeper dependency on real low-RAM
+boot scaffolding (exception vectors/boot_info-style structures) that
+the PRId=0x1f path skips entirely since iop_module_loader_boot() never
+triggers there. PRId stays 0 in the committed build - this is real,
+partial, honestly-reported progress, not a working splash-screen path
+yet. Task #245 continues: disassemble the freshly-loaded module's own
+code at its real relocated address to find what it's spinning on.

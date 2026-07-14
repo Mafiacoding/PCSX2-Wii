@@ -76,6 +76,12 @@ typedef struct {
      * exception - a real, reproducible hang found while regression-
      * testing task #155 (see docs/STATUS.md). */
     uint8_t  exception_pending;
+
+    /* Round 77 (117th finding, task #221/#245): scratch state for the
+     * device-table embedded-ELF intercept (see iop_core.c's JAL/JALR
+     * case comments). 0 = no pending image. Only ever set/used when
+     * cop0[15]==0x1f (dead field at the default PRId=0). */
+    uint32_t devtable_pending_image;
 } iop_state_t;
 
 int  iop_core_init(const bios_image_t *bios);

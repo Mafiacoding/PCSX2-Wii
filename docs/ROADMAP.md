@@ -2898,3 +2898,23 @@ expected to return. Next concrete step: live-trace (PRId=0x1f,
 disposable scratch copy) the real raw device-table bytes and the
 actual resolved jalr target at 0xBFC4A44C to find out what real
 function that is and why it returns in this project's emulation.
+
+### Round 77 (117th finding, task #221/#245, task #172 continuation)
+Discovered the "device table" entries are genuine embedded IOP IRX/ELF
+modules (real ELF magic, e_machine=8 MIPS, vendor e_type=0xFF80,
+PT_MIPS_IOPMOD segment - exactly iop_elf.c's already-supported format).
+Implemented a real intercept in source/core/iop/iop_core.c: remembers
+the raw device-table image pointer at the JAL to 0xBFC4A600, then at
+the two real "call the device's init function" JALR sites
+(0xBFC4A39C/0xBFC4A44C) calls the existing iop_elf_load() on it and
+redirects to the real relocated entry point - only active at
+PRId=0x1f, fully inert (verified via 90/90 regression) at the shipped
+default PRId=0. Live-traced: this genuinely escapes the literal
+panic-loop PC for the first time, but the freshly-loaded code then
+spins at very low RAM addresses (0x50-0x90), suggesting a further,
+deeper dependency on boot infrastructure the PRId=0x1f path currently
+skips entirely (iop_module_loader_boot()'s own scaffolding never runs
+there). PRId stays 0 in the shipped build - not yet a working boot
+path, but real, verified, committed progress and a working foundation
+for the next round. Full regression: 90/90 pass. Clean Wii/devkitPPC
+rebuild verified, exit 0.

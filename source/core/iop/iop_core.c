@@ -55,6 +55,7 @@
 #include "core/hw/iop_module_loader.h" /* real IOP module/IRX loader - task #92 */
 #include "core/hw/iop_excb.h" /* real exception-handler priority chains at RAM[0x100] - Round 22 */
 #include "core/hw/iop_icfg.h" /* real ICFG register / EE INTC_SBUS raise - task #214, 85th finding */
+#include "core/hw/iop_elf.h" /* real ELF32/MIPS IOP loader - reused for device-table embedded images, task #221/#245 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -586,7 +587,68 @@ static int iop_step(void)
         case 0x06: /* SRLV */ if (rd) GPR(rd) = rt32 >> (rs32 & 0x1F); break;
         case 0x07: /* SRAV */ if (rd) GPR(rd) = (uint32_t)((int32_t)rt32 >> (rs32 & 0x1F)); break;
         case 0x08: /* JR */   BRANCH_TO(GPR(rs)); break;
-        case 0x09: /* JALR */ { uint32_t tgt = GPR(rs); if (rd) LINK(rd); BRANCH_TO(tgt); } break;
+        case 0x09: /* JALR */ {
+            uint32_t tgt = GPR(rs);
+            /* Round 77 (117th finding, task #221/#245): these two
+             * exact addresses are the real ROM's own two device-table-
+             * slot "call the real init function now" sites (see the
+             * caller's disassembly in the 116th/117th findings -
+             * 0xBFC4A39C for slot 1, 0xBFC4A44C for slot 2). $rs at
+             * each of these sites holds a raw, NEVER-RELOCATED field
+             * read straight out of the still-in-ROM ELF header (the
+             * real ROM code assumes this device's image was already
+             * ELF-loaded into RAM by an earlier step this project
+             * doesn't model) - live tracing confirmed this resolves
+             * to tiny, clearly-wrong addresses (0x890, 0x30) that
+             * either read as zero-filled RAM (a stream of SLL $0,$0,0
+             * NOPs) or immediately return, falling straight into the
+             * "should never get here" panic trap this project's 92nd/
+             * 116th findings already documented. Since we now know
+             * the real raw entry (remembered from the matching JAL to
+             * 0xBFC4A600 above) is a genuine IRX-format ELF image,
+             * really ELF-load it here (reusing iop_elf.c's existing,
+             * already-tested loader - the exact same machinery
+             * iop_module_loader.c uses for every ROMDIR module) and
+             * redirect the jump to its real, correctly-relocated
+             * entry point instead. Fixed, generous load addresses
+             * (0x001C0000/0x001C8000) were chosen well clear of both
+             * the ROMDIR module loader's own bump-allocated region
+             * (observed peak 0x00145CA0 in a full 29-module boot) and
+             * the stack (0x001FFF00) - see the 117th finding for the
+             * measurement. On any load failure, falls back to the
+             * real ROM's own (buggy-today) value rather than risk a
+             * worse outcome. Only active at PRId=0x1f - dead code at
+             * the shipped default PRId=0. Verified via live host-
+             * native tracing this DOES change behavior (IOP escapes
+             * the exact literal panic-loop PC for the first time),
+             * but also reveals a further, deeper blocker - see the
+             * 117th finding's honest "not yet a working boot path"
+             * section before treating this as more than a genuine
+             * partial step. */
+            if (st->cop0[15] == 0x1fu &&
+                (this_pc == 0xBFC4A39Cu || this_pc == 0xBFC4A44Cu) &&
+                st->devtable_pending_image != 0) {
+                uint32_t raw = st->devtable_pending_image;
+                st->devtable_pending_image = 0;
+                if (raw >= 0xBFC00000u) {
+                    uint32_t rom_off = raw - 0xBFC00000u;
+                    if (st->bios && rom_off < st->bios->size) {
+                        uint32_t image_size = st->bios->size - rom_off;
+                        if (image_size > 0x8000u) image_size = 0x8000u;
+                        uint32_t load_addr = (this_pc == 0xBFC4A39Cu)
+                                             ? 0x001C0000u : 0x001C8000u;
+                        iop_elf_load_result_t res;
+                        const char *err = NULL;
+                        int rc = iop_elf_load(st, st->bios->data + rom_off,
+                                               image_size, load_addr, &res, &err);
+                        if (rc == 0) {
+                            tgt = res.entry;
+                        }
+                    }
+                }
+            }
+            if (rd) LINK(rd); BRANCH_TO(tgt);
+        } break;
         case 0x0C: /* SYSCALL - raises a real R3000A exception instead
              * of halting, ported from PCSX2's psxException()
              * (R3000A.cpp): Cause.ExcCode=8 (Syscall, pre-shifted
@@ -891,7 +953,28 @@ static int iop_step(void)
         break;
 
     case 0x02: /* J */   BRANCH_TO((this_pc & 0xF0000000u) | ((instr & 0x03FFFFFFu) << 2)); break;
-    case 0x03: /* JAL */  LINK(31); BRANCH_TO((this_pc & 0xF0000000u) | ((instr & 0x03FFFFFFu) << 2)); break;
+    case 0x03: /* JAL */ {
+        uint32_t jal_tgt = (this_pc & 0xF0000000u) | ((instr & 0x03FFFFFFu) << 2);
+        /* Round 77 (117th finding, task #221/#245): 0xBFC4A600 is the
+         * real ROM's device-table-entry classifier (see the 116th/
+         * 117th findings) - it takes the raw device-table entry
+         * pointer in $a0. That raw entry turned out to be a genuine
+         * embedded ELF32/MIPS IOP module image (same "IRX" format
+         * iop_elf.c already loads for ROMDIR-listed modules - real
+         * e_machine=8, vendor e_type=0xFF80, PT_MIPS_IOPMOD segment).
+         * Remember it here so the matching JALR call site below (the
+         * real ROM code's own "call this device's real init function"
+         * step) can ELF-load it for real instead of jumping to
+         * whatever raw, unrelocated header field the ROM's un-loaded
+         * pointer happens to contain. Only active when PRId is the
+         * real retail value - completely inert (zero behavior change)
+         * at the default PRId=0, since this ROM code path is never
+         * even reached then (see g_iop.cop0[15]'s own header comment). */
+        if (st->cop0[15] == 0x1fu && jal_tgt == 0xBFC4A600u) {
+            st->devtable_pending_image = GPR(4);
+        }
+        LINK(31); BRANCH_TO(jal_tgt);
+    } break;
     case 0x04: /* BEQ */  if (GPR(rs) == GPR(rt)) BRANCH_TO(this_pc + 4 + (imm << 2)); break;
     case 0x05: /* BNE */  if (GPR(rs) != GPR(rt)) BRANCH_TO(this_pc + 4 + (imm << 2)); break;
     case 0x06: /* BLEZ */ if ((int32_t)GPR(rs) <= 0) BRANCH_TO(this_pc + 4 + (imm << 2)); break;

@@ -10636,3 +10636,88 @@ real code lives there, and what condition it's waiting on).
 
 Docs to follow this finding: full docs→commit→push→rsync→TaskUpdate
 per this project's mandatory workflow for a source-changing round.
+
+---
+
+## 92nd finding (Round 60, task #220): the new wall at pc=0xBFC4A45C is
+a genuine IOP dead-end/panic loop, not an interrupt-starved poll -
+corrects the 91st finding's framing
+
+**Method.** Disassembled the real BIOS ROM at the new resting PC
+using the LIVE, connected PCSX2 reference debugger
+(`pcsx2_disassemble`, cpu="iop") rather than manual byte decoding -
+authoritative, not guessed. Confirmed instruction-for-instruction
+against an independent manual decode of the same bytes from
+`/tmp/real_bios.bin` (this project's real BIOS image) at the matching
+ROM offset.
+
+**What's actually there.** The code from `0xBFC4A3E0` onward is a
+real device/driver-table walk: compares a computed value in `$s5`
+against `0x1FC10000` (`0x1FC00000` is this exact ROM's own physical
+base address + 0x10000 - i.e. "does this pointer fall past the first
+64KB of ROM"), configures two fields of a struct pointed to by `$s3`
+based on the result, loads a function pointer from `sp+0x3C`, and
+calls it (`jalr ->v0`, `move a0, s3` in the delay slot). Immediately
+after that call - unconditionally, with no branch on the call's
+return value - the code does:
+```
+lui  v1, 0x8000        ; v1 = 0x80000000 (IOP RAM address 0)
+li   v0, 0x2
+sb   v0, (v1)           ; *0x80000000 = 2
+j    ->0xBFC4A458        ; unconditional, no exit condition
+```
+This is a genuine dead loop - not a poll (nothing is loaded/compared
+before the jump), not a `wait-for-interrupt` idiom, and not gated on
+any external state. It writes a fixed status byte (2) to the very
+base of IOP RAM once and then spins forever with no way out except a
+real CPU exception/interrupt.
+
+**Correction to the 91st finding.** That finding reported the IOP
+"executing real post-boot ROM code... no longer using the old idle=1
+shortcut" as unambiguous forward progress, which remains true and
+significant (the module-loading phase is now provably behind it,
+further than any prior round reached) - but it did NOT establish that
+interrupts were now flowing. This round's diagnostic (`/tmp/
+diag_watch3.c`, scratch-only, extended `diag_full_watch.c` with
+direct `iop_intc_get_state()`/`cop0[12]`/`cop0[13]` reporting plus a
+per-instruction counter of visits to both real MIPS general-exception
+vectors, `0x80000080` (BEV=0) and `0xBFC00180` (BEV=1)) shows,
+unambiguously, across a 40,000,000+ instruction window at this exact
+resting point: **`imask=0x00000000`** (still, exactly as the 89th/
+90th findings found before the fix - the fix's forward-progress effect
+came from resolving the wrong-table AllocHardTimer/RegisterIntrHandler
+resolution enough for the boot to advance past module loading
+structurally, not from actually getting a working timer interrupt
+flowing), **`cop0_12=0x00000000`** (Status.IEc/IM2 both back to 0 -
+some later, entirely legitimate real code path re-disabled interrupts
+after the Round 58 fix's syscall took effect, which is normal MIPS
+practice around critical sections, not itself a bug), and, most
+decisively, **`vecstd=0` and `vecbev=0`** - neither general exception
+vector has been entered even once, at any point, across the entire
+boot. This IOP is not "waiting for an interrupt that never arrives
+because of a masking bug" at this specific point - with IEc=0, no
+interrupt COULD arrive here even if I_MASK were correct. This is a
+real, unconditional dead end.
+
+**Working hypothesis, not yet confirmed.** The unconditional-panic
+shape (write a fixed status byte, hang forever, no polling) strongly
+resembles a genuine BIOS-level "something in the device/driver table
+walk went wrong, halt with diagnostic code 2" path - the same
+category of idiom this project has already identified and correctly
+bypassed multiple times earlier in boot (LOADCORE panic loop,
+registration-walk panic loop, trap-stub panic loop - tasks #148-163).
+The most likely real cause: the function pointer loaded from
+`sp+0x3C` and called via `jalr ->v0` is wrong/garbage/null, most
+plausibly because this project doesn't yet model whatever real
+device/driver descriptor table this ROM code is walking (the `$s5`
+vs `0x1FC10000` comparison and the `$s3`-relative struct writes
+strongly suggest a real, ROM-resident table this project has not
+previously had to reverse-engineer, since it's well past everything
+traced so far). Not yet confirmed - no source change made this
+round; flagged as task #221's concrete starting point: trace what
+real value should be at `sp+0x3C` at the `jalr`, and what table/
+struct `$s3`/`$s5` are walking.
+
+Docs-only round (investigation only, no source change - working tree
+verified clean, matches commit `e3bcd07`, before this finding was
+written up).

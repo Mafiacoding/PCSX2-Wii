@@ -2585,3 +2585,26 @@ activity (0x80005ExX-0x8000B8A4 range) instead of the old fixed
 0x8000CFD4 park. Splash screen not yet reached - no new GS/display
 register activity observed; 0xBFC4A45C is a new spin-loop wall, not
 yet investigated. Next: disassemble/trace real code at 0xBFC4A45C.
+
+### Round 60 (92nd finding, task #220)
+Disassembled the new pc=0xBFC4A45C wall via the live PCSX2 reference
+debugger (authoritative, not guessed): it's a real device/driver-
+table walk (compares a pointer against this ROM's own base+0x10000,
+configures a struct, calls a function pointer loaded from the stack)
+whose trailer, reached unconditionally after that call, writes a
+fixed status byte (2) to IOP RAM address 0 and spins forever with no
+exit condition - a genuine dead-end/panic idiom, same category as
+LOADCORE's/registration-walk's panic loops from much earlier in this
+project's history (tasks #148-163). Corrects the 91st finding's
+framing: I_MASK is STILL 0x0 here, Status.IEc/IM2 are back to 0 (some
+later real code legitimately re-disabled interrupts, not a bug by
+itself), and neither MIPS exception vector (0x80000080 nor
+0xBFC00180) has been entered even once across the whole boot - the
+91st finding's fix produced real structural progress (past ALL
+module loading, further than ever before) but did not get interrupts
+flowing; this new wall is unrelated to I_MASK. Working hypothesis
+(not yet confirmed): the called function pointer, loaded from the
+stack, is wrong/garbage because this project doesn't yet model
+whatever real device/driver table this ROM code walks. Docs-only
+round, no source change. Next (task #221): trace the real value that
+should be at that stack slot and what table it indexes.

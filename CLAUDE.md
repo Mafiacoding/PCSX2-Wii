@@ -4035,3 +4035,29 @@ frozen there across 140M+ instructions despite idle=0). This is the
 concrete next target: disassemble/trace real code at that address
 to find what it's waiting on - not yet started. Tasks #218/#219
 closed; opening a new task for this.
+
+## Checkpoint (Round 60 - 92nd finding, task #220)
+Disassembled the new pc=0xBFC4A45C wall (from Round 59's 91st
+finding) via the live PCSX2 reference debugger. It's a real
+device/driver-table walk in the BIOS ROM: compares a pointer against
+this ROM's own base+0x10000, configures a struct via `$s3`, loads a
+function pointer from `sp+0x3C`, calls it - and unconditionally
+afterward writes status byte 2 to IOP RAM address 0 and spins forever
+with zero exit condition. A genuine dead-end/panic idiom, same
+category as this project's earlier LOADCORE/registration-walk panic
+loops (tasks #148-163).
+
+Important correction to the 91st finding: I_MASK is confirmed STILL
+0x0 at this point (a fresh diagnostic with direct intc/cop0/exception-
+vector-visit instrumentation proves it), Status.IEc/IM2 are back to 0
+(legitimate - some later real code re-disabled interrupts, not itself
+a bug), and neither MIPS exception vector has been entered even once
+across the ENTIRE boot. The 91st finding's real, verified achievement
+was structural (past ALL module loading, further than any prior
+round) - not "interrupts now work." This new wall is unrelated to
+I_MASK/EnableIntr.
+
+Working hypothesis (not yet confirmed, no source change made): the
+called function pointer at `sp+0x3C` is wrong/garbage because this
+project doesn't model whatever real device/driver table this ROM
+code walks. Next (task #221): trace what real value belongs there.

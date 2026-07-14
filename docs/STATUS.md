@@ -11958,3 +11958,66 @@ evidence on the two real mechanisms traced above. Two direct matches:
    documents - not a novel or fabricated interpretation.
 
 No source change - citation-strengthening addendum only.
+
+
+## 108th finding (Round 68, task #172/#234): traced the full call chain up to its real root - the registration subsystem is invoked from a genuine EE kernel exception vector, not a plain function call
+
+Continuing live-DebugServer-driven tracing from the 107th finding's
+"what triggers this chain" open question. Confirmed via disassembly a
+five-real-function-deep call chain, ending at a genuine MIPS exception
+vector:
+
+1. `0x8000C500` (writes `RAM[0x80020B54]`, 107th finding) is reached
+   via `jalr` through the device table's funcptr field.
+2. `0x8000BFF0`-`0x8000BFF4` (part of a 4-way `a0`-dispatched function
+   at `0x8000BFB0`) tail-jumps (`j`) to `0x8000C8E8` when called with
+   `a0==1`; `0x8000C8E8` is what eventually reaches the `key=1`
+   registration call (`0x8000CA84`) traced in the 107th finding.
+3. `0x8000BFB0` is itself one case (`a0==1`, mapped via a real 16-entry
+   MIPS jump table at `0x80013280`) of a larger command dispatcher at
+   `0x8000BE78` - confirmed via disassembly: `addiu v1,a0,-1;
+   sltiu v0,v1,0x10; jr table[v1]`. Other cases in this SAME jump table
+   directly call `0x8000F6E0` (OSDSYS's real per-frame render
+   dispatcher, confirmed reached in this project's own boot since the
+   100th/103rd findings) and `0x80010A08` (the real SIF/RPC dispatch
+   helper this project already models and has working, Round 53-55) -
+   strong evidence this is one real, already-partially-modeled OSDSYS
+   subsystem, not a hypothetical dead-code island.
+4. Found `0x8000BE78`'s two real callers via exhaustive pattern search
+   (`0x8001127C`, `0x800112AC`) - and both sit inside genuine EE
+   exception-vector code: `mfc0 v0/k0, EPC`, scratch-register save/
+   restore through `$k1` via `sq`/`lq` (the real MIPS/EE exception
+   convention), and `eret` at the end. The shared post-dispatch cleanup
+   routine (`0x80011030`) is a textbook EE exception-return epilogue -
+   restoring COP0 Status/ErrorPC/Debug/Perf/EPC and HI/LO via
+   `pmthi`/`pmtlo`, and notably uses `mtsa` - the exact instruction
+   this project implemented for task #177 (EE `MFSA`/`MTSA`,
+   `SPECIAL` funct `0x28`/`0x29`).
+
+**What this means.** `RAM[0x80020B54]`'s entire causal chain is not a
+plain, always-reachable function call graph - its root trigger is a
+genuine EE kernel exception (almost certainly a `syscall`, given the
+`bltzl a0,...`/`subu a0,zero,a0` sign-handling pattern at the vector's
+entry, which matches this project's own already-reverse-engineered EE
+syscall-number convention: negative encoded numbers, negated on entry).
+This project has substantial, working EE exception/interrupt delivery
+infrastructure already (real `Cause`/`EPC`/`Status` vectoring since the
+63rd-round work, real syscall delivery through multiple prior tasks
+such as #178/#180). The open question has narrowed from "what code
+never runs" to a much more precise one: which specific syscall
+number(s) route to this exact vector (`~0x80011200`-`0x800112BC`), and
+is that syscall ever actually issued - with the right argument
+(`a0==1`) - anywhere in this project's own EE-side boot code or by the
+real BIOS/OSDSYS code this project's own boot executes.
+
+**Honest scope.** No source change this round. The exact syscall
+number was not yet identified (would require locating the real syscall
+dispatch table's entry pointing at `0x80011200`/`0x80011274`, or
+correlating against this project's own already-implemented syscall
+table in `ee_core.c`) - this is the concrete next step, not yet
+completed. Given how deep and precisely-bounded this chain now is
+(five real function levels, ending at a real kernel exception vector,
+every link confirmed via PCSX2's live native disassembler), this
+represents very substantial narrowing of task #172's remaining scope
+since the 96th finding first characterized this as a vague "table never
+gets populated" problem.

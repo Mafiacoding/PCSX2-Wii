@@ -10243,3 +10243,56 @@ rather than rushed, since it requires deliberately resetting/
 re-booting the live instance with breakpoints armed in advance, which
 wasn't safe to do blind against an already-running, unknown game
 state this round.
+
+### Second addendum to the 87th finding (task #217): import-linking proof narrows the gap to real ROM-resident boot glue, not module code
+
+Following up on the live-debugger probe above with source research: real
+ps2sdk (`iop/system/intrman/src/intrman.c`, `iop/system/intrman/include/
+intrman.h`) confirms `CpuEnableIntr()` is a real, ordinary IOP library
+call - IOP modules invoke it through the standard IOP inter-module
+import/export jump-table mechanism (library name + ordinal, e.g.
+`intrman` ordinal 9), the exact same mechanism this project's own
+module loader already implements for real (see `link_imports_one()`
+in `source/hw/iop_module_loader.c`, task #92/31st change).
+
+Added a one-off diagnostic trace (not committed - scratch only) at
+the same `idle=1` point as the first addendum, printing the loader's
+own real import/export-resolution stats. Result against the real
+BIOS boot: **355 imports resolved, 0 unresolved, 30 real export
+tables registered** (sysmem, loadcore, excepman, intrman x2, ssbusc,
+dmacman, timrman x2, sysclib, stdio x2, heaplib, eeconfig, thbase,
+thevent, thsemap, thmsgbx, thfpool, thvpool, thrdman, vblank, ioman,
+modload, sifman, sifcmd, cdvdman, cdvdfsv, secrman, eesync - i.e.
+every real module this project loads, including both real `intrman`
+instances (INTRMANP/INTRMANI), got its full export table correctly
+registered and every import stub across all 29 modules patched
+successfully).
+
+This is a meaningful strengthening of the root-cause picture: it
+rules out "the import-linking mechanism itself is broken" as an
+explanation for Status.IEc/IM staying 0. If any module's own
+init-time code called its `CpuEnableIntr` import stub, that call
+would genuinely reach real intrman code through a correctly-patched
+jump - and Status would very likely end up nonzero. Since it doesn't,
+the real conclusion is now sharper than before: **none of the 29 real
+module entry points this project executes ever calls `CpuEnableIntr`
+itself** - which is consistent with real PS2 module init routines
+typically only registering their own library's exports and returning
+(see this same finding's earlier note that intrman's own doc/source
+shows `CpuEnableIntr` used by drivers/services at runtime, not
+uniformly by every module's cold-boot init path). The real call to
+`CpuEnableIntr` (or equivalent Status.IEc=1 write) almost certainly
+belongs to the ROM-resident kernel bootstrap/glue code that
+originally drives the whole IOPBTCONF module list and dispatches the
+first real thread once loading finishes - code this project's "front-
+load all modules, run each entry-to-completion, then park" model
+(tasks #92/#152/#179) never itself interprets, because it isn't one
+of the 29 listed modules; it's the code that iterates that list.
+
+Still no source change made from this observation alone (task #217
+remains open) - the concrete next step is now well-scoped: find or
+reconstruct the real ROM-resident sequence between "last IOPBTCONF
+module's entry point returns" and "first real thread begins running"
+(very plausibly a short, findable real BIOS ROM routine, analogous to
+how the LOADCORE registration list was eventually traced in tasks
+#148-163), rather than continuing to guess at Status bit values.

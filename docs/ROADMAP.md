@@ -3077,3 +3077,18 @@ a third attempt would very likely reproduce the same result. No fix,
 no source change. Task #245 next step if pursued further: true
 single-instruction stepping from an earlier known point, substantially
 more time-intensive than watchpoints and not yet attempted.
+
+### Round 86 (126th finding, task #172 continuation)
+Docs-only round. Re-ran the 94th finding's GS-write-instrumentation
+check on top of all intervening work (95th-125th findings, including
+the 114th/115th IOP interrupt/timer MMIO fixes) to answer whether
+those fixes incidentally unblocked the splash-screen path - they did
+not: PMODE/DISPFB1/DISPLAY1 are still never written across a full
+100M-instruction run. New data: 8 GS writes now observed (vs. 1
+before) - SMODE1(x2)/SMODE2/SRFSH/SYNCH1/SYNCH2/SYNCV (real display-
+timing config, plausible values) - but no framebuffer/display-enable
+writes. Resting state: EE pc=0x80005E5C, IOP pc=0x00100000 (=
+BUMP_BASE, not yet investigated further). No fix, no source change.
+Next: live PCSX2 comparison tracing forward from the SMODE/SYNCH
+writes (a point this project's boot now demonstrably reaches) rather
+than re-deriving the whole chain from scratch.

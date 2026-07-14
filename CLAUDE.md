@@ -4530,3 +4530,17 @@ thoroughly documented and twice independently verified (116th-125th
 findings); the exact writing instruction remains unidentified and
 would need true single-instruction stepping to pin down - substantially
 more time-intensive, not attempted. No fix, no source change.
+
+## Checkpoint (Round 86 - 126th finding, task #172)
+Re-ran the 94th finding's GS-write instrumentation on the current
+committed state (post 95th-125th findings) to check whether the
+114th/115th IOP interrupt/timer fixes incidentally unblocked the
+splash-screen path - confirmed they did not: PMODE/DISPFB1/DISPLAY1
+still never written across a 100M-instruction run. New: 8 GS writes
+now observed (vs. 1 before) - real display-timing config registers
+(SMODE1 x2/SMODE2/SRFSH/SYNCH1/SYNCH2/SYNCV) with plausible values,
+but no framebuffer/display-enable writes. EE rests at pc=0x80005E5C,
+IOP at pc=0x00100000 (=BUMP_BASE). No fix, no source change. Next:
+live PCSX2 comparison tracing forward from the SMODE/SYNCH writes
+this project's boot now demonstrably reaches, rather than re-deriving
+the whole chain from scratch.

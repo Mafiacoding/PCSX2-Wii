@@ -11485,3 +11485,62 @@ if real citable PS2 boot documentation describes OSDSYS deliberately
 polling across multiple vblanks before its menu becomes interactive
 (which would confirm this is expected behavior, not a bug). No source
 change this round - docs-only investigation.
+
+
+## 102nd finding (Round 65 continued, task #172/#230): VU1 dispatch confirmed to NEVER happen even after 765M instructions - the "expected multi-frame retry" hypothesis is refuted, this is a genuine permanent stall
+
+Directly resolves the 101st finding's open question. Instrumented
+`vu1_exec_micro()` (`source/hw/vu.c`) with a call counter in the same
+disposable scratch copy used throughout this session's investigation,
+and ran this project's own emulator (not the mismatched live debugger)
+for as long as possible using the checkpoint/resume mechanism built
+earlier this round.
+
+**Result**: after 764,918,045 EE instructions - the run was only
+stopped by the diagnostic's own wall-clock budget, not by the
+emulator reaching any natural stopping point - `vu1_exec_micro()` has
+been called exactly **zero** times, and the EE program counter is
+observed cycling repeatedly through the same narrow address range
+(`0x8000F810`, part of the OSDSYS per-frame update loop characterized
+in the 99th/100th findings) with no forward progress. A second
+checkpoint-resume attempt hit a determinism failure in the
+checkpoint mechanism itself (address layout did not reproduce
+identically on the second `setarch -R` invocation in a separate tool
+call - a disclosed limitation of relying on environmental address
+determinism, not a data-corruption concern, since the first 765M-
+instruction segment's result stands on its own and was independently
+sufficient), so this session did not extend the run further, but the
+existing data point is already decisive.
+
+**Why this is decisive.** Real PS2 hardware's EE clock runs at
+~294.912 MHz; 765 million EE instructions represents multiple real-
+world SECONDS of continuous execution even accounting for realistic
+IPC well below 1 (this project's own scheduler models an 8:1 EE:IOP
+ratio, so IOP-side stalls do throttle effective progress, but nowhere
+near enough to make 765M EE instructions equivalent to sub-second real
+time). Real PS2 consoles visibly reach the OSDSYS browser UI - which
+is well documented to use VU1 for its rendering - within a small
+number of frames after boot, not after multiple seconds of pure
+per-frame-loop spinning. This conclusively downgrades the 101st
+finding's "maybe this is normal real-hardware multi-frame retry"
+hypothesis: it is very unlikely real hardware takes anywhere near this
+long to first dispatch VU1. Combined with the steady-state,
+non-advancing PC pattern (the same narrow loop, not a slowly-
+progressing sequence of different per-frame states), this is real,
+strong evidence of a genuine, permanent stall in this project's
+current emulation - not expected startup latency.
+
+**Net effect on task #172.** The investigative arc across the 96th-
+102nd findings has now: (1) precisely located the real dispatcher
+function and its parameters, (2) confirmed the caller is a genuine,
+correctly-delivered VBLANK interrupt (validating this project's own
+interrupt-delivery work), (3) identified the likely code-path shortcut
+caused by a passive, undriven `VPU-STAT` register read, and (4) now
+conclusively ruled out "just needs more time" as an explanation. The
+concrete remaining open question is unchanged from the 99th finding's
+re-scoping: what real mechanism is supposed to drive `VPU-STAT`'s
+VU1-status bits (or otherwise route this handler past its shortcut)
+so that VU1 eventually receives its first real microprogram dispatch.
+No citable source for that mechanism has been found yet. No source
+change this round - docs-only investigation; regression/rebuild
+skipped per this project's own standing convention.

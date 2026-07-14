@@ -137,8 +137,23 @@ splash screen, not just difficulty.
       for ANY branch, integer or FP), and the FPU exception-cause
       control-register flags (only the condition flag needed for BC1
       is modeled).
-- [ ] COP2 (VU0 macro mode) - VU0 running as a COP2 coprocessor
-      attached to the EE pipeline (reference: `pcsx2/VU0.cpp`, `COP2.cpp`)
+- [x] COP2 (VU0 macro mode) - VU0 running as a COP2 coprocessor
+      attached to the EE pipeline (reference: `pcsx2/VU0.cpp`,
+      `COP2.cpp`). Stale checkbox corrected in Round 64's audit: this
+      was actually implemented across many rounds (tasks #71, #133-
+      #147) - control-register transfers (round 12), VF/VI regs plus
+      macro arithmetic datapath (round 13), then the full VADD/VSUB/
+      VMUL/VMADD/VMSUB/VOPMSUB family and all four broadcast forms
+      (x/y/z/w), the SPECIAL2 accumulator family (VADDA/VSUBA/VMULA/
+      VMADDA/VMSUBA/VOPMULA/VNOP), VABS/VITOF/VFTOI/VMOVE/VMR32,
+      VLQI/VLQD/VSQD/VSQI, VMTIR/VMFIR/VILWR, the R-register LCG
+      (VRNEXT/VRGET/VRINIT/VRXOR), the Q-register family (VDIV/VSQRT/
+      VRSQRT/VWAITQ), and VCLIPw with its own CLIP flag register.
+      Still missing/unverified: OPMSUB's cross-product ordering quirk
+      beyond the basic VOPMSUB, and the R-register RNG's exact
+      bit-for-bit hardware LCG constants (matched against PCSX2's own
+      implementation only, not independently verified against real
+      hardware output).
 - [x] COP0 "CO"-format instructions: RFE, ERET, EI, DI - dispatched
       via a 6-bit `funct` field (not the `rs` field used by MFC0/MTC0)
       once `rs`'s top bit is set (`rs & 0x10`), matching PCSX2's
@@ -706,7 +721,7 @@ instead of fully emulating the real IOP BIOS ROM.
       continued (5th finding + fix)" section for the full trace and
       the concrete next step (disassemble backward from 0x1011ac to
       find what condition each retry pass actually tests).
-- [ ] **7th finding (2026-07-08)**: full dynamic instruction tracing
+- [x] **7th finding (2026-07-08)**: full dynamic instruction tracing
       (not static disassembly) pinpointed the retry loop's root cause
       precisely: a specific stack slot (`$fp+0x40`) that a real IOP
       routine reads is zero/null at the time it runs, causing it to
@@ -723,7 +738,7 @@ instead of fully emulating the real IOP BIOS ROM.
       site to find what real data source should have supplied
       `$fp+0x40` and why it's empty in this emulation. See
       docs/STATUS.md's "Round 29 continued (7th finding)" section.
-- [ ] **9th finding (2026-07-08)**: traced `$fp+0x40` one level further
+- [x] **9th finding (2026-07-08)**: traced `$fp+0x40` one level further
       - it's `RAM[0x100010+0x08]`, a field inside SYSMEM's OWN
       "boot info" structure (`source/hw/iop_module_loader.c`'s already-
       cited `BOOT_INFO_RAM_MB` work only populates word 0 of this
@@ -738,6 +753,17 @@ instead of fully emulating the real IOP BIOS ROM.
       from how each field gets used, the same approach that resolved
       the B(00h)/B(18h)/B(19h) findings. See docs/STATUS.md's "Round 29
       continued (9th finding)" section.
+      **Stale-checkbox correction (Round 64 audit)**: these two
+      findings' proposed next step (populate boot_info offsets
+      0x08-0x18 by inferring values from SYSMEM's own use of them) was
+      NOT how the underlying wall was ultimately resolved. Instead,
+      later rounds (task #134's boot_info offset 0x0C fix, then the
+      LOADCORE module-registration-list work in tasks #124/#132/
+      #148-#163) found and fixed the real root cause via a different,
+      more direct path, and boot now passes all module loading (task
+      #219). Both entries are marked done here because the problem
+      they were investigating is conclusively closed, not because
+      their specific proposed next step was the one that closed it.
 - [x] **6th change (2026-07-08)**: real A(96h) AddCDROMDevice() and
       A(97h) AddMemCardDevice(), per explicit user request ("add both
       as active devices, not as demo"). Implemented as real, queryable
@@ -799,8 +825,14 @@ the SPU2. Reference: `Dmac.cpp` (583) + `Dmac.h` (570).
       and stop cleanly rather than misbehaving. INTERLEAVE mode (SPR
       only) is not implemented. Unit tested end-to-end in
       `tests/test_dma_chain.c`.
-- [ ] At minimum: the channels needed for BIOS boot to push data to
-      GIF (graphics) and to talk to the IOP over SIF
+- [x] At minimum: the channels needed for BIOS boot to push data to
+      GIF (graphics) and to talk to the IOP over SIF. Stale checkbox
+      corrected in Round 64's audit: both are real and exercised
+      extensively - GIF via `dma_set_sink()`/`DMA_CHANNEL_GIF` (see
+      section 4 below), and SIF0/SIF1/SIF2 via `DMA_CHANNEL_SIF0`
+      register decode (`source/hw/dma.c`) plus the many rounds of real
+      SIF RPC/reply-queue work in `ee_core.c` (tasks #164-#219,
+      Round 53-55's real reply-queue implementation).
 
 ## 4. GIF / VIF (packet interfaces)
 
@@ -927,9 +959,15 @@ these - only the interpreter side is even theoretically portable.
       (RGET/RNEXT/RINIT/RXOR - needs a real LFSR model), the FC*/FS*/
       FM* MAC/status/clip flag ops, and IADDIU/ISUBIU (the source
       manual's immediate bit-packing for these two was ambiguous).
-- [ ] VIF-side data unpacking into VU memory (VIF's UNPACK format -
-      still needs a verified format reference, separate from the
-      opcode-table work above)
+- [x] VIF-side data unpacking into VU memory (VIF's UNPACK format).
+      Stale checkbox corrected in Round 64's audit: implemented in
+      `source/hw/vif.c`'s `vif_unpack()` (task #107) - real VN/VL
+      geometry decode (S/V2/V3/V4, 32/16/8/5-bit component widths),
+      signed/unsigned extension (USN), masked writes, CL/WL fill-mode
+      skip-byte handling, and the V4-5 real 5/5/5/1 bit-packed special
+      case - writing real values into VU0/VU1 memory via
+      `vu0_mem_write32`/`vu1_mem_write32`, cross-checked against
+      PCSX2's `Vif_Codes.cpp`/`Vif_Unpack.cpp` dispatch tables.
 
 ## 6. GS (Graphics Synthesizer) + Wii output
 

@@ -11146,3 +11146,59 @@ the top-level table and all four sa-indexed sub-tables) has a real,
 citation-grounded implementation in `ee_core.c`. This closes out the
 "EE remaining MMI opcodes" item from this session's not-yet-implemented
 feature list.
+
+
+## 98th finding (Round 64 continued): ROADMAP.md checkbox accuracy audit
+
+Per explicit user request ("make sure the Roadmaps checkboxes are
+uptodate with the right progress"), systematically reviewed every
+unchecked `- [ ]` item in `docs/ROADMAP.md` against the actual current
+source state (the same cross-referencing approach used for the MMI
+opcode scope correction above), rather than only touching the section
+this round's own MMI work happened to land in.
+
+**Six stale checkboxes found and corrected:**
+
+1. "COP2 (VU0 macro mode)" (section 1) - marked unchecked despite
+   being substantially implemented across tasks #71 and #133-#147
+   (control-register transfers, VF/VI datapath, the full VADD/VSUB/
+   VMUL/VMADD/VMSUB/VOPMSUB family and broadcast forms, the SPECIAL2
+   accumulator family, VABS/VITOF/VFTOI/VMOVE/VMR32, VLQI/VLQD/VSQD/
+   VSQI, VMTIR/VMFIR/VILWR, the R-register LCG, the Q-register family,
+   and VCLIPw). Verified via `grep -c` over `ee_core.c` showing 79
+   distinct real VU0-macro-opcode references. Checked, with an honest
+   note on what's still missing (OPMSUB's cross-product ordering
+   quirk, unverified R-register RNG constants).
+2. DMA section's "channels needed for BIOS boot to push data to GIF
+   and to talk to the IOP over SIF" - marked unchecked despite both
+   being real and extensively exercised (GIF via `dma_set_sink()`,
+   SIF0/1/2 via the many rounds of real SIF RPC/reply-queue work,
+   tasks #164-#219).
+3. "VIF-side data unpacking into VU memory" (section 5) - marked
+   unchecked despite `vif_unpack()` in `source/hw/vif.c` (task #107)
+   being a real, complete UNPACK implementation (VN/VL geometry
+   decode, USN sign extension, masked writes, CL/WL fill mode, the
+   V4-5 special case) that writes into VU0/VU1 memory.
+4/5. The 7th and 9th "findings" from the Round 29 IOP retry-loop
+   investigation (section 2's chronological log) - both were left
+   unchecked as of the round they were written, each proposing a
+   specific next step (populate `boot_info` offsets 0x08-0x18 by
+   inference). That specific next step was never literally carried
+   out - instead, later rounds (task #134's boot_info offset 0x0C
+   fix, then the LOADCORE registration-list work in tasks #124/#132/
+   #148-#163) resolved the same underlying wall via a different, more
+   direct path, and boot now passes all module loading (task #219).
+   Marked done with an explicit note that the problem is closed, not
+   that the originally-proposed next step is what closed it.
+
+**One item checked and confirmed still accurate (left unchecked):**
+"Pad/memory card" (section 7) - verified via `find`/`grep` that no
+real SIO2 pad-register or memory-card model exists anywhere in
+`source/hw/` (only the IOP DMA channel address map entries for SIO2,
+no actual register semantics); task #224's PADMAN padArea fix was a
+narrow RPC-reply state-settling shim, not a real pad controller. This
+checkbox is correct as-is.
+
+No source changes this round (docs-only correction pass) - regression/
+rebuild skipped per this project's own standing convention for
+docs-only rounds.

@@ -5044,3 +5044,13 @@ Root cause: the 55th finding's AddDmacHandler/SIF0 confirmation came from live-d
 This does NOT change the 157th finding's standing conclusion - the real remaining gate for the OSDSYS splash-screen path is still the generic `AddIntcHandler`/Cause=0x8800 per-cause table being empty. This round rules out one specific alternate-mechanism hypothesis rather than opening a new one.
 
 Next: either continue the EE-side AddIntcHandler/Cause=0x8800 reverse-engineering thread now that the DMAC-specific alternative is ruled out, or pursue the Wii/GX downstream verification track further, or the 21 pre-existing failing regression tests - all previously offered, still-open angles.
+
+## Checkpoint (Round 121, task #172/#276 - see STATUS.md 161st finding)
+
+Per the user's request to keep reverse-engineering the "0x8800"/AddIntcHandler EE-side blocker: first checked Open-PS2-Loader's real open source for kernel-internal dispatch-table clues - found nothing applicable, since OPL (like all PS2 homebrew) runs atop the real kernel and only uses the same public AddIntcHandler syscall wrapper this project already has from ps2sdk. Closed that side-thread.
+
+Then directly re-verified the 111th finding's generic-dispatcher chain (`0x800004C0`/`0x80001798`) against the CURRENT code state: neither address is reached at all anymore in a full 45M-slice plain boot. Root cause: `Status.EXL=1` - exactly the condition task #247/127th-128th findings already fully explained as genuine, deliberate real kernel bootstrap behavior (confirmed via the real EE Core User's Manual) that correctly blocks ALL interrupt delivery until a real ERET (not yet reached) clears it.
+
+**Important course-correction**: Rounds 120 and 121's negative findings (AddDmacHandler never fires, generic dispatcher never reached) are both downstream symptoms of the ALREADY-KNOWN task #247 blocker - not a new, separate mystery. The "0x8800/AddIntcHandler table" framing this thread has followed since the 111th finding is retired as unproductive to continue - the real gate is upstream of it. Redirecting to task #247's own pre-existing, still-open next steps: trace forward from `0x8000C0B8` for what clears EXL, or find the real writer of physical `0x0000F230`.
+
+No source change this round (diagnostic-only). Per the user's own explicit instruction, next: tackle the 21 pre-existing failing regression tests.

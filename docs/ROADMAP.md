@@ -3514,3 +3514,10 @@ Does not (and given this session's tool constraints, cannot) confirm whether thi
 - **True result: 104/104 (100%) test files compile and pass against the current source tree - zero real bugs.** The "105 total" figure included one harness-only duplicate entry; there are 104 real distinct test files.
 - No source code changed (bug was entirely in the local test tool, not the repo). No Wii rebuild needed.
 - See STATUS.md 162nd finding for full details.
+
+### Round 123 (diagnostic investigation, no source change)
+- Directly attacked task #247 per the user's own 3-point plan: captured live Status/Cause at the `0x8000CF94` loop (`Status=0x70030C02`: IE=0,EXL=1; `Cause=0x00008408`: ExcCode=2/TLBL), traced every MTC0-to-Status write, every real ERET, and every `ee_raise_exception()` call across a full 45M-slice plain boot.
+- Found only 3 exceptions/2 ERETs total in the entire run. The first two EXL set/clear cycles are legitimate, working kernel bootstrap + real interrupt-handler dispatch (confirmed via real ERET-based jumps to registered handler code). The THIRD and terminal event is a genuine null-pointer (`BadVAddr=0x00000000`) TLB Load Miss at `pc=0x80011328`, whose register state (`s3=s4=0x80020000`) matches the already-documented 96th finding's confirmed-empty registration table region (`0x80020E70`/`0x80021008`) - directly connecting task #247 to that pre-existing finding for the first time.
+- Ran the user's suggested forced-`Status.EXL=0` experiment: result is strictly worse, not better - the CPU immediately re-triggers the same pending interrupt every step (330M+ times, zero progress), because forcing EXL=0 breaks the real hardware masking that protects against re-entering an interrupt handler mid-dispatch (the same mechanism that worked correctly twice earlier in the same trace). Conclusively rules out a naive forced-EXL=0 fix.
+- No source change (diagnostic-only, scratch copy, including the ruled-out experiment). Regression/rebuild skipped per standing convention.
+- See STATUS.md 163rd finding for full details.

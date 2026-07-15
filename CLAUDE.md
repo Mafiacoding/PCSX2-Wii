@@ -5066,3 +5066,11 @@ Fixed by writing a self-correcting harness that auto-detects each test's own #in
 No source code changed - the bug was entirely in a local, disposable tool, never part of the repo. No Wii rebuild needed. This corrects the project's own historical self-reporting rather than fixing an emulator bug, since none existed.
 
 Next: per the user's original two-part instruction, both parts (0x8800 reverse-engineering, then the 21 failing tests) are now closed. Awaiting further direction, or continuing autonomous work on task #172's main thread (task #247's EXL=1 next steps) or other open items.
+
+## Checkpoint (Round 123, task #172/#247/#278 - see STATUS.md 163rd finding)
+
+Directly attacked task #247 per the user's detailed 3-point diagnostic plan. Traced the full Status.EXL timeline end to end (every MTC0-to-Status write, every ERET, every ee_raise_exception() call) across a full 45M-slice plain boot: only 3 exceptions/2 EREets happen total. The first two cycles are legitimate - real kernel bootstrap + a genuine, working, ERET-based dispatch to a registered interrupt handler. The THIRD and terminal one is a real null-pointer (BadVAddr=0) TLB Load Miss at pc=0x80011328, whose register state matches the already-documented 96th finding's confirmed-empty registration table (0x80020E70/0x80021008) - the first direct link between task #247 and that pre-existing finding.
+
+Ran the user's own suggested forced-Status.EXL=0 experiment: result is conclusively worse, not better - it breaks the real interrupt-reentrancy protection and gets the CPU stuck re-raising the same interrupt 330M+ times with zero progress. This rules out a naive fix.
+
+No source change this round (diagnostic-only). Next: live-debug the exact fault site (pc=0x80011328 / the 0x81FE0 handler dispatch) against real hardware via the PCSX2 debugger bridge - the same methodology that resolved the 55th/154th findings - to find what real entry/value is missing from the empty registration table.

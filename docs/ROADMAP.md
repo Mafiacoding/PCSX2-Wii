@@ -3464,3 +3464,10 @@ Does not (and given this session's tool constraints, cannot) confirm whether thi
 - Full regression suite: 84 OK / 21 non-OK (unchanged pre-existing gaps) / 105 total - zero new regressions.
 - Clean Wii/devkitPPC rebuild verified.
 - See STATUS.md 156th finding for full details.
+
+### Round 117
+- Re-confirmed `RAM[0x80020B54]` (the single real memory cell gating OSDSYS's per-frame RPC path, root-caused across the 103rd-114th findings) is STILL never written, even with Rounds 109-116's full IOP interrupt/DMA-completion work in place.
+- Re-ran the 107th/108th findings' exact measurement (write-watch on `RAM[0x80020B54]`, hit-counters on `pc==0x8000C500`/`pc==0x8000CA84`) at 45M interleaved-scheduler slices against the real SCPH-10000 BIOS: unchanged, zero hits, value still 0.
+- Clarified why: this blocker is gated by the EE's own real per-cause `AddIntcHandler` registration array (111th finding) - architecturally separate from the IOP-side interrupt controller work (`iop_intc.c`/`iop_dma.c`/`iop_hle_intr.c`) built in Rounds 109-116. The two subsystems don't share code, so the IOP work could not have reached this EE-side gate - directly answering this round's guiding question.
+- No source change (measurement-only). Regression/rebuild skipped per standing convention for docs-only rounds.
+- See STATUS.md 157th finding for full details.

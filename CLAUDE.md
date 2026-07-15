@@ -5002,3 +5002,15 @@ No new regression tests this round (guard-condition tightening in already-tested
 Honest scope note: what real further module/kernel code the EE side would need to run past its current resting point (pc=0x8000CF94) to ever reach real PMODE/DISPFB1/DISPLAY1 writes remains open - a substantially larger, separate effort (see task #221's deprioritized device-table scope).
 
 Next: continue investigating what would let the EE progress past pc=0x8000CF94, or pursue other task #172 boot-progress angles.
+
+## Checkpoint (Round 117, task #172/#272 - see STATUS.md 157th finding)
+
+Investigated the EE's resting point (pc=0x8000CF94, part of the same OSDSYS per-frame loop this project has tracked since the 94th finding). Found the ring-buffer showed it's an ACTIVE polling loop, not a freeze - cycling through 0x8000CF88-0x8000D01C and 0x8000F768-0x8000F874, calling a helper with a constant pointer argument (0x80020000-region). Cross-referencing this project's own extensive prior history (findings 94th-114th, tasks #230-#237) found this exact loop, and its root cause, already deeply characterized: it's gated by a single real memory cell, RAM[0x80020B54], written only by real code reached through the EE's own per-cause interrupt-handler registration array (`AddIntcHandler`) having a real entry for whatever cause fires (Cause=0x8800, per the 111th finding) - which it never does in this project's current boot.
+
+Re-ran that exact measurement against the current, fully-fixed post-Round-116 state (45M slices): RAM[0x80020B54] is still exactly 0, and the write-site/registration-entry PCs (0x8000C500/0x8000CA84) were hit zero times - unchanged from every prior measurement since the 103rd finding. This directly answers the round's guiding question: Rounds 109-116's IOP-side interrupt/DMA-completion work is architecturally separate from this EE-side blocker (different CPU, different registration mechanism - IOP's iop_intc.c vs. the EE kernel's own AddIntcHandler array) - so it could never have unblocked this chain, and the unchanged result is the expected outcome, not a new negative finding.
+
+No source change this round (measurement-only). Regression/rebuild skipped (docs-only round).
+
+Honest scope note: the real, precise open question - what EE-kernel code should call AddIntcHandler for the cause OSDSYS needs, and why it's never reached - has been open since the 111th finding (many rounds before this session) and remains a substantial, separate EE-side reverse-engineering effort, distinct from anything this session's IOP work touched.
+
+Next: either resume the EE-side AddIntcHandler/Cause=0x8800 reverse-engineering thread (a large, already-scoped-as-difficult effort), or continue other, more tractable task #172 angles.

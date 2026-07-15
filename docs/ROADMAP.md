@@ -3163,3 +3163,44 @@ a GS-packet-send primitive, given proximity to the already-confirmed
 SMODE/SYNCH writes; or a semaphore/thread-signal primitive) via a live
 PCSX2 comparison targeting this address range, OR scope real EE-side
 concurrent scheduling infrastructure if the gap is architectural.
+
+### Round 90 (130th finding, task #172/#247 continuation)
+Attempted a targeted fix (synchronous completion-flag set on the
+0xC430 mailbox write) per user's "lets go and finally fix it"
+directive. Tested via scratch copy: zero effect on GS writes -
+root-caused to the trigger firing on an unrelated coincidental
+ROM-code write, not the real kernel event. Reverted cleanly
+(git checkout), no source change survived. Chased a genuine SW-CASE
+vs top-of-function hook contradiction while diagnosing (same call,
+same run, one hook fires with correct args, the other never logs it)
+- ruled out compiler optimization (-O0 reproduces identically) and
+confirmed via an unconditional entry counter that the function IS
+entered a second time. Root cause deferred to Round 91.
+
+### Round 91 (131st finding, task #172/#247 continuation) - BUSY-WAIT RESOLVED
+Root-caused the Round 90 contradiction: 0xB0xxxxxx and 0xA0xxxxxx
+KSEG1 addresses do NOT alias the same physical address (bit 28
+survives the `& 0x1FFFFFFF` mask) - the 129th/130th findings'
+manual address arithmetic was wrong, not the emulator's
+`ee_hw_mmio_addr()`. Recomputed with the correct mask: the "mailbox"
+protocol from the 129th finding actually targets real, already-
+implemented EE hardware registers - SIF1_TADR/QWC (phys 0x1000C420/
+0x1000C430, dma.c's own SIF1 channel table) and SIF_SMFLAG/SIF_MSCOM
+(phys 0x1000F230/0x1000F200, already modeled in sif.c) - not
+software-internal RAM as the 129th finding concluded. This is
+genuinely the real kernel's sceSifInit()-equivalent routine, waiting
+on SIF_STAT_SIFINIT (SMFLAG bit 16). Found sif.c already had logic to
+set this bit, but only reactively (gated on the EE first writing a
+specific bit to SMFLAG) - a path this routine never takes since it
+only reads SMFLAG. Fix: set SIF_STAT_SIFINIT unconditionally in
+mark_iop_boot_complete() (source/hw/iop_module_loader.c), alongside
+the sibling BOOTEND/CMDINIT bits already set at the same real
+milestone. Verified: busy-wait resolved (7.5M-iteration loop no
+longer loops), EE PC advances from 0x80005E5C to 0x8000CFD8 within
+60M instructions, and real GS video-timing registers (SMODE1/2,
+SYNCH1/2, SYNCV, SRFSH, CSR) are written for the first time in this
+project's history - directly superseding the 94th/127th findings'
+"PMODE/DISPFB1/DISPLAY1 never written" (those three specific
+registers still not confirmed reached yet, honestly not claimed).
+90/90 regression, clean Wii rebuild. Next: trace forward from
+0x8000CFD8 to find the display-enable sequence.

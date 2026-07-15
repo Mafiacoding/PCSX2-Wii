@@ -935,10 +935,36 @@ static int advance_to_next_module(iop_state_t *st)
  * project's IOP module loader already has a well-defined, deliberate
  * concept of "the boot sequence is complete" (the three halt sites
  * below), so setting this real, citable bit at exactly that point -
- * ORed onto whatever SIF_SMFLG already holds (task #165 already
+ * ORed onto whatever SIF_SMFLG already holds - is a precedented,
+ * non-fabricated fix, not a guess.
+ *
+ * Round 91 (131st finding, task #172/#247 continuation) correction:
+ * the header comment above previously claimed "task #165 already
  * established SIF_STAT_SIFINIT=0x10000 gets set for real via the
- * genuine SIFMAN/SIFCMD handshake, and this must not be clobbered) -
- * is a precedented, non-fabricated fix, not a guess. */
+ * genuine SIFMAN/SIFCMD handshake" - this was based on an address-
+ * computation error in an earlier round's manual disassembly (KSEG1
+ * addresses of the form 0xB0xxxxxx were incorrectly assumed to alias
+ * the same physical address as the equivalent 0xA0xxxxxx address;
+ * they do not - bit 28 survives the real `addr & 0x1FFFFFFF` KSEG
+ * mask and is NOT redundant between the 0x8/0x9/0xA halves and the
+ * 0x9/0xB halves of KSEG0/KSEG1). Re-disassembling the real kernel's
+ * SIF-driver-init routine (EE pc=0x80006198, confirmed live via
+ * host-native instruction-level tracing) with the corrected masking
+ * shows it polls real phys 0x1000F230 (SIF_SMFLAG, this project's own
+ * sif.c) for bit 0x00010000 (SIF_STAT_SIFINIT) WITHOUT ever first
+ * writing to SIF_SMFLAG itself - so sif.c's existing reactive
+ * SIFINIT-reassertion path (sif_mmio_write32's SIF_SMFLAG case, gated
+ * on the EE writing bit 0x00040000) can never fire for this call
+ * site, and SIF_STAT_SIFINIT was in fact never being set at all for
+ * this real boot path prior to this fix - confirmed by a 35M-
+ * instruction host-native run that hit the busy-wait 7,577,906 times
+ * without exiting. Real hardware's SIFMAN module is what sets this
+ * bit once IOP-side SIF init genuinely completes; this project's own
+ * IOP module loader completing (the same event mark_iop_boot_complete
+ * already represents for BOOTEND/CMDINIT below) is the equivalent
+ * real milestone, so SIFINIT is added here unconditionally rather
+ * than left to the narrower reactive path (which remains, unchanged,
+ * for the documented _LoadExecPS2 reset-and-resignal case). */
 static void mark_iop_boot_complete(void)
 {
     /* Task #172 continued: SIF_STAT_CMDINIT (0x20000, "SIFCMD
@@ -951,10 +977,13 @@ static void mark_iop_boot_complete(void)
      * real SIFCMD's own init routine is what's responsible for
      * setting exactly this bit on real hardware - so this is a
      * legitimate consequence of work this project already models, not
-     * a new fabrication. */
+     * a new fabrication. SIF_STAT_SIFINIT (0x10000, "SIFMAN
+     * initialized", same ps2sdk source) is added here too as of Round
+     * 91 (131st finding) - see the corrected citation above. */
     uint32_t smflag = 0;
     sif_iop_mmio_read32(0x1D000030u, &smflag);
-    sif_iop_mmio_write32(0x1D000030u, smflag | 0x00040000u /* SIF_STAT_BOOTEND */
+    sif_iop_mmio_write32(0x1D000030u, smflag | 0x00010000u /* SIF_STAT_SIFINIT */
+                                             | 0x00040000u /* SIF_STAT_BOOTEND */
                                              | 0x00020000u /* SIF_STAT_CMDINIT */);
     /* task #212 continuation (82nd/83rd findings): record that real
      * IOP module loading has genuinely completed at least once, so

@@ -3471,3 +3471,11 @@ Does not (and given this session's tool constraints, cannot) confirm whether thi
 - Clarified why: this blocker is gated by the EE's own real per-cause `AddIntcHandler` registration array (111th finding) - architecturally separate from the IOP-side interrupt controller work (`iop_intc.c`/`iop_dma.c`/`iop_hle_intr.c`) built in Rounds 109-116. The two subsystems don't share code, so the IOP work could not have reached this EE-side gate - directly answering this round's guiding question.
 - No source change (measurement-only). Regression/rebuild skipped per standing convention for docs-only rounds.
 - See STATUS.md 157th finding for full details.
+
+### Round 118 (diagnostic experiment, no source change)
+- Per the user's request, ran a bounded HLE force-write experiment (scratch copy only, never the real repo) to test whether `RAM[0x80020B54]` is the ONLY remaining blocker before PMODE/DISPFB1/DISPLAY1.
+- Forcing the flag continuously in `ee_step()` genuinely unlocked the real gate check (`pc==0x8000F798`) and triggered the real RPC-dispatch call (`pc==0x80010A08`) for the first time ever in this investigation - both hit exactly once across a 30M-slice run.
+- This alone was NOT sufficient: GS writes stayed at 8 (unchanged), no PMODE/DISPFB1/DISPLAY1, EE settled back into the same per-frame retry loop.
+- Conclusion: this gate is a genuine real waypoint (not a red herring), but at least one more layer of missing plumbing (most likely a SIF/RPC reply, or one of the other still-zero preceding checks in the same function) sits downstream of it.
+- No source change (diagnostic-only, disposable HLE hook, never proposed as a real fix per this project's no-fabrication policy). Regression/rebuild skipped per standing convention.
+- See STATUS.md 158th finding for full details.

@@ -5014,3 +5014,11 @@ No source change this round (measurement-only). Regression/rebuild skipped (docs
 Honest scope note: the real, precise open question - what EE-kernel code should call AddIntcHandler for the cause OSDSYS needs, and why it's never reached - has been open since the 111th finding (many rounds before this session) and remains a substantial, separate EE-side reverse-engineering effort, distinct from anything this session's IOP work touched.
 
 Next: either resume the EE-side AddIntcHandler/Cause=0x8800 reverse-engineering thread (a large, already-scoped-as-difficult effort), or continue other, more tractable task #172 angles.
+
+## Checkpoint (Round 118, task #172/#273 - see STATUS.md 158th finding, diagnostic experiment only)
+
+Per the user's own suggested "short path" experiment: force-wrote RAM[0x80020B54] continuously in a disposable scratch-copy HLE hook (never the real repo) to test whether that single gate is the ONLY blocker before PMODE/DISPFB1/DISPLAY1. Result: genuinely informative. The forced flag DID unlock the real gate check and DID trigger the real RPC-dispatch call (pc=0x80010A08) for the first time ever in this investigation - but that alone did not escape the per-frame retry loop or produce any new GS activity (still exactly 8 writes, no PMODE/DISPFB1/DISPLAY1).
+
+This tells us the RAM[0x80020B54] gate is a real, load-bearing waypoint (not a red herring) - but there's at least one more layer downstream (most likely the SIF/RPC reply needing to come back, or one of the other still-zero preceding checks in the same function) still missing. No source change - purely a diagnostic probe, explicitly not committed as a fix (no citable real source for what should actually write that address, per this project's no-fabrication policy).
+
+Next: either trace what real reply this project's SIF/RPC machinery needs to deliver for the 0x80010A08 call to be "answered" (continuing this thread), or redirect to other task #172 angles / other project work per the user's own "Option A" menu (Wii/GX downstream verification, or the 21 pre-existing failing regression tests).

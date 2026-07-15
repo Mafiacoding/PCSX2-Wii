@@ -251,7 +251,16 @@ static void gs_finish_pixel(int32_t xx, int32_t yy, uint32_t frag_color, uint32_
     if (color_write) {
         uint32_t out_r = frag_r, out_g = frag_g, out_b = frag_b, out_a = frag_a;
 
-        if (gs_effective_attr_prim() & PRIM_ABE_MASK) {
+        /* Round 104 (145th finding, task #254): PABE - real GS Users
+         * Manual "Alpha Blending Control in Units of Pixels". When
+         * PABE=1, alpha blending is additionally gated per-pixel by
+         * the fragment's own alpha MSB (bit 7): blending only
+         * actually happens if that bit is 1, even when ABE is set.
+         * PABE=0 (default) leaves ABE as the sole condition, exactly
+         * as every pre-existing round already implements - a genuine
+         * no-op for every pre-existing test/demo. */
+        int pabe_allows_blend = !g_gif.pabe || (frag_a & 0x80u) != 0;
+        if ((gs_effective_attr_prim() & PRIM_ABE_MASK) && pabe_allows_blend) {
             /* Real alpha blending - RGB channels only; the written
              * alpha is always the fragment's own source alpha (As),
              * matching real GS hardware (see gif.h's ALPHA field
@@ -1691,6 +1700,13 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
         g_gif.ctx2_fba = fba;
         g_gif.ctx2_fba_configured = 1;
     } break;
+    case GS_REG_PABE:
+        /* Round 104 (145th finding, task #254): PABE.PABE (bit 0
+         * only, per the manual's BIT ASSIGN table) - see
+         * gs_finish_pixel()'s ABE-gating check for the full citation
+         * and how this takes effect. Not per-context. */
+        g_gif.pabe = data_lo & 0x1u;
+        break;
     case GS_REG_TEX2_1:
     case GS_REG_TEX2_2: {
         /* Round 100 (141st finding, task #254): TEX2 - "subset of

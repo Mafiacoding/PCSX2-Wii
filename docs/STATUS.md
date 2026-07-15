@@ -12624,3 +12624,15 @@ Seventh installment closing the confirmed-missing-GS-register list from the 137t
 **Full regression suite: 78/99 tests pass (0 new failures)** - reconfirmed the same 20 pre-existing, unrelated `ee_intc_raise`/harness-reconstruction gaps (task #215 documentation staleness plus the `test_ee_mmi_hilo2` EE-core dependency-chain gap), none touching GS/gif.c code. **Clean Wii/devkitPPC rebuild**, 0 errors.
 
 **Honest scope note**: this closes 1 more of the confirmed-missing registers (`FBA_1`/`FBA_2`), 16 of ~18 total across Rounds 97-103. Remaining: `PABE`, `TEXCLUT`, `SCANMSK`, `TEXA`, `SIGNAL`/`FINISH`/`LABEL`. Judged low-risk enough (additive, well-tested, safety-gated) to commit directly to `main`.
+
+## 145th finding (Round 104, task #254, GS gap follow-up 8/N): PABE implemented
+
+Eighth installment closing the confirmed-missing-GS-register list from the 137th finding.
+
+**PABE** (0x49, "Alpha Blending Control in Units of Pixels"): per the official GS Users Manual, "0: Alpha blending is not performed in pixel units. 1: Alpha blending is performed in pixel units." Real semantics: when PABE=1, alpha blending (normally gated solely by PRIM/PRMODE's ABE bit) is additionally gated per-pixel by the fragment's own alpha MSB (bit 7) - a pixel only actually blends if that bit is 1; pixels with alpha MSB=0 skip blending entirely and write their fragment color straight through, even when ABE is otherwise enabled. PABE=0 (default) leaves ABE as the sole condition, matching every pre-existing round's behavior exactly. Not per-context (single shared 1-bit field, no `_1`/`_2` suffix per the manual). Implemented as an additional `pabe_allows_blend` condition ANDed into `gs_finish_pixel()`'s existing `PRIM_ABE_MASK` check, gated by `pabe` defaulting to 0 - the established safety-gate convention.
+
+**New test** (`tests/test_gs_pabe.c`, 3 checks): a pre-filled black background pixel with a white ABE-enabled 1x1 SPRITE drawn over it via a 50/50 `ALPHA_1` blend. Covers: no PABE configured (regression safety - blending happens regardless of fragment alpha MSB, same as every prior round); PABE=1 with fragment alpha MSB=0 (blending skipped, pure white written through); PABE=1 with fragment alpha MSB=1 (blending happens normally, mixed gray result).
+
+**Full regression suite: 79/100 tests pass (0 new failures)** - reconfirmed the same 20 pre-existing, unrelated `ee_intc_raise`/harness-reconstruction gaps (task #215 documentation staleness plus the `test_ee_mmi_hilo2` EE-core dependency-chain gap), none touching GS/gif.c code. **Clean Wii/devkitPPC rebuild**, 0 errors.
+
+**Honest scope note**: this closes 1 more of the confirmed-missing registers (`PABE`), 17 of ~18 total across Rounds 97-104. Remaining: `TEXCLUT`, `SCANMSK`, `TEXA`, `SIGNAL`/`FINISH`/`LABEL`. Judged low-risk enough (additive, well-tested, safety-gated) to commit directly to `main`.

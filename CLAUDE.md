@@ -4876,3 +4876,15 @@ Task #254 progress: 16 of ~18 confirmed-missing GS registers now closed (Rounds 
 User's explicit instruction: "finish all the gaps once and for all so the gs part is finally done" - continuing task #254 through all remaining items without pause.
 
 Committed directly to main (additive, well-tested, safety-gated - same risk judgment as every prior round's new-register work).
+
+## Checkpoint (Round 104 - 145th finding, task #254, GS gap follow-up 8/N)
+
+Implemented real GS PABE (0x49, "Alpha Blending Control in Units of Pixels"). When PABE=1, alpha blending is additionally gated per-pixel by the fragment's own alpha MSB (bit 7): blends only if that bit is 1, even when ABE is set. PABE=0 (default) leaves ABE as the sole condition, exactly matching every pre-existing round's behavior. Not per-context (single shared field). Implemented as an extra `pabe_allows_blend` AND condition on gs_finish_pixel()'s existing PRIM_ABE_MASK check.
+
+New test tests/test_gs_pabe.c (3 checks, all pass). Full regression 79/100 (0 new failures vs the same 20 pre-existing ee_intc_raise/harness-reconstruction gaps plus test_ee_mmi_hilo2, documented since Round 101). Clean Wii/devkitPPC rebuild, 0 errors.
+
+Task #254 progress: 17 of ~18 confirmed-missing GS registers now closed (Rounds 97-104: XYZF2, XYZF3, XYZ3, FOG, FOGCOL, CLAMP_1, CLAMP_2, PRMODECONT, PRMODE, TEX2_1, TEX2_2, COLCLAMP, TEXFLUSH, DTHE, DIMX, FBA_1, FBA_2, PABE). Remaining: TEXCLUT, SCANMSK, TEXA, SIGNAL/FINISH/LABEL.
+
+User's explicit instruction: "finish all the gaps once and for all so the gs part is finally done" - continuing task #254 through all remaining items without pause.
+
+Committed directly to main (additive, well-tested, safety-gated - same risk judgment as every prior round's new-register work).

@@ -288,6 +288,24 @@
 #define GS_REG_FBA_1 0x4A
 #define GS_REG_FBA_2 0x4B
 
+/* Round 104 (145th finding, task #254 - GS gap follow-up 8/N): PABE -
+ * real address 0x49 per the official GS Users Manual ("PABE : Alpha
+ * Blending Control in Units of Pixels" - "0: Alpha blending is not
+ * performed in pixel units. 1: Alpha blending is performed in pixel
+ * units."). Real semantics: when PABE=1, alpha blending (normally
+ * gated only by PRIM/PRMODE's ABE bit) is additionally gated
+ * per-pixel by the fragment's own alpha MSB (bit 7) - blending only
+ * actually happens for a pixel whose alpha's MSB is 1; pixels with
+ * MSB=0 skip blending entirely (write their fragment color directly)
+ * even when ABE is otherwise enabled. PABE=0 (default) means no
+ * per-pixel gating - ABE's own bit is the sole condition, exactly as
+ * every pre-existing round already implements. Not per-context (a
+ * single shared 1-bit field, no _1/_2 suffix per the manual's own bit
+ * assignment). Defaults to pabe=0 - the established safety-gate
+ * convention, so this is a genuine no-op for every pre-existing
+ * test/demo unless it actually writes PABE=1. */
+#define GS_REG_PABE 0x49
+
 /* Round 98 (139th finding, task #254, GS gap follow-up 2/N): CLAMP_1/2
  * (real texture wrap-mode registers) - addresses cross-checked against
  * the official GS Users Manual's "7.3 Register List in Address Order"
@@ -784,6 +802,10 @@ typedef struct {
     int ctx1_fba_configured;
     uint32_t ctx2_fba;
     int ctx2_fba_configured;
+    /* Round 104 (145th finding, task #254): PABE - see GS_REG_PABE's
+     * comment above. Single 1-bit field, not per-context. Defaults
+     * to 0 (no per-pixel gating) - safety gate. */
+    uint32_t pabe;
     uint32_t ctx1_clamp_wms, ctx1_clamp_wmt;
     uint32_t ctx1_clamp_minu, ctx1_clamp_maxu, ctx1_clamp_minv, ctx1_clamp_maxv;
     int ctx1_clamp_configured;

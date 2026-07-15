@@ -209,6 +209,25 @@
 #define GS_REG_PRMODECONT 0x1A
 #define GS_REG_PRMODE     0x1B
 #define PRIM_ATTR_MASK    0x7F8u /* bits 3-10: IIP,TME,FGE,ABE,AA1,FST,CTXT,FIX */
+/* Round 100 (141st finding, task #254 - GS gap follow-up 4/N): TEX2_1/
+ * TEX2_2 - real addresses 0x16/0x17 per the official GS Users Manual
+ * ("TEX2_1 / TEX2_2 : Texture Information Setting" - "These registers
+ * set texture information. They are subsets of the TEX0 register.").
+ * TEX2 shares TEX0's exact same PSM/CBP/CPSM/CSM/CSA/CLD bit positions
+ * (data_lo bits 20-25 for PSM; data_hi bits 5-31 for CBP/CPSM/CSM/CSA/
+ * CLD - see apply_ad_write's existing GS_REG_TEX0_1/2 case) but the
+ * manual's own BIT ASSIGN diagram for TEX2 leaves bits 0-19 entirely
+ * unlabeled/reserved - i.e. TEX2 has NO TBP0/TBW/TW/TH/TCC/TFX fields
+ * of its own at all. Writing TEX2 therefore updates only the CLUT-
+ * related subset (PSM/CBP/CPSM/CSA/CLD - CSM is parsed but, like
+ * TEX0's own CSM handling, not separately modeled: only CSM1 is
+ * supported, per this file's pre-existing TEX0 CLUT scope note),
+ * leaving TBP0/TBW/TW/TH/TCC/TFX exactly as the most recent TEX0
+ * write left them - the real hardware use case (per the manual) is
+ * swapping which CLUT a texture uses without re-specifying its
+ * buffer/size/format. */
+#define GS_REG_TEX2_1 0x16
+#define GS_REG_TEX2_2 0x17
 
 /* Round 98 (139th finding, task #254, GS gap follow-up 2/N): CLAMP_1/2
  * (real texture wrap-mode registers) - addresses cross-checked against

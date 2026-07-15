@@ -4821,3 +4821,16 @@ Task #254 progress: 9 of ~15 confirmed-missing GS registers now closed (Rounds 9
 User's explicit instruction this session remains in effect: "finish all gs gaps first and then the iop room" - continuing task #254 (GS gaps) before returning to task #252 (IOP clean-room exception dispatcher design - already completed earlier this session per task list, but user's ordering instruction is honored regardless).
 
 Committed directly to main (additive, well-tested, safety-gated - same risk judgment as every prior round's new-register work).
+
+
+## Checkpoint (Round 100 - 141st finding, task #254, GS gap follow-up 4/N)
+
+Implemented real GS TEX2_1/TEX2_2 (0x16/0x17) - "subset of TEX0" registers per the official GS Users Manual. New apply_ad_write() case reuses TEX0's exact PSM/CBP/CPSM/CSA/CLD bit-extraction but deliberately does NOT touch TBP0/TBW/TFX/TW/TH - those keep whatever the last TEX0 write set. Mirrors into ctx1_tex_xxx/ctx2_tex_xxx per the established dual-context convention.
+
+New test tests/test_gs_tex2.c (3 checks, all pass - built directly on test_gs_clut.c's helper functions/compile convention: CBP override, CSA override, and a no-TEX2-write regression-safety check). Full regression 96/96 (0 new failures vs the same pre-existing ee_intc_raise test-harness gap and test_gs_alpha false-positive documented since Rounds 97-99's checkpoints). Clean Wii/devkitPPC rebuild, 0 errors.
+
+Task #254 progress: 11 of ~15 confirmed-missing GS registers now closed (Rounds 97-100: XYZF2, XYZF3, XYZ3, FOG, FOGCOL, CLAMP_1, CLAMP_2, PRMODECONT, PRMODE, TEX2_1, TEX2_2). Remaining: TEXCLUT, SCANMSK, TEXA, TEXFLUSH, DIMX, DTHE, COLCLAMP, PABE, FBA_1/2, SIGNAL/FINISH/LABEL.
+
+User's explicit instruction this session remains in effect: "finish all gs gaps first and then the iop room" - continuing task #254 (GS gaps) before returning to task #252 (IOP clean-room exception dispatcher design - already completed earlier this session per task list, but user's ordering instruction is honored regardless for any further IOP work).
+
+Committed directly to main (additive, well-tested, safety-gated - same risk judgment as every prior round's new-register work).

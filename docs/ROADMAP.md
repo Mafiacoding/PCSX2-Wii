@@ -3335,3 +3335,10 @@ Closes 2 more confirmed-missing GS registers (7 of ~15 total across Rounds 97-98
 Implemented real GS `PRMODECONT` (0x1a) / `PRMODE` (0x1b) registers per the official GS Users Manual: PRMODECONT.AC selects whether the 8 mirrored drawing-attribute bits (IIP/TME/FGE/ABE/AA1/FST/CTXT/FIX) come from PRIM (AC=1, default/safety-gated) or PRMODE (AC=0) - the primitive TYPE field is always sourced from PRIM regardless. New `gs_effective_attr_prim()` helper wired into all 8 attribute-bit read sites in gif.c (context select, fog gate, IIP/TME/FST/ABE checks across triangle/sprite/line rasterizers). Not per-context (real hardware has one PRMODECONT/PRMODE pair). New test `tests/test_gs_prmode.c` (3 checks, all passing - confirms PRIM.IIP override via PRMODE, and that AC round-trips). Full regression: 94/94, 0 new failures. Clean Wii/devkitPPC rebuild, 0 errors.
 
 Closes 2 more confirmed-missing GS registers (9 of ~15 total across Rounds 97-99). Remaining: `TEX2_1/2`, `TEXCLUT`, `SCANMSK`, `TEXA`, `TEXFLUSH`, `DIMX`, `DTHE`, `COLCLAMP`, `PABE`, `FBA_1/2`, `SIGNAL`/`FINISH`/`LABEL`. Committed directly to `main` (additive, well-tested, safety-gated).
+
+
+### Round 100 (141st finding, task #254, GS gap follow-up 4/N)
+
+Implemented real GS `TEX2_1`/`TEX2_2` (0x16/0x17) - "subset of TEX0" registers per the official GS Users Manual that update only PSM/CBP/CPSM/CSA/CLD (reusing TEX0's exact bit positions) while leaving TBP0/TBW/TW/TH/TCC/TFX untouched, letting a texture swap its CLUT palette without re-specifying its buffer/size/format. Mirrors into per-context storage matching TEX0's own dual-context convention. New test `tests/test_gs_tex2.c` (3 checks, all passing, built on `test_gs_clut.c`'s helpers). Full regression: 96/96, 0 new failures. Clean Wii/devkitPPC rebuild, 0 errors.
+
+Closes 2 more confirmed-missing GS registers (11 of ~15 total across Rounds 97-100). Remaining: `TEXCLUT`, `SCANMSK`, `TEXA`, `TEXFLUSH`, `DIMX`, `DTHE`, `COLCLAMP`, `PABE`, `FBA_1/2`, `SIGNAL`/`FINISH`/`LABEL`. Committed directly to `main` (additive, well-tested, safety-gated).

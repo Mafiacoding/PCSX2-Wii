@@ -1569,6 +1569,31 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
             g_gif.ctx2_tex_csa = csa; g_gif.ctx2_tex_cld = cld;
         }
     } break;
+    case GS_REG_TEX2_1:
+    case GS_REG_TEX2_2: {
+        /* Round 100 (141st finding, task #254): TEX2 - "subset of
+         * TEX0" (see gif.h's GS_REG_TEX2_1/2 comment). Reuses TEX0's
+         * exact PSM/CBP/CPSM/CSA/CLD bit positions (data_lo bits
+         * 20-25 / data_hi bits 5-31) but deliberately does NOT touch
+         * tex_tbp0/tex_tbw/tex_tfx/tex_tw/tex_th - those keep
+         * whatever the most recent TEX0 write set them to, per the
+         * manual's real hardware behavior. */
+        uint32_t psm = (data_lo >> 20) & 0x3Fu;
+        uint32_t cbp = (data_hi >> 5) & 0x3FFFu;
+        uint32_t cpsm = (data_hi >> 19) & 0xFu;
+        uint32_t csa = (data_hi >> 24) & 0x1Fu;
+        uint32_t cld = (data_hi >> 29) & 0x7u;
+
+        if (addr == GS_REG_TEX2_1) {
+            g_gif.tex_psm = psm; g_gif.tex_cbp = cbp; g_gif.tex_cpsm = cpsm;
+            g_gif.tex_csa = csa; g_gif.tex_cld = cld;
+            g_gif.ctx1_tex_psm = psm; g_gif.ctx1_tex_cbp = cbp; g_gif.ctx1_tex_cpsm = cpsm;
+            g_gif.ctx1_tex_csa = csa; g_gif.ctx1_tex_cld = cld;
+        } else {
+            g_gif.ctx2_tex_psm = psm; g_gif.ctx2_tex_cbp = cbp; g_gif.ctx2_tex_cpsm = cpsm;
+            g_gif.ctx2_tex_csa = csa; g_gif.ctx2_tex_cld = cld;
+        }
+    } break;
     case GS_REG_ZBUF_1: {
         /* GIFRegZBUF bitfield cross-checked against PCSX2's own
          * GS/GSRegs.h: word0 = ZBP(9):pad(15):PSM(6):pad(2);

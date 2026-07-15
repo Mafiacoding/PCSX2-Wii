@@ -3444,3 +3444,13 @@ Does not (and given this session's tool constraints, cannot) confirm whether thi
 - Full regression suite: 84 OK / 21 non-OK (unchanged pre-existing gaps) / 105 total - zero new regressions.
 - Clean Wii/devkitPPC rebuild verified.
 - See STATUS.md 154th finding for full details.
+
+### Round 114
+- Implemented `iop_dma_signal_channel_done(int channel)` (source/hw/iop_dma.c) - the first real IOP-side DMA-completion raise-side, closing the gap left open at the end of Round 113.
+- Sets the real per-channel pending-IRQ flag bit (already-tested `icr_write()` bits 24-30) in DMA_ICR (channels 0-6) or DMA_ICR2 (channels 7-12), then raises the real IOP_IRQ_DMA line + Round 112's soft-dispatch simplification if that channel's enable bit AND the real master-enable bit (DMA_ICR bit 23, always - even for DMA_ICR2-owned channels, per Round 113's cited intrman.c) are both set.
+- Wired into `ee_core.c`'s syscall 119 (sceSifSetDma) handler - the one genuine real transfer-completion point in this codebase - deliberately NOT added to two other, purely-synthetic reply-delivery call sites in the same file.
+- 8 new regression checks (35 total in `tests/test_iop_dma.c`, up from 27).
+- Regression harness update: every EE-side test linking `ee_core.c` now also needs `iop_dma.c`/`iop_intc.c` (mechanical, not behavioral).
+- Full regression suite: 84 OK / 21 non-OK (unchanged pre-existing gaps) / 105 total - zero new regressions.
+- Clean Wii/devkitPPC rebuild verified.
+- See STATUS.md 155th finding for full details.

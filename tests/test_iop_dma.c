@@ -114,6 +114,74 @@ int main(void)
     CHECK((v & 0x80000000u) != 0u,
           "DMA_ICR and DMA_ICR2 are independent registers (ICR's earlier force-bit state undisturbed by ICR2 writes)");
 
+    /* --- Round 114 (task #172/#269/#270): iop_dma_signal_channel_done()
+     * - the real per-channel completion signal this file's own
+     * earlier comment (above) noted this register-stub model didn't
+     * yet have. Covers both real registers (DMA_ICR for channels
+     * 0-6, DMA_ICR2 for channels 7-12) and the real master-enable
+     * gate (DMA_ICR bit 23, per Round 113's cited intrman.c - always
+     * DMA_ICR, even when signaling a DMA_ICR2-owned channel). --- */
+    {
+        iop_dma_init();
+        iop_intc_init();
+
+        /* Channel 2 (dicr1 range) with nothing enabled yet: flag bit
+         * gets set (real hardware always flags completion), but no
+         * IRQ is raised since neither the per-channel enable bit nor
+         * the master-enable bit is set. */
+        iop_dma_signal_channel_done(2);
+        CHECK((g_dma.icr & (1u << (2 + 24))) != 0u, "channel 2 completion sets the real DMA_ICR flag bit (local_ch+24) even with nothing enabled");
+        CHECK(iop_intc_get_state()->istat == 0u, "channel 2 completion with nothing enabled raises no IOP_IRQ_DMA (istat still 0)");
+        CHECK(iop_intc_get_state()->istat_hi == 0u, "channel 2 completion with nothing enabled raises no soft irq either");
+
+        /* Now enable channel 2 for real (bit 16+2=18) and set the
+         * real master-enable bit (23) directly, mirroring what
+         * EnableIntr(0x22) would do (Round 113) without depending on
+         * that HLE layer here - this file only tests iop_dma.c. */
+        iop_dma_init();
+        iop_intc_init();
+        g_dma.icr |= (1u << (2 + 16)) | 0x800000u; /* real enable bit + real master-enable bit */
+        iop_dma_signal_channel_done(2);
+        CHECK((iop_intc_get_state()->istat & (1u << 3)) != 0u, "channel 2 completion (enabled) raises the real IOP_IRQ_DMA hardware line (istat bit 3)");
+        CHECK((iop_intc_get_state()->istat_hi & (1u << (0x22 - 32))) != 0u, "channel 2 completion (enabled) also raises the Round 112 soft-dispatch irq 0x22");
+
+        /* Channel 9 (SIF0, dicr2 range) - the exact real channel this
+         * project's Round 111-113 work has tracked throughout. Local
+         * index within dicr2 is channel-7=2, so enable bit is 2+16=18,
+         * flag bit is 2+24=26 - but the real master gate is STILL
+         * DMA_ICR's bit 23 (not DMA_ICR2's), per Round 113's citation. */
+        iop_dma_init();
+        iop_intc_init();
+        g_dma.icr2 |= (1u << (2 + 16)); /* real per-channel enable bit in DICR2 */
+        g_dma.icr  |= 0x800000u;        /* real master-enable bit, always in DICR1 */
+        iop_dma_signal_channel_done(9);
+        CHECK((g_dma.icr2 & (1u << (2 + 24))) != 0u, "channel 9 (SIF0) completion sets the real DMA_ICR2 flag bit");
+        CHECK((iop_intc_get_state()->istat & (1u << 3)) != 0u, "channel 9 (SIF0) completion (enabled) raises the real IOP_IRQ_DMA hardware line");
+        CHECK((iop_intc_get_state()->istat_hi & (1u << (0x2A - 32))) != 0u, "channel 9 (SIF0) completion raises the real irq 0x2A (IOP_IRQ_DMA_SIF0) via Round 112's soft dispatch");
+
+        /* Channel 9 completion does NOT raise anything if DMA_ICR's
+         * master-enable bit (23) is missing, even with DICR2's own
+         * per-channel enable bit set - confirms the real cross-
+         * register master gate is actually being checked, not just
+         * assumed true. */
+        iop_dma_init();
+        iop_intc_init();
+        g_dma.icr2 |= (1u << (2 + 16)); /* enabled locally, but... */
+        /* ...g_dma.icr's bit 23 deliberately left clear */
+        iop_dma_signal_channel_done(9);
+        CHECK(iop_intc_get_state()->istat == 0u, "channel 9 completion without DMA_ICR's real master-enable bit (23) raises nothing");
+
+        /* Invalid channels (5, and out-of-range) are safely ignored,
+         * matching the same channel-5 gap already established for
+         * MMIO addressing above. */
+        iop_dma_init();
+        iop_intc_init();
+        iop_dma_signal_channel_done(5);
+        iop_dma_signal_channel_done(13);
+        iop_dma_signal_channel_done(-1);
+        CHECK(g_dma.icr == 0u && g_dma.icr2 == 0u, "invalid channels (5, 13, -1) are safely ignored, no register touched");
+    }
+
     printf("\n%d check(s) failed\n", failures);
     return failures ? 1 : 0;
 }

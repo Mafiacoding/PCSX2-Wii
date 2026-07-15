@@ -3,6 +3,7 @@
  * scope, per-register semantics, and PCSX2 source cross-reference.
  */
 #include "core/hw/iop_dma.h"
+#include "core/hw/iop_intc.h" /* Round 114: iop_intc_raise/iop_intc_raise_soft */
 #include <string.h>
 
 #define DMA_PCR   0x1F8010F0u
@@ -112,6 +113,42 @@ int iop_dma_mmio_read32(uint32_t addr, uint32_t *out)
         case 0x08: *out = c->chcr; return 1;
         case 0x0C: *out = c->tadr; return 1;
         default:   *out = 0;       return 1; /* unmodeled sub-offset within the 0x10 block */
+    }
+}
+
+/* Round 114 - see iop_dma.h's own doc comment for the full citation
+ * and honesty caveats. */
+void iop_dma_signal_channel_done(int channel)
+{
+    if (channel < 0 || channel == 5 || channel > 12)
+        return;
+
+    uint32_t local_ch;
+    uint32_t *icr_reg;
+    uint32_t irq_index;
+
+    if (channel <= 6) {
+        local_ch  = (uint32_t)channel;
+        icr_reg   = &g_dma.icr;
+        irq_index = 0x20u + (uint32_t)channel;
+    } else {
+        local_ch  = (uint32_t)(channel - 7);
+        icr_reg   = &g_dma.icr2;
+        irq_index = 0x28u + (uint32_t)(channel - 7);
+    }
+
+    uint32_t flag_bit   = 1u << (local_ch + 24u);
+    uint32_t enable_bit = 1u << (local_ch + 16u);
+
+    *icr_reg |= flag_bit; /* real per-channel pending-IRQ flag */
+
+    /* Real master-enable gate: per Round 113's fetched intrman.c,
+     * EnableIntr always sets DMA_ICR (not DMA_ICR2) bit 23 regardless
+     * of which controller's channel is being enabled - so g_dma.icr's
+     * bit 23 is the one real master gate for both ranges here. */
+    if ((g_dma.icr & 0x800000u) && (*icr_reg & enable_bit)) {
+        iop_intc_raise(3);              /* real IOP_IRQ_DMA hardware line */
+        iop_intc_raise_soft(irq_index); /* Round 112 soft-dispatch simplification */
     }
 }
 

@@ -116,6 +116,7 @@
 #include "core/hw/vif.h"
 #include "core/hw/vu.h"
 #include "core/hw/sif.h"
+#include "core/hw/iop_dma.h" /* Round 114: real IOP-side DMA-completion signal for sceSifSetDma */
 
 /* Task #172 continued (regression fix): the SIF DMA-copy syscall
  * handler below needs to write into IOP memory, but ee_core.c must
@@ -3153,6 +3154,26 @@ static int ee_step(void)
                     }
                 }
                 dma_channel_signal_done(DMA_CHANNEL_SIF0); /* task #176 */
+                /* Round 114 (task #172/#269/#270): this is the one
+                 * genuine, real transfer-completion point in this
+                 * whole syscall - the EE-RAM-to-IOP-RAM byte copy
+                 * above already really happened. The EE side's own
+                 * completion IRQ was already signaled directly
+                 * above; the IOP's own DMA controller (real channel
+                 * 9 = SIF0, per iop_dma.h's own cited channel table)
+                 * would, on real hardware, ALSO see its own real
+                 * completion for the same physical transfer - not a
+                 * separate, fabricated event, just this project's
+                 * other already-modeled DMA-completion side reacting
+                 * to the transfer this function just, for real,
+                 * performed. Deliberately NOT added to the OTHER two
+                 * dma_channel_signal_done(DMA_CHANNEL_SIF0) call
+                 * sites in this file (sif_cmd_iop_send_rpcinit_ready/
+                 * sif_cmd_iop_send_rpc_bind_rend) - those synthesize
+                 * an EE-side INCOMING reply with no real IOP-side
+                 * transfer behind them, so signaling a real IOP DMA
+                 * completion there would be fabricated timing. */
+                iop_dma_signal_channel_done(9);
                 GPR(2) = count ? count : 1u;
                 st->pc = this_pc + 4u;
                 st->next_pc = this_pc + 8u;

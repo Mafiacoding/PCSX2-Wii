@@ -4980,3 +4980,11 @@ Implemented real EnableIntr/DisableIntr (intrman#6/#7), ported from the real, fe
 Honest scope note: real module code calling EnableIntr(0x2A)/EnableIntr(0x2B) (SIF0/SIF1) would now correctly populate both the real DMA_ICR2 bits AND this project's imask_hi simplification - but nothing yet RAISES those irqs (no real DMA-completion hardware model calls iop_intc_raise_soft() or sets the real DMA_ICR2 ack/flag bits) - that remains the next, still-open step.
 
 Next: implement a real IOP DMA-completion path (something that sets the real DICR/DICR2 ack bits and/or calls iop_intc_raise_soft() when a SIF0/SIF1 transfer genuinely finishes), or continue other task #172 boot-progress angles.
+
+## Checkpoint (Round 114, task #172/#269/#270 - see STATUS.md 155th finding)
+
+Implemented `iop_dma_signal_channel_done()`, the first real IOP-side DMA-completion raise-side, wired into sceSifSetDma (syscall 119, ee_core.c) - the one genuine real transfer-completion point in this codebase. Real module code that has called EnableIntr(SIF0)/EnableIntr(SIF1) (Round 113) can now actually receive a dispatched completion interrupt, not just have it silently accepted. Uses this project's own already-tested icr_write() flag/enable bits (24-30/16-22), with the real, cross-register master-gate quirk preserved (DMA_ICR bit 23 gates both DMA_ICR and DMA_ICR2 channels - a genuine intrman.c finding, not an assumption). 8 new regression checks (35 total in test_iop_dma). Regression harness needed a mechanical update since ee_core.c now cross-links iop_dma.c/iop_intc.c. Regression: 84 OK/21 non-OK(pre-existing)/105 total, zero new regressions. Clean Wii rebuild verified.
+
+This closes out the RegisterIntrHandler -> EnableIntr -> DMA-completion chain (Rounds 109-114) as a complete, real, end-to-end mechanism for the first time - task #172's original scoped design (135th finding) is now fully realized for at least one concrete real subsystem (SIF0/SIF1).
+
+Next: re-verify whether this chain (or anything since Round 86) has moved the needle on task #172's actual, still-open splash-screen blocker (PMODE/DISPFB1/DISPLAY1 never written, per the 94th/126th findings) - that re-check has not been done since Round 86 and is the most direct next step.

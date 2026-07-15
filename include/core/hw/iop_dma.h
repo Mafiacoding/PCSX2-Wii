@@ -98,4 +98,35 @@ int iop_dma_mmio_write32(uint32_t addr, uint32_t value);
 
 iop_dma_state_t *iop_dma_get_state(void);
 
+/* Round 114 (task #172/#269/#270): real per-channel DMA-completion
+ * signal - the counterpart, on the IOP DMA controller side, of this
+ * project's already-existing EE-side dma_channel_signal_done()
+ * (core/hw/dma.h). Sets the real, already-documented "per-channel
+ * pending-IRQ flag" bit (this file's own icr_write()'s bits 24-30,
+ * cited from PCSX2's IopHwWrite.cpp) for `channel` in whichever real
+ * register owns it (DMA_ICR for channels 0-6, DMA_ICR2 for channels
+ * 7-12 - see this header's channel table above), and, if that
+ * channel's real per-channel enable bit (bits 16-22, same citation)
+ * AND the real master-enable bit (DMA_ICR bit 23 - per Round 113's
+ * fetched intrman.c, EnableIntr always sets THIS bit, in DMA_ICR
+ * specifically, regardless of which controller's channel is being
+ * enabled, so it is the one real master gate checked here for both
+ * ranges) are both set, raises the real IOP_IRQ_DMA hardware line
+ * (iop_intc_raise(3)) and Round 112's soft-dispatch simplification
+ * (iop_intc_raise_soft()) for the corresponding real irq number.
+ *
+ * Honest scope note: this project's own icr_write() (PCSX2-cited,
+ * already tested in tests/test_iop_dma.c) and the real, fetched
+ * ps2sdk intrman.c EnableIntr/DisableIntr (Round 113) don't fully
+ * agree on the exact real meaning of every low-order bit in these
+ * registers - intrman.c's own EnableIntr additionally touches a
+ * different bit range (documented in iop_hle_intr.c) whose precise
+ * real hardware purpose isn't confirmed by either fetched source.
+ * This function deliberately uses ONLY the higher-confidence, better-
+ * corroborated bits (16-22 enable / 23 master / 24-30 flag) both
+ * fetched sources independently agree on for the enable-bit position
+ * specifically, rather than asserting a single unified theory of the
+ * whole register this project doesn't have full evidence for. */
+void iop_dma_signal_channel_done(int channel);
+
 #endif

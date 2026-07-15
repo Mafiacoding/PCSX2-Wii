@@ -1007,7 +1007,19 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
                  (unsigned)g.stats.modules_loaded, (unsigned)g.modlist_count,
                  (unsigned)g.stats.modules_run_to_completion, (unsigned)g.stats.panic_loops_bypassed);
         mark_iop_boot_complete();
-        st->halted = 1;
+        /* Round 93 (133rd/134th finding, task #172 continuation):
+         * this bypass path used to leave the IOP permanently halted,
+         * but it represents the exact same real event ("no more real
+         * modules to run") as the genuine-completion site below,
+         * which task #238 already fixed to use `idle` instead -
+         * real IOP hardware never halts regardless of which code
+         * pattern this project's own module loader used to recognize
+         * "boot is done". Matching that site's own three-part fix
+         * (idle=1, IEc=1, exception_pending=0 - see its doc comment
+         * for the full citation trail) here too, for consistency. */
+        st->idle = 1;
+        st->cop0[12] |= 0x1u; /* Status.IEc = 1 */
+        st->exception_pending = 0;
         strncpy(st->halt_reason, panic_msg, sizeof(st->halt_reason) - 1);
         st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';
         return 1;
@@ -1024,7 +1036,12 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
                  (unsigned)g.stats.modules_loaded, (unsigned)g.modlist_count,
                  (unsigned)g.stats.modules_run_to_completion, (unsigned)g.stats.trap_stubs_bypassed);
         mark_iop_boot_complete();
-        st->halted = 1;
+        /* Round 93 (133rd/134th finding) - same fix as the panic-loop
+         * bypass above, same reasoning: identical real event, just
+         * recognized via a different code pattern. */
+        st->idle = 1;
+        st->cop0[12] |= 0x1u; /* Status.IEc = 1 */
+        st->exception_pending = 0;
         strncpy(st->halt_reason, trap_msg, sizeof(st->halt_reason) - 1);
         st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';
         return 1;
@@ -1041,7 +1058,11 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
                  (unsigned)g.stats.modules_loaded, (unsigned)g.modlist_count,
                  (unsigned)g.stats.modules_run_to_completion, (unsigned)g.stats.registration_walk_panics_bypassed);
         mark_iop_boot_complete();
-        st->halted = 1;
+        /* Round 93 (133rd/134th finding) - same fix as the two
+         * bypasses above, same reasoning. */
+        st->idle = 1;
+        st->cop0[12] |= 0x1u; /* Status.IEc = 1 */
+        st->exception_pending = 0;
         strncpy(st->halt_reason, reg_panic_msg, sizeof(st->halt_reason) - 1);
         st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';
         return 1;
@@ -1080,6 +1101,60 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
              (unsigned)g.stats.modules_run_to_completion);
     mark_iop_boot_complete();
     st->idle = 1;
+
+    /* Round 93 (133rd finding, task #172 continuation): this project's
+     * own idle-mode doc comment (iop_core.h's `idle` field) already
+     * promises "stays interrupt-responsive indefinitely" - but a
+     * live diagnostic found Status.IEc (cop0[12] bit 0) reads 0 right
+     * at this exact transition (confirmed stable/unchanged across a
+     * 60M-instruction run, since idle mode never fetches/executes,
+     * so nothing could have changed it afterward - this is genuinely
+     * the value at entry, not later drift). Status=0x414 decodes to
+     * IEc=0/KUc=0 (current) with IEp=1/KUp=0 and IEo=1/KUo=0
+     * (previous/old) - the textbook signature of "took an exception,
+     * pushed the interrupt-enable stack, never executed a matching
+     * RFE" (real R3000A COP0 Status semantics - see this project's
+     * own RFE implementation, task #113). The last-run module's
+     * front-loaded trampoline jumps straight to the boot-complete
+     * path without necessarily having unwound every exception it
+     * took along the way, so IEc is left wherever it happened to
+     * land.
+     *
+     * A real kernel's idle thread is definitionally interrupt-
+     * responsive - no real OS ever parks its idle loop with
+     * interrupts globally masked, since it could then never service
+     * even its own scheduler tick. This isn't a guess about specific
+     * IOP-side protocol details; it's the same universal invariant
+     * this project's own idle-mode doc comment already asserted.
+     * Explicitly enabling interrupts here makes that already-decided
+     * design intent actually true, rather than silently broken by an
+     * unrelated leftover exception-nesting artifact from module
+     * bring-up. */
+    st->cop0[12] |= 0x1u; /* Status.IEc = 1 */
+
+    /* Round 93 continued (133rd finding): live diagnostic confirms
+     * `exception_pending` is ALSO already stuck at 1 at this exact
+     * transition (some earlier module's own exception handling never
+     * reached a matching RFE before the loader's trampoline forcibly
+     * cut over to the boot-complete path) - reproducibly, every run.
+     * This second leftover artifact silently defeats the interrupt-
+     * wake logic even after the IEc fix above: iop_core_step()'s
+     * idle branch only clears `idle` on a `!pending_before &&
+     * exception_pending` transition, which can never fire again once
+     * exception_pending is already 1 forever, even though
+     * iop_check_hw_interrupt() keeps re-vectoring `pc` on every idle
+     * step once IEc is set (a real, if narrow, correctness gap in
+     * that guard's "was this already pending" check - visible here
+     * for the first time because IEc was 0 before this round, so the
+     * guard's behavior when re-triggered was previously unreachable).
+     * Same reasoning as the IEc fix: entering the synthetic idle
+     * state is meant to represent a clean handoff to the real
+     * kernel's own idle thread, not a continuation of some other,
+     * already-finished module's incidental exception bookkeeping -
+     * clearing it here makes that already-decided design intent
+     * actually work. */
+    st->exception_pending = 0;
+
     strncpy(st->halt_reason, msg, sizeof(st->halt_reason) - 1);
     st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';
     return 1;

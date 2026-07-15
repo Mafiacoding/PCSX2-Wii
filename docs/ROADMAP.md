@@ -3204,3 +3204,29 @@ project's history - directly superseding the 94th/127th findings'
 registers still not confirmed reached yet, honestly not claimed).
 90/90 regression, clean Wii rebuild. Next: trace forward from
 0x8000CFD8 to find the display-enable sequence.
+
+### Round 93 (133rd/134th findings, task #172/"fix all IOP issues")
+Investigated whether IOP idle mode (task #238) actually delivers its
+own documented interrupt-responsive promise. Found two real bugs:
+(1) Status.IEc reads 0 at idle entry (leftover from an unresolved
+exception during module bring-up), permanently blocking ALL interrupt
+delivery despite IM2/istat/imask all being correctly armed - fixed by
+setting IEc=1 at the idle-entry site (source/hw/iop_module_loader.c).
+(2) exception_pending is ALSO already stuck at 1 at the same
+transition, independently defeating the wake-up logic even after the
+IEc fix - fixed by clearing it too. Verified: IOP now genuinely wakes
+on interrupt, resumes real execution at the MIPS exception vector
+(0x80000080), and correctly re-recognizes the same already-validated
+inert trap-stub template found elsewhere in the ROM (tasks #151/#152).
+Found and fixed a third bug while verifying: all 3 of the "no more
+modules" bypass-completion sites (LOADCORE panic-loop, trap-stub,
+registration-walk - tasks #148/#151/#155/#157) still used the old
+`halted=1` pattern task #238 had already replaced with `idle` at the
+4th ("genuine") completion site - applied the same fix to all 3 for
+consistency. Resulting behavior: IOP cycles wake/trap-recognize/idle
+repeatedly (bounded, not infinite, but frequent - 242,759 hits in a
+5M-instruction diagnostic window) since no real interrupt handler is
+installed at the vector (separate, already-tracked gap, tasks
+#230-237). Does NOT by itself unblock the EE's SBUS wait (132nd
+finding) - the trap-stub bytes are inert by design. 90/90 regression,
+clean Wii rebuild.

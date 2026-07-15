@@ -3454,3 +3454,13 @@ Does not (and given this session's tool constraints, cannot) confirm whether thi
 - Full regression suite: 84 OK / 21 non-OK (unchanged pre-existing gaps) / 105 total - zero new regressions.
 - Clean Wii/devkitPPC rebuild verified.
 - See STATUS.md 155th finding for full details.
+
+### Round 115/116
+- Re-verified the 94th/126th finding's PMODE/DISPFB1/DISPLAY1 blocker against the full post-Round-114 state (fresh host-native diagnostic, real SCPH-10000 BIOS, 20M/45M interleaved-scheduler slices): still exactly 8 GS writes, zero to PMODE/DISPFB1/DISPLAY1. The user's Round 86 hypothesis (Rounds 109-114's interrupt/DMA work being a prerequisite) is disproven by this evidence.
+- Surfaced and root-caused a real, distinct, previously-undiscovered bug along the way: the IOP could permanently freeze at its own general exception vector (pc=0x80000080) when a real hardware interrupt fired while already at the real "unconditional trap stub" dead end (tasks #150/#151/#157) - the Round 95 (136th finding) "interrupted module, RFE back to EPC" bypass never checked whether EPC itself equals the stub's own address, so the RFE could send execution right back into the same stub forever.
+- Fix (`source/hw/iop_module_loader.c`): added `&& st->cop0[14] != pc` to that branch's guard - when EPC equals the stub's own address, falls through to the same module-complete handling (`advance_to_next_module()`/`mark_iop_boot_complete()`) already used for the ExcCode!=0 case, same precedent.
+- Verified: before the fix, IOP frozen at pc=0x80000080, idle=0, real_dispatches stuck at 4073 (12M/20M/45M slices alike). After the fix, IOP reaches idle=1, Status.IEc=1, real_dispatches=20217, genuine "boot complete" halt_reason (29/29 modules loaded). EE side and the 8-GS-write picture unchanged.
+- No new regression tests this round (fix tightens an existing guard in already-tested code paths).
+- Full regression suite: 84 OK / 21 non-OK (unchanged pre-existing gaps) / 105 total - zero new regressions.
+- Clean Wii/devkitPPC rebuild verified.
+- See STATUS.md 156th finding for full details.

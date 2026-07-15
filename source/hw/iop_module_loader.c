@@ -1095,7 +1095,37 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
          * address (0x8000F814) - genuine additional real BIOS code
          * now executes on both CPUs. */
         uint32_t exccode = st->cop0[13] & 0x7Cu;
-        if (exccode == 0u) {
+        /* Round 116 (task #271/#172 continuation, 156th finding): the
+         * Round 95 fix above (exccode==0 => "genuinely interrupted,
+         * resumable module code, RFE back to EPC") silently assumed
+         * EPC always points at real, resumable module code distinct
+         * from this stub's own fixed address. A host-native
+         * diagnostic this round (20M/45M-slice runs against the real
+         * SCPH-10000 BIOS, both landing on a byte-for-byte identical
+         * frozen final state) proved that assumption false: once EPC
+         * itself equals this exact trap-stub's own address (pc), the
+         * RFE below jumps straight back into this SAME stub, which
+         * re-detects exccode==0 (Cause.ExcCode is left at 0 - never
+         * reset to anything else by this branch), re-acks an already-
+         * empty firing mask (a no-op the second time), and RFEs to
+         * the SAME never-updated EPC again - a permanent, self-
+         * sustaining loop that freezes pc at this one address forever
+         * (confirmed live: a 64-entry PC ring-buffer sampled at the
+         * end of both diagnostic runs showed all 64 most recent PC
+         * values identical, all Status/Cause/EPC fields frozen, and
+         * zero further real syscalls/interrupts dispatched after the
+         * loop starts - not a slow real polling loop, an immediate
+         * fixed point). This is architecturally the exact same "no
+         * real module code left to resume" dead end the exccode!=0
+         * branch below already handles (advance_to_next_module()/
+         * mark_iop_boot_complete()) - EPC==pc means the "interrupted"
+         * context was itself already sitting at this dead-end stub
+         * when the interrupt fired, so there is no real resumable
+         * code to RFE back into. Falling through to the exact same
+         * module-complete handling used below is the same precedent
+         * already established for the exccode!=0 case, not a new
+         * mechanism. */
+        if (exccode == 0u && st->cop0[14] != pc) {
             g.stats.trap_stubs_bypassed++;
             iop_intc_state_t *intc = iop_intc_get_state();
             uint32_t firing = intc->istat & intc->imask;

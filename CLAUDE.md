@@ -4988,3 +4988,17 @@ Implemented `iop_dma_signal_channel_done()`, the first real IOP-side DMA-complet
 This closes out the RegisterIntrHandler -> EnableIntr -> DMA-completion chain (Rounds 109-114) as a complete, real, end-to-end mechanism for the first time - task #172's original scoped design (135th finding) is now fully realized for at least one concrete real subsystem (SIF0/SIF1).
 
 Next: re-verify whether this chain (or anything since Round 86) has moved the needle on task #172's actual, still-open splash-screen blocker (PMODE/DISPFB1/DISPLAY1 never written, per the 94th/126th findings) - that re-check has not been done since Round 86 and is the most direct next step.
+
+## Checkpoint (Round 115/116, task #172/#271 - see STATUS.md 156th finding)
+
+Re-verified the 94th/126th finding's PMODE/DISPFB1/DISPLAY1 blocker against the full post-Round-114 state, per the user's own hypothesis that Rounds 109-114's interrupt/DMA work might be a prerequisite. Fresh host-native diagnostic (write-instrumented gs_mmio_write64, real SCPH-10000 BIOS, 20M/45M interleaved-scheduler slices): still exactly 8 GS writes, zero to PMODE/DISPFB1/DISPLAY1 - the hypothesis does not hold.
+
+Along the way, found + fixed a real, distinct, previously-undiscovered bug: both diagnostic runs landed on a byte-for-byte identical frozen state, with the IOP permanently pinned at pc=0x80000080 (its own general exception vector / the already-tracked "unconditional trap stub" dead end from tasks #150/#151/#157). Root cause: Round 95's (136th finding) "interrupted module, RFE back to EPC" bypass in iop_module_loader.c never checked whether EPC itself equals the trap stub's own address - when a real interrupt fires while the CPU is already AT that dead end (not at genuinely resumable code), the RFE sends execution right back into the same stub forever, since that branch never updates EPC.
+
+Fix: added `&& st->cop0[14] != pc` to that branch's guard (source/hw/iop_module_loader.c) - when EPC==pc, falls through to the same module-complete handling (advance_to_next_module()/mark_iop_boot_complete()) already used one branch below, same precedent. Verified: IOP now reaches idle=1/Status.IEc=1/real_dispatches=20217 (up from a frozen 4073) with a genuine "boot complete" halt_reason, instead of spinning forever. EE side and the 8-GS-write picture unchanged - this is a real correctness fix for the IOP's execution model, not a new step toward PMODE/DISPFB1/DISPLAY1.
+
+No new regression tests this round (guard-condition tightening in already-tested paths). Regression: 84 OK/21 non-OK(pre-existing)/105 total, zero new regressions. Clean Wii rebuild verified.
+
+Honest scope note: what real further module/kernel code the EE side would need to run past its current resting point (pc=0x8000CF94) to ever reach real PMODE/DISPFB1/DISPLAY1 writes remains open - a substantially larger, separate effort (see task #221's deprioritized device-table scope).
+
+Next: continue investigating what would let the EE progress past pc=0x8000CF94, or pursue other task #172 boot-progress angles.

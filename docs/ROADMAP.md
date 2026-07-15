@@ -3370,3 +3370,9 @@ Closes 1 more confirmed-missing GS register (16 of ~18 total across Rounds 97-10
 Implemented real GS `PABE` (0x49, "Alpha Blending Control in Units of Pixels") per the official GS Users Manual. When PABE=1, alpha blending is additionally gated per-pixel by the fragment's own alpha MSB (bit 7) - only blends if that bit is 1, even when PRIM/PRMODE's ABE is set. PABE=0 (default) leaves ABE as the sole condition. Not per-context. New test `tests/test_gs_pabe.c` (3 checks, all passing). Full regression: 79/100 (0 new failures). Clean Wii/devkitPPC rebuild, 0 errors.
 
 Closes 1 more confirmed-missing GS register (17 of ~18 total across Rounds 97-104). Remaining: `TEXCLUT`, `SCANMSK`, `TEXA`, `SIGNAL`/`FINISH`/`LABEL`. Committed directly to `main` (additive, well-tested, safety-gated).
+
+### Round 105 (146th finding, task #254, GS gap follow-up 9/N)
+
+Implemented real GS `TEXCLUT` (0x1c, "CLUT Position Specification") per the official GS Users Manual - "disabled when CSM=0 (CSM1 mode)", which is this codebase's only supported CLUT storage mode, so this is a documented, honest no-op (same convention as `TEXFLUSH`). Real bit layout parsed and stored (CBW/COU/COV) but not consumed. New test `tests/test_gs_texclut.c` (2 checks, all passing, reusing `test_gs_clut.c`'s helpers). Full regression: 80/101 (0 new failures). Clean Wii/devkitPPC rebuild, 0 errors.
+
+Count correction: the running "~18 total" figure since Round 97 undercounted `SIGNAL`/`FINISH`/`LABEL` as one item instead of three - real total is 23 confirmed-missing registers. Closes 1 more (18 of 23 total across Rounds 97-105). Remaining: `SCANMSK`, `TEXA`, `SIGNAL`, `FINISH`, `LABEL`. Committed directly to `main` (additive, well-tested, safety-gated).

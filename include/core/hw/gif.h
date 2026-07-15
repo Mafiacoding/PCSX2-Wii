@@ -306,6 +306,25 @@
  * test/demo unless it actually writes PABE=1. */
 #define GS_REG_PABE 0x49
 
+/* Round 105 (146th finding, task #254 - GS gap follow-up 9/N): TEXCLUT
+ * - real address 0x1c per the official GS Users Manual ("TEXCLUT :
+ * CLUT Position Specification" - "This register specifies the CLUT
+ * position in the buffer when the CLUT storage mode is CSM=1 (CSM2
+ * mode). It is disabled when CSM=0 (CSM1 mode)."). Real bit layout:
+ * CBW (bits 5:0, CLUT buffer width in units of 64px), COU (bits
+ * 11:6, CLUT U offset in units of 16px), COV (bits 21:12, CLUT V
+ * offset in units of 1px). This codebase's CLUT support is CSM1-only
+ * (see the pre-existing Round 24 scope note and TEX0/TEX2's own CSM
+ * handling above) - CSM2's separate "load CLUT from an offset inside
+ * an arbitrary texture page buffer" addressing mode is a documented,
+ * unsupported gap, so per the manual's own words this register is
+ * genuinely inert for every draw this codebase can perform. Parsed
+ * and stored (so a real TEXCLUT write is never silently dropped as
+ * an unknown register) but intentionally does not feed into
+ * gs_sample_clut()'s CSM1-only addressing math - honestly scoped,
+ * same convention as GS_REG_TEXFLUSH above. */
+#define GS_REG_TEXCLUT 0x1C
+
 /* Round 98 (139th finding, task #254, GS gap follow-up 2/N): CLAMP_1/2
  * (real texture wrap-mode registers) - addresses cross-checked against
  * the official GS Users Manual's "7.3 Register List in Address Order"
@@ -806,6 +825,11 @@ typedef struct {
      * comment above. Single 1-bit field, not per-context. Defaults
      * to 0 (no per-pixel gating) - safety gate. */
     uint32_t pabe;
+    /* Round 105 (146th finding, task #254): TEXCLUT - see
+     * GS_REG_TEXCLUT's comment above. Stored for completeness but
+     * intentionally not consumed anywhere (CSM1-only scope, same
+     * honest-inert convention as TEXFLUSH). */
+    uint32_t texclut_cbw, texclut_cou, texclut_cov;
     uint32_t ctx1_clamp_wms, ctx1_clamp_wmt;
     uint32_t ctx1_clamp_minu, ctx1_clamp_maxu, ctx1_clamp_minv, ctx1_clamp_maxv;
     int ctx1_clamp_configured;

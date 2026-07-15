@@ -4888,3 +4888,15 @@ Task #254 progress: 17 of ~18 confirmed-missing GS registers now closed (Rounds 
 User's explicit instruction: "finish all the gaps once and for all so the gs part is finally done" - continuing task #254 through all remaining items without pause.
 
 Committed directly to main (additive, well-tested, safety-gated - same risk judgment as every prior round's new-register work).
+
+## Checkpoint (Round 105 - 146th finding, task #254, GS gap follow-up 9/N)
+
+Implemented real GS TEXCLUT (0x1c, "CLUT Position Specification") - per the official GS Users Manual, disabled when CSM=0 (CSM1 mode), which is this codebase's only supported CLUT storage mode. Documented, honest no-op: real bit layout (CBW/COU/COV) parsed and stored into new texclut_cbw/texclut_cou/texclut_cov fields but deliberately not consumed by gs_sample_clut()'s CSM1-only addressing math - same convention as TEXFLUSH (Round 102).
+
+New test tests/test_gs_texclut.c (2 checks, all pass, reusing test_gs_clut.c's exact helper functions). Full regression 80/101 (0 new failures vs the same 20 pre-existing ee_intc_raise/harness-reconstruction gaps plus test_ee_mmi_hilo2). Clean Wii/devkitPPC rebuild, 0 errors.
+
+Count correction: the running "~18 total confirmed-missing GS registers" figure carried since Round 97 undercounted SIGNAL/FINISH/LABEL as a single item instead of three separate registers - the real total across Rounds 97-105 is 23. Task #254 progress: 18 of 23 confirmed-missing GS registers now closed (Rounds 97-105: XYZF2, XYZF3, XYZ3, FOG, FOGCOL, CLAMP_1, CLAMP_2, PRMODECONT, PRMODE, TEX2_1, TEX2_2, COLCLAMP, TEXFLUSH, DTHE, DIMX, FBA_1, FBA_2, PABE, TEXCLUT). Remaining: SCANMSK, TEXA, SIGNAL, FINISH, LABEL.
+
+User's explicit instruction: "finish all the gaps once and for all so the gs part is finally done" - continuing task #254 through all remaining items without pause.
+
+Committed directly to main (additive, well-tested, safety-gated - same risk judgment as every prior round's new-register work).

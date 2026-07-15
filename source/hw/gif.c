@@ -1707,6 +1707,19 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
          * and how this takes effect. Not per-context. */
         g_gif.pabe = data_lo & 0x1u;
         break;
+    case GS_REG_TEXCLUT: {
+        /* Round 105 (146th finding, task #254): TEXCLUT - real bit
+         * layout per the manual: CBW bits[5:0], COU bits[11:6], COV
+         * bits[21:12] (all within data_lo, since the whole register
+         * fits in the low 32 bits). Parsed and stored for
+         * completeness, but - per the manual's own words, "disabled
+         * when CSM=0 (CSM1 mode)" - deliberately never consumed by
+         * gs_sample_clut()'s CSM1-only addressing math. See gif.h's
+         * GS_REG_TEXCLUT comment for the full citation. */
+        g_gif.texclut_cbw = data_lo & 0x3Fu;
+        g_gif.texclut_cou = (data_lo >> 6) & 0x3Fu;
+        g_gif.texclut_cov = (data_lo >> 12) & 0x3FFu;
+    } break;
     case GS_REG_TEX2_1:
     case GS_REG_TEX2_2: {
         /* Round 100 (141st finding, task #254): TEX2 - "subset of

@@ -194,6 +194,21 @@
 #define GS_REG_TEX1_2     0x15
 #define GS_REG_MIPTBP1_2  0x35
 #define GS_REG_MIPTBP2_2  0x37
+/* Round 99 (140th finding, task #254 - GS gap follow-up 3/N): PRMODECONT
+ * / PRMODE - real addresses 0x1a/0x1b per the official GS Users Manual
+ * ("PRMODE : Setting for Attributes of Drawing Primitives" / "PRMODECONT
+ * : Specification of Primitive Attribute Setting Method"). PRMODECONT.AC
+ * selects which register supplies the 8 mirrored drawing-attribute bits
+ * (IIP/TME/FGE/ABE/AA1/FST/CTXT/FIX, bits 3-10 - PRIM's own bits 0-2,
+ * the primitive TYPE field, are NEVER sourced from PRMODE, per the
+ * manual's own field list for PRMODE, which omits bits 0-2 entirely):
+ * AC=1 -> use PRIM's own attribute bits (the default/normal case, and
+ * this project's chosen safety-gate default so pre-existing tests never
+ * touch PRMODECONT and thus see identical behavior to every prior
+ * round); AC=0 -> use PRMODE's mirrored attribute bits instead. */
+#define GS_REG_PRMODECONT 0x1A
+#define GS_REG_PRMODE     0x1B
+#define PRIM_ATTR_MASK    0x7F8u /* bits 3-10: IIP,TME,FGE,ABE,AA1,FST,CTXT,FIX */
 
 /* Round 98 (139th finding, task #254, GS gap follow-up 2/N): CLAMP_1/2
  * (real texture wrap-mode registers) - addresses cross-checked against
@@ -659,6 +674,14 @@ typedef struct {
      * keeps sampling exactly as before this round unless it opts in
      * by actually writing CLAMP_1/2. */
     int clamp_configured;
+    /* Round 99: PRMODECONT/PRMODE - see the GS_REG_PRMODECONT/GS_REG_PRMODE
+     * comment above. prmodecont_ac defaults to 1 ("use PRIM", the
+     * pre-existing behavior) in gif_init() so this is a genuine no-op
+     * for every prior round's test/demo unless it actually writes
+     * PRMODECONT. Not per-context: real hardware has exactly one
+     * PRMODECONT/PRMODE pair, shared across both contexts. */
+    uint32_t prmodecont_ac;
+    uint32_t prmode;
     uint32_t ctx1_clamp_wms, ctx1_clamp_wmt;
     uint32_t ctx1_clamp_minu, ctx1_clamp_maxu, ctx1_clamp_minv, ctx1_clamp_maxv;
     int ctx1_clamp_configured;

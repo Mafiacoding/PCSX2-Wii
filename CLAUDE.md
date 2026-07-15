@@ -4808,3 +4808,16 @@ Task #254 progress: 7 of ~15 confirmed-missing GS registers now closed (Rounds 9
 User's explicit instruction this session: "finish all gs gaps first and then the iop room" - continuing task #254 (GS gaps) before returning to task #252 (IOP clean-room exception dispatcher design).
 
 Committed directly to main (additive, well-tested, safety-gated - same risk judgment as every prior round's new-register work).
+
+
+## Checkpoint (Round 99 - 140th finding, task #254, GS gap follow-up 3/N)
+
+Implemented real GS PRMODECONT (0x1a) / PRMODE (0x1b) registers: AC selects whether IIP/TME/FGE/ABE/AA1/FST/CTXT/FIX come from PRIM (AC=1, default) or PRMODE (AC=0), per the official GS Users Manual. New gs_effective_attr_prim() helper in source/hw/gif.c, wired into all 8 attribute-bit read sites (gs_activate_context's CTXT check, apply_fog's FGE check, triangle/sprite/line rasterizers' IIP/TME/FST/ABE checks). Not per-context - real hardware has one shared PRMODECONT/PRMODE pair. Safety-gated via prmodecont_ac defaulting to 1 ("use PRIM") in gif_init() - no behavior change for any pre-existing test/demo.
+
+New test tests/test_gs_prmode.c (3 checks, all pass - PRIM.IIP override via PRMODE, AC round-trip). Full regression 94/94 (0 new failures vs the same pre-existing, unrelated ee_intc_raise test-harness gap and test_gs_alpha false-positive already documented in Rounds 97-98's checkpoints). Clean Wii/devkitPPC rebuild, 0 errors.
+
+Task #254 progress: 9 of ~15 confirmed-missing GS registers now closed (Rounds 97-99: XYZF2, XYZF3, XYZ3, FOG, FOGCOL, CLAMP_1, CLAMP_2, PRMODECONT, PRMODE). Remaining: TEX2_1/2, TEXCLUT, SCANMSK, TEXA, TEXFLUSH, DIMX, DTHE, COLCLAMP, PABE, FBA_1/2, SIGNAL/FINISH/LABEL.
+
+User's explicit instruction this session remains in effect: "finish all gs gaps first and then the iop room" - continuing task #254 (GS gaps) before returning to task #252 (IOP clean-room exception dispatcher design - already completed earlier this session per task list, but user's ordering instruction is honored regardless).
+
+Committed directly to main (additive, well-tested, safety-gated - same risk judgment as every prior round's new-register work).

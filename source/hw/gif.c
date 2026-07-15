@@ -26,6 +26,8 @@ void gif_init(void)
      * project's usual safety-gate convention, see cur_fog's own field
      * comment in gif.h. */
     g_gif.cur_fog = 0xFFu;
+    g_gif.prmodecont_ac = 1u; /* Round 99: default AC=1 ("use PRIM") - safety gate */
+    g_gif.prmode = 0u;
 }
 
 gif_state_t *gif_get_state(void) { return &g_gif; }
@@ -174,6 +176,11 @@ static uint32_t gs_sample_texel(int32_t tex_x, int32_t tex_y)
  * gate (unchanged from before this round) - this function may
  * additionally suppress it (AFAIL) but never re-enables a Z write the
  * caller didn't already allow. */
+/* Forward declaration: gs_effective_attr_prim() is defined further down
+ * (right before gs_activate_context()) but gs_finish_pixel() below needs
+ * it for the ABE check - Round 99, task #254. */
+static uint32_t gs_effective_attr_prim(void);
+
 static void gs_finish_pixel(int32_t xx, int32_t yy, uint32_t frag_color, uint32_t frag_z, int z_write_allowed)
 {
     uint32_t frag_r = rgba_channel(frag_color, 0);
@@ -217,7 +224,7 @@ static void gs_finish_pixel(int32_t xx, int32_t yy, uint32_t frag_color, uint32_
     if (color_write) {
         uint32_t out_r = frag_r, out_g = frag_g, out_b = frag_b, out_a = frag_a;
 
-        if (g_gif.prim & PRIM_ABE_MASK) {
+        if (gs_effective_attr_prim() & PRIM_ABE_MASK) {
             /* Real alpha blending - RGB channels only; the written
              * alpha is always the fragment's own source alpha (As),
              * matching real GS hardware (see gif.h's ALPHA field
@@ -284,6 +291,27 @@ static void gs_finish_pixel(int32_t xx, int32_t yy, uint32_t frag_color, uint32_
     }
 }
 
+/* Round 99 (140th finding, task #254 - GS gap follow-up 3/N): resolves
+ * PRIM vs. PRMODE for the 8 mirrored drawing-attribute bits (IIP, TME,
+ * FGE, ABE, AA1, FST, CTXT, FIX - bits 3-10), per PRMODECONT.AC (see
+ * gif.h's GS_REG_PRMODECONT/GS_REG_PRMODE comment for the full manual
+ * citation and bit layout). PRIM's own bits 0-2 (primitive TYPE) are
+ * always taken from PRIM itself - PRMODE has no TYPE field at all, per
+ * the manual - so this helper always returns PRIM's type bits
+ * unchanged regardless of AC. Every attribute-bit read site in this
+ * file (gs_activate_context's CTXT check, apply_fog's FGE check,
+ * rasterize_*'s IIP/TME/FST/ABE checks) goes through this helper
+ * instead of reading g_gif.prim directly, so PRMODECONT genuinely
+ * takes effect everywhere real hardware says it should. Defaults to
+ * AC=1 ("use PRIM", set in gif_init()) - the established safety-gate
+ * convention, so this is a no-op for every pre-existing test/demo
+ * unless it actually writes PRMODECONT. */
+static uint32_t gs_effective_attr_prim(void)
+{
+    if (g_gif.prmodecont_ac) return g_gif.prim;
+    return (g_gif.prim & 0x7u) | (g_gif.prmode & PRIM_ATTR_MASK);
+}
+
 /* Round 27: GS Context 2 (dual-context support) - see gif.h's
  * PRIM_CTXT_MASK/GS_REG_FRAME_2/etc and gif_state_t's ctx1_xxx/
  * ctx2_xxx field comments for the full design. Called once at the
@@ -292,16 +320,18 @@ static void gs_finish_pixel(int32_t xx, int32_t yy, uint32_t frag_color, uint32_
  * gs_finish_pixel()/gs_sample_texel()/gs_sample_clut() and the
  * rasterizers themselves keep reading completely unchanged from
  * before this round) from whichever of ctx1_xxx/ctx2_xxx PRIM's CTXT
- * bit (bit 9) currently selects. For CTXT=0 this simply re-copies
- * context 1's own already-correct values back (idempotent, matching
- * exactly what apply_ad_write's _1 cases already wrote directly) -
- * so existing single-context callers/tests see zero behavioral
- * change. For CTXT=1, context 2's permanent storage becomes "live"
- * in the active fields for the duration of this primitive's
- * rasterization. */
+ * bit (bit 9) currently selects (Round 99: routed through
+ * gs_effective_attr_prim() so PRMODECONT.AC=0 correctly sources CTXT
+ * from PRMODE instead, per the manual's own mirrored-bit list). For
+ * CTXT=0 this simply re-copies context 1's own already-correct values
+ * back (idempotent, matching exactly what apply_ad_write's _1 cases
+ * already wrote directly) - so existing single-context callers/tests
+ * see zero behavioral change. For CTXT=1, context 2's permanent
+ * storage becomes "live" in the active fields for the duration of
+ * this primitive's rasterization. */
 static void gs_activate_context(void)
 {
-    if (g_gif.prim & PRIM_CTXT_MASK) {
+    if (gs_effective_attr_prim() & PRIM_CTXT_MASK) {
         g_gif.fbp = g_gif.ctx2_fbp;
         g_gif.fbw = g_gif.ctx2_fbw;
         g_gif.xyoffset_x = g_gif.ctx2_xyoffset_x;
@@ -466,7 +496,7 @@ static void clamp_bbox_to_scissor(int32_t *minx, int32_t *maxx, int32_t *miny, i
  * for every pre-existing test/demo, none of which ever set FGE. */
 static uint32_t apply_fog(uint32_t color, uint32_t fog)
 {
-    if (!(g_gif.prim & PRIM_FGE_MASK)) return color;
+    if (!(gs_effective_attr_prim() & PRIM_FGE_MASK)) return color;
     uint32_t r = rgba_channel(color, 0), g = rgba_channel(color, 8), b = rgba_channel(color, 16), a = rgba_channel(color, 24);
     uint32_t fcr = rgba_channel(g_gif.fogcol, 0), fcg = rgba_channel(g_gif.fogcol, 8), fcb = rgba_channel(g_gif.fogcol, 16);
     uint32_t inv = 255u - fog;
@@ -543,8 +573,8 @@ static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, i
     int32_t area = edge(x0, y0, x1, y1, x2, y2);
     if (area == 0) return;
 
-    int gouraud = (g_gif.prim & PRIM_IIP_MASK) != 0;
-    int textured = (g_gif.prim & PRIM_TME_MASK) != 0;
+    int gouraud = (gs_effective_attr_prim() & PRIM_IIP_MASK) != 0;
+    int textured = (gs_effective_attr_prim() & PRIM_TME_MASK) != 0;
     /* Flat shading uses the LAST vertex's color on real hardware
      * (matches this rasterizer's pre-Gouraud behavior, which always
      * used whichever RGBAQ was active when the triangle completed -
@@ -667,7 +697,7 @@ static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, i
                     out = rgba_pack(shaded_r, shaded_g, shaded_b, shaded_a);
                 } else {
                     double tu, tv;
-                    if (g_gif.prim & PRIM_FST_MASK) {
+                    if (gs_effective_attr_prim() & PRIM_FST_MASK) {
                         /* FST=1 (UV mode): plain affine interpolation,
                          * exactly as before task #88 - UV is already
                          * in integer texel units. */
@@ -797,7 +827,7 @@ static void rasterize_sprite(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
                               uint32_t z0, uint32_t z1, uint32_t f0, uint32_t f1)
 {
     gs_activate_context(); /* Round 27: dual-context - see its own comment */
-    int textured = (g_gif.prim & PRIM_TME_MASK) != 0;
+    int textured = (gs_effective_attr_prim() & PRIM_TME_MASK) != 0;
     /* Z (task #89): real hardware treats SPRITE Z the same way it
      * treats SPRITE color - a single flat value for the whole
      * primitive, taken from the second (completing) vertex,
@@ -828,7 +858,7 @@ static void rasterize_sprite(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
      * vertex order). */
     double tex_u0 = 0.0, tex_v0 = 0.0, tex_u1 = 0.0, tex_v1 = 0.0;
     if (textured) {
-        if (g_gif.prim & PRIM_FST_MASK) {
+        if (gs_effective_attr_prim() & PRIM_FST_MASK) {
             tex_u0 = (double)u0; tex_v0 = (double)v0;
             tex_u1 = (double)u1; tex_v1 = (double)v1;
         } else {
@@ -1026,7 +1056,7 @@ static void rasterize_line(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
                             uint32_t f0, uint32_t f1)
 {
     gs_activate_context(); /* Round 27: dual-context - see its own comment */
-    int gouraud = (g_gif.prim & PRIM_IIP_MASK) != 0;
+    int gouraud = (gs_effective_attr_prim() & PRIM_IIP_MASK) != 0;
     uint32_t flat_r = rgba_channel(c1, 0), flat_g = rgba_channel(c1, 8);
     uint32_t flat_b = rgba_channel(c1, 16), flat_a = rgba_channel(c1, 24);
 
@@ -1409,6 +1439,25 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
          * channel convention (alpha byte unused/0, matching FOGCOL
          * having no real alpha field). */
         g_gif.fogcol = rgba_pack(data_lo & 0xFFu, (data_lo >> 8) & 0xFFu, (data_lo >> 16) & 0xFFu, 0u);
+        break;
+    case GS_REG_PRMODECONT:
+        /* Round 99 (140th finding, task #254): PRMODECONT.AC (bit 0
+         * only, per the manual's BIT ASSIGN table) - see the
+         * GS_REG_PRMODECONT/GS_REG_PRMODE comment in gif.h and
+         * gs_effective_attr_prim() above for the full citation and
+         * how this actually takes effect. */
+        g_gif.prmodecont_ac = data_lo & 0x1u;
+        break;
+    case GS_REG_PRMODE:
+        /* Round 99: PRMODE mirrors PRIM's bits 3-10 only (IIP/TME/
+         * FGE/ABE/AA1/FST/CTXT/FIX) - bits 0-2 (TYPE) have no
+         * counterpart in PRMODE per the manual's own field list, so
+         * masked off here defensively (gs_effective_attr_prim()
+         * always sources TYPE from PRIM regardless, but keeping
+         * g_gif.prmode itself clean avoids any confusion if it's
+         * ever read directly elsewhere in the future). Only takes
+         * effect while PRMODECONT.AC=0, per the manual. */
+        g_gif.prmode = data_lo & PRIM_ATTR_MASK;
         break;
     case GS_REG_FRAME_1: {
         /* FBP: bits 0-8, FBW: bits 9-14 (units of 64px - real hardware

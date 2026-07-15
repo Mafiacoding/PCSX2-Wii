@@ -3328,3 +3328,10 @@ DIMX, DTHE, COLCLAMP, PABE, FBA, SIGNAL/FINISH/LABEL.
 Implemented real GS `CLAMP_1`/`CLAMP_2` texture wrap-mode registers (addresses `0x08`/`0x09`): `REPEAT` (bitmask wrap), `CLAMP` (clamp to `[0,size-1]`), `REGION_CLAMP` (clamp to explicit `[MINU,MAXU]`/`[MINV,MAXV]`), `REGION_REPEAT` (`(coord & UMSK) | UFIX`), per the official GS Users Manual. Gated by a `clamp_configured` safety flag (established convention) so no pre-existing texture test/demo changes behavior unless it actually writes CLAMP_1/2. Per-context storage (dual-context pattern). New test `tests/test_gs_clamp.c` (6 checks, all passing). Full regression: 93/93 (92 pre-existing + 1 new), 0 new failures. Clean Wii/devkitPPC rebuild, 0 errors.
 
 Closes 2 more confirmed-missing GS registers (7 of ~15 total across Rounds 97-98). Remaining: `TEX2_1/2`, `PRMODECONT`/`PRMODE`, `TEXCLUT`, `SCANMSK`, `TEXA`, `TEXFLUSH`, `DIMX`, `DTHE`, `COLCLAMP`, `PABE`, `FBA_1/2`, `SIGNAL`/`FINISH`/`LABEL`. Committed directly to `main` (additive, well-tested, safety-gated).
+
+
+### Round 99 (140th finding, task #254, GS gap follow-up 3/N)
+
+Implemented real GS `PRMODECONT` (0x1a) / `PRMODE` (0x1b) registers per the official GS Users Manual: PRMODECONT.AC selects whether the 8 mirrored drawing-attribute bits (IIP/TME/FGE/ABE/AA1/FST/CTXT/FIX) come from PRIM (AC=1, default/safety-gated) or PRMODE (AC=0) - the primitive TYPE field is always sourced from PRIM regardless. New `gs_effective_attr_prim()` helper wired into all 8 attribute-bit read sites in gif.c (context select, fog gate, IIP/TME/FST/ABE checks across triangle/sprite/line rasterizers). Not per-context (real hardware has one PRMODECONT/PRMODE pair). New test `tests/test_gs_prmode.c` (3 checks, all passing - confirms PRIM.IIP override via PRMODE, and that AC round-trips). Full regression: 94/94, 0 new failures. Clean Wii/devkitPPC rebuild, 0 errors.
+
+Closes 2 more confirmed-missing GS registers (9 of ~15 total across Rounds 97-99). Remaining: `TEX2_1/2`, `TEXCLUT`, `SCANMSK`, `TEXA`, `TEXFLUSH`, `DIMX`, `DTHE`, `COLCLAMP`, `PABE`, `FBA_1/2`, `SIGNAL`/`FINISH`/`LABEL`. Committed directly to `main` (additive, well-tested, safety-gated).

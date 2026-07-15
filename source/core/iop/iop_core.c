@@ -452,7 +452,16 @@ static void iop_check_hw_interrupt(iop_state_t *st, uint32_t next_pc)
 {
     iop_intc_state_t *intc = iop_intc_get_state();
 
-    if (intc->istat & intc->imask)
+    /* Round 112 (task #172/#267/#268, 152nd finding's honestly-
+     * documented gap): Cause.IP2 must also reflect the real 32-63
+     * "soft" irq range (istat_hi/imask_hi - see iop_intc.h), not just
+     * the 32-bit I_STAT/I_MASK MMIO registers. On real hardware both
+     * ranges are still genuinely "an IOP interrupt is pending" from
+     * the CPU's point of view - the split between memory-mapped and
+     * INTRMAN-internal is purely about HOW the source is identified/
+     * multiplexed, not whether it drives the same physical Cause.IP2
+     * line. */
+    if ((intc->istat & intc->imask) || (intc->istat_hi & intc->imask_hi))
         st->cop0[13] |= IOP_CAUSE_IP2;
     else
         st->cop0[13] &= ~IOP_CAUSE_IP2;
@@ -491,6 +500,27 @@ static void iop_check_hw_interrupt(iop_state_t *st, uint32_t next_pc)
             while (!(pending & 1u)) { pending >>= 1; irq++; }
             if (iop_hle_intr_dispatch_interrupt(st, irq))
                 return;
+        } else {
+            /* Round 112: the real 0-31 hardware range takes priority
+             * (numerically lower irq numbers are serviced first on
+             * real MIPS/R3000A hardware - same convention already
+             * relied on above), so the soft 32-63 range is only
+             * consulted when nothing is pending in the hardware
+             * range. Nothing in this project raises into istat_hi
+             * yet (no DMA-completion hardware model exists - see
+             * iop_intc.h), so this is presently dead code in
+             * practice, exactly like iop_intc_raise_soft() itself -
+             * it exists so the dispatch SIDE of this mechanism is no
+             * longer artificially capped at 32 irqs, closing the gap
+             * the 152nd finding documented, ready for whichever
+             * future hardware model raises the first real soft irq. */
+            uint32_t soft_pending = intc->istat_hi & intc->imask_hi;
+            if (soft_pending) {
+                uint32_t bit = 0;
+                while (!(soft_pending & 1u)) { soft_pending >>= 1; bit++; }
+                if (iop_hle_intr_dispatch_interrupt(st, 32u + bit))
+                    return;
+            }
         }
     }
 

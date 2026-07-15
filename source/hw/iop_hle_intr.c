@@ -174,7 +174,16 @@ int iop_hle_intr_try_handle(iop_state_t *st, uint32_t pc)
          * that default-path case. */
         if (g.in_dispatch) {
             iop_intc_state_t *intc = iop_intc_get_state();
-            intc->istat &= ~(1u << g.dispatched_irq);
+            /* Round 112: dispatched_irq can now be 0-63 (previously
+             * always 0-31), so acknowledging must target whichever
+             * of the two real, architecturally-separate ranges the
+             * irq actually came from - see iop_intc.h's istat_hi
+             * comment. Shifting by >= 32 is undefined behavior in C,
+             * so this split is required, not just tidier. */
+            if (g.dispatched_irq < 32u)
+                intc->istat &= ~(1u << g.dispatched_irq);
+            else
+                intc->istat_hi &= ~(1u << (g.dispatched_irq - 32u));
             st->cop0[12] = (st->cop0[12] & ~0x0Fu) | ((st->cop0[12] >> 2) & 0x0Fu); /* Status stack pop, real RFE formula */
             st->pc = g.saved_epc;
             st->next_pc = g.saved_epc + 4u;

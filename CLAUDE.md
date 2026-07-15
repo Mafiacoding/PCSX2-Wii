@@ -4964,3 +4964,11 @@ Host-native instrumentation (own `system_init()`/`system_run_interleaved()` sche
 Honest scoped limitation carried forward: table can now store irq>=32 handlers without rejecting them, but `iop_check_hw_interrupt()`'s dispatch-side selection logic still only scans the 32-bit I_STAT/I_MASK range, so real dispatch to SIF0/SIF1-style handlers via that path is a separate, still-open next step (the real "soft" 32-63 irq range is raised via INTRMAN's own internal mechanism on real hardware, not I_STAT/I_MASK).
 
 Next: model the soft-interrupt raise-side for irq 32-63, or continue investigating other task #172 boot-progress angles.
+
+## Checkpoint (Round 112, task #172/#267/#268 - see STATUS.md 153rd finding)
+
+Closed the 152nd finding's gap: added `istat_hi`/`imask_hi` (real 32-63 "soft" irq range, per ps2sdk's cited enum - deliberately NOT memory-mapped, matching real INTRMAN-internal hardware behavior) plus `iop_intc_raise_soft()` raise hook. `iop_check_hw_interrupt()` now dispatches to this range when nothing's pending in the 0-31 hardware range (hw range keeps strict priority). Fixed a latent UB bug in the return-trampoline's IRQ-ack shift for irq>=32. 8 new regression checks (42 total), verified end-to-end with real irq=0x2A (SIF0). Regression: 84 OK/21 non-OK(pre-existing)/105 total, zero new regressions. Clean Wii rebuild verified.
+
+Honest scope note: no hardware model calls `iop_intc_raise_soft()` yet (no DMA-completion engine exists in this project) - this round only removed the artificial dispatch-side 32-irq cap; actually building a DMA-completion model that raises real per-channel soft irqs (SIF0/SIF1 etc.) remains open.
+
+Next: implement an IOP DMA-completion hardware model that calls `iop_intc_raise_soft()` for real, or continue other task #172 boot-progress angles.

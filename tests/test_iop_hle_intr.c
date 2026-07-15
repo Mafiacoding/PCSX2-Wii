@@ -206,6 +206,80 @@ int main(void)
         CHECK(st->cop0[14] == 0x00160004u, "EPC still set exactly as before this round");
     }
 
+    /* --- Round 112 (task #172/#267/#268, 152nd finding follow-up):
+     * the real 32-63 "soft" irq range (istat_hi/imask_hi) must now
+     * genuinely reach dispatch, not just be storable in the table.
+     * Uses irq=0x2A (real IOP_IRQ_DMA_SIF0) since that's the exact
+     * real irq Round 111's host-native diagnostic caught actual
+     * module code registering. --- */
+    {
+        iop_state_t *st = fresh_state();
+        iop_intc_state_t *intc = iop_intc_get_state();
+        memset(intc, 0, sizeof(*intc));
+
+        st->gpr[4] = 0x2A;             /* a0 = irq 0x2A (SIF0) */
+        st->gpr[6] = 0x00180000u;      /* a2 = handler entry point */
+        st->gpr[7] = 0xD00DFEEDu;      /* a3 = arg */
+        st->gpr[31] = 0x00180080u;
+        iop_hle_intr_try_handle(st, IOP_HLE_INTR_REGISTER_INTR_HANDLER);
+        CHECK(iop_hle_intr_get_intr_handler(0x2A) == 0x00180000u, "irq 0x2A (SIF0) handler registered for soft-range dispatch test");
+
+        iop_intc_raise_soft(0x2A);
+        CHECK((iop_intc_get_state()->istat_hi & (1u << (0x2A - 32))) != 0, "iop_intc_raise_soft(0x2A) sets the real istat_hi bit");
+        intc->imask_hi = 0xFFFFFFFFu; /* unmask everything in the soft range */
+
+        st->cop0[12] = 0x1u | IOP_STATUS_IM2;
+        st->pc = 0x00190000u;
+        st->next_pc = 0x00190004u;
+
+        iop_check_hw_interrupt(st, 0x00190004u);
+
+        CHECK(st->pc == 0x00180000u, "soft-range irq redirected straight into registered handler, not fixed vector");
+        CHECK(st->gpr[4] == 0xD00DFEEDu, "soft-range handler called with real RegisterIntrHandler arg in $a0");
+        CHECK(st->gpr[31] == IOP_HLE_INTR_HANDLER_RETURN_TRAMPOLINE, "soft-range handler's $ra set to this project's own return trampoline");
+
+        int handled = iop_hle_intr_try_handle(st, st->gpr[31]);
+        CHECK(handled == 1, "return trampoline recognized for soft-range irq");
+        CHECK(st->pc == 0x00190004u, "resumes at the real saved EPC after soft-range handler returns");
+        CHECK((iop_intc_get_state()->istat_hi & (1u << (0x2A - 32))) == 0, "irq 0x2A (SIF0) acknowledged (istat_hi bit cleared) after real handling, no UB from shifting >= 32");
+    }
+
+    /* --- Round 112: hardware range (0-31) still takes priority over
+     * the soft range when both are pending, matching real MIPS'
+     * lowest-numbered-bit-first convention already relied on above. --- */
+    {
+        iop_state_t *st = fresh_state();
+        iop_intc_state_t *intc = iop_intc_get_state();
+        memset(intc, 0, sizeof(*intc));
+
+        /* Register handler for irq 0 (hw) and irq 0x2A (soft), then
+         * make BOTH pending - irq 0's handler must win. */
+        st->gpr[4] = 0;
+        st->gpr[6] = 0x001A0000u;
+        st->gpr[7] = 0x11111111u;
+        st->gpr[31] = 0x001A0080u;
+        iop_hle_intr_try_handle(st, IOP_HLE_INTR_REGISTER_INTR_HANDLER);
+
+        st->gpr[4] = 0x2A;
+        st->gpr[6] = 0x001B0000u;
+        st->gpr[7] = 0x22222222u;
+        st->gpr[31] = 0x001B0080u;
+        iop_hle_intr_try_handle(st, IOP_HLE_INTR_REGISTER_INTR_HANDLER);
+
+        intc->istat = 0x1u;
+        intc->imask = 0x1u;
+        iop_intc_raise_soft(0x2A);
+        intc->imask_hi = 0xFFFFFFFFu;
+
+        st->cop0[12] = 0x1u | IOP_STATUS_IM2;
+        st->pc = 0x001C0000u;
+        st->next_pc = 0x001C0004u;
+        iop_check_hw_interrupt(st, 0x001C0004u);
+
+        CHECK(st->pc == 0x001A0000u, "hw range (irq 0) takes priority over pending soft range (irq 0x2A)");
+        CHECK((iop_intc_get_state()->istat_hi & (1u << (0x2A - 32))) != 0, "soft-range irq 0x2A left pending, untouched, since hw range was serviced first");
+    }
+
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

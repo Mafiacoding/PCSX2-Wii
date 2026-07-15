@@ -53,6 +53,29 @@
  * are NOT modeled yet. iop_intc_raise() below lets other hardware
  * models set a specific I_STAT bit, for when those are eventually
  * wired up.
+ *
+ * UPDATE (Round 112, task #172/#267/#268, following the 152nd
+ * finding's honestly-documented gap): real PS2 IOP hardware ALSO has
+ * a second, separate irq range (0x20-0x3F / 32-63, per ps2sdk's cited
+ * `enum iop_irq_list` in intrman.h) that is NOT part of the 32-bit
+ * I_STAT/I_MASK MMIO registers modeled above at all - it is dispatched
+ * entirely by INTRMAN's own internal software bookkeeping (real
+ * per-DMA-channel "soft" IRQs like IOP_IRQ_DMA_SIF0=0x2A/
+ * IOP_IRQ_DMA_SIF1=0x2B, plus two pure software interrupts
+ * IOP_IRQ_SW1=0x3E/IOP_IRQ_SW2=0x3F). `istat_hi`/`imask_hi` below
+ * model exactly that second, software-only range (bit N here means
+ * irq 32+N) - deliberately NOT exposed via iop_intc_mmio_read32/
+ * write32, because real hardware doesn't expose it as memory-mapped
+ * I/O either. `iop_intc_raise_soft()` is the raise-side hook for this
+ * range, mirroring `iop_intc_raise()`'s own precedent: exposed now,
+ * before any real hardware model (DMA completion) calls it, exactly
+ * per this project's established "build the mechanism, gate
+ * activation on a real condition" convention (no real DMA-completion
+ * hardware model exists in this project yet, so nothing raises into
+ * this range today - this round only fixes the previously-honest
+ * gap that `iop_check_hw_interrupt()` could never even CONSIDER
+ * dispatching to irq >= 32, regardless of whether anything eventually
+ * raises one).
  */
 #ifndef PCSX2_WII_IOP_INTC_H
 #define PCSX2_WII_IOP_INTC_H
@@ -63,6 +86,14 @@ typedef struct {
     uint32_t istat;
     uint32_t imask;
     uint32_t ictrl;
+
+    /* Round 112: real irq 32-63 "soft" range - see the header comment
+     * above. Bit N here = real irq (32+N). NOT memory-mapped; real
+     * hardware doesn't expose this range via I_STAT/I_MASK MMIO
+     * either - it's purely internal to INTRMAN's own software
+     * dispatch, which is exactly what this mirrors. */
+    uint32_t istat_hi;
+    uint32_t imask_hi;
 } iop_intc_state_t;
 
 void iop_intc_init(void);
@@ -78,6 +109,17 @@ int iop_intc_mmio_write32(uint32_t addr, uint32_t value);
  * interrupts yet) - exposed now so future hardware models have a
  * ready hook. */
 void iop_intc_raise(int irq);
+
+/* Round 112: sets bit (irq-32) in the real 32-63 "soft" irq range's
+ * istat_hi (irq must be 32-63) - see the header comment and
+ * iop_intc_state_t's istat_hi field comment above for the full real-
+ * hardware citation. Not yet called by anything in this project (no
+ * DMA-completion hardware model raises real per-channel soft irqs
+ * yet, e.g. IOP_IRQ_DMA_SIF0/SIF1) - exposed now, mirroring
+ * iop_intc_raise()'s own precedent, so a future DMA-completion model
+ * has a ready hook, and so iop_check_hw_interrupt()'s dispatch-side
+ * selection logic (fixed this round) has a real range to scan. */
+void iop_intc_raise_soft(int irq);
 
 iop_intc_state_t *iop_intc_get_state(void);
 

@@ -26,6 +26,22 @@ void iop_intc_raise(int irq)
     g_intc.istat |= (1u << irq);
 }
 
+/* Round 112: raise-side hook for the real 32-63 "soft" irq range -
+ * see iop_intc.h's iop_intc_state_t.istat_hi comment for the full
+ * citation. Deliberately separate from iop_intc_raise() above (not
+ * folded into a single 0-63 function) because these really are two
+ * architecturally distinct mechanisms on real hardware - one is a
+ * memory-mapped register, the other is purely internal to INTRMAN -
+ * and keeping them as separate functions/fields makes that real
+ * distinction visible in the code instead of hiding it behind a
+ * uniform-looking API that isn't uniform on the actual hardware. */
+void iop_intc_raise_soft(int irq)
+{
+    if (irq < 32 || irq > 63)
+        return;
+    g_intc.istat_hi |= (1u << (irq - 32));
+}
+
 int iop_intc_mmio_read32(uint32_t addr, uint32_t *out)
 {
     switch (addr) {

@@ -3422,3 +3422,14 @@ Does not (and given this session's tool constraints, cannot) confirm whether thi
 - Full regression suite: 84 OK / 21 non-OK (unchanged pre-existing gaps) / 105 total - zero new regressions.
 - Clean Wii/devkitPPC rebuild verified.
 - See STATUS.md 152nd finding for full details.
+
+### Round 112
+- Closed the 152nd finding's honestly-documented gap: `iop_check_hw_interrupt()` can now dispatch to the real 32-63 "soft" irq range (SIF0/SIF1 and friends per ps2sdk's cited `enum iop_irq_list`), not just store handlers for it.
+- Added `istat_hi`/`imask_hi` to `iop_intc_state_t` (bit N = irq 32+N) - deliberately not memory-mapped, matching real hardware (this range is INTRMAN-internal, not I_STAT/I_MASK MMIO).
+- Added `iop_intc_raise_soft(int irq)` raise-side hook, mirroring `iop_intc_raise()`'s own precedent - not yet called by any hardware model (no DMA-completion engine exists), exposed ready for one.
+- `iop_check_hw_interrupt()`: Cause.IP2 now reflects both ranges; hardware range (0-31) still takes strict priority, soft range (32-63) only scanned when nothing pending in hw range.
+- Fixed a latent UB bug in the Round 109 return-trampoline's IRQ-ack code (`1u << irq` for irq >= 32) by splitting the ack path on range.
+- Added 8 new regression checks (42 total in `test_iop_hle_intr`, up from 34): soft-range dispatch round trip using real irq=0x2A (SIF0), and hw-range-takes-priority-over-soft-range-when-both-pending.
+- Full regression suite: 84 OK / 21 non-OK (unchanged pre-existing gaps) / 105 total - zero new regressions.
+- Clean Wii/devkitPPC rebuild verified.
+- See STATUS.md 153rd finding for full details.

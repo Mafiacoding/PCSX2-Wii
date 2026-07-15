@@ -4795,3 +4795,16 @@ BIOS-bytes clean.
 `DTHE`, `COLCLAMP`, `PABE`, `FBA_1/2`, `SIGNAL`/`FINISH`/`LABEL`. Per the
 user's instruction, these come before returning to the IOP clean-room
 exception-dispatcher design (135th finding).
+
+
+## Checkpoint (Round 98 - 139th finding, task #254, GS gap follow-up 2/N)
+
+Implemented real GS CLAMP_1/CLAMP_2 texture wrap-mode registers (0x08/0x09): REPEAT/CLAMP/REGION_CLAMP/REGION_REPEAT, per the official GS Users Manual. Safety-gated via `clamp_configured` (established convention - no behavior change for any pre-existing test/demo). Per-context storage wired into `gs_activate_context()`. New helper `gs_apply_clamp_wrap()` in source/hw/gif.c, wired into both rasterize_triangle() and rasterize_sprite()'s texture sampling.
+
+New test tests/test_gs_clamp.c (6 checks, all pass). Full regression 93/93 (0 new failures vs the 2 pre-existing, unrelated ee_timers.c/iop_icfg.c test-harness link-line gaps from tasks #246/#215, already documented in Round 97's checkpoint). Clean Wii/devkitPPC rebuild, 0 errors.
+
+Task #254 progress: 7 of ~15 confirmed-missing GS registers now closed (Rounds 97-98: XYZF2, XYZF3, XYZ3, FOG, FOGCOL, CLAMP_1, CLAMP_2). Remaining: TEX2_1/2, PRMODECONT/PRMODE, TEXCLUT, SCANMSK, TEXA, TEXFLUSH, DIMX, DTHE, COLCLAMP, PABE, FBA_1/2, SIGNAL/FINISH/LABEL.
+
+User's explicit instruction this session: "finish all gs gaps first and then the iop room" - continuing task #254 (GS gaps) before returning to task #252 (IOP clean-room exception dispatcher design).
+
+Committed directly to main (additive, well-tested, safety-gated - same risk judgment as every prior round's new-register work).

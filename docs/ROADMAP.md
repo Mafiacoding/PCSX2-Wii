@@ -3321,3 +3321,10 @@ caused by this round). Clean Wii rebuild. Committed directly to main
 (additive, well-tested, no behavior change to any pre-existing register).
 Remaining: CLAMP, TEX2, PRMODECONT/PRMODE, TEXCLUT, SCANMSK, TEXA, TEXFLUSH,
 DIMX, DTHE, COLCLAMP, PABE, FBA, SIGNAL/FINISH/LABEL.
+
+
+### Round 98 (139th finding, task #254, GS gap follow-up 2/N)
+
+Implemented real GS `CLAMP_1`/`CLAMP_2` texture wrap-mode registers (addresses `0x08`/`0x09`): `REPEAT` (bitmask wrap), `CLAMP` (clamp to `[0,size-1]`), `REGION_CLAMP` (clamp to explicit `[MINU,MAXU]`/`[MINV,MAXV]`), `REGION_REPEAT` (`(coord & UMSK) | UFIX`), per the official GS Users Manual. Gated by a `clamp_configured` safety flag (established convention) so no pre-existing texture test/demo changes behavior unless it actually writes CLAMP_1/2. Per-context storage (dual-context pattern). New test `tests/test_gs_clamp.c` (6 checks, all passing). Full regression: 93/93 (92 pre-existing + 1 new), 0 new failures. Clean Wii/devkitPPC rebuild, 0 errors.
+
+Closes 2 more confirmed-missing GS registers (7 of ~15 total across Rounds 97-98). Remaining: `TEX2_1/2`, `PRMODECONT`/`PRMODE`, `TEXCLUT`, `SCANMSK`, `TEXA`, `TEXFLUSH`, `DIMX`, `DTHE`, `COLCLAMP`, `PABE`, `FBA_1/2`, `SIGNAL`/`FINISH`/`LABEL`. Committed directly to `main` (additive, well-tested, safety-gated).

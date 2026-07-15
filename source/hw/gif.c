@@ -346,6 +346,13 @@ static void gs_activate_context(void)
             g_gif.tex_mip_tbp[lvl] = g_gif.ctx2_tex_mip_tbp[lvl];
             g_gif.tex_mip_tbw[lvl] = g_gif.ctx2_tex_mip_tbw[lvl];
         }
+        g_gif.clamp_wms = g_gif.ctx2_clamp_wms;
+        g_gif.clamp_wmt = g_gif.ctx2_clamp_wmt;
+        g_gif.clamp_minu = g_gif.ctx2_clamp_minu;
+        g_gif.clamp_maxu = g_gif.ctx2_clamp_maxu;
+        g_gif.clamp_minv = g_gif.ctx2_clamp_minv;
+        g_gif.clamp_maxv = g_gif.ctx2_clamp_maxv;
+        g_gif.clamp_configured = g_gif.ctx2_clamp_configured;
     } else {
         g_gif.fbp = g_gif.ctx1_fbp;
         g_gif.fbw = g_gif.ctx1_fbw;
@@ -391,6 +398,13 @@ static void gs_activate_context(void)
             g_gif.tex_mip_tbp[lvl] = g_gif.ctx1_tex_mip_tbp[lvl];
             g_gif.tex_mip_tbw[lvl] = g_gif.ctx1_tex_mip_tbw[lvl];
         }
+        g_gif.clamp_wms = g_gif.ctx1_clamp_wms;
+        g_gif.clamp_wmt = g_gif.ctx1_clamp_wmt;
+        g_gif.clamp_minu = g_gif.ctx1_clamp_minu;
+        g_gif.clamp_maxu = g_gif.ctx1_clamp_maxu;
+        g_gif.clamp_minv = g_gif.ctx1_clamp_minv;
+        g_gif.clamp_maxv = g_gif.ctx1_clamp_maxv;
+        g_gif.clamp_configured = g_gif.ctx1_clamp_configured;
     }
 }
 
@@ -463,6 +477,44 @@ static uint32_t apply_fog(uint32_t color, uint32_t fog)
     if (ng > 255) ng = 255;
     if (nb > 255) nb = 255;
     return rgba_pack(nr, ng, nb, a);
+}
+
+/* Round 98 (139th finding, task #254): CLAMP_1/2 real texture wrap
+ * mode - per the official GS Users Manual's own FIELD table:
+ *   REPEAT (00): coord & (size-1) - real hardware requires power-of-2
+ *     texture sizes (matches this project's existing log2 tex_tw/th
+ *     fields), so a bitmask is the exact real wrap operation.
+ *   CLAMP (01): coord clamped to [0, size-1].
+ *   REGION_CLAMP (10): coord clamped to the explicit [minv,maxv]
+ *     sub-rectangle (minv/maxv here already resolved to whichever of
+ *     MINU/MAXU or MINV/MAXV the caller passed - see call sites).
+ *   REGION_REPEAT (11): coord = (coord & minv) | maxv - a masked-
+ *     repeat (minv/maxv here are really UMSK/UFIX or VMSK/VFIX in
+ *     this mode, per the manual's own field-reuse note).
+ * Gated by clamp_configured (this project's established safety-gate
+ * convention) - when CLAMP_1/2 was never written, this is a pure
+ * pass-through, so every pre-existing texture test/demo keeps
+ * sampling exactly as before this round. */
+static int32_t gs_apply_clamp_wrap(int32_t coord, uint32_t size_log2, uint32_t wm, uint32_t minv, uint32_t maxv)
+{
+    if (!g_gif.clamp_configured) return coord;
+    int32_t size = (int32_t)(1u << size_log2);
+    switch (wm) {
+    case GS_CLAMP_REPEAT:
+        return coord & (size - 1);
+    case GS_CLAMP_CLAMP:
+        if (coord < 0) return 0;
+        if (coord > size - 1) return size - 1;
+        return coord;
+    case GS_CLAMP_REGION_CLAMP:
+        if (coord < (int32_t)minv) return (int32_t)minv;
+        if (coord > (int32_t)maxv) return (int32_t)maxv;
+        return coord;
+    case GS_CLAMP_REGION_REPEAT:
+        return (coord & (int32_t)minv) | (int32_t)maxv;
+    default:
+        return coord;
+    }
 }
 
 static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t x2, int32_t y2,
@@ -663,6 +715,12 @@ static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, i
                      * safely returns 0 rather than reading garbage. */
                     int32_t tex_x = (tu < 0.0) ? 0 : (int32_t)(tu + 0.5);
                     int32_t tex_y = (tv < 0.0) ? 0 : (int32_t)(tv + 0.5);
+                    /* Round 98 (139th finding): real CLAMP_1/2 wrap -
+                     * see gs_apply_clamp_wrap()'s own comment. No-op
+                     * (returns tex_x/tex_y unchanged) unless CLAMP_1/2
+                     * was actually configured this draw. */
+                    tex_x = gs_apply_clamp_wrap(tex_x, g_gif.tex_tw, g_gif.clamp_wms, g_gif.clamp_minu, g_gif.clamp_maxu);
+                    tex_y = gs_apply_clamp_wrap(tex_y, g_gif.tex_th, g_gif.clamp_wmt, g_gif.clamp_minv, g_gif.clamp_maxv);
                     /* Round 24: routes through gs_sample_texel() so
                      * PSMT8/PSMT4 CLUT textures work here too - see
                      * its own comment for the full scope. */
@@ -876,6 +934,10 @@ static void rasterize_sprite(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
                 double tv = tex_v0 + frac_y * (tex_v1 - tex_v0);
                 int32_t tex_x = (tu < 0.0) ? 0 : (int32_t)(tu + 0.5);
                 int32_t tex_y = (tv < 0.0) ? 0 : (int32_t)(tv + 0.5);
+                /* Round 98 (139th finding): real CLAMP_1/2 wrap - see
+                 * gs_apply_clamp_wrap()'s own comment above. */
+                tex_x = gs_apply_clamp_wrap(tex_x, g_gif.tex_tw, g_gif.clamp_wms, g_gif.clamp_minu, g_gif.clamp_maxu);
+                tex_y = gs_apply_clamp_wrap(tex_y, g_gif.tex_th, g_gif.clamp_wmt, g_gif.clamp_minv, g_gif.clamp_maxv);
                 /* Round 24: routes through gs_sample_texel() so
                  * PSMT8/PSMT4 CLUT textures work here too. */
                 uint32_t texel = gs_sample_texel(tex_x, tex_y);
@@ -1577,6 +1639,43 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
         g_gif.ctx2_scissor_x0 = x0; g_gif.ctx2_scissor_x1 = x1;
         g_gif.ctx2_scissor_y0 = y0; g_gif.ctx2_scissor_y1 = y1;
         g_gif.ctx2_scissor_configured = 1;
+    } break;
+    case GS_REG_CLAMP_1: {
+        /* Round 98 (139th finding, task #254): real CLAMP bit layout
+         * per the official GS Users Manual: word0(data_lo) bits[1:0]=
+         * WMS, bits[3:2]=WMT, bits[13:4]=MINU, bits[23:14]=MAXU;
+         * MINV/MAXV (10-bit fields each) straddle the 64-bit
+         * register's word boundary - MINV is bits[33:24] (low 8 bits
+         * in data_lo's top byte, top 2 bits in data_hi's bottom 2
+         * bits), MAXV is bits[43:34] (entirely within data_hi,
+         * bits[11:2]) - same generic 64-bit A+D word0/word1 mapping
+         * this file already uses for FOG/FOGCOL (Round 97). */
+        uint32_t wms = data_lo & 0x3u;
+        uint32_t wmt = (data_lo >> 2) & 0x3u;
+        uint32_t minu = (data_lo >> 4) & 0x3FFu;
+        uint32_t maxu = (data_lo >> 14) & 0x3FFu;
+        uint32_t minv = ((data_lo >> 24) & 0xFFu) | ((data_hi & 0x3u) << 8);
+        uint32_t maxv = (data_hi >> 2) & 0x3FFu;
+        g_gif.clamp_wms = wms; g_gif.clamp_wmt = wmt;
+        g_gif.clamp_minu = minu; g_gif.clamp_maxu = maxu;
+        g_gif.clamp_minv = minv; g_gif.clamp_maxv = maxv;
+        g_gif.clamp_configured = 1;
+        g_gif.ctx1_clamp_wms = wms; g_gif.ctx1_clamp_wmt = wmt;
+        g_gif.ctx1_clamp_minu = minu; g_gif.ctx1_clamp_maxu = maxu;
+        g_gif.ctx1_clamp_minv = minv; g_gif.ctx1_clamp_maxv = maxv;
+        g_gif.ctx1_clamp_configured = 1;
+    } break;
+    case GS_REG_CLAMP_2: {
+        uint32_t wms = data_lo & 0x3u;
+        uint32_t wmt = (data_lo >> 2) & 0x3u;
+        uint32_t minu = (data_lo >> 4) & 0x3FFu;
+        uint32_t maxu = (data_lo >> 14) & 0x3FFu;
+        uint32_t minv = ((data_lo >> 24) & 0xFFu) | ((data_hi & 0x3u) << 8);
+        uint32_t maxv = (data_hi >> 2) & 0x3FFu;
+        g_gif.ctx2_clamp_wms = wms; g_gif.ctx2_clamp_wmt = wmt;
+        g_gif.ctx2_clamp_minu = minu; g_gif.ctx2_clamp_maxu = maxu;
+        g_gif.ctx2_clamp_minv = minv; g_gif.ctx2_clamp_maxv = maxv;
+        g_gif.ctx2_clamp_configured = 1;
     } break;
     case GS_REG_TEX1_1: {
         /* GIFRegTEX1 (Round 28) - real bit layout, moderate

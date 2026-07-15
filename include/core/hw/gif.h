@@ -195,6 +195,26 @@
 #define GS_REG_MIPTBP1_2  0x35
 #define GS_REG_MIPTBP2_2  0x37
 
+/* Round 98 (139th finding, task #254, GS gap follow-up 2/N): CLAMP_1/2
+ * (real texture wrap-mode registers) - addresses cross-checked against
+ * the official GS Users Manual's "7.3 Register List in Address Order"
+ * (0x08=CLAMP_1, 0x09=CLAMP_2). Previously entirely unmodeled (flagged
+ * since Round 28: "CLAMP/TEX2/SCISSOR/FBA remain entirely unmodeled",
+ * confirmed again in Round 96's manual audit). */
+#define GS_REG_CLAMP_1    0x08
+#define GS_REG_CLAMP_2    0x09
+
+/* CLAMP's WMS/WMT wrap-mode field values (real hardware, manual's own
+ * "FIELD" table) - REPEAT wraps via bitmask (real hardware requires
+ * power-of-2 texture sizes, matching this project's existing TW/TH
+ * log2-size fields); CLAMP clamps to [0, size-1]; REGION_CLAMP clamps
+ * to an explicit [MINU,MAXU]/[MINV,MAXV] sub-rectangle; REGION_REPEAT
+ * masks with MINU/MINV (UMSK/VMSK) then ORs in MAXU/MAXV (UFIX/VFIX). */
+#define GS_CLAMP_REPEAT        0u
+#define GS_CLAMP_CLAMP         1u
+#define GS_CLAMP_REGION_CLAMP  2u
+#define GS_CLAMP_REGION_REPEAT 3u
+
 /* TEX1's MMIN field (3 bits) - real hardware distinguishes several
  * NEAREST/LINEAR x MIPMAP_NEAREST/MIPMAP_LINEAR combinations (values
  * 0-5); this project does not implement trilinear/bilinear filtering
@@ -616,6 +636,35 @@ typedef struct {
     uint32_t ctx2_tex1_l;
     int32_t ctx2_tex1_k;
     uint32_t ctx2_tex_mip_tbp[6], ctx2_tex_mip_tbw[6];
+
+    /* Round 98 (139th finding, task #254): CLAMP_1/2 texture wrap mode
+     * - wms/wmt hold the real 2-bit wrap-mode field (GS_CLAMP_* above)
+     * for S/T independently; minu/maxu/minv/maxv hold the real 10-bit
+     * region parameters (meaning depends on wms/wmt - see GS_CLAMP_*
+     * comment). Applied in the texture-sampling step of
+     * rasterize_triangle()/rasterize_sprite() (gs_apply_clamp_wrap()
+     * in gif.c) - previously coordinates were only naively clamped to
+     * 0 on the low side with no real wrap/region semantics at all (see
+     * this file's top-of-file scope comment, "No CLAMP register
+     * modeling"). Same "flat + per-context, refreshed by
+     * gs_activate_context()" pattern as tex1_xxx above. */
+    uint32_t clamp_wms, clamp_wmt;
+    uint32_t clamp_minu, clamp_maxu, clamp_minv, clamp_maxv;
+    /* Safety gate (this project's established convention, same as
+     * zbuf_configured/scissor_configured): real hardware defaults
+     * WMS/WMT to REPEAT, but this project defaults to "not configured
+     * = exactly this codebase's pre-existing behavior" (naive clamp-
+     * to-0 on the low side, gs_sample_texel()'s own out-of-range-
+     * returns-0 on the high side) so every pre-existing texture test
+     * keeps sampling exactly as before this round unless it opts in
+     * by actually writing CLAMP_1/2. */
+    int clamp_configured;
+    uint32_t ctx1_clamp_wms, ctx1_clamp_wmt;
+    uint32_t ctx1_clamp_minu, ctx1_clamp_maxu, ctx1_clamp_minv, ctx1_clamp_maxv;
+    int ctx1_clamp_configured;
+    uint32_t ctx2_clamp_wms, ctx2_clamp_wmt;
+    uint32_t ctx2_clamp_minu, ctx2_clamp_maxu, ctx2_clamp_minv, ctx2_clamp_maxv;
+    int ctx2_clamp_configured;
 
     /* Current UV register value (real hardware's 12.4 fixed-point
      * texel coordinate "FST=1" mode - see gif.h's scope comment),

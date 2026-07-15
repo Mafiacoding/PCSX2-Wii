@@ -3433,3 +3433,14 @@ Does not (and given this session's tool constraints, cannot) confirm whether thi
 - Full regression suite: 84 OK / 21 non-OK (unchanged pre-existing gaps) / 105 total - zero new regressions.
 - Clean Wii/devkitPPC rebuild verified.
 - See STATUS.md 153rd finding for full details.
+
+### Round 113
+- Implemented real `EnableIntr(irq)`/`DisableIntr(irq, *res)` (intrman#6/#7), ported from the real, fetched ps2sdk `intrman.c`.
+- Discovery that refines Round 112: real EnableIntr/DisableIntr for irq 32-45 directly manipulate the already-modeled `DMA_ICR`/`DMA_ICR2` registers (`iop_dma_state_t.icr`/`icr2`), NOT a separate INTRMAN-internal soft-mask register.
+- `EnableIntr`'s irq>=32 path also mirrors into Round 112's `imask_hi`, since real hardware has no such register but this project's own explicitly-labeled simplification of INTRMAN's internal irq-3 re-dispatch needs a real trigger - `EnableIntr` is that trigger, closing the "nothing can ever set imask_hi" gap.
+- Real irq=0x27 (`IOP_IRQ_DMA_BERR`) correctly falls through to the real `KE_ILLEGAL_INTRCODE` (-101) gap, matching real intrman.c exactly.
+- Real cited error constants used: `KE_ILLEGAL_INTRCODE=-101`, `KE_INTRDISABLE=-103` (`iop/kernel/include/kerr.h`).
+- 20 new regression checks (61 total in `test_iop_hle_intr`, up from 42).
+- Full regression suite: 84 OK / 21 non-OK (unchanged pre-existing gaps) / 105 total - zero new regressions.
+- Clean Wii/devkitPPC rebuild verified.
+- See STATUS.md 154th finding for full details.

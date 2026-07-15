@@ -6,6 +6,7 @@
 #include <string.h>
 #include "core/hw/iop_hle_intr.h"
 #include "core/hw/iop_intc.h"
+#include "core/hw/iop_dma.h" /* Round 113: real EnableIntr/DisableIntr target DMA_ICR/DMA_ICR2 */
 
 typedef struct {
     uint32_t intr_handler_addr[IOP_HLE_INTR_NUM_IRQ];
@@ -60,6 +61,8 @@ uint32_t iop_hle_intr_sentinel_for_import(const char *module_name, uint32_t ordi
     if (strcmp(module_name, "intrman") == 0) {
         if (ordinal == 4u) return IOP_HLE_INTR_REGISTER_INTR_HANDLER;   /* I_RegisterIntrHandler */
         if (ordinal == 5u) return IOP_HLE_INTR_RELEASE_INTR_HANDLER;   /* I_ReleaseIntrHandler */
+        if (ordinal == 6u) return IOP_HLE_INTR_ENABLE_INTR;             /* I_EnableIntr (Round 113) */
+        if (ordinal == 7u) return IOP_HLE_INTR_DISABLE_INTR;            /* I_DisableIntr (Round 113) */
     } else if (strcmp(module_name, "excepman") == 0) {
         if (ordinal == 4u) return IOP_HLE_INTR_REGISTER_EXCEPTION_HANDLER;         /* I_RegisterExceptionHandler */
         if (ordinal == 6u) return IOP_HLE_INTR_REGISTER_DEFAULT_EXCEPTION_HANDLER; /* I_RegisterDefaultExceptionHandler */
@@ -156,6 +159,111 @@ int iop_hle_intr_try_handle(iop_state_t *st, uint32_t pc)
         } else {
             st->gpr[2] = (uint32_t)-1;
         }
+        st->pc = ra;
+        st->next_pc = ra + 4u;
+        return 1;
+    } else if (pc == IOP_HLE_INTR_ENABLE_INTR) {
+        /* int EnableIntr(int irq) - a0=irq. Real body ported from
+         * ps2sdk's iop/system/intrman/src/intrman.c (fetched this
+         * round): irq_index = irq & 0xFF; three real ranges:
+         *   irq_index < 32            -> plain I_MASK bit (this
+         *                                 project's existing, real
+         *                                 iop_intc_state_t.imask).
+         *   32 <= irq_index <= 38     -> DMA_ICR (dicr1) bits, exact
+         *                                 real formula below.
+         *   40 <= irq_index <= 45     -> DMA_ICR2 (dicr2) bits, exact
+         *                                 real formula below.
+         *   anything else             -> KE_ILLEGAL_INTRCODE (-101,
+         *                                 real cited value, iop/
+         *                                 kernel/include/kerr.h).
+         * This is the REAL mechanism - real EnableIntr does NOT use a
+         * separate soft-irq mask register; it directly toggles the
+         * already-modeled DMA controller's own ICR/ICR2 registers
+         * (core/hw/iop_dma.h). Round 112's istat_hi/imask_hi remain
+         * an explicitly-labeled simplification of INTRMAN's own
+         * internal irq-3 re-dispatch (not modeled - its real code
+         * isn't in any fetched source) - EnableIntr additionally
+         * mirrors into imask_hi purely so that simplification becomes
+         * reachable via this real, standard, now-implemented API. */
+        int32_t irq = (int32_t)st->gpr[4];
+        uint32_t irq_index = (uint32_t)irq & 0xFFu;
+        uint32_t upper = ((uint32_t)irq & 0xFF00u) >> 8;
+        int32_t ret = 0;
+        g.stats.calls_seen++;
+        if (irq_index < 32u) {
+            iop_intc_get_state()->imask |= (1u << irq_index);
+        } else if (irq_index >= 0x20u && irq_index <= 0x26u) {
+            iop_dma_state_t *dma = iop_dma_get_state();
+            dma->icr = (dma->icr & ~(1u << (irq_index - 32u)) & 0xFFFFFFu)
+                     | (((upper & 0x1u) != 0u) ? (1u << (irq_index - 32u)) : 0u)
+                     | (1u << (irq_index - 32u + 16u)) | 0x800000u;
+            dma->icr2 = (dma->icr2 & ~(1u << (irq_index - 32u)) & 0xFFFFFFu)
+                      | (((upper & 0x2u) != 0u) ? (1u << (irq_index - 32u)) : 0u);
+            iop_intc_get_state()->imask |= 8u; /* real IOP_IRQ_DMA bit */
+            iop_intc_get_state()->imask_hi |= (1u << (irq_index - 32u)); /* Round 112 simplification mirror */
+        } else if (irq_index >= 0x28u && irq_index <= 0x2Du) {
+            iop_dma_state_t *dma = iop_dma_get_state();
+            dma->icr2 = (dma->icr2 & ~(1u << (irq_index - 40u + 7u)) & 0xFFFFFFu)
+                      | (((upper & 0x2u) != 0u) ? (1u << (irq_index - 33u)) : 0u)
+                      | (1u << (irq_index - 40u + 16u));
+            dma->icr = (dma->icr & 0x7FFFFFu) | 0x800000u;
+            iop_intc_get_state()->imask |= 8u;
+            iop_intc_get_state()->imask_hi |= (1u << (irq_index - 32u));
+        } else {
+            ret = -101; /* KE_ILLEGAL_INTRCODE, real cited value */
+        }
+        st->gpr[2] = (uint32_t)ret;
+        st->pc = ra;
+        st->next_pc = ra + 4u;
+        return 1;
+    } else if (pc == IOP_HLE_INTR_DISABLE_INTR) {
+        /* int DisableIntr(int irq, int *res) - a0=irq, a1=res
+         * (may be NULL, real code checks before writing). Real body,
+         * same citation as EnableIntr above. */
+        int32_t irq = (int32_t)st->gpr[4];
+        uint32_t res_ptr = st->gpr[5];
+        uint32_t irq_index = (uint32_t)irq & 0xFFu;
+        int32_t ret = 0;
+        int32_t res_temp = -103; /* KE_INTRDISABLE, real cited value */
+        g.stats.calls_seen++;
+        if (irq_index < 32u) {
+            iop_intc_state_t *intc = iop_intc_get_state();
+            uint32_t old_imask = intc->imask;
+            intc->imask = old_imask & ~(1u << irq_index);
+            if ((old_imask & (1u << irq_index)) != 0u) {
+                res_temp = (int32_t)irq_index;
+            } else {
+                ret = -103;
+            }
+        } else if (irq_index >= 0x20u && irq_index <= 0x26u) {
+            iop_dma_state_t *dma = iop_dma_get_state();
+            uint32_t dicr_tmp = dma->icr & 0xFFFFFFu;
+            if ((dicr_tmp & (1u << (irq_index - 16u))) != 0u) {
+                res_temp = (int32_t)irq_index;
+                if (((dicr_tmp >> (irq_index - 32u)) & 1u) != 0u) res_temp |= 0x100;
+                if ((dma->icr2 & (1u << (irq_index - 32u))) != 0u) res_temp |= 0x200;
+                dma->icr = dicr_tmp & ~(1u << (irq_index - 16u));
+                iop_intc_get_state()->imask_hi &= ~(1u << (irq_index - 32u));
+            } else {
+                ret = -103;
+            }
+        } else if (irq_index >= 0x28u && irq_index <= 0x2Du) {
+            iop_dma_state_t *dma = iop_dma_get_state();
+            uint32_t dicr_tmp = dma->icr2 & 0xFFFFFFu;
+            if ((dicr_tmp & (1u << (irq_index - 24u))) != 0u) {
+                res_temp = (int32_t)irq_index;
+                if (((dicr_tmp >> (irq_index - 33u)) & 1u) != 0u) res_temp |= 0x200;
+                dma->icr2 = dicr_tmp & ~(1u << (irq_index - 24u));
+                iop_intc_get_state()->imask_hi &= ~(1u << (irq_index - 32u));
+            } else {
+                ret = -103;
+            }
+        } else {
+            ret = -101; /* KE_ILLEGAL_INTRCODE */
+        }
+        if (res_ptr != 0u)
+            iop_mem_write32(st, res_ptr, (uint32_t)res_temp);
+        st->gpr[2] = (uint32_t)ret;
         st->pc = ra;
         st->next_pc = ra + 4u;
         return 1;

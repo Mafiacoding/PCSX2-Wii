@@ -116,6 +116,35 @@
  * "intercept before fetch" pattern. 0xD0-0xE4 sit safely below
  * BUMP_BASE (0x00100000, where real module code is ever loaded), so
  * there is no risk of collision with genuine guest code/data.
+ *
+ * UPDATE (Round 113, task #172/#269): two MORE real, cited intrman
+ * exports are now intercepted the same way - EnableIntr/DisableIntr
+ * (real ordinals intrman#6/#7, per the same DECLARE_IMPORT() macros
+ * cited above). Fetching+reading their REAL implementation this round
+ * (iop/system/intrman/src/intrman.c, same real ps2sdk source tree)
+ * revealed something that corrects Round 112's own design: real
+ * EnableIntr/DisableIntr do NOT maintain a separate INTRMAN-internal
+ * software mask register for the irq>=32 "soft" range at all - they
+ * directly read/write the DMA controller's own real, already-modeled
+ * DMA_ICR/DMA_ICR2 registers (this project's iop_dma_state_t.icr/
+ * icr2, core/hw/iop_dma.h), using the exact real per-channel bit
+ * formulas quoted in iop_hle_intr.c's EnableIntr/DisableIntr handlers
+ * below. This project's own istat_hi/imask_hi (iop_intc.h, Round 112)
+ * remain in place as an explicitly-labeled SIMPLIFICATION of the real
+ * two-stage mechanism (real hardware: DMA channel completes -> real
+ * hardware IOP_IRQ_DMA irq 3 fires -> INTRMAN's OWN internal irq-3
+ * handler - not modeled here, its real code isn't in any fetched
+ * source - inspects DICR1/DICR2 and re-dispatches to the per-channel
+ * handler slot; this project's simplification: skip modeling
+ * INTRMAN's own internal irq-3 handler and dispatch directly off a
+ * channel-specific pending+enabled check), but this round's real
+ * EnableIntr now ALSO mirrors into imask_hi (in addition to correctly
+ * updating the real DICR1/DICR2 bits) specifically so that real,
+ * standard module code calling this real, cited API is what turns
+ * on Round 112's dispatch path for the first time - closing the exact
+ * "nothing calls iop_intc_raise_soft()'s prerequisite enable step"
+ * gap task #269 was opened to investigate. Sentinel gates 0xE8/0xEC
+ * extend the same safe, sub-BUMP_BASE range.
  */
 #ifndef PCSX2_WII_IOP_HLE_INTR_H
 #define PCSX2_WII_IOP_HLE_INTR_H
@@ -139,6 +168,11 @@
  * comes back here - not into any real BIOS code - once the handler
  * itself executes a real `jr $ra`). */
 #define IOP_HLE_INTR_HANDLER_RETURN_TRAMPOLINE          0x000000E4u
+
+/* Round 113: EnableIntr/DisableIntr (intrman#6/#7) - see the header
+ * comment's "UPDATE (Round 113...)" section above. */
+#define IOP_HLE_INTR_ENABLE_INTR                        0x000000E8u
+#define IOP_HLE_INTR_DISABLE_INTR                       0x000000ECu
 
 /* Round 111 (task #267, host-native instrumentation against the real
  * SCPH-10000 BIOS): a real, direct diagnostic run of THIS project's
@@ -212,8 +246,9 @@ uint32_t iop_hle_intr_get_exc_handler(int exc);
  * the low-16-bit value link_imports_one() already extracts from each
  * stub's own ORI instruction. Returns the sentinel address to
  * redirect that stub to, or 0 if this (module_name, ordinal) pair
- * isn't one of the five real, cited exports this file intercepts
+ * isn't one of the seven real, cited exports this file intercepts
  * (RegisterIntrHandler=intrman#4, ReleaseIntrHandler=intrman#5,
+ * EnableIntr=intrman#6, DisableIntr=intrman#7,
  * RegisterExceptionHandler=excepman#4,
  * RegisterDefaultExceptionHandler=excepman#6,
  * ReleaseExceptionHandler=excepman#7 - ordinals taken directly from

@@ -4972,3 +4972,11 @@ Closed the 152nd finding's gap: added `istat_hi`/`imask_hi` (real 32-63 "soft" i
 Honest scope note: no hardware model calls `iop_intc_raise_soft()` yet (no DMA-completion engine exists in this project) - this round only removed the artificial dispatch-side 32-irq cap; actually building a DMA-completion model that raises real per-channel soft irqs (SIF0/SIF1 etc.) remains open.
 
 Next: implement an IOP DMA-completion hardware model that calls `iop_intc_raise_soft()` for real, or continue other task #172 boot-progress angles.
+
+## Checkpoint (Round 113, task #172/#268/#269 - see STATUS.md 154th finding)
+
+Implemented real EnableIntr/DisableIntr (intrman#6/#7), ported from the real, fetched ps2sdk intrman.c. Key discovery: real EnableIntr/DisableIntr for irq 32-45 directly manipulate the already-modeled DMA_ICR/DMA_ICR2 registers (iop_dma_state_t.icr/icr2) - NOT a separate soft-mask register as Round 112's istat_hi/imask_hi framing implied. EnableIntr's irq>=32 path now also mirrors into imask_hi, since that's this project's own explicit simplification of INTRMAN's internal irq-3 re-dispatch, and needed a real trigger to ever activate - closing exactly that gap. Real cited error constants: KE_ILLEGAL_INTRCODE=-101, KE_INTRDISABLE=-103. 20 new regression checks (61 total). Regression: 84 OK/21 non-OK(pre-existing)/105 total, zero new regressions. Clean Wii rebuild verified.
+
+Honest scope note: real module code calling EnableIntr(0x2A)/EnableIntr(0x2B) (SIF0/SIF1) would now correctly populate both the real DMA_ICR2 bits AND this project's imask_hi simplification - but nothing yet RAISES those irqs (no real DMA-completion hardware model calls iop_intc_raise_soft() or sets the real DMA_ICR2 ack/flag bits) - that remains the next, still-open step.
+
+Next: implement a real IOP DMA-completion path (something that sets the real DICR/DICR2 ack bits and/or calls iop_intc_raise_soft() when a SIF0/SIF1 transfer genuinely finishes), or continue other task #172 boot-progress angles.

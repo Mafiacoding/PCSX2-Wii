@@ -92,12 +92,29 @@
 #define GIF_REG_XYZ2      0x05
 #define GIF_REG_AD        0x0E
 #define GIF_REG_NOP       0x0F
+/* Round 97 (138th finding, task #254 - vertex-register parity):
+ * XYZF2 (X/Y/Z + Fog coefficient, WITH drawing kick), XYZF3/XYZ3
+ * (vertex-queue-advance-only variants, no drawing kick), and FOG (a
+ * standalone "current fog value" register, same "latched, then read
+ * at vertex kick" pattern as ST/UV - see gif.h's cur_fog field
+ * comment below). Real PACKED-mode tag nibbles, cross-checked against
+ * the official Sony GS Users Manual's "7.3 Register List in Address
+ * Order" (0x04=XYZF2, 0x0a=FOG, 0x0c=XYZF3, 0x0d=XYZ3) - the same
+ * legitimately public, citable source as Round 96's SCISSOR_1/2. */
+#define GIF_REG_XYZF2     0x04
+#define GIF_REG_FOG       0x0A
+#define GIF_REG_XYZF3     0x0C
+#define GIF_REG_XYZ3      0x0D
 
 #define GS_REG_PRIM       0x00
 #define GS_REG_RGBAQ      0x01
 #define GS_REG_ST         0x02
 #define GS_REG_UV         0x03
 #define GS_REG_XYZ2       0x05
+#define GS_REG_XYZF2      0x04
+#define GS_REG_XYZF3      0x0C
+#define GS_REG_XYZ3       0x0D
+#define GS_REG_FOG        0x0A
 #define GS_REG_TEX0_1     0x06
 #define GS_REG_FRAME_1    0x4C
 #define GS_REG_XYOFFSET_1 0x18
@@ -234,6 +251,19 @@
  * ALPHA_1 below) - matches this file's existing bit-position-
  * comment style for IIP/TME/FST above. */
 #define PRIM_ABE_MASK 0x40u
+/* PRIM bit 5 (FGE) - real GIFRegPRIM bitfield (see PRIM_ABE_MASK's own
+ * comment for the full field ordering: PRIM:3,IIP:1,TME:1,FGE:1,
+ * ABE:1,AA1:1,FST:1,CTXT:1,FIX:1). Gates the Round 97 Fog effect
+ * (task #254, 138th finding) - see gs_finish_pixel()'s fog-blend step
+ * in gif.c and the GS_REG_FOGCOL/cur_fog comments below. */
+#define PRIM_FGE_MASK 0x20u
+/* FOGCOL (Round 97, task #254): the "distant fog color" (Rfc,Gfc,Bfc)
+ * blended against per-pixel Fog coefficient F, per the official GS
+ * Users Manual's "3.5. Fog Effect" formula:
+ *   R = F*Rv + (0xff-F)*Rfc  (and likewise G, B; A is left untouched)
+ * Real, well-known GS register address (manual's "7.3 Register List
+ * in Address Order": 0x3d=FOGCOL). */
+#define GS_REG_FOGCOL 0x3D
 
 /* GIFRegTEST bitfield (task #89, extended Round 23) - cross-checked
  * against PCSX2's GS/GSRegs.h GIFRegTEST: ATE:1,ATST:3,AREF:8,
@@ -604,6 +634,29 @@ typedef struct {
      * against PCSX2's own GS/GSRegs.h. */
     float cur_s, cur_t, cur_q;
 
+    /* Round 97 (138th finding, task #254): "current fog value" -
+     * exactly the same latch-then-read-at-vertex-kick pattern this
+     * file already uses for cur_u/cur_v (UV) and cur_s/cur_t (ST):
+     * a standalone FOG register write (GS_REG_FOG, either PACKED tag
+     * 0x0a or the A+D address) sets this; the combined XYZF2/XYZF3
+     * vertex-kick registers ALSO set it directly from their own
+     * embedded F field in PACKED mode (see apply_xyz2_kick() in
+     * gif.c). Plain XYZ2/XYZ3 (no F field) leave it unchanged, so a
+     * fog value set once persists across subsequent XYZ2-only
+     * vertices - real hardware behavior for an internal GS register.
+     * Default 0xFF (per the GS Users Manual's "3.5. Fog Effect":
+     * F=255 is "the fog effect is at the minimum", i.e. the vertex's
+     * own color passes through unmodified) - this project's usual
+     * safety-gate convention so pre-existing tests/demos that never
+     * touch FOG/XYZF2 keep drawing exactly as before this round even
+     * if a future round mistakenly left FGE-gating off somewhere. */
+    uint32_t cur_fog;
+    /* FOGCOL (Round 97) - packed as R in bits 0-7, G in 8-15, B in
+     * 16-23 (alpha byte unused/0), matching this file's existing
+     * rgba_pack() channel convention for consistency, even though
+     * FOGCOL itself has no alpha field on real hardware. */
+    uint32_t fogcol;
+
     int has_vertex0;
     int32_t v0x, v0y;
     /* SPRITE's first-vertex texture coordinates (task #88 - SPRITE
@@ -614,6 +667,10 @@ typedef struct {
     /* SPRITE's first-vertex Z (task #89) - see tri_z's comment
      * below for the same A+D-vs-PACKED scope caveat. */
     uint32_t v0z;
+    /* SPRITE's first-vertex Fog coefficient (Round 97, task #254) -
+     * latched from cur_fog at the same moment v0z is (see
+     * apply_xyz2_kick()'s vertex-kick logic in gif.c). */
+    uint32_t v0f;
 
     /* Triangle vertex accumulation (TRIANGLE/TRIANGLE_STRIP/
      * TRIANGLE_FAN, prim types 3/4/5). tri_vseq counts vertices
@@ -658,6 +715,15 @@ typedef struct {
      * zbuf_configured, so pre-existing A+D-only tests are completely
      * unaffected either way). */
     uint32_t tri_z[3];
+    /* Per-vertex Fog coefficient (Round 97, task #254) - latched from
+     * cur_fog at every vertex kick, same shape/rolling-window rules
+     * as tri_z above; interpolated the same plain-affine barycentric
+     * way as Z in rasterize_triangle() (the GS Users Manual's "3.5.
+     * Fog Effect" describes F as linearly interpolated per vertex,
+     * with no mention of the 1/Q perspective correction ST/UV need -
+     * matching Z's own already-post-projection screen-space-linear
+     * behavior, not independently re-derived here). */
+    uint32_t tri_f[3];
 
     /* LINE/LINE_STRIP vertex accumulation (task: "GS coverage
      * breadth", item 5) - a 2-slot rolling window, the same shape as
@@ -676,6 +742,9 @@ typedef struct {
     int32_t line_x[2], line_y[2];
     uint32_t line_rgba[2];
     uint32_t line_z[2];
+    /* Per-vertex Fog coefficient (Round 97, task #254) - same rolling
+     * 2-slot shape as line_z above. */
+    uint32_t line_f[2];
 
     uint64_t quadwords_seen;
     uint64_t sprites_drawn;

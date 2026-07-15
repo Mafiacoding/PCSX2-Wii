@@ -19,6 +19,13 @@ void gif_init(void)
      * aliasing/zero-width surprise). */
     g_gif.ctx1_fbw = 640;
     g_gif.ctx2_fbw = 640;
+    /* Round 97 (138th finding, task #254): cur_fog defaults to 0xFF
+     * ("fog effect at minimum" per the GS Users Manual - i.e. the
+     * vertex's own color passes through unmodified) rather than
+     * memset's 0 ("fog effect at maximum" - full fog color) - this
+     * project's usual safety-gate convention, see cur_fog's own field
+     * comment in gif.h. */
+    g_gif.cur_fog = 0xFFu;
 }
 
 gif_state_t *gif_get_state(void) { return &g_gif; }
@@ -427,11 +434,43 @@ static void clamp_bbox_to_scissor(int32_t *minx, int32_t *maxx, int32_t *miny, i
     if (*maxy > sy1) *maxy = sy1;
 }
 
+/* Round 97 (138th finding, task #254): the Fog effect - blends a
+ * fragment's shaded/textured color toward FOGCOL using a per-pixel
+ * Fog coefficient F (0-255), per the official GS Users Manual's
+ * "3.5. Fog Effect":
+ *   R = F*Rv + (0xff-F)*Rfc   (and likewise G, B; alpha is untouched)
+ * The manual's own footnote on this formula ("A*B = (AxB)>>8")
+ * establishes the real fixed-point convention: divide by 256, not
+ * 255 - confirmed self-consistent with the F=255/F=0 boundary
+ * descriptions ("255 = fog effect at minimum" implies output should
+ * equal the vertex color almost exactly, which >>8 gives - 255/256
+ * of the original value - while a plain /255 division would not
+ * introduce this same, deliberately-matching, real-hardware
+ * rounding). Gated by PRIM's real FGE bit (Round 97's PRIM_FGE_MASK) -
+ * "Whether or not Fogging is performed is specified with the FGE flag
+ * of the PRIM register", per the manual - so this is a genuine no-op
+ * for every pre-existing test/demo, none of which ever set FGE. */
+static uint32_t apply_fog(uint32_t color, uint32_t fog)
+{
+    if (!(g_gif.prim & PRIM_FGE_MASK)) return color;
+    uint32_t r = rgba_channel(color, 0), g = rgba_channel(color, 8), b = rgba_channel(color, 16), a = rgba_channel(color, 24);
+    uint32_t fcr = rgba_channel(g_gif.fogcol, 0), fcg = rgba_channel(g_gif.fogcol, 8), fcb = rgba_channel(g_gif.fogcol, 16);
+    uint32_t inv = 255u - fog;
+    uint32_t nr = ((fog * r) + (inv * fcr)) >> 8;
+    uint32_t ng = ((fog * g) + (inv * fcg)) >> 8;
+    uint32_t nb = ((fog * b) + (inv * fcb)) >> 8;
+    if (nr > 255) nr = 255;
+    if (ng > 255) ng = 255;
+    if (nb > 255) nb = 255;
+    return rgba_pack(nr, ng, nb, a);
+}
+
 static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t x2, int32_t y2,
                                 uint32_t c0, uint32_t c1, uint32_t c2,
                                 int32_t u0, int32_t v0, int32_t u1, int32_t v1, int32_t u2, int32_t v2,
                                 float s0, float t0, float q0, float s1, float t1, float q1, float s2, float t2, float q2,
-                                uint32_t z0, uint32_t z1, uint32_t z2)
+                                uint32_t z0, uint32_t z1, uint32_t z2,
+                                uint32_t f0, uint32_t f1, uint32_t f2)
 {
     gs_activate_context(); /* Round 27: dual-context - see its own comment */
     int32_t minx = x0, maxx = x0, miny = y0, maxy = y0;
@@ -646,6 +685,15 @@ static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, i
                         out = rgba_pack(r, g, b, a);
                     }
                 }
+                /* Round 97 (138th finding, task #254): Fog effect -
+                 * F interpolates the exact same plain-affine
+                 * barycentric way as Z above (see tri_f's field
+                 * comment in gif.h), applied here right before the
+                 * final composite, same insertion point Round 96's
+                 * SCISSOR clamp used for its own gate. */
+                double ff = b0 * (double)f0 + b1 * (double)f1 + b2 * (double)f2;
+                uint32_t frag_fog = (ff < 0.0) ? 0u : (ff > 255.0 ? 255u : (uint32_t)(ff + 0.5));
+                out = apply_fog(out, frag_fog);
                 /* ZMSK (real ZBUF register bit): 1 = Z writes
                  * disabled for this draw, matching real hardware
                  * exactly (color can still be written while Z stays
@@ -688,7 +736,7 @@ static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, i
 static void rasterize_sprite(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
                               int32_t u0, int32_t v0, int32_t u1, int32_t v1,
                               float s0, float t0, float q0, float s1, float t1, float q1,
-                              uint32_t z0, uint32_t z1)
+                              uint32_t z0, uint32_t z1, uint32_t f0, uint32_t f1)
 {
     gs_activate_context(); /* Round 27: dual-context - see its own comment */
     int textured = (g_gif.prim & PRIM_TME_MASK) != 0;
@@ -706,6 +754,14 @@ static void rasterize_sprite(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
      * is intentionally unused. */
     (void)z0;
     uint32_t frag_z = z1;
+    /* Round 97 (138th finding, task #254): SPRITE Fog, same "flat,
+     * second-vertex" convention this file already established for
+     * SPRITE Z just above (real hardware does not interpolate either
+     * attribute across a SPRITE the way it does for TRIANGLE - both
+     * are simple flat per-primitive values here, f0 kept for
+     * signature symmetry only, same as z0). */
+    (void)f0;
+    uint32_t frag_fog = f1;
 
     /* Resolve each corner's texture coordinate into texel space
      * BEFORE the min/max reordering below, so the X/Y->U/V
@@ -837,6 +893,7 @@ static void rasterize_sprite(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
                     out = rgba_pack(r, g, b, a);
                 }
             }
+            out = apply_fog(out, frag_fog);
             gs_finish_pixel(xx, yy, out, frag_z, g_gif.zbuf_configured && !g_gif.zmsk);
         }
     }
@@ -855,7 +912,7 @@ static void rasterize_sprite(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
  * `GS_POINT_CLASS`, i.e. there's only ever one vertex to begin with,
  * no interpolation of any kind), gated behind the same Z test every
  * other primitive uses. */
-static void rasterize_point(int32_t x, int32_t y, uint32_t rgba, uint32_t z)
+static void rasterize_point(int32_t x, int32_t y, uint32_t rgba, uint32_t z, uint32_t fog)
 {
     gs_activate_context(); /* Round 27: dual-context - see its own comment */
     if (x < 0 || y < 0) return;
@@ -877,7 +934,11 @@ static void rasterize_point(int32_t x, int32_t y, uint32_t rgba, uint32_t z)
         return;
     }
 
-    gs_finish_pixel(x, y, rgba, z, g_gif.zbuf_configured && !g_gif.zmsk);
+    /* Round 97 (138th finding, task #254): POINT Fog - a single
+     * vertex, so no interpolation is possible or needed (same "no
+     * interpolation of any kind" real-hardware rule this file already
+     * documents for POINT's color). */
+    gs_finish_pixel(x, y, apply_fog(rgba, fog), z, g_gif.zbuf_configured && !g_gif.zmsk);
     g_gif.points_drawn++;
 }
 
@@ -899,7 +960,8 @@ static void rasterize_point(int32_t x, int32_t y, uint32_t rgba, uint32_t z)
  * `GS_LINE_CLASS` (the same "flat uses the last vertex" convention
  * already established for triangles/sprites in this file). */
 static void rasterize_line(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
-                            uint32_t c0, uint32_t c1, uint32_t z0, uint32_t z1)
+                            uint32_t c0, uint32_t c1, uint32_t z0, uint32_t z1,
+                            uint32_t f0, uint32_t f1)
 {
     gs_activate_context(); /* Round 27: dual-context - see its own comment */
     int gouraud = (g_gif.prim & PRIM_IIP_MASK) != 0;
@@ -915,7 +977,7 @@ static void rasterize_line(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
          * draws the single point (a 0-length line still emits its
          * one pixel); handled the same way DrawPoint would. */
         uint32_t z_avg = z1;
-        rasterize_point(x0, y0, gouraud ? c1 : rgba_pack(flat_r, flat_g, flat_b, flat_a), z_avg);
+        rasterize_point(x0, y0, gouraud ? c1 : rgba_pack(flat_r, flat_g, flat_b, flat_a), z_avg, f1);
         g_gif.lines_drawn++;
         return;
     }
@@ -924,7 +986,12 @@ static void rasterize_line(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
     double step_x = (double)dx / (double)steps;
     double step_y = (double)dy / (double)steps;
     double step_z = ((double)z1 - (double)z0) / (double)steps;
-    double px = (double)x0, py = (double)y0, pz = (double)z0;
+    /* Round 97 (138th finding, task #254): Fog steps linearly along
+     * the line exactly like Z above (same "already screen-space-
+     * linear, no perspective correction needed" real-hardware rule -
+     * see gif.h's tri_f field comment). */
+    double step_fog = ((double)f1 - (double)f0) / (double)steps;
+    double px = (double)x0, py = (double)y0, pz = (double)z0, pf = (double)f0;
 
     for (int32_t i = 0; i <= steps; i++) {
         int32_t xx = (int32_t)(px + 0.5);
@@ -961,16 +1028,18 @@ static void rasterize_line(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
                     if (a > 255) a = 255;
                     out = rgba_pack(r, g, b, a);
                 }
+                uint32_t frag_fog = (pf < 0.0) ? 0u : (pf > 255.0 ? 255u : (uint32_t)(pf + 0.5));
+                out = apply_fog(out, frag_fog);
                 gs_finish_pixel(xx, yy, out, frag_z, g_gif.zbuf_configured && !g_gif.zmsk);
             }
         }
 
-        px += step_x; py += step_y; pz += step_z;
+        px += step_x; py += step_y; pz += step_z; pf += step_fog;
     }
     g_gif.lines_drawn++;
 }
 
-static void apply_xyz2(uint32_t word0, uint32_t word1, uint32_t word2)
+static void apply_xyz2_kick(uint32_t word0, uint32_t word1, uint32_t word2, int do_draw_kick)
 {
     /* PACKED XYZ2 layout (GS/GSRegs.h-compatible bit positions): X in
      * bits 0-15 of word0, Y in bits 0-15 of word1 (both 12.4
@@ -978,9 +1047,26 @@ static void apply_xyz2(uint32_t word0, uint32_t word1, uint32_t word2)
      * word2 - a real, full 32-bit value, cross-checked against
      * PCSX2's GS/GSRegs.h GIFPackedXYZ2 layout. The ADC/context bit
      * (word3) still isn't used. IMPORTANT: word2 is only ever a real
-     * Z value when apply_xyz2() is reached via the genuine PACKED-
-     * mode path - the A+D-mode call site passes 0 here instead (see
-     * gif.h's tri_z field comment for why). */
+     * Z value when apply_xyz2_kick() is reached via the genuine
+     * PACKED-mode path - the A+D-mode call site passes 0 here instead
+     * (see gif.h's tri_z field comment for why).
+     *
+     * Round 97 (138th finding, task #254): renamed from apply_xyz2()
+     * and given a new do_draw_kick parameter so this same shared
+     * vertex-kick logic can serve BOTH the original XYZ2/XYZF2 (kick
+     * + draw when the vertex queue fills) and the new XYZ3/XYZF3
+     * (kick only - "the Drawing Kick is not performed... only the
+     * vertex queue is advanced", per the official GS Users Manual's
+     * XYZ3 description). do_draw_kick=0 lets every vseq-increment/
+     * rolling-window bookkeeping line below run exactly as before -
+     * it only gates the terminal rasterize_*() calls. The vertex's
+     * Fog coefficient (also new this round) is read from cur_fog,
+     * which callers set immediately before invoking this function
+     * when the register being processed carries its own F field
+     * (XYZF2/XYZF3 in PACKED mode) - see process_one_packet()'s new
+     * GIF_REG_XYZF2/XYZF3 cases - or simply left as whatever a prior
+     * standalone FOG-register write (or the 0xFF default) already
+     * set, for plain XYZ2/XYZ3/XYZF2-via-A+D. */
     int32_t raw_x = (int32_t)(word0 & 0xFFFFu);
     int32_t raw_y = (int32_t)(word1 & 0xFFFFu);
     uint32_t raw_z = word2;
@@ -994,8 +1080,12 @@ static void apply_xyz2(uint32_t word0, uint32_t word1, uint32_t word2)
         /* POINT: draws immediately on every single vertex - no
          * accumulation needed (real hardware: NumIndicesForPrim
          * returns 1 for POINTLIST, each incoming vertex is a
-         * complete primitive on its own). */
-        rasterize_point(x, y, g_gif.rgba, raw_z);
+         * complete primitive on its own). XYZ3/XYZF3 (do_draw_kick=0)
+         * on a POINT primitive means "advance the queue but don't
+         * draw" - since POINT has no queue depth beyond the current
+         * vertex, this simply means: don't draw this vertex at all. */
+        if (do_draw_kick)
+            rasterize_point(x, y, g_gif.rgba, raw_z, g_gif.cur_fog);
         return;
     }
 
@@ -1012,23 +1102,31 @@ static void apply_xyz2(uint32_t word0, uint32_t word1, uint32_t word2)
             g_gif.line_y[slot] = y;
             g_gif.line_rgba[slot] = g_gif.rgba;
             g_gif.line_z[slot] = raw_z;
-            if (g_gif.line_vseq % 2 == 0)
+            g_gif.line_f[slot] = g_gif.cur_fog;
+            if (do_draw_kick && g_gif.line_vseq % 2 == 0)
                 rasterize_line(g_gif.line_x[0], g_gif.line_y[0], g_gif.line_x[1], g_gif.line_y[1],
                                 g_gif.line_rgba[0], g_gif.line_rgba[1],
-                                g_gif.line_z[0], g_gif.line_z[1]);
+                                g_gif.line_z[0], g_gif.line_z[1],
+                                g_gif.line_f[0], g_gif.line_f[1]);
         } else { /* PRIM_TYPE_LINE_STRIP */
             /* LINE_STRIP: each new vertex (from the 2nd onward) forms
              * a segment with the previous one - a rolling 2-slot
              * window, same shape as this file's TRIANGLE_STRIP
-             * handling above, just 2 slots instead of 3. */
+             * handling above, just 2 slots instead of 3. The rolling
+             * shift always happens (real hardware: the vertex queue
+             * always advances on every vertex kick, draw or not);
+             * only the rasterize_line() call itself is gated. */
             g_gif.line_x[0] = g_gif.line_x[1]; g_gif.line_y[0] = g_gif.line_y[1];
             g_gif.line_rgba[0] = g_gif.line_rgba[1]; g_gif.line_z[0] = g_gif.line_z[1];
+            g_gif.line_f[0] = g_gif.line_f[1];
             g_gif.line_x[1] = x; g_gif.line_y[1] = y;
             g_gif.line_rgba[1] = g_gif.rgba; g_gif.line_z[1] = raw_z;
-            if (g_gif.line_vseq >= 2)
+            g_gif.line_f[1] = g_gif.cur_fog;
+            if (do_draw_kick && g_gif.line_vseq >= 2)
                 rasterize_line(g_gif.line_x[0], g_gif.line_y[0], g_gif.line_x[1], g_gif.line_y[1],
                                 g_gif.line_rgba[0], g_gif.line_rgba[1],
-                                g_gif.line_z[0], g_gif.line_z[1]);
+                                g_gif.line_z[0], g_gif.line_z[1],
+                                g_gif.line_f[0], g_gif.line_f[1]);
         }
         return;
     }
@@ -1049,38 +1147,47 @@ static void apply_xyz2(uint32_t word0, uint32_t word1, uint32_t word2)
             g_gif.tri_t[slot] = g_gif.cur_t;
             g_gif.tri_q[slot] = g_gif.cur_q;
             g_gif.tri_z[slot] = raw_z;
-            if (g_gif.tri_vseq % 3 == 0)
+            g_gif.tri_f[slot] = g_gif.cur_fog;
+            if (do_draw_kick && g_gif.tri_vseq % 3 == 0)
                 rasterize_triangle(g_gif.tri_x[0], g_gif.tri_y[0], g_gif.tri_x[1], g_gif.tri_y[1], g_gif.tri_x[2], g_gif.tri_y[2],
                                     g_gif.tri_rgba[0], g_gif.tri_rgba[1], g_gif.tri_rgba[2],
                                     g_gif.tri_u[0], g_gif.tri_v[0], g_gif.tri_u[1], g_gif.tri_v[1], g_gif.tri_u[2], g_gif.tri_v[2],
                                     g_gif.tri_s[0], g_gif.tri_t[0], g_gif.tri_q[0],
                                     g_gif.tri_s[1], g_gif.tri_t[1], g_gif.tri_q[1],
                                     g_gif.tri_s[2], g_gif.tri_t[2], g_gif.tri_q[2],
-                                    g_gif.tri_z[0], g_gif.tri_z[1], g_gif.tri_z[2]);
+                                    g_gif.tri_z[0], g_gif.tri_z[1], g_gif.tri_z[2],
+                                    g_gif.tri_f[0], g_gif.tri_f[1], g_gif.tri_f[2]);
         } else if (ptype == PRIM_TYPE_TRIANGLE_STRIP) {
             /* TRIANGLE_STRIP: each new vertex (from the 3rd onward)
              * forms a triangle with the previous 2 - a rolling
-             * 3-slot window. */
+             * 3-slot window. The rolling shift always happens; only
+             * the rasterize_triangle() call itself is gated by
+             * do_draw_kick (same "queue advances regardless" rule as
+             * LINE_STRIP above). */
             g_gif.tri_x[0] = g_gif.tri_x[1]; g_gif.tri_y[0] = g_gif.tri_y[1]; g_gif.tri_rgba[0] = g_gif.tri_rgba[1];
             g_gif.tri_u[0] = g_gif.tri_u[1]; g_gif.tri_v[0] = g_gif.tri_v[1];
             g_gif.tri_s[0] = g_gif.tri_s[1]; g_gif.tri_t[0] = g_gif.tri_t[1]; g_gif.tri_q[0] = g_gif.tri_q[1];
             g_gif.tri_z[0] = g_gif.tri_z[1];
+            g_gif.tri_f[0] = g_gif.tri_f[1];
             g_gif.tri_x[1] = g_gif.tri_x[2]; g_gif.tri_y[1] = g_gif.tri_y[2]; g_gif.tri_rgba[1] = g_gif.tri_rgba[2];
             g_gif.tri_u[1] = g_gif.tri_u[2]; g_gif.tri_v[1] = g_gif.tri_v[2];
             g_gif.tri_s[1] = g_gif.tri_s[2]; g_gif.tri_t[1] = g_gif.tri_t[2]; g_gif.tri_q[1] = g_gif.tri_q[2];
             g_gif.tri_z[1] = g_gif.tri_z[2];
+            g_gif.tri_f[1] = g_gif.tri_f[2];
             g_gif.tri_x[2] = x; g_gif.tri_y[2] = y; g_gif.tri_rgba[2] = g_gif.rgba;
             g_gif.tri_u[2] = g_gif.cur_u; g_gif.tri_v[2] = g_gif.cur_v;
             g_gif.tri_s[2] = g_gif.cur_s; g_gif.tri_t[2] = g_gif.cur_t; g_gif.tri_q[2] = g_gif.cur_q;
             g_gif.tri_z[2] = raw_z;
-            if (g_gif.tri_vseq >= 3)
+            g_gif.tri_f[2] = g_gif.cur_fog;
+            if (do_draw_kick && g_gif.tri_vseq >= 3)
                 rasterize_triangle(g_gif.tri_x[0], g_gif.tri_y[0], g_gif.tri_x[1], g_gif.tri_y[1], g_gif.tri_x[2], g_gif.tri_y[2],
                                     g_gif.tri_rgba[0], g_gif.tri_rgba[1], g_gif.tri_rgba[2],
                                     g_gif.tri_u[0], g_gif.tri_v[0], g_gif.tri_u[1], g_gif.tri_v[1], g_gif.tri_u[2], g_gif.tri_v[2],
                                     g_gif.tri_s[0], g_gif.tri_t[0], g_gif.tri_q[0],
                                     g_gif.tri_s[1], g_gif.tri_t[1], g_gif.tri_q[1],
                                     g_gif.tri_s[2], g_gif.tri_t[2], g_gif.tri_q[2],
-                                    g_gif.tri_z[0], g_gif.tri_z[1], g_gif.tri_z[2]);
+                                    g_gif.tri_z[0], g_gif.tri_z[1], g_gif.tri_z[2],
+                                    g_gif.tri_f[0], g_gif.tri_f[1], g_gif.tri_f[2]);
         } else { /* PRIM_TYPE_TRIANGLE_FAN */
             /* TRIANGLE_FAN: the first vertex is a fixed anchor
              * (slot 0, never overwritten); each new vertex forms a
@@ -1090,27 +1197,32 @@ static void apply_xyz2(uint32_t word0, uint32_t word1, uint32_t word2)
                 g_gif.tri_u[0] = g_gif.cur_u; g_gif.tri_v[0] = g_gif.cur_v;
                 g_gif.tri_s[0] = g_gif.cur_s; g_gif.tri_t[0] = g_gif.cur_t; g_gif.tri_q[0] = g_gif.cur_q;
                 g_gif.tri_z[0] = raw_z;
+                g_gif.tri_f[0] = g_gif.cur_fog;
                 g_gif.tri_x[1] = x; g_gif.tri_y[1] = y; g_gif.tri_rgba[1] = g_gif.rgba; /* also seed "previous" so vseq==2 has something to pair with */
                 g_gif.tri_u[1] = g_gif.cur_u; g_gif.tri_v[1] = g_gif.cur_v;
                 g_gif.tri_s[1] = g_gif.cur_s; g_gif.tri_t[1] = g_gif.cur_t; g_gif.tri_q[1] = g_gif.cur_q;
                 g_gif.tri_z[1] = raw_z;
+                g_gif.tri_f[1] = g_gif.cur_fog;
             } else {
                 g_gif.tri_x[2] = x; g_gif.tri_y[2] = y; g_gif.tri_rgba[2] = g_gif.rgba;
                 g_gif.tri_u[2] = g_gif.cur_u; g_gif.tri_v[2] = g_gif.cur_v;
                 g_gif.tri_s[2] = g_gif.cur_s; g_gif.tri_t[2] = g_gif.cur_t; g_gif.tri_q[2] = g_gif.cur_q;
                 g_gif.tri_z[2] = raw_z;
-                if (g_gif.tri_vseq >= 3)
+                g_gif.tri_f[2] = g_gif.cur_fog;
+                if (do_draw_kick && g_gif.tri_vseq >= 3)
                     rasterize_triangle(g_gif.tri_x[0], g_gif.tri_y[0], g_gif.tri_x[1], g_gif.tri_y[1], g_gif.tri_x[2], g_gif.tri_y[2],
                                         g_gif.tri_rgba[0], g_gif.tri_rgba[1], g_gif.tri_rgba[2],
                                         g_gif.tri_u[0], g_gif.tri_v[0], g_gif.tri_u[1], g_gif.tri_v[1], g_gif.tri_u[2], g_gif.tri_v[2],
                                         g_gif.tri_s[0], g_gif.tri_t[0], g_gif.tri_q[0],
                                         g_gif.tri_s[1], g_gif.tri_t[1], g_gif.tri_q[1],
                                         g_gif.tri_s[2], g_gif.tri_t[2], g_gif.tri_q[2],
-                                        g_gif.tri_z[0], g_gif.tri_z[1], g_gif.tri_z[2]);
+                                        g_gif.tri_z[0], g_gif.tri_z[1], g_gif.tri_z[2],
+                                        g_gif.tri_f[0], g_gif.tri_f[1], g_gif.tri_f[2]);
                 g_gif.tri_x[1] = g_gif.tri_x[2]; g_gif.tri_y[1] = g_gif.tri_y[2]; g_gif.tri_rgba[1] = g_gif.tri_rgba[2];
                 g_gif.tri_u[1] = g_gif.tri_u[2]; g_gif.tri_v[1] = g_gif.tri_v[2];
                 g_gif.tri_s[1] = g_gif.tri_s[2]; g_gif.tri_t[1] = g_gif.tri_t[2]; g_gif.tri_q[1] = g_gif.tri_q[2];
                 g_gif.tri_z[1] = g_gif.tri_z[2];
+                g_gif.tri_f[1] = g_gif.tri_f[2];
             }
         }
         return;
@@ -1125,17 +1237,23 @@ static void apply_xyz2(uint32_t word0, uint32_t word1, uint32_t word2)
         g_gif.v0t = g_gif.cur_t;
         g_gif.v0q = g_gif.cur_q;
         g_gif.v0z = raw_z;
+        g_gif.v0f = g_gif.cur_fog;
         g_gif.has_vertex0 = 1;
         return;
     }
 
     /* Second vertex: if we're drawing a SPRITE, fill the rectangle
-     * between v0 and this vertex now. */
+     * between v0 and this vertex now (unless do_draw_kick=0 - the
+     * GS Users Manual's XYZ3/XYZF3 "no Drawing Kick" example is a
+     * TRIANGLE_STRIP, but the same rule applies here for
+     * consistency: the vertex queue is still consumed/advanced,
+     * just without triggering the actual fill). */
     if (ptype == PRIM_TYPE_SPRITE) {
-        rasterize_sprite(g_gif.v0x, g_gif.v0y, x, y,
-                          g_gif.v0u, g_gif.v0v, g_gif.cur_u, g_gif.cur_v,
-                          g_gif.v0s, g_gif.v0t, g_gif.v0q, g_gif.cur_s, g_gif.cur_t, g_gif.cur_q,
-                          g_gif.v0z, raw_z);
+        if (do_draw_kick)
+            rasterize_sprite(g_gif.v0x, g_gif.v0y, x, y,
+                              g_gif.v0u, g_gif.v0v, g_gif.cur_u, g_gif.cur_v,
+                              g_gif.v0s, g_gif.v0t, g_gif.v0q, g_gif.cur_s, g_gif.cur_t, g_gif.cur_q,
+                              g_gif.v0z, raw_z, g_gif.v0f, g_gif.cur_fog);
     } else {
         g_gif.unsupported_prims_seen++;
     }
@@ -1190,7 +1308,45 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
          * word1=Y-only - see gif.h's tri_z field comment for the
          * full explanation and why it isn't changed here) - pass
          * 0 for Z. */
-        apply_xyz2(data_lo, data_hi, 0u);
+        apply_xyz2_kick(data_lo, data_hi, 0u, 1);
+        break;
+    case GS_REG_XYZF2:
+        /* Round 97 (138th finding, task #254): A+D XYZF2 follows the
+         * same simplified, already-established A+D XYZ2 convention
+         * above (X-only/Y-only, no Z) - F is likewise unavailable
+         * under that convention, so cur_fog is left as whatever a
+         * prior standalone GS_REG_FOG A+D write (or the 0xFF default)
+         * already set, exactly like Z is left at 0. This performs a
+         * normal drawing-kick vertex push, same as XYZ2. */
+        apply_xyz2_kick(data_lo, data_hi, 0u, 1);
+        break;
+    case GS_REG_XYZ3:
+    case GS_REG_XYZF3:
+        /* Round 97 (138th finding, task #254): "vertex kick without
+         * drawing kick" (official GS Users Manual's XYZ3/XYZF3
+         * description) - advances the vertex queue exactly like
+         * XYZ2/XYZF2 above but never triggers the terminal
+         * rasterize_*() call, see apply_xyz2_kick()'s do_draw_kick
+         * parameter. */
+        apply_xyz2_kick(data_lo, data_hi, 0u, 0);
+        break;
+    case GS_REG_FOG:
+        /* Round 97 (138th finding, task #254): standalone FOG
+         * register - generic A+D 64-bit layout (data_lo=low32,
+         * data_hi=high32, matching every OTHER A+D register in this
+         * function except XYZ2/XYZF2's own established simplified
+         * exception above), F occupying bits 63:56 per the official
+         * GS Users Manual's BIT ASSIGN table - i.e. the top byte of
+         * data_hi. */
+        g_gif.cur_fog = (data_hi >> 24) & 0xFFu;
+        break;
+    case GS_REG_FOGCOL:
+        /* Round 97 (138th finding, task #254): FOGCOL - FCR:bits0-7,
+         * FCG:bits8-15, FCB:bits16-23 of data_lo (real GS Users Manual
+         * BIT ASSIGN table), packed here via rgba_pack()'s existing
+         * channel convention (alpha byte unused/0, matching FOGCOL
+         * having no real alpha field). */
+        g_gif.fogcol = rgba_pack(data_lo & 0xFFu, (data_lo >> 8) & 0xFFu, (data_lo >> 16) & 0xFFu, 0u);
         break;
     case GS_REG_FRAME_1: {
         /* FBP: bits 0-8, FBW: bits 9-14 (units of 64px - real hardware
@@ -1733,7 +1889,41 @@ static uint32_t process_one_packet(const uint8_t *p, uint32_t len)
             switch (reg_code) {
             case GIF_REG_PRIM:  g_gif.prim = w0; reset_tri_vseq(); break;
             case GIF_REG_RGBAQ: apply_rgbaq(w0, w1, w2); break;
-            case GIF_REG_XYZ2:  apply_xyz2(w0, w1, w2); break; /* w2 = real Z (task #89) */
+            case GIF_REG_XYZ2:  apply_xyz2_kick(w0, w1, w2, 1); break; /* w2 = real Z (task #89) */
+            /* Round 97 (138th finding, task #254): XYZF2 - real
+             * GIFPackedXYZF2 layout (cross-checked against PCSX2's own
+             * GS/GSRegs.h): X in w0 (same as XYZ2), Y in w1 (same as
+             * XYZ2), w2's low 24 bits = Z (narrower than XYZ2's full
+             * 32-bit Z - real hardware trades Z range for the F byte),
+             * w2's top 8 bits = Fog coefficient F. F is latched into
+             * cur_fog BEFORE the shared vertex-kick call so it's
+             * captured into the vertex's own tri_f/line_f/v0f slot
+             * exactly like Z is. */
+            case GIF_REG_XYZF2:
+                g_gif.cur_fog = (w2 >> 24) & 0xFFu;
+                apply_xyz2_kick(w0, w1, w2 & 0xFFFFFFu, 1);
+                break;
+            /* XYZ3/XYZF3: same field layouts as XYZ2/XYZF2 above, but
+             * "vertex kick WITHOUT drawing kick" (do_draw_kick=0) -
+             * see apply_xyz2_kick()'s own comment and the official GS
+             * Users Manual's XYZ3 description. */
+            case GIF_REG_XYZ3:
+                apply_xyz2_kick(w0, w1, w2, 0);
+                break;
+            case GIF_REG_XYZF3:
+                g_gif.cur_fog = (w2 >> 24) & 0xFFu;
+                apply_xyz2_kick(w0, w1, w2 & 0xFFFFFFu, 0);
+                break;
+            /* Round 97 (138th finding, task #254): standalone FOG tag
+             * - real hardware replicates a 64-bit register's value
+             * into PACKED mode's low 64 bits (w0=bits31:0, w1=bits
+             * 63:32, the same generic mapping this file already uses
+             * implicitly for e.g. RGBAQ's word0/word1 split) - F sits
+             * at bits 63:56 of that 64-bit value, i.e. the top byte of
+             * w1. */
+            case GIF_REG_FOG:
+                g_gif.cur_fog = (w1 >> 24) & 0xFFu;
+                break;
             case GIF_REG_AD:    apply_ad_write(w2 & 0xFFu, w0, w1); break; /* A+D: DATA in words 0-1, ADDR in word2's low byte */
             case GIF_REG_NOP:   default: break;
             }

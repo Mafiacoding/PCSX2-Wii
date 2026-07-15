@@ -3297,3 +3297,27 @@ Fixed a real bug found while testing: SPRITE's exclusive-bound loop needed a
 inclusive loop. New test_gs_scissor.c (8 checks). 91/91 regression, clean
 Wii rebuild. Remaining confirmed gaps left open (task #253) with a real
 citable source now available for future rounds.
+
+### Round 97 (138th finding, task #254, GS gap follow-up 1/N): XYZF2/XYZF3/XYZ3 + real Fog effect
+Per the user's "finish all GS gaps first, then the IOP room" instruction,
+closed 5 of the ~15 remaining confirmed-missing GS registers from Round 96's
+audit: XYZF2/XYZF3 (real addr 0x04/0x0c), XYZ3 (0x0d), FOG (0x0a), FOGCOL
+(0x3d). Refactored apply_xyz2() into apply_xyz2_kick(..., do_draw_kick) so
+XYZ3/XYZF3's real "vertex kick without drawing kick" semantics (manual's own
+worked example: a TRIANGLE_STRIP where one triangle is deliberately skipped)
+share all the existing vseq/rolling-window bookkeeping with XYZ2/XYZF2,
+gating only the terminal rasterize_*() calls. Implemented the real Fog
+effect (apply_fog(), gated by PRIM's FGE bit): manual's blend formula
+R=F*Rv+(0xff-F)*Rfc with the manual's own >>8 fixed-point convention,
+per-vertex F latched the same way Z already is, interpolated the same way Z
+already is per primitive type (barycentric for TRIANGLE, linear for LINE,
+flat "2nd vertex" for SPRITE/POINT). New test_gs_fog.c (9 checks) - fog
+blend at a hand-verified midpoint, FGE=0 safety-gate regression, XYZF2's
+embedded F overriding a stale FOG-register value, and XYZ3/XYZF3's "kick
+without draw" verified via the triangles_drawn counter. 92/92 regression
+(worked around two pre-existing, unrelated test-harness doc-staleness gaps
+- ee_timers.c/iop_icfg.c link-line gaps predating tasks #246/#215, not
+caused by this round). Clean Wii rebuild. Committed directly to main
+(additive, well-tested, no behavior change to any pre-existing register).
+Remaining: CLAMP, TEX2, PRMODECONT/PRMODE, TEXCLUT, SCANMSK, TEXA, TEXFLUSH,
+DIMX, DTHE, COLCLAMP, PABE, FBA, SIGNAL/FINISH/LABEL.

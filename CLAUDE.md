@@ -4746,3 +4746,52 @@ this round's own new test. 91/91 regression (90 + new `test_gs_scissor.c`,
 open (task #253) for future rounds, now backed by a real citable source
 (the official manual, at `/tmp/ps2docs/` this session) instead of prior
 rounds' "session-limited-research caveat".
+
+
+## Checkpoint (Round 97 - 138th finding, task #254, GS gap follow-up 1/N)
+
+Per the user's explicit "finish all GS gaps first, then the IOP room"
+instruction. Closed 5 of the ~15 confirmed-missing GS registers from Round
+96's audit: **XYZF2/XYZF3/XYZ3** (vertex-register parity - some real games
+use these instead of plain XYZ2) and **FOG/FOGCOL** (the real Fog effect),
+which are directly coupled on real hardware (F is a field of XYZF2/XYZF3
+itself).
+
+Refactored `apply_xyz2()` into `apply_xyz2_kick(word0, word1, word2,
+do_draw_kick)` in `source/hw/gif.c` - every vseq-increment/rolling-window
+bookkeeping line runs unconditionally on any vertex kick; `do_draw_kick`
+gates only the terminal `rasterize_*()` calls. XYZ3/XYZF3 (real addr
+0x0d/0x0c) route through with `do_draw_kick=0` - the manual's own
+"vertex kick without drawing kick" semantics (worked example: skip exactly
+one triangle in a TRIANGLE_STRIP). XYZF2 (0x04, PACKED mode) carries a real
+embedded F field (word2's top 8 bits, Z narrowed to the low 24) alongside
+X/Y - cross-checked against PCSX2's `GIFPackedXYZF2` struct.
+
+Implemented the real Fog effect (`apply_fog()`, new shared helper): the GS
+Users Manual's blend formula `R=F*Rv+(0xff-F)*Rfc` using the manual's own
+`>>8` fixed-point convention (confirmed correct via the F=0/F=255 boundary
+descriptions), gated by PRIM's real FGE bit so it's a genuine no-op for
+every pre-existing test/demo. New `cur_fog` register (latch-then-read
+pattern, same as ST/UV) plus per-vertex `tri_f`/`line_f`/`v0f` storage
+mirroring the existing Z fields exactly; interpolated the same way Z
+already is per primitive type (barycentric/linear/flat).
+
+New `tests/test_gs_fog.c` (9 checks): fog blend at a hand-verified midpoint,
+FGE=0 safety-gate regression, XYZF2's embedded F overriding a stale
+FOG-register value, and XYZ3/XYZF3's "kick without draw" verified via the
+`triangles_drawn` counter (directly reproducing the manual's own worked
+example). **Full regression suite: 92/92 tests pass, 0 failures.** Worked
+around two pre-existing, unrelated test-harness documentation-staleness
+gaps while running the full suite (`tests/README.md`'s build lines predate
+the `ee_timers.c`/`iop_icfg.c` source splits from tasks #246/#215) - neither
+is a regression from this round, noted for whoever next updates the README.
+**Clean Wii/devkitPPC rebuild**, 0 errors (same pre-existing unrelated
+`strncpy` warning). Committed directly to `main` (additive, well-tested, no
+behavior change to any pre-existing register) - pushed, rsync'd, verified
+BIOS-bytes clean.
+
+**Remaining GS gaps** (task #254 continues): `CLAMP_1/2`, `TEX2_1/2`,
+`PRMODECONT`/`PRMODE`, `TEXCLUT`, `SCANMSK`, `TEXA`, `TEXFLUSH`, `DIMX`,
+`DTHE`, `COLCLAMP`, `PABE`, `FBA_1/2`, `SIGNAL`/`FINISH`/`LABEL`. Per the
+user's instruction, these come before returning to the IOP clean-room
+exception-dispatcher design (135th finding).

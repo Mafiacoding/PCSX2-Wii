@@ -268,6 +268,26 @@
 #define GS_REG_DTHE     0x45
 #define GS_REG_DIMX     0x44
 
+/* Round 103 (144th finding, task #254 - GS gap follow-up 7/N): FBA_1/
+ * FBA_2 - real addresses 0x4a/0x4b per the official GS Users Manual
+ * ("FBA_1 / FBA_2 : Alpha Correction Value" - "The OR of the fixed
+ * value set by this register and the most significant bit of the
+ * Alpha value of the pixel is written to the frame buffer."). Real
+ * formula for RGBA32 mode (this project's only supported framebuffer
+ * format): A = As | (FBA<<7) - i.e. FBA=1 forces bit 7 (the MSB) of
+ * the written alpha on, regardless of what the fragment's own alpha
+ * already was; FBA=0 is a pure pass-through. Per-context (FBA_1 sets
+ * Context 1, FBA_2 sets Context 2), applied as the absolute final
+ * transform on the alpha channel in gs_finish_pixel() - after alpha
+ * blending, after the AFAIL=RGB_ONLY old-alpha-preservation case -
+ * since the manual describes this as happening at the moment of the
+ * actual frame buffer write, unconditionally. Defaults to fba=0 (not
+ * configured) - the established safety-gate convention, so this is a
+ * genuine no-op for every pre-existing test/demo unless it actually
+ * writes FBA_1/2. */
+#define GS_REG_FBA_1 0x4A
+#define GS_REG_FBA_2 0x4B
+
 /* Round 98 (139th finding, task #254, GS gap follow-up 2/N): CLAMP_1/2
  * (real texture wrap-mode registers) - addresses cross-checked against
  * the official GS Users Manual's "7.3 Register List in Address Order"
@@ -753,6 +773,17 @@ typedef struct {
      * in the Rout=Rin+DIMX[y%4][x%4] formula. */
     uint32_t dthe;
     int32_t dimx[4][4];
+    /* Round 103 (144th finding, task #254): FBA_1/FBA_2 - see the
+     * GS_REG_FBA_1/GS_REG_FBA_2 comment above. Per-context, mirrored
+     * by gs_activate_context() exactly like every other _1/_2
+     * register pair in this struct. fba defaults to 0 (pass-through)
+     * with fba_configured defaulting to 0 - safety-gate convention. */
+    uint32_t fba;
+    int fba_configured;
+    uint32_t ctx1_fba;
+    int ctx1_fba_configured;
+    uint32_t ctx2_fba;
+    int ctx2_fba_configured;
     uint32_t ctx1_clamp_wms, ctx1_clamp_wmt;
     uint32_t ctx1_clamp_minu, ctx1_clamp_maxu, ctx1_clamp_minv, ctx1_clamp_maxv;
     int ctx1_clamp_configured;

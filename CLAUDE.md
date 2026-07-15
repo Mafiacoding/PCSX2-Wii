@@ -4864,3 +4864,15 @@ Task #254 progress: 15 of ~18 confirmed-missing GS registers now closed (correct
 User's explicit instruction: "finish all the gaps once and for all so the gs part is finally done" - continuing task #254 through all remaining items without pause.
 
 Committed directly to main (additive, well-tested, safety-gated - same risk judgment as every prior round's new-register work).
+
+## Checkpoint (Round 103 - 144th finding, task #254, GS gap follow-up 7/N)
+
+Implemented real GS FBA_1 (0x4a) / FBA_2 (0x4b, "Alpha Correction Value"). Real formula for RGBA32 mode: A = As | (FBA<<7) - FBA=1 forces bit 7 (MSB) of the written alpha on, FBA=0 is pass-through. Per-context, mirrored via gs_activate_context() exactly like every other per-context register pair. Applied in gs_finish_pixel() as the absolute last transform on the alpha channel, after alpha blending and after AFAIL=RGB_ONLY handling; does not interact with Round 102's dithering (R/G/B only). Safety-gated (fba defaults to 0 via memset, the OR identity already makes FBA=0 a correct no-op).
+
+New test tests/test_gs_fba.c (4 checks, all pass, covering regression safety, context-1 forcing, explicit pass-through, and dual-context isolation via FBA_2). Full regression 78/99 (0 new failures vs the same 20 pre-existing ee_intc_raise/harness-reconstruction gaps plus test_ee_mmi_hilo2, documented since Round 101). Clean Wii/devkitPPC rebuild, 0 errors.
+
+Task #254 progress: 16 of ~18 confirmed-missing GS registers now closed (Rounds 97-103: XYZF2, XYZF3, XYZ3, FOG, FOGCOL, CLAMP_1, CLAMP_2, PRMODECONT, PRMODE, TEX2_1, TEX2_2, COLCLAMP, TEXFLUSH, DTHE, DIMX, FBA_1, FBA_2). Remaining: PABE, TEXCLUT, SCANMSK, TEXA, SIGNAL/FINISH/LABEL.
+
+User's explicit instruction: "finish all the gaps once and for all so the gs part is finally done" - continuing task #254 through all remaining items without pause.
+
+Committed directly to main (additive, well-tested, safety-gated - same risk judgment as every prior round's new-register work).

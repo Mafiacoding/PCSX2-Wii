@@ -325,6 +325,27 @@ static void gs_finish_pixel(int32_t xx, int32_t yy, uint32_t frag_color, uint32_
             out_b = gs_colclamp_channel((int32_t)out_b + d);
         }
 
+        if (g_gif.fba) {
+            /* Round 103 (144th finding, task #254): FBA_1/FBA_2 -
+             * real GS Users Manual "FBA_1 / FBA_2 : Alpha Correction
+             * Value" formula for RGBA32 (this project's only
+             * supported framebuffer format): A = As | (FBA<<7) - the
+             * OR of the fixed FBA bit (placed at bit 7, the alpha
+             * channel's MSB) and the pixel's own alpha, applied
+             * unconditionally at the actual frame-buffer-write moment
+             * per the manual - i.e. the absolute last transform on
+             * the alpha channel, after alpha blending and after the
+             * AFAIL=RGB_ONLY old-alpha-preservation case above. Does
+             * NOT interact with dithering (R/G/B only) so ordering
+             * relative to that block doesn't matter. Gated by fba
+             * itself (0 = pass-through) rather than fba_configured,
+             * matching the manual's literal "OR with a fixed value"
+             * behavior - FBA=0 is already a correct no-op via the OR
+             * identity, so no separate gate is needed beyond fba's
+             * own default of 0. */
+            out_a = out_a | 0x80u;
+        }
+
         gs_mem_write_psmct32(g_gif.fbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy, rgba_pack(out_r, out_g, out_b, out_a));
     }
 
@@ -425,6 +446,8 @@ static void gs_activate_context(void)
         g_gif.clamp_minv = g_gif.ctx2_clamp_minv;
         g_gif.clamp_maxv = g_gif.ctx2_clamp_maxv;
         g_gif.clamp_configured = g_gif.ctx2_clamp_configured;
+        g_gif.fba = g_gif.ctx2_fba;
+        g_gif.fba_configured = g_gif.ctx2_fba_configured;
     } else {
         g_gif.fbp = g_gif.ctx1_fbp;
         g_gif.fbw = g_gif.ctx1_fbw;
@@ -477,6 +500,8 @@ static void gs_activate_context(void)
         g_gif.clamp_minv = g_gif.ctx1_clamp_minv;
         g_gif.clamp_maxv = g_gif.ctx1_clamp_maxv;
         g_gif.clamp_configured = g_gif.ctx1_clamp_configured;
+        g_gif.fba = g_gif.ctx1_fba;
+        g_gif.fba_configured = g_gif.ctx1_fba_configured;
     }
 }
 
@@ -1648,6 +1673,23 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
                 g_gif.dimx[row][col] = raw;
             }
         }
+    } break;
+    case GS_REG_FBA_1: {
+        /* Round 103 (144th finding, task #254): FBA_1 - see gif.h's
+         * GS_REG_FBA_1/GS_REG_FBA_2 comment for the full citation.
+         * Single 1-bit FBA field (bit 0), per-context (this is
+         * context 1's copy plus the flat "currently active" copy,
+         * mirroring the exact CLAMP_1/CLAMP_2 pattern above). */
+        uint32_t fba = data_lo & 0x1u;
+        g_gif.fba = fba;
+        g_gif.fba_configured = 1;
+        g_gif.ctx1_fba = fba;
+        g_gif.ctx1_fba_configured = 1;
+    } break;
+    case GS_REG_FBA_2: {
+        uint32_t fba = data_lo & 0x1u;
+        g_gif.ctx2_fba = fba;
+        g_gif.ctx2_fba_configured = 1;
     } break;
     case GS_REG_TEX2_1:
     case GS_REG_TEX2_2: {

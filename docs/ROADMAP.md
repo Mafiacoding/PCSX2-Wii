@@ -3358,3 +3358,9 @@ Implemented real GS `TEXFLUSH` (0x3f, genuine no-op - this codebase has no textu
 Also corrects a bookkeeping error: `PABE` was mistakenly dropped from the "remaining" list in Round 101 without being implemented - restored below.
 
 Closes 3 more confirmed-missing GS registers (15 of ~18 total across Rounds 97-102, corrected count). Remaining: `PABE`, `TEXCLUT`, `SCANMSK`, `TEXA`, `FBA_1/2`, `SIGNAL`/`FINISH`/`LABEL`. Committed directly to `main` (additive, well-tested, safety-gated).
+
+### Round 103 (144th finding, task #254, GS gap follow-up 7/N)
+
+Implemented real GS `FBA_1` (0x4a) / `FBA_2` (0x4b, "Alpha Correction Value") per the official GS Users Manual. Real formula for RGBA32 mode: `A = As | (FBA<<7)` - FBA=1 forces bit 7 (MSB) of the written alpha on, FBA=0 is pass-through. Per-context, mirrored via `gs_activate_context()`. Applied in `gs_finish_pixel()` as the absolute last transform on the alpha channel, after alpha blending and after AFAIL=RGB_ONLY handling. New test `tests/test_gs_fba.c` (4 checks, all passing, including dual-context isolation). Full regression: 78/99 (0 new failures). Clean Wii/devkitPPC rebuild, 0 errors.
+
+Closes 1 more confirmed-missing GS register (16 of ~18 total across Rounds 97-103). Remaining: `PABE`, `TEXCLUT`, `SCANMSK`, `TEXA`, `SIGNAL`/`FINISH`/`LABEL`. Committed directly to `main` (additive, well-tested, safety-gated).

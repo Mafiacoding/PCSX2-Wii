@@ -5,6 +5,7 @@
 #include "core/hw/iop_module_loader.h"
 #include "core/hw/iop_elf.h"
 #include "core/hw/sif.h"
+#include "core/hw/iop_intc.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -1026,6 +1027,60 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
     }
 
     if (g.booted_ok && is_unconditional_trap_stub(st, pc)) {
+        /* Round 95 (136th finding, task #252): distinguish WHY the
+         * empty vector was reached before deciding this means "module
+         * complete". See docs/STATUS.md for the full derivation - a
+         * live host-native diagnostic this round found the SAME dead
+         * vector bytes are reached both by a genuine SYSCALL falling
+         * through (the original 29th/30th-finding scenario, correctly
+         * treated as "this module's init is done") AND by a genuine
+         * hardware INTERRUPT exception (Cause.ExcCode==0, live once
+         * Status.IEc/IM2 are set - task #217/88th finding) - and
+         * treating an interrupted module the same way as a module
+         * that deliberately fell through a syscall was silently
+         * discarding dozens of modules' real init code every time ANY
+         * interrupt fired while they were running (confirmed via
+         * diagnostic: with the old behavior, modules 12-84 of this
+         * project's real IOPBTCONF list were being cut off after at
+         * most one instruction, before this fix).
+         *
+         * An interrupted module's own code is fully resumable and was
+         * doing real work - unlike a syscall, which is the calling
+         * code's own deliberate request. So ExcCode==0 does NOT get
+         * treated as module-complete: this project acknowledges
+         * (clears) exactly the I_STAT bits that are both pending and
+         * enabled in I_MASK (the same bits that caused Cause.IP2 to
+         * be set in the first place - the minimal, generic "an
+         * unhandled interrupt must be acked or it refires forever"
+         * default any real OS needs here, not a guess at PS2-specific
+         * semantics, since no real handler exists to cite), then RFEs
+         * (the same real Status-stack-pop formula already established
+         * for IOP RFE, task #113) back to EPC - resuming the
+         * INTERRUPTED module's own real code exactly where it left
+         * off, instead of abandoning it.
+         *
+         * Verified via host-native diagnostic against the real
+         * SCPH-10000 BIOS: modules_run_to_completion rose from a
+         * small fraction of 29 to 28/29 (only 1 module still needs
+         * the trap-stub bypass, now correctly only for the original
+         * syscall-fallthrough scenario), and the EE's own real
+         * boot progress advanced from its long-stuck 0x8000CFD8
+         * resting point (131st/132nd findings) to a new, further
+         * address (0x8000F814) - genuine additional real BIOS code
+         * now executes on both CPUs. */
+        uint32_t exccode = st->cop0[13] & 0x7Cu;
+        if (exccode == 0u) {
+            g.stats.trap_stubs_bypassed++;
+            iop_intc_state_t *intc = iop_intc_get_state();
+            uint32_t firing = intc->istat & intc->imask;
+            intc->istat &= ~firing;
+            st->cop0[12] = (st->cop0[12] & ~0x0Fu) | ((st->cop0[12] & 0x3Cu) >> 2); /* RFE Status pop */
+            st->pc = st->cop0[14]; /* EPC */
+            st->next_pc = st->pc + 4u;
+            st->exception_pending = 0;
+            return 1;
+        }
+
         g.stats.trap_stubs_bypassed++;
         if (advance_to_next_module(st)) return 1;
 

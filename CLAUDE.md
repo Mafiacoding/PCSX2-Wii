@@ -4699,3 +4699,28 @@ through the already-correctly-modeled import/export mechanism (87th
 finding: "355 imports resolved, 0 unresolved"). No source change this
 round - docs-only investigation, regression/rebuild skipped per standing
 convention.
+
+## Checkpoint (Round 95 - 136th finding, task #252, "implement everything... branch if unsure")
+
+Implementing the 135th finding's scoped design, diagnostics first revealed a
+bigger bug: `is_unconditional_trap_stub()` (task #151/#152) treated a
+hardware interrupt reaching the unclaimed exception vector identically to a
+syscall reaching it - silently discarding dozens of still-working modules'
+real init code (modules 12-84 of the real IOPBTCONF list were being cut off
+after their first instruction, confirmed via diagnostic). **Fix**: check
+`Cause.ExcCode` before deciding - syscalls keep the original "module
+complete" behavior; real interrupts now ack the specific firing I_STAT bits
+and RFE back to EPC, letting the interrupted module's own code resume
+instead of being abandoned. **Verified**: `modules_run_to_completion` rose
+to 28/29 (was cutting most modules short before), and EE-side real boot
+progress advanced past its long-stuck `0x8000CFD8` resting point to a new
+wall, `0x8000F814` - genuine additional real BIOS code now executes on both
+CPUs. 90/90 regression, clean Wii rebuild. Developed and verified on branch
+`round95-iop-exception-dispatcher` before merging to `main`, per this
+round's explicit instruction to branch when unsure on higher-risk changes.
+PMODE/DISPFB1/DISPLAY1 still not written within tested budget - real
+progress, not the finish line yet. Also received a set of official, public
+Sony PS2 technical manuals (EE Core/Overview, GS Users Manual + Supplement,
+VU, SPU2, MIPS calling conventions) from the user this round - legitimately
+citable public documentation, next used for a GS completeness audit per the
+user's earlier "make sure everything is included for GS" directive.

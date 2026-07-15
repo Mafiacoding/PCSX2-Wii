@@ -105,6 +105,16 @@
  * against a live fetch of PCSX2's GS/GSRegs.h GIF_A_D_REG enum. */
 #define GS_REG_TEST_1     0x47
 #define GS_REG_ZBUF_1     0x4E
+/* Round 96: SCISSOR_1/2 (clipping) - real, well-known GS register
+ * addresses, cross-checked this round against the official Sony
+ * GS Users Manual ("7.3 Register List in Address Order": 0x40=
+ * SCISSOR_1, 0x41=SCISSOR_2), a genuine primary-source citation
+ * (not the session-limited-research caveat noted on Rounds 24-28
+ * below - this round had the real manual available). Previously
+ * explicitly flagged as unmodeled (see the Round 28 comment
+ * above: "CLAMP/TEX2/SCISSOR/FBA remain entirely unmodeled"). */
+#define GS_REG_SCISSOR_1  0x40
+#define GS_REG_SCISSOR_2  0x41
 /* ALPHA_1 (Round 23: alpha blending) - cross-checked against a live
  * research pass over PCSX2's GS/GSRegs.h GIF_A_D_REG enum. */
 #define GS_REG_ALPHA_1    0x42
@@ -460,6 +470,21 @@ typedef struct {
     uint32_t alpha_a, alpha_b, alpha_c, alpha_d;
     uint32_t alpha_fix;
 
+    /* Round 96: SCISSOR_1/2 - real scissoring/clip rectangle, per
+     * GS Users Manual "SCISSOR_1/SCISSOR_2: Setting for Scissoring
+     * Area": SCAX0/SCAY0 = upper-left, SCAX1/SCAY1 = lower-right,
+     * inclusive, in the same window coordinate system as XYZ2's
+     * screen coordinates (i.e. directly comparable to this
+     * project's own rasterizer x/y values, no extra scaling).
+     * scissor_configured follows the same established "safety
+     * gate" pattern as zbuf_configured above: real hardware
+     * defaults SCISSOR to (0,0)-(0,0) (which would clip away
+     * everything), but this project defaults to "not configured =
+     * no clipping applied" so every pre-existing test/demo that
+     * never writes SCISSOR keeps drawing exactly as before. */
+    uint32_t scissor_x0, scissor_x1, scissor_y0, scissor_y1;
+    int scissor_configured;
+
     /* Round 27: GS Context 2 (dual-context support) - see
      * PRIM_CTXT_MASK/GS_REG_FRAME_2/etc above for the register-
      * address side. The flat fields above (fbp, fbw, xyoffset_x/y,
@@ -494,6 +519,8 @@ typedef struct {
     int ctx1_ate, ctx1_atst, ctx1_afail;
     uint32_t ctx1_aref;
     uint32_t ctx1_alpha_a, ctx1_alpha_b, ctx1_alpha_c, ctx1_alpha_d, ctx1_alpha_fix;
+    uint32_t ctx1_scissor_x0, ctx1_scissor_x1, ctx1_scissor_y0, ctx1_scissor_y1;
+    int ctx1_scissor_configured;
 
     uint32_t ctx2_fbp, ctx2_fbw;
     uint32_t ctx2_xyoffset_x, ctx2_xyoffset_y;
@@ -504,6 +531,8 @@ typedef struct {
     int ctx2_ate, ctx2_atst, ctx2_afail;
     uint32_t ctx2_aref;
     uint32_t ctx2_alpha_a, ctx2_alpha_b, ctx2_alpha_c, ctx2_alpha_d, ctx2_alpha_fix;
+    uint32_t ctx2_scissor_x0, ctx2_scissor_x1, ctx2_scissor_y0, ctx2_scissor_y1;
+    int ctx2_scissor_configured;
 
     /* Round 28: mipmaps (TEX1 + MIPTBP1/MIPTBP2) - see
      * GS_REG_TEX1_1/MIPTBP1_1/MIPTBP2_1's header comment for the

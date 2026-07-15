@@ -4724,3 +4724,25 @@ Sony PS2 technical manuals (EE Core/Overview, GS Users Manual + Supplement,
 VU, SPU2, MIPS calling conventions) from the user this round - legitimately
 citable public documentation, next used for a GS completeness audit per the
 user's earlier "make sure everything is included for GS" directive.
+
+## Checkpoint (Round 96 - 137th finding, task #253)
+
+User supplied official, public Sony PS2 technical manuals this round
+(GS Users Manual + Supplement, EE Core/Overview, VU, SPU2, MIPS calling
+conventions - `PS2-Programming-Docs-master.zip`). Used the GS manual's
+official register address table to audit `apply_ad_write()` for
+completeness - confirmed the already-flagged gap ("CLAMP/TEX2/SCISSOR/FBA
+remain entirely unmodeled", Round 28) plus several more: XYZF2/XYZF3/XYZ3,
+FOG/FOGCOL, TEX2, PRMODECONT/PRMODE, TEXCLUT, SCANMSK, TEXA, TEXFLUSH, DIMX,
+DTHE, COLCLAMP, PABE, FBA, SIGNAL/FINISH/LABEL. **Implemented SCISSOR_1/
+SCISSOR_2** (real clip-rectangle registers) as the highest-impact item:
+real per-context storage following the established dual-context pattern,
+safety-gated so every pre-existing test/demo keeps drawing exactly as
+before this round. Found and fixed a real bug during testing: SPRITE's
+exclusive-high-edge loop needed a +1 adjustment against SCISSOR's inclusive
+bound (TRIANGLE's already-inclusive loop needed no adjustment) - caught by
+this round's own new test. 91/91 regression (90 + new `test_gs_scissor.c`,
+8 checks), clean Wii rebuild. Remaining confirmed GS register gaps left
+open (task #253) for future rounds, now backed by a real citable source
+(the official manual, at `/tmp/ps2docs/` this session) instead of prior
+rounds' "session-limited-research caveat".

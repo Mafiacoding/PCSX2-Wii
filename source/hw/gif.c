@@ -323,6 +323,11 @@ static void gs_activate_context(void)
         g_gif.alpha_c = g_gif.ctx2_alpha_c;
         g_gif.alpha_d = g_gif.ctx2_alpha_d;
         g_gif.alpha_fix = g_gif.ctx2_alpha_fix;
+        g_gif.scissor_x0 = g_gif.ctx2_scissor_x0;
+        g_gif.scissor_x1 = g_gif.ctx2_scissor_x1;
+        g_gif.scissor_y0 = g_gif.ctx2_scissor_y0;
+        g_gif.scissor_y1 = g_gif.ctx2_scissor_y1;
+        g_gif.scissor_configured = g_gif.ctx2_scissor_configured;
         g_gif.tex1_lcm = g_gif.ctx2_tex1_lcm;
         g_gif.tex1_mxl = g_gif.ctx2_tex1_mxl;
         g_gif.tex1_mmag = g_gif.ctx2_tex1_mmag;
@@ -363,6 +368,11 @@ static void gs_activate_context(void)
         g_gif.alpha_c = g_gif.ctx1_alpha_c;
         g_gif.alpha_d = g_gif.ctx1_alpha_d;
         g_gif.alpha_fix = g_gif.ctx1_alpha_fix;
+        g_gif.scissor_x0 = g_gif.ctx1_scissor_x0;
+        g_gif.scissor_x1 = g_gif.ctx1_scissor_x1;
+        g_gif.scissor_y0 = g_gif.ctx1_scissor_y0;
+        g_gif.scissor_y1 = g_gif.ctx1_scissor_y1;
+        g_gif.scissor_configured = g_gif.ctx1_scissor_configured;
         g_gif.tex1_lcm = g_gif.ctx1_tex1_lcm;
         g_gif.tex1_mxl = g_gif.ctx1_tex1_mxl;
         g_gif.tex1_mmag = g_gif.ctx1_tex1_mmag;
@@ -375,6 +385,46 @@ static void gs_activate_context(void)
             g_gif.tex_mip_tbw[lvl] = g_gif.ctx1_tex_mip_tbw[lvl];
         }
     }
+}
+
+/* Round 96: real SCISSOR clipping (GS Users Manual "SCISSOR_1/2:
+ * Setting for Scissoring Area") - previously entirely unmodeled (see
+ * the Round 28 comment on GS_REG_TEX1_1 above). Applied uniformly
+ * across all 4 rasterizers below: triangle/sprite clamp their
+ * bounding box directly (cheaper, and those two already computed a
+ * bounding box); point/line test each individual pixel, since they
+ * don't have a bounding box to clamp. scissor_configured follows the
+ * same "safety gate" pattern as zbuf_configured - if no real SCISSOR
+ * write has ever happened, this is a no-op and every pre-existing
+ * test/demo keeps drawing exactly as before this round. */
+static int scissor_test(int32_t x, int32_t y)
+{
+    if (!g_gif.scissor_configured) return 1;
+    if (x < (int32_t)g_gif.scissor_x0 || x > (int32_t)g_gif.scissor_x1) return 0;
+    if (y < (int32_t)g_gif.scissor_y0 || y > (int32_t)g_gif.scissor_y1) return 0;
+    return 1;
+}
+
+static void clamp_bbox_to_scissor(int32_t *minx, int32_t *maxx, int32_t *miny, int32_t *maxy, int exclusive_max)
+{
+    if (!g_gif.scissor_configured) return;
+    /* SCISSOR's SCAX1/SCAY1 are real, documented INCLUSIVE bounds
+     * (GS Users Manual). rasterize_triangle()'s own bbox loop is
+     * already inclusive on both ends (`xx <= maxx`), so its maxx/maxy
+     * compare directly against SCAX1/SCAY1. rasterize_sprite()'s own
+     * loop is EXCLUSIVE on the high edge (`xx < sx1`, matching this
+     * project's established SPRITE X1/Y1 convention - see
+     * rasterize_sprite()'s own header comment) - exclusive_max=1
+     * shifts the comparison by one so an inclusive real SCISSOR bound
+     * still allows exactly that last real pixel to be drawn under an
+     * exclusive loop. */
+    int32_t sx0 = (int32_t)g_gif.scissor_x0, sx1 = (int32_t)g_gif.scissor_x1;
+    int32_t sy0 = (int32_t)g_gif.scissor_y0, sy1 = (int32_t)g_gif.scissor_y1;
+    if (exclusive_max) { sx1 += 1; sy1 += 1; }
+    if (*minx < sx0) *minx = sx0;
+    if (*maxx > sx1) *maxx = sx1;
+    if (*miny < sy0) *miny = sy0;
+    if (*maxy > sy1) *maxy = sy1;
 }
 
 static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t x2, int32_t y2,
@@ -395,6 +445,7 @@ static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, i
     if (y2 > maxy) maxy = y2;
     if (minx < 0) minx = 0;
     if (miny < 0) miny = 0;
+    clamp_bbox_to_scissor(&minx, &maxx, &miny, &maxy, 0); /* triangle: inclusive loop */
 
     /* Degenerate (zero-area) triangle - nothing to draw. Also guards
      * against divide-by-zero-shaped edge cases below. */
@@ -679,6 +730,9 @@ static void rasterize_sprite(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
     int32_t sx0 = x0, sx1 = x1, sy0 = y0, sy1 = y1;
     if (sx1 < sx0) { int32_t t = sx0; sx0 = sx1; sx1 = t; }
     if (sy1 < sy0) { int32_t t = sy0; sy0 = sy1; sy1 = t; }
+    if (sx0 < 0) sx0 = 0;
+    if (sy0 < 0) sy0 = 0;
+    clamp_bbox_to_scissor(&sx0, &sx1, &sy0, &sy1, 1); /* sprite: exclusive loop */
 
     /* Round 28: mipmaps - SPRITE-only, per-PRIMITIVE (not per-pixel)
      * LOD selection. See gif.h's GS_REG_TEX1_1/MIPTBP1_1/MIPTBP2_1
@@ -805,6 +859,7 @@ static void rasterize_point(int32_t x, int32_t y, uint32_t rgba, uint32_t z)
 {
     gs_activate_context(); /* Round 27: dual-context - see its own comment */
     if (x < 0 || y < 0) return;
+    if (!scissor_test(x, y)) return;
 
     int z_pass = 1;
     if (g_gif.zbuf_configured && g_gif.zte) {
@@ -876,7 +931,7 @@ static void rasterize_line(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
         int32_t yy = (int32_t)(py + 0.5);
         uint32_t frag_z = (pz < 0.0) ? 0u : (uint32_t)(pz + 0.5);
 
-        if (xx >= 0 && yy >= 0) {
+        if (xx >= 0 && yy >= 0 && scissor_test(xx, yy)) {
             int z_pass = 1;
             if (g_gif.zbuf_configured && g_gif.zte) {
                 uint32_t stored_z = gs_mem_read_psmct32(g_gif.zbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy);
@@ -1338,6 +1393,34 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
         g_gif.ctx2_alpha_c = (data_lo >> ALPHA_C_SHIFT) & ALPHA_ABCD_MASK;
         g_gif.ctx2_alpha_d = (data_lo >> ALPHA_D_SHIFT) & ALPHA_ABCD_MASK;
         g_gif.ctx2_alpha_fix = data_hi & ALPHA_FIX_MASK;
+    } break;
+
+    case GS_REG_SCISSOR_1: {
+        /* Round 96: real SCISSOR bit layout per the official GS
+         * Users Manual: word0 bits[10:0]=SCAX0, bits[26:16]=SCAX1;
+         * word1(data_hi) bits[10:0]=SCAY0, bits[26:16]=SCAY1 -
+         * upper-left/lower-right corners of the enabled drawing area,
+         * inclusive, in the same window coordinate system this
+         * project's rasterizers already use for x/y. */
+        uint32_t x0 = data_lo & 0x7FFu;
+        uint32_t x1 = (data_lo >> 16) & 0x7FFu;
+        uint32_t y0 = data_hi & 0x7FFu;
+        uint32_t y1 = (data_hi >> 16) & 0x7FFu;
+        g_gif.scissor_x0 = x0; g_gif.scissor_x1 = x1;
+        g_gif.scissor_y0 = y0; g_gif.scissor_y1 = y1;
+        g_gif.scissor_configured = 1;
+        g_gif.ctx1_scissor_x0 = x0; g_gif.ctx1_scissor_x1 = x1;
+        g_gif.ctx1_scissor_y0 = y0; g_gif.ctx1_scissor_y1 = y1;
+        g_gif.ctx1_scissor_configured = 1;
+    } break;
+    case GS_REG_SCISSOR_2: {
+        uint32_t x0 = data_lo & 0x7FFu;
+        uint32_t x1 = (data_lo >> 16) & 0x7FFu;
+        uint32_t y0 = data_hi & 0x7FFu;
+        uint32_t y1 = (data_hi >> 16) & 0x7FFu;
+        g_gif.ctx2_scissor_x0 = x0; g_gif.ctx2_scissor_x1 = x1;
+        g_gif.ctx2_scissor_y0 = y0; g_gif.ctx2_scissor_y1 = y1;
+        g_gif.ctx2_scissor_configured = 1;
     } break;
     case GS_REG_TEX1_1: {
         /* GIFRegTEX1 (Round 28) - real bit layout, moderate

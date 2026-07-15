@@ -3279,3 +3279,21 @@ regression, clean Wii rebuild. Developed and verified on a dedicated branch
 explicit "branch if unsure" instruction. PMODE/DISPFB1/DISPLAY1 still not
 written - real progress, not the finish line. The broader 135th-finding
 clean-room dispatcher design remains open for a future round.
+
+### Round 96 (137th finding, task #253): GS audit vs. official manual; SCISSOR_1/2 implemented
+User supplied official, public Sony PS2 technical manuals (GS Users Manual +
+Supplement, EE Core/Overview, VU, SPU2, MIPS calling conventions). Cross-
+referenced the manual's full GS register address table against apply_ad_write()
+- confirmed the gap Round 28 already flagged ("CLAMP/TEX2/SCISSOR/FBA remain
+entirely unmodeled") plus additional gaps: XYZF2/XYZF3/XYZ3, FOG/FOGCOL, TEX2,
+PRMODECONT/PRMODE, TEXCLUT, SCANMSK, TEXA, TEXFLUSH, DIMX, DTHE, COLCLAMP,
+PABE, FBA, SIGNAL/FINISH/LABEL. Implemented SCISSOR_1/SCISSOR_2 (real
+clipping rect, address 0x40/0x41, bit layout cross-checked against the
+manual) as the single highest correctness-impact item - real per-context
+storage following the Round 27 dual-context pattern, safety-gated (not
+configured = no clipping, so pre-existing tests/demos are unaffected).
+Fixed a real bug found while testing: SPRITE's exclusive-bound loop needed a
++1 adjustment against SCISSOR's inclusive bound, unlike TRIANGLE's already-
+inclusive loop. New test_gs_scissor.c (8 checks). 91/91 regression, clean
+Wii rebuild. Remaining confirmed gaps left open (task #253) with a real
+citable source now available for future rounds.

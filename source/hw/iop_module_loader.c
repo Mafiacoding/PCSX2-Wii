@@ -6,6 +6,7 @@
 #include "core/hw/iop_elf.h"
 #include "core/hw/sif.h"
 #include "core/hw/iop_intc.h"
+#include "core/hw/iop_hle_intr.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -447,7 +448,32 @@ static void link_imports_one(iop_state_t *st, const iop_elf_load_result_t *res)
             uint32_t ori_word = iop_mem_read32(st, stub_addr + 4u);
             uint32_t ord = ori_word & 0xFFFFu; /* low 16 bits carry the function ordinal - see iop_elf.h/DECLARE_IMPORT */
 
-            if (exp && ord < exp->fptr_count) {
+            /* Round 109 (task #172/#247/#249 continuation): five
+             * specific real kernel APIs, identified by their real
+             * (library name, ordinal) pair exactly as real IOP
+             * import tables identify any callee - RegisterIntrHandler
+             * (intrman#4)/ReleaseIntrHandler(intrman#5)/
+             * RegisterExceptionHandler(excepman#4)/
+             * RegisterDefaultExceptionHandler(excepman#6)/
+             * ReleaseExceptionHandler(excepman#7), ordinals cited
+             * directly from ps2sdk's intrman.h/excepman.h - see
+             * core/hw/iop_hle_intr.h for the full design and
+             * citations - are redirected to this project's own
+             * project-authored HLE gates instead of the real,
+             * resolved INTRMAN/EXCEPMAN code address, so real module
+             * calls to them populate this project's own clean-room
+             * handler-registration table instead of falling into
+             * real BIOS-internal bookkeeping this project has never
+             * modeled. Checked BEFORE the normal resolution below so
+             * it takes priority when both would otherwise apply (exp
+             * would be non-NULL for these too, since INTRMAN/EXCEPMAN
+             * really do export them - see the 42nd/135th findings). */
+            uint32_t intr_sentinel = iop_hle_intr_sentinel_for_import(imp->name, ord);
+            if (intr_sentinel != 0) {
+                uint32_t j_instr = 0x08000000u | ((intr_sentinel >> 2) & 0x03FFFFFFu);
+                iop_mem_write32(st, stub_addr, j_instr);
+                g.stats.imports_resolved++;
+            } else if (exp && ord < exp->fptr_count) {
                 uint32_t target = iop_mem_read32(st, exp->fptr_table_addr + ord * 4u);
                 uint32_t j_instr = 0x08000000u | ((target >> 2) & 0x03FFFFFFu);
                 iop_mem_write32(st, stub_addr, j_instr); /* overwrite "jr $ra" with "j target" - see the cited PS2 BIOS book's exact description of this mechanism */

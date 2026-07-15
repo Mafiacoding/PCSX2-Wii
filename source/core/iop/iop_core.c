@@ -52,6 +52,7 @@
 #include "core/hw/iop_cdvd.h" /* CDVD register scaffold, no-disc boot case - ROADMAP section 7 */
 #include "core/hw/iop_hle_bios.h"
 #include "core/hw/iop_hle_modules.h"
+#include "core/hw/iop_hle_intr.h"
 #include "core/hw/iop_module_loader.h" /* real IOP module/IRX loader - task #92 */
 #include "core/hw/iop_excb.h" /* real exception-handler priority chains at RAM[0x100] - Round 22 */
 #include "core/hw/iop_icfg.h" /* real ICFG register / EE INTC_SBUS raise - task #214, 85th finding */
@@ -271,6 +272,7 @@ int iop_core_init(const bios_image_t *bios)
     iop_cdvd_init(); /* CDVD register scaffold, no-disc boot case - see core/hw/iop_cdvd.h */
     iop_hle_bios_init(); /* IOP BIOS syscall trap (A0/B0/C0) - see core/hw/iop_hle_bios.h */
     iop_hle_modules_init(); /* IOP module registry scaffold - see core/hw/iop_hle_modules.h */
+    iop_hle_intr_init(); /* Round 109: clean-room RegisterIntrHandler/RegisterExceptionHandler HLE table - see core/hw/iop_hle_intr.h */
     iop_module_loader_reset(); /* real module/IRX boot sequencer - see core/hw/iop_module_loader.h */
     iop_icfg_init(); /* real ICFG register - task #214, 85th finding */
 
@@ -464,11 +466,37 @@ static void iop_check_hw_interrupt(iop_state_t *st, uint32_t next_pc)
 
     st->cop0[13] = (st->cop0[13] & ~0x7Fu); /* Cause.ExcCode = 0 (Interrupt) */
     st->cop0[14] = next_pc; /* EPC */
-    uint32_t vector = (st->cop0[12] & 0x400000u) ? 0xBFC00180u : 0x80000080u; /* Status.BEV */
     st->cop0[12] = (st->cop0[12] & ~0x3Fu) | ((st->cop0[12] & 0x0Fu) << 2); /* Status stack push */
+    st->exception_pending = 1; /* task #156 - see iop_core.h's field comment */
+
+    /* Round 109 (task #172/#247/#249 continuation, following the
+     * user's "lets fix this now and maybe the sony docs have some
+     * info" directive): before falling back to this project's
+     * pre-existing fixed-vector behavior, give the clean-room
+     * RegisterIntrHandler table (core/hw/iop_hle_intr.h) a chance to
+     * redirect straight into a REAL, module-registered handler for
+     * whichever specific IRQ is actually firing - real MIPS/R3000A
+     * hardware convention: the lowest-numbered set bit among
+     * currently pending+unmasked sources is serviced first (same
+     * priority-by-bit-number convention this project's own IOP_INTC_
+     * IRQ_VBLANK_START/END constants already rely on being bit 0/11
+     * respectively). Falls through to the unmodified default
+     * (fixed-vector) behavior below when nothing is registered for
+     * that bit - per the 135th finding's own explicit design
+     * requirement, point (b). */
+    {
+        uint32_t pending = intc->istat & intc->imask;
+        if (pending) {
+            uint32_t irq = 0;
+            while (!(pending & 1u)) { pending >>= 1; irq++; }
+            if (iop_hle_intr_dispatch_interrupt(st, irq))
+                return;
+        }
+    }
+
+    uint32_t vector = (st->cop0[12] & 0x400000u) ? 0xBFC00180u : 0x80000080u; /* Status.BEV */
     st->pc = vector;
     st->next_pc = vector + 4u;
-    st->exception_pending = 1; /* task #156 - see iop_core.h's field comment */
 }
 
 static int iop_step(void)
@@ -483,6 +511,17 @@ static int iop_step(void)
      * address, so this step is complete without any real MIPS
      * instruction being fetched/decoded. */
     if (iop_hle_bios_try_handle(st, pc)) {
+        st->instructions_executed++;
+        return 0;
+    }
+
+    /* Round 109 (task #172/#247/#249 continuation): the clean-room
+     * RegisterIntrHandler/RegisterExceptionHandler handler-
+     * registration table's own 5 call gates and its "handler
+     * finished" return trampoline - see core/hw/iop_hle_intr.h for
+     * the full design. Checked in the same "intercept before fetch"
+     * spot as the A0/B0/C0 table just above. */
+    if (iop_hle_intr_try_handle(st, pc)) {
         st->instructions_executed++;
         return 0;
     }

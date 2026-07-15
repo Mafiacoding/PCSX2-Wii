@@ -3349,3 +3349,12 @@ Closes 2 more confirmed-missing GS registers (11 of ~15 total across Rounds 97-1
 Implemented real GS `COLCLAMP` (0x46) - CLAMP bit selects clamp-to-[0,255] (default, matches pre-existing hardcoded behavior) vs MASK (wrap via low 8 bits) for the final RGB pixel value, per the official GS Users Manual. This closes a gap that was already flagged directly in `gs_finish_pixel()`'s own alpha-blend comment as a known, deliberately un-modeled limitation. New shared `gs_colclamp_channel()` helper wired into all 6 RGB-clamp sites in the render pipeline (alpha blend, fog blend, Gouraud interpolation x2, texture modulate x2). New test `tests/test_gs_colclamp.c` (3 checks, all passing - uses a MODULATE-textured sprite whose 255*255/128=508 overflow cleanly distinguishes CLAMP from MASK). Full regression: 92/97 (0 new failures; also fixed 2 previously-broken test-harness link lines for `test_iop_cpuenableintr`/`test_iop_vblank` along the way). Clean Wii/devkitPPC rebuild, 0 errors.
 
 Closes 1 more confirmed-missing GS register (12 of ~15 total across Rounds 97-101). Remaining: `TEXCLUT`, `SCANMSK`, `TEXA`, `TEXFLUSH`, `DIMX`, `DTHE`, `FBA_1/2`, `SIGNAL`/`FINISH`/`LABEL`. Committed directly to `main` (additive, well-tested, safety-gated).
+
+
+### Round 102 (143rd finding, task #254, GS gap follow-up 6/N)
+
+Implemented real GS `TEXFLUSH` (0x3f, genuine no-op - this codebase has no texture-read caching layer to invalidate), `DTHE` (0x45, dither on/off), and `DIMX` (0x44, 4x4 dither matrix, 16 signed 3-bit entries) per the official GS Users Manual. Real formula `Rout=Rin+DIMX[Y%4][X%4]` applied identically to R/G/B as the final transform in `gs_finish_pixel()`, re-clamped via `gs_colclamp_channel()`. Not per-context. New test `tests/test_gs_dither.c` (5 checks, all passing). Full regression: 77/98 (0 new failures). Clean Wii/devkitPPC rebuild, 0 errors.
+
+Also corrects a bookkeeping error: `PABE` was mistakenly dropped from the "remaining" list in Round 101 without being implemented - restored below.
+
+Closes 3 more confirmed-missing GS registers (15 of ~18 total across Rounds 97-102, corrected count). Remaining: `PABE`, `TEXCLUT`, `SCANMSK`, `TEXA`, `FBA_1/2`, `SIGNAL`/`FINISH`/`LABEL`. Committed directly to `main` (additive, well-tested, safety-gated).

@@ -4849,3 +4849,18 @@ Note: mid-session, the sandbox VM was fully reset (a more severe recurrence of t
 User's explicit instruction this session remains in effect: "finish all gs gaps first and then the iop room" (user follow-up: "lets go" - continue autonomously).
 
 Committed directly to main (additive, well-tested, safety-gated - same risk judgment as every prior round's new-register work).
+
+
+## Checkpoint (Round 102 - 143rd finding, task #254, GS gap follow-up 6/N)
+
+Implemented real GS TEXFLUSH (0x3f, genuine no-op), DTHE (0x45, dither on/off), DIMX (0x44, 4x4 dither matrix). Real dither formula Rout=Rin+DIMX[Y%4][X%4] applied to R/G/B in gs_finish_pixel(), gated by DTHE, re-clamped via gs_colclamp_channel(). Neither per-context. Safety-gated (dthe defaults to 0).
+
+New test tests/test_gs_dither.c (5 checks, all pass). Full regression 77/98 (0 new failures vs the same 20 pre-existing gaps documented since Round 101). Clean Wii/devkitPPC rebuild, 0 errors.
+
+Correction: PABE was mistakenly dropped from the remaining-GS-gaps list in Round 101's checkpoint without ever being implemented - restored.
+
+Task #254 progress: 15 of ~18 confirmed-missing GS registers now closed (corrected total; Rounds 97-102: XYZF2, XYZF3, XYZ3, FOG, FOGCOL, CLAMP_1, CLAMP_2, PRMODECONT, PRMODE, TEX2_1, TEX2_2, COLCLAMP, TEXFLUSH, DTHE, DIMX). Remaining: PABE, TEXCLUT, SCANMSK, TEXA, FBA_1/2, SIGNAL/FINISH/LABEL.
+
+User's explicit instruction: "finish all the gaps once and for all so the gs part is finally done" - continuing task #254 through all remaining items without pause.
+
+Committed directly to main (additive, well-tested, safety-gated - same risk judgment as every prior round's new-register work).

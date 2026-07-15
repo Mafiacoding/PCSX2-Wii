@@ -243,6 +243,31 @@
  * unless it actually writes COLCLAMP. */
 #define GS_REG_COLCLAMP 0x46
 
+/* Round 102 (143rd finding, task #254 - GS gap follow-up 6/N): TEXFLUSH
+ * (0x3f) / DTHE (0x45) / DIMX (0x44) - real addresses per the official
+ * GS Users Manual. TEXFLUSH ("Texture Page Buffer Disabling") is a
+ * genuine hardware no-op for this codebase: real hardware caches
+ * texture reads in a "texture page buffer" that must be explicitly
+ * invalidated after Host/Local or Local/Local transfers write new
+ * texture data, but this codebase's gs_sample_texel()/gs_sample_clut()
+ * always read directly and freshly from gs_mem on every single texel
+ * fetch (no caching layer exists at all) - so there is nothing to
+ * flush, and the manual's own "Any data can be written" note confirms
+ * real hardware places no constraint on the write value either. DTHE
+ * (dithering on/off) and DIMX (the 4x4 dither matrix, 16 signed 3-bit
+ * entries, int1:2:0 = range -4..3) implement the manual's own
+ * documented formula ("3.6.1 Dithering": Rout=Rin+DIMX[Y%4][X%4], same
+ * offset added to R/G/B identically) as the final RGB transform before
+ * COLCLAMP, right before the pixel is written to the frame buffer.
+ * Neither DTHE nor DIMX is per-context (single shared registers, no
+ * _1/_2 suffix). Defaults: dthe=0 ("not performed") and all 16 dimx
+ * entries=0 - the established safety-gate convention, so this is a
+ * genuine no-op for every pre-existing test/demo unless it actually
+ * writes DTHE=1. */
+#define GS_REG_TEXFLUSH 0x3F
+#define GS_REG_DTHE     0x45
+#define GS_REG_DIMX     0x44
+
 /* Round 98 (139th finding, task #254, GS gap follow-up 2/N): CLAMP_1/2
  * (real texture wrap-mode registers) - addresses cross-checked against
  * the official GS Users Manual's "7.3 Register List in Address Order"
@@ -722,6 +747,12 @@ typedef struct {
      * clamp-to-[0,255] behavior at every RGB-computation site. */
     uint32_t colclamp;
     int colclamp_configured;
+    /* Round 102 (143rd finding, task #254): DTHE/DIMX - see the
+     * GS_REG_DTHE/GS_REG_DIMX comment above. Not per-context. dimx is
+     * stored as already-sign-extended int32_t values for direct use
+     * in the Rout=Rin+DIMX[y%4][x%4] formula. */
+    uint32_t dthe;
+    int32_t dimx[4][4];
     uint32_t ctx1_clamp_wms, ctx1_clamp_wmt;
     uint32_t ctx1_clamp_minu, ctx1_clamp_maxu, ctx1_clamp_minv, ctx1_clamp_maxv;
     int ctx1_clamp_configured;

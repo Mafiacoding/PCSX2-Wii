@@ -30,6 +30,8 @@ void gif_init(void)
     g_gif.prmode = 0u;
     g_gif.colclamp = 1u; /* Round 101: default CLAMP=1 - safety gate, matches pre-existing hardcoded behavior */
     g_gif.colclamp_configured = 0;
+    g_gif.dthe = 0u; /* Round 102: default "not performed" - safety gate */
+    memset(g_gif.dimx, 0, sizeof(g_gif.dimx));
 }
 
 gif_state_t *gif_get_state(void) { return &g_gif; }
@@ -305,6 +307,22 @@ static void gs_finish_pixel(int32_t xx, int32_t yy, uint32_t frag_color, uint32_
              * fragment always writes its own real alpha normally. */
             uint32_t existing = gs_mem_read_psmct32(g_gif.fbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy);
             out_a = rgba_channel(existing, 24);
+        }
+
+        if (g_gif.dthe) {
+            /* Round 102 (143rd finding, task #254): dithering - real
+             * GS Users Manual "3.6.1 Dithering" formula, applied as
+             * the final RGB transform before the pixel is written
+             * (same offset added to R/G/B identically; alpha is
+             * untouched, matching the manual's own R/G/B-only
+             * formula). Passed back through gs_colclamp_channel()
+             * (Round 101) since dithering can itself push a channel
+             * out of [0,255] just like any other RGB-modifying stage
+             * in this pipeline. */
+            int32_t d = g_gif.dimx[(uint32_t)yy & 3u][(uint32_t)xx & 3u];
+            out_r = gs_colclamp_channel((int32_t)out_r + d);
+            out_g = gs_colclamp_channel((int32_t)out_g + d);
+            out_b = gs_colclamp_channel((int32_t)out_b + d);
         }
 
         gs_mem_write_psmct32(g_gif.fbp, g_gif.fbw, (uint32_t)xx, (uint32_t)yy, rgba_pack(out_r, out_g, out_b, out_a));
@@ -1600,6 +1618,37 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
         g_gif.colclamp = data_lo & 0x1u;
         g_gif.colclamp_configured = 1;
         break;
+    case GS_REG_TEXFLUSH:
+        /* Round 102 (143rd finding, task #254): TEXFLUSH - genuine
+         * no-op, see gif.h's GS_REG_TEXFLUSH comment for the full
+         * citation/reasoning. Accepted (not falling through to any
+         * "unknown register" path) but intentionally does nothing. */
+        break;
+    case GS_REG_DTHE:
+        /* Round 102: DTHE.DTHE (bit 0 only, per the manual's BIT
+         * ASSIGN table) - see gs_finish_pixel()'s dithering block
+         * above for the full citation and how this takes effect. */
+        g_gif.dthe = data_lo & 0x1u;
+        break;
+    case GS_REG_DIMX: {
+        /* Round 102: DIMX - 16 signed 3-bit (int1:2:0, range -4..3)
+         * entries, DM00-DM13 in data_lo (bits 0-31, 4-bit-aligned
+         * nibbles with only the low 3 bits meaningful per the
+         * manual's own BIT ASSIGN diagram), DM20-DM33 in data_hi
+         * (bits 32-63 of the full 64-bit register, i.e. bits 0-31 of
+         * data_hi here). Sign-extended at parse time so gs_finish_pixel()
+         * can just add the stored value directly. */
+        for (int row = 0; row < 4; row++) {
+            for (int col = 0; col < 4; col++) {
+                int idx = row * 4 + col; /* 0..15, matching DM(row)(col) naming */
+                uint32_t word = (idx < 8) ? data_lo : data_hi;
+                int shift = (idx % 8) * 4;
+                int32_t raw = (int32_t)((word >> shift) & 0x7u);
+                if (raw & 0x4) raw -= 8; /* sign-extend the 3-bit field */
+                g_gif.dimx[row][col] = raw;
+            }
+        }
+    } break;
     case GS_REG_TEX2_1:
     case GS_REG_TEX2_2: {
         /* Round 100 (141st finding, task #254): TEX2 - "subset of

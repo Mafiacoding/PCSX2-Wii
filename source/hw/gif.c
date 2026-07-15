@@ -1762,6 +1762,35 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
         g_gif.texa_aem = (data_lo >> 15) & 0x1u;
         g_gif.texa_ta1 = data_hi & 0xFFu;
     } break;
+    case GS_REG_SIGNAL: {
+        /* Round 108 (149th finding, task #254 - FINAL): SIGNAL -
+         * real masked-update formula per the manual: SIGLBLID.SIGID
+         * = (old_SIGID & ~IDMSK) | (ID & IDMSK). ID is data_lo,
+         * IDMSK is data_hi (both full 32-bit fields). See gif.h's
+         * GS_REG_SIGNAL/FINISH/LABEL comment for the full citation
+         * and honest scope (SIGLBLID storage only, no EE/IOP
+         * interrupt-controller wiring). */
+        uint32_t id = data_lo, idmsk = data_hi;
+        g_gif.siglblid_sigid = (g_gif.siglblid_sigid & ~idmsk) | (id & idmsk);
+    } break;
+    case GS_REG_FINISH:
+        /* Round 108 (149th finding, task #254 - FINAL): FINISH -
+         * "Any data can be written" per the manual, a genuine no-op
+         * for this codebase (same reasoning as GS_REG_TEXFLUSH - no
+         * drawing-completion event/interrupt infrastructure exists
+         * here to request against). finish_pending is incremented
+         * purely for test-observability that the write was accepted
+         * as a real, distinct register (not falling through to an
+         * unknown-register path). */
+        g_gif.finish_pending++;
+        break;
+    case GS_REG_LABEL: {
+        /* Round 108 (149th finding, task #254 - FINAL): LABEL -
+         * identical masked-update formula to SIGNAL, but targets
+         * SIGLBLID.LBLID instead of SIGID. */
+        uint32_t id = data_lo, idmsk = data_hi;
+        g_gif.siglblid_lblid = (g_gif.siglblid_lblid & ~idmsk) | (id & idmsk);
+    } break;
     case GS_REG_TEX2_1:
     case GS_REG_TEX2_2: {
         /* Round 100 (141st finding, task #254): TEX2 - "subset of

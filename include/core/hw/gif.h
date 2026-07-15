@@ -369,6 +369,49 @@
  * TEXCLUT above. */
 #define GS_REG_TEXA 0x3B
 
+/* Round 108 (149th finding, task #254 - GS gap follow-up 12/N,
+ * FINAL): SIGNAL (0x60) / FINISH (0x61) / LABEL (0x62) - the last 3
+ * confirmed-missing GS registers from the 137th finding, closing
+ * task #254. Real semantics per the official GS Users Manual:
+ *
+ * - SIGNAL: "This register generates the SIGNAL event and updates
+ *   the value of the SIGLBLID register. The ID field is composed of
+ *   32 bits, and SIGLBLID is updated only in the bit position where
+ *   the bit value corresponding to IDMSK is 1." Real formula:
+ *   SIGLBLID.SIGID = (old_SIGID & ~IDMSK) | (ID & IDMSK).
+ * - LABEL: identical masked-update formula, but targets SIGLBLID's
+ *   LBLID subfield instead of SIGID.
+ * - FINISH: "When the drawing process currently being performed is
+ *   completed, this register makes a request for the occurrence of
+ *   the FINISH event. Any data can be written." - a genuine no-op
+ *   for this codebase, same reasoning as GS_REG_TEXFLUSH above (no
+ *   drawing-completion event/interrupt infrastructure exists here to
+ *   request against).
+ *
+ * SIGLBLID itself (real address 0x48, a privileged r/w register per
+ * the manual's "7.2. Privileged Registers" section) is modeled here
+ * as plain internal state (siglblid_sigid/siglblid_lblid fields,
+ * inspectable via gif_get_state() exactly like every other register
+ * this codebase tracks) rather than a full readable-by-the-EE
+ * register path, since no such privileged-register read mechanism
+ * exists anywhere in this codebase yet.
+ *
+ * Honestly scoped: this implements genuine SIGLBLID storage +
+ * masked-update semantics (the actual, observable register-level
+ * behavior), but does NOT wire SIGNAL/FINISH/LABEL into the EE/IOP
+ * interrupt controller - no GS_CSR/GS_IMR/vsync-style interrupt
+ * infrastructure exists in gif.c/gif.h to hook into (confirmed via
+ * grep - zero hits for GS_CSR/gs_csr/GS_IMR/gs_imr anywhere in this
+ * file), and building that cross-subsystem delivery path is a
+ * substantially larger undertaking than the GS-local-state modeling
+ * this round is scoped to (consistent with how VSYNC interrupt
+ * delivery already lives in a separate subsystem - ee_timers.c/
+ * ee_intc.c - rather than in gif.c itself, per Round 87's earlier
+ * work). */
+#define GS_REG_SIGNAL 0x60
+#define GS_REG_FINISH 0x61
+#define GS_REG_LABEL  0x62
+
 /* Round 98 (139th finding, task #254, GS gap follow-up 2/N): CLAMP_1/2
  * (real texture wrap-mode registers) - addresses cross-checked against
  * the official GS Users Manual's "7.3 Register List in Address Order"
@@ -884,6 +927,14 @@ typedef struct {
      * sampler is PSMCT32/PSMT8/PSMT4-only, none of which need a
      * substitute alpha - same honest-inert convention as TEXCLUT). */
     uint32_t texa_ta0, texa_aem, texa_ta1;
+    /* Round 108 (149th finding, task #254): SIGLBLID storage - see
+     * GS_REG_SIGNAL/FINISH/LABEL's comment above. SIGID is updated
+     * (masked) by SIGNAL; LBLID is updated (masked) by LABEL.
+     * finish_pending counts outstanding FINISH requests purely for
+     * test-observability - genuinely inert otherwise, since no
+     * drawing-completion tracking/interrupt path consumes it. */
+    uint32_t siglblid_sigid, siglblid_lblid;
+    uint32_t finish_pending;
     uint32_t ctx1_clamp_wms, ctx1_clamp_wmt;
     uint32_t ctx1_clamp_minu, ctx1_clamp_maxu, ctx1_clamp_minv, ctx1_clamp_maxv;
     int ctx1_clamp_configured;

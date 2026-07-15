@@ -4900,3 +4900,15 @@ Count correction: the running "~18 total confirmed-missing GS registers" figure 
 User's explicit instruction: "finish all the gaps once and for all so the gs part is finally done" - continuing task #254 through all remaining items without pause.
 
 Committed directly to main (additive, well-tested, safety-gated - same risk judgment as every prior round's new-register work).
+
+## Checkpoint (Round 106 - 147th finding, task #254, GS gap follow-up 10/N)
+
+Implemented real GS SCANMSK (0x22, "Raster Address Mask Setting"). 2-bit MSK field: 00=normal, 01=reserved (treated as normal), 10=prohibit drawing pixels with even Y, 11=prohibit drawing pixels with odd Y. Genuinely testable (unlike TEXCLUT/TEXA) - gated via a new scanmsk_allows_y() helper called as an early-out at the very top of gs_finish_pixel(), the single per-pixel funnel point every rasterizer (triangle/sprite/point/line) already calls, so it applies uniformly without per-rasterizer bounding-box changes (unlike SCISSOR, Round 96). Not per-context. Defaults to scanmsk=0 (normal) - safety gate.
+
+New test tests/test_gs_scanmsk.c (5 checks, all pass). Full regression 81/102 (0 new failures vs the same 20 pre-existing ee_intc_raise/harness-reconstruction gaps plus test_ee_mmi_hilo2). Clean Wii/devkitPPC rebuild, 0 errors.
+
+Task #254 progress: 19 of 23 confirmed-missing GS registers now closed (Rounds 97-106: XYZF2, XYZF3, XYZ3, FOG, FOGCOL, CLAMP_1, CLAMP_2, PRMODECONT, PRMODE, TEX2_1, TEX2_2, COLCLAMP, TEXFLUSH, DTHE, DIMX, FBA_1, FBA_2, PABE, TEXCLUT, SCANMSK). Remaining: TEXA, SIGNAL, FINISH, LABEL.
+
+User's explicit instruction: "finish all the gaps once and for all so the gs part is finally done" - continuing task #254 through all remaining items without pause.
+
+Committed directly to main (additive, well-tested, safety-gated - same risk judgment as every prior round's new-register work).

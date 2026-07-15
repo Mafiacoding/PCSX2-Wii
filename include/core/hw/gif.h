@@ -325,6 +325,27 @@
  * same convention as GS_REG_TEXFLUSH above. */
 #define GS_REG_TEXCLUT 0x1C
 
+/* Round 106 (147th finding, task #254 - GS gap follow-up 10/N):
+ * SCANMSK - real address 0x22 per the official GS Users Manual
+ * ("SCANMSK : Raster Address Mask Setting" - "This register sets
+ * whether drawing is performed only to odd or even row by the row
+ * address of the frame buffer... The mask is only effective for
+ * drawing primitives."). Real 2-bit MSK field: 00=normal (no
+ * masking, this codebase's pre-existing behavior); 01=reserved
+ * (treated as normal - the manual gives it no defined meaning);
+ * 10=drawing prohibited for pixels with an EVEN Y coordinate;
+ * 11=drawing prohibited for pixels with an ODD Y coordinate. Unlike
+ * TEXCLUT/TEXA, this has a genuine, directly testable effect: gated
+ * via a new scanmsk_allows_y() helper called from gs_finish_pixel()
+ * right alongside the existing scissor_test() check, so it applies
+ * uniformly across all 4 rasterizers (triangle/sprite/point/line)
+ * without needing per-rasterizer changes. Not per-context (single
+ * shared 2-bit field, no _1/_2 suffix). Defaults to msk=0 (normal
+ * drawing) - the established safety-gate convention, so this is a
+ * genuine no-op for every pre-existing test/demo unless it actually
+ * writes SCANMSK with MSK=2 or 3. */
+#define GS_REG_SCANMSK 0x22
+
 /* Round 98 (139th finding, task #254, GS gap follow-up 2/N): CLAMP_1/2
  * (real texture wrap-mode registers) - addresses cross-checked against
  * the official GS Users Manual's "7.3 Register List in Address Order"
@@ -830,6 +851,10 @@ typedef struct {
      * intentionally not consumed anywhere (CSM1-only scope, same
      * honest-inert convention as TEXFLUSH). */
     uint32_t texclut_cbw, texclut_cou, texclut_cov;
+    /* Round 106 (147th finding, task #254): SCANMSK.MSK (2 bits) -
+     * see GS_REG_SCANMSK's comment above. Not per-context. Defaults
+     * to 0 (normal drawing, no masking) - safety gate. */
+    uint32_t scanmsk;
     uint32_t ctx1_clamp_wms, ctx1_clamp_wmt;
     uint32_t ctx1_clamp_minu, ctx1_clamp_maxu, ctx1_clamp_minv, ctx1_clamp_maxv;
     int ctx1_clamp_configured;

@@ -208,8 +208,29 @@ static uint32_t gs_colclamp_channel(int32_t v)
     return (uint32_t)v & 0xFFu;
 }
 
+/* Round 106 (147th finding, task #254 - GS gap follow-up 10/N):
+ * SCANMSK - real GS Users Manual "SCANMSK : Raster Address Mask
+ * Setting" ("This register sets whether drawing is performed only
+ * to odd or even row by the row address of the frame buffer...The
+ * mask is only effective for drawing primitives."). MSK=0 (default)
+ * and MSK=1 (reserved, treated as normal per the manual giving it no
+ * defined meaning) both draw normally; MSK=2 prohibits drawing
+ * pixels whose Y coordinate is even; MSK=3 prohibits drawing pixels
+ * whose Y is odd. Called from gs_finish_pixel() - the single funnel
+ * point every rasterizer (triangle/sprite/point/line) already calls
+ * per-pixel - so this applies uniformly without needing any
+ * per-rasterizer bounding-box changes, unlike SCISSOR (Round 96). */
+static int scanmsk_allows_y(int32_t yy)
+{
+    if (g_gif.scanmsk == 2u) return (yy & 1) != 0;   /* even Y prohibited */
+    if (g_gif.scanmsk == 3u) return (yy & 1) == 0;   /* odd Y prohibited */
+    return 1; /* MSK=0 (normal) or MSK=1 (reserved, treated as normal) */
+}
+
 static void gs_finish_pixel(int32_t xx, int32_t yy, uint32_t frag_color, uint32_t frag_z, int z_write_allowed)
 {
+    if (!scanmsk_allows_y(yy)) return;
+
     uint32_t frag_r = rgba_channel(frag_color, 0);
     uint32_t frag_g = rgba_channel(frag_color, 8);
     uint32_t frag_b = rgba_channel(frag_color, 16);
@@ -1720,6 +1741,13 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
         g_gif.texclut_cou = (data_lo >> 6) & 0x3Fu;
         g_gif.texclut_cov = (data_lo >> 12) & 0x3FFu;
     } break;
+    case GS_REG_SCANMSK:
+        /* Round 106 (147th finding, task #254): SCANMSK.MSK (bits
+         * 1:0, per the manual's BIT ASSIGN table) - see
+         * scanmsk_allows_y()'s comment for the full citation and how
+         * this takes effect. Not per-context. */
+        g_gif.scanmsk = data_lo & 0x3u;
+        break;
     case GS_REG_TEX2_1:
     case GS_REG_TEX2_2: {
         /* Round 100 (141st finding, task #254): TEX2 - "subset of

@@ -3376,3 +3376,9 @@ Closes 1 more confirmed-missing GS register (17 of ~18 total across Rounds 97-10
 Implemented real GS `TEXCLUT` (0x1c, "CLUT Position Specification") per the official GS Users Manual - "disabled when CSM=0 (CSM1 mode)", which is this codebase's only supported CLUT storage mode, so this is a documented, honest no-op (same convention as `TEXFLUSH`). Real bit layout parsed and stored (CBW/COU/COV) but not consumed. New test `tests/test_gs_texclut.c` (2 checks, all passing, reusing `test_gs_clut.c`'s helpers). Full regression: 80/101 (0 new failures). Clean Wii/devkitPPC rebuild, 0 errors.
 
 Count correction: the running "~18 total" figure since Round 97 undercounted `SIGNAL`/`FINISH`/`LABEL` as one item instead of three - real total is 23 confirmed-missing registers. Closes 1 more (18 of 23 total across Rounds 97-105). Remaining: `SCANMSK`, `TEXA`, `SIGNAL`, `FINISH`, `LABEL`. Committed directly to `main` (additive, well-tested, safety-gated).
+
+### Round 106 (147th finding, task #254, GS gap follow-up 10/N)
+
+Implemented real GS `SCANMSK` (0x22, "Raster Address Mask Setting") per the official GS Users Manual. 2-bit MSK field: 00=normal, 01=reserved (treated as normal), 10=prohibit drawing pixels with even Y, 11=prohibit drawing pixels with odd Y. Genuinely testable effect - gated via `scanmsk_allows_y()` called at the top of `gs_finish_pixel()`, the single per-pixel funnel point for all 4 rasterizers. Not per-context. New test `tests/test_gs_scanmsk.c` (5 checks, all passing). Full regression: 81/102 (0 new failures). Clean Wii/devkitPPC rebuild, 0 errors.
+
+Closes 1 more confirmed-missing GS register (19 of 23 total across Rounds 97-106). Remaining: `TEXA`, `SIGNAL`, `FINISH`, `LABEL`. Committed directly to `main` (additive, well-tested, safety-gated).

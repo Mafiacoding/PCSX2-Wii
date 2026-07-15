@@ -5032,3 +5032,15 @@ Moved it (byte-for-byte identical logic) into gs_wii_output.c/.h as gs_decode_di
 Net effect: the entire real display-path logic chain (pmode -> gs_decode_dispfb -> gs_blit_psmct32_to_xfb -> YCbCr) now has host-native test coverage end to end - the moment PMODE/DISPFB1/DISPLAY1 get real values from any future fix, this project has verified, tested code ready to actually present them. Only the final libogc XFB-present call (VIDEO_WaitVSync/DCFlushRange) remains genuinely untestable outside real Wii/Dolphin hardware - honestly disclosed as out of reach for this sandbox, though it's the same, already-demo-verified (Round 17) call shape.
 
 Next: either resume the EE-side AddIntcHandler thread (157th/158th findings), or continue other task #172 angles / the 21 pre-existing failing regression tests per the user's own remaining menu options.
+
+## Checkpoint (Round 120, task #172/#275 - see STATUS.md 160th finding)
+
+Per the user's request to dig deeper on the EE side: tested whether real ps2sdk's separate `AddDmacHandler(channel,...)` mechanism (distinct from the already-examined generic `AddIntcHandler(cause,...)` table) might be the real dispatch path for `Cause.IP3`/DMAC interrupts - since this project's own history (task #180/55th finding) confirmed `AddDmacHandler` DOES get called for real, for SIF0 (channel 5), during a real game boot.
+
+Built fresh scratch-copy instrumentation (`/tmp/pcsx2-instrument22`, never the real repo) logging both the firing DMA channel whenever `Cause.IP3` raises and the AddDmacHandler syscall's own arguments whenever it fires. Ran a full 45M-slice plain BIOS-only OSDSYS boot (no game/disc): **neither ever fired, not once** - confirmed against the full captured log, not a truncated view.
+
+Root cause: the 55th finding's AddDmacHandler/SIF0 confirmation came from live-debugging a real **GT3 game boot** (real CDVD/SIF2 disc-loading DMA traffic) - not the bare BIOS/no-disc OSDSYS path this project's whole 94th-159th-finding thread has been stuck in. The two boot paths diverge before AddDmacHandler/Cause.IP3 become relevant at all, so this round's cross-check question is definitively answered: not applicable to this specific blocker, not a bug, just not exercised here.
+
+This does NOT change the 157th finding's standing conclusion - the real remaining gate for the OSDSYS splash-screen path is still the generic `AddIntcHandler`/Cause=0x8800 per-cause table being empty. This round rules out one specific alternate-mechanism hypothesis rather than opening a new one.
+
+Next: either continue the EE-side AddIntcHandler/Cause=0x8800 reverse-engineering thread now that the DMAC-specific alternative is ruled out, or pursue the Wii/GX downstream verification track further, or the 21 pre-existing failing regression tests - all previously offered, still-open angles.

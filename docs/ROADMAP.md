@@ -3488,3 +3488,12 @@ Does not (and given this session's tool constraints, cannot) confirm whether thi
 - Full regression suite: 84 OK / 21 non-OK (unchanged pre-existing gaps) / 105 total - zero new regressions.
 - Clean Wii/devkitPPC rebuild verified (main.c compiles with zero new warnings from this change).
 - See STATUS.md 159th finding for full details.
+
+### Round 120 (diagnostic investigation, no source change)
+- Per the user's request to keep digging on the EE side: re-examined the 111th finding's "empty AddIntcHandler cause list" conclusion for a possible gap - real ps2sdk has a SEPARATE `AddDmacHandler(channel,...)` mechanism distinct from `AddIntcHandler(cause,...)`, and this project's own history (task #180/55th finding) already confirmed `AddDmacHandler` DOES get called for real for channel 5 (SIF0) - so the question was whether the DMAC-specific dispatch path (rather than the generic one already examined) might actually find a match.
+- Built a fresh scratch copy (`/tmp/pcsx2-instrument22`) with two diagnostic hooks (never ported to the real repo): one logging the firing DMA channel mask whenever `Cause.IP3` is raised, one logging AddDmacHandler's (channel/handler/next) arguments whenever syscall 18 fires.
+- Ran a full 45,000,000-slice plain OSDSYS boot (no game, no force-writes) against the real SCPH-10000 BIOS: **neither hook fired even once** - confirmed via full-log `grep -c`, not a truncated tail.
+- Root cause of the mismatch: the 55th finding's AddDmacHandler/SIF0 confirmation was captured live-debugging a real **Gran Turismo 3 game boot** (which drives real CDVD/SIF2 disc-loading DMA traffic), not the bare BIOS/no-disc OSDSYS bring-up this project's task #172 thread has been chasing since the 94th finding - the two boot paths diverge before AddDmacHandler/Cause.IP3 ever become relevant.
+- Conclusion: the DMAC-channel cross-check is definitively ruled out as applicable to the current splash-screen blocker - it's not broken, it's simply never exercised on this boot path. The 157th finding's standing conclusion (generic `AddIntcHandler`/Cause=0x8800 is the real remaining gate) is unchanged and re-confirmed as the correct focus for any further EE-side work on this specific thread.
+- No source change (diagnostic-only, scratch copy, never touching the real repo). Regression/rebuild skipped per standing convention for docs-only rounds.
+- See STATUS.md 160th finding for full details.

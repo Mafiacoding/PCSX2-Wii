@@ -43,4 +43,26 @@ void gs_blit_psmct32_to_xfb(void *xfb, uint32_t xfb_width_px,
 uint32_t gs_rgb8_pair_to_ycbcr(uint8_t r1, uint8_t g1, uint8_t b1,
                                 uint8_t r2, uint8_t g2, uint8_t b2);
 
+/* Round 119 (task #172/#274, GX/Wii output verification): decodes the
+ * real PS2 GS hardware DISPFB1/DISPFB2 register field layout (well-
+ * established, publicly documented GS register format) - FBP (frame
+ * buffer pointer, bits 0-8, units of 2048 words) and FBW (frame
+ * buffer width, bits 9-14, units of 64 pixels) - into this project's
+ * own gs_mem.h plain word-offset/pixel-count convention.
+ *
+ * Moved here from main.c (where it originated as part of
+ * run_real_boot_flow()'s real production display path, task #126)
+ * specifically so it can be unit-tested: main.c #includes <gccore.h>
+ * (the real Wii SDK), which isn't available in this project's host-
+ * native regression environment, so nothing defined there has ever
+ * been directly testable. This function has no Wii-specific
+ * dependency at all - it's pure integer bit-field arithmetic - so
+ * moving it into this already-host-tested module (gs_wii_output.c/.h)
+ * closes a real, previously-undetected test-coverage gap in exactly
+ * the code path that decides what real GS memory region gets shown
+ * on screen once PMODE/DISPFB1 are finally written for real. main.c
+ * now just calls this declaration instead of defining its own static
+ * copy - no behavior change, verified identical logic. */
+void gs_decode_dispfb(uint64_t dispfb, uint32_t *out_bp_words, uint32_t *out_bw_pixels);
+
 #endif

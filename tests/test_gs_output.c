@@ -49,6 +49,43 @@ int main(void) {
     CHECK(mock_xfb[6] == 0xAAAAAAAAu, "row 1, pixel pair 4-5 untouched");
     CHECK(mock_xfb[3*4+0] == 0xAAAAAAAAu, "row 2 (outside blit height) fully untouched");
 
+    /* Round 119 (task #172/#274): gs_decode_dispfb() - real GS
+     * DISPFB1/DISPFB2 register field decode (FBP bits 0-8, units of
+     * 2048 words; FBW bits 9-14, units of 64 pixels). This is the
+     * exact function main.c's real production display path
+     * (run_real_boot_flow(), task #126) calls the moment PMODE
+     * indicates an active display - previously untested since it
+     * lived in main.c (which depends on <gccore.h>, unavailable
+     * host-natively). */
+    {
+        uint32_t bp, bw;
+
+        gs_decode_dispfb(0, &bp, &bw);
+        CHECK(bp == 0 && bw == 0, "dispfb=0: FBP=0 words, FBW=0 pixels");
+
+        gs_decode_dispfb(1, &bp, &bw); /* FBP field = 1 */
+        CHECK(bp == 2048 && bw == 0, "dispfb FBP=1: bp_words=2048 (1*2048)");
+
+        gs_decode_dispfb(1u << 9, &bp, &bw); /* FBW field = 1, bit 9 exactly */
+        CHECK(bp == 0 && bw == 64, "dispfb FBW=1 (bit 9): bw_pixels=64 (1*64)");
+
+        gs_decode_dispfb(1u << 8, &bp, &bw); /* top bit of FBP field (bit 8) */
+        CHECK(bp == 256u * 2048u && bw == 0, "dispfb bit 8 (top of FBP field): bp_words=524288, FBW untouched");
+
+        /* Realistic real-hardware-typical case: a 640-pixel-wide
+         * framebuffer (FBW field = 640/64 = 10) at word offset
+         * 5*2048 = 10240 (FBP field = 5). */
+        uint64_t realistic = (uint64_t)5u | ((uint64_t)10u << 9);
+        gs_decode_dispfb(realistic, &bp, &bw);
+        CHECK(bp == 10240 && bw == 640, "dispfb realistic 640px-wide case: bp_words=10240, bw_pixels=640");
+
+        /* Bits above 14 (outside both real fields) must be ignored -
+         * real hardware defines DISPFB1/2 with other fields (DBX/DBY/
+         * PSM) above bit 14 that this function doesn't decode. */
+        gs_decode_dispfb((uint64_t)1u << 20, &bp, &bw);
+        CHECK(bp == 0 && bw == 0, "dispfb bit 20 (outside FBP/FBW fields): both outputs 0");
+    }
+
     printf("\n%d check(s) failed\n", failures);
     return failures ? 1 : 0;
 }

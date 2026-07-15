@@ -44,6 +44,18 @@ static inline void rgba32_to_rgb8(uint32_t rgba, uint8_t *r, uint8_t *g, uint8_t
     *b = (uint8_t)((rgba >> 16) & 0xFF);
 }
 
+/* Round 119 (task #172/#274) - see gs_wii_output.h's doc comment.
+ * Moved verbatim from main.c's decode_dispfb() (task #126); logic is
+ * byte-for-byte identical, only the name/location changed (renamed
+ * with a gs_ prefix to match this file's own naming convention). */
+void gs_decode_dispfb(uint64_t dispfb, uint32_t *out_bp_words, uint32_t *out_bw_pixels)
+{
+    uint32_t fbp_field = (uint32_t)(dispfb & 0x1FFu);
+    uint32_t fbw_field  = (uint32_t)((dispfb >> 9) & 0x3Fu);
+    *out_bp_words  = fbp_field * 2048u;
+    *out_bw_pixels = fbw_field * 64u;
+}
+
 void gs_blit_psmct32_to_xfb(void *xfb, uint32_t xfb_width_px,
                              uint32_t dst_x, uint32_t dst_y,
                              uint32_t gs_bp, uint32_t gs_bw,

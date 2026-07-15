@@ -259,21 +259,16 @@ static bios_image_t g_bios;
 #define BOOT_CHUNK_SLICES 200000ull  /* IOP-instruction budget per redraw, keeps the UI responsive */
 #define BOOT_TOTAL_CAP    2000000000ull /* generous overall safety cap, not a real limit - see comment above */
 
-/* Real PS2 GS hardware register field layout for DISPFB1/DISPFB2
- * (well-established, publicly documented GS register format): FBP
- * (frame buffer pointer) is bits 0-8, in units of 2048 words; FBW
- * (frame buffer width) is bits 9-14, in units of 64 pixels.
- * gs_mem.h's own functions expect a plain word offset / pixel-count
- * convention instead (see that header's note that converting real
- * register units is "the caller's job, not handled here") - this is
- * that conversion, done for real, not guessed at. */
-static void decode_dispfb(uint64_t dispfb, uint32_t *out_bp_words, uint32_t *out_bw_pixels)
-{
-    uint32_t fbp_field = (uint32_t)(dispfb & 0x1FFu);
-    uint32_t fbw_field  = (uint32_t)((dispfb >> 9) & 0x3Fu);
-    *out_bp_words  = fbp_field * 2048u;
-    *out_bw_pixels = fbw_field * 64u;
-}
+/* Round 119 (task #172/#274): this used to be a static function
+ * defined right here. It was moved into gs_wii_output.c/.h
+ * (gs_decode_dispfb) so it could actually be unit-tested host-
+ * natively - everything in this file depends on <gccore.h> (the real
+ * Wii SDK), which isn't available in this project's host-native test
+ * environment, so nothing defined in main.c has ever been directly
+ * testable. The logic is byte-for-byte unchanged, only the name/
+ * location changed - see gs_wii_output.h's doc comment for the real
+ * PS2 GS DISPFB1/DISPFB2 register field layout this implements. */
+#define decode_dispfb gs_decode_dispfb
 
 /* Live progress HUD for the automatic real boot flow - redrawn every
  * chunk so the user can see real instruction counts advancing (proof

@@ -3479,3 +3479,12 @@ Does not (and given this session's tool constraints, cannot) confirm whether thi
 - Conclusion: this gate is a genuine real waypoint (not a red herring), but at least one more layer of missing plumbing (most likely a SIF/RPC reply, or one of the other still-zero preceding checks in the same function) sits downstream of it.
 - No source change (diagnostic-only, disposable HLE hook, never proposed as a real fix per this project's no-fabrication policy). Regression/rebuild skipped per standing convention.
 - See STATUS.md 158th finding for full details.
+
+### Round 119
+- Per the user's redirect toward Wii/GX downstream verification: audited `run_real_boot_flow()`'s production display path (`source/main.c`, task #126) - already correctly checks real PMODE EN1/EN2, decodes real DISPFB1 fields, and blits real GS memory via the same `gs_blit_psmct32_to_xfb()` the existing GS/GIF demo already exercises end-to-end (real GIF packet + `dma_channel_kick()`).
+- Found the one untested piece: `decode_dispfb()` lived in `main.c` (depends on `<gccore.h>`, unavailable host-natively) - moved it, byte-for-byte identical, into `source/hw/gs_wii_output.c`/`include/core/hw/gs_wii_output.h` as `gs_decode_dispfb()` (zero Wii dependency, already-tested module). `main.c` now aliases via `#define decode_dispfb gs_decode_dispfb` at its one call site - no behavior change.
+- Added 6 new host-native unit tests (`tests/test_gs_output.c`, 19 checks total up from 13): zero case, FBP-only, FBW-only/bit-9 boundary, FBP-field-top-bit (bit 8, no bleed into FBW), a realistic 640px-wide-framebuffer case, and an out-of-field bit-20 probe.
+- Net: the entire real production display-path logic chain (pmode check -> gs_decode_dispfb -> gs_blit_psmct32_to_xfb -> YCbCr) now has host-native test coverage end to end. Only the final libogc/Wii-hardware XFB-present step (VIDEO_WaitVSync/DCFlushRange) remains untestable outside real Wii/Dolphin - honestly out of reach for this sandbox, but identical to the already-demo-verified (Round 17) XFB-present calls.
+- Full regression suite: 84 OK / 21 non-OK (unchanged pre-existing gaps) / 105 total - zero new regressions.
+- Clean Wii/devkitPPC rebuild verified (main.c compiles with zero new warnings from this change).
+- See STATUS.md 159th finding for full details.

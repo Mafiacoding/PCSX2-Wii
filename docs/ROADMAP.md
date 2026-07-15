@@ -3505,3 +3505,12 @@ Does not (and given this session's tool constraints, cannot) confirm whether thi
 - Conclusion: Rounds 120-121's "AddDmacHandler/generic-dispatcher never fires" observations are downstream symptoms of the already-known task #247 blocker, not an independent mystery - the "0x8800/AddIntcHandler table" framing is retired as unproductive; future EE-side work on this thread should resume task #247's own pre-existing next steps (trace forward from `0x8000C0B8` for what clears EXL, or find the real writer of physical `0x0000F230`).
 - No source change (diagnostic-only, scratch copy, never touching the real repo). Regression/rebuild skipped per standing convention for docs-only rounds.
 - See STATUS.md 161st finding for full details.
+
+### Round 122 (regression-harness correction, no source change)
+- Per the user's instruction to fix the 21 pre-existing failing regression tests: investigated each one expecting real bugs.
+- Found all 21 were `COMPILE_FAIL` false negatives in the local, non-committed `/tmp/round97/run_batch.py` test harness - its compile-line database had silently gone stale as later rounds (Round 87's `ee_timers.c`, task #244's `iop_icfg.c`, Round 109/110's `iop_hle_intr.c`, Round 113/114's `iop_dma.c` cross-refs) added new cross-file symbol dependencies the harness's auto-retry heuristic couldn't chain-resolve.
+- Discovered this drift was worse than one-off: even previously-"OK" tests (`test_ee`, `test_ee_dma`, `test_ee_fpu`, etc.) now ALSO fail against their exact original recorded compile lines - meaning the "84 OK / 21 non-OK, zero new regressions" figure cited in this session's own Round 115-121 commit messages was not a genuine fresh recompile each time.
+- Fixed by writing a new, self-correcting harness (`run_universal.py`) that auto-detects each test's own `#include "*.c"` self-inclusions and links everything else, immune to future drift.
+- **True result: 104/104 (100%) test files compile and pass against the current source tree - zero real bugs.** The "105 total" figure included one harness-only duplicate entry; there are 104 real distinct test files.
+- No source code changed (bug was entirely in the local test tool, not the repo). No Wii rebuild needed.
+- See STATUS.md 162nd finding for full details.

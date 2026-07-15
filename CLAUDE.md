@@ -5054,3 +5054,15 @@ Then directly re-verified the 111th finding's generic-dispatcher chain (`0x80000
 **Important course-correction**: Rounds 120 and 121's negative findings (AddDmacHandler never fires, generic dispatcher never reached) are both downstream symptoms of the ALREADY-KNOWN task #247 blocker - not a new, separate mystery. The "0x8800/AddIntcHandler table" framing this thread has followed since the 111th finding is retired as unproductive to continue - the real gate is upstream of it. Redirecting to task #247's own pre-existing, still-open next steps: trace forward from `0x8000C0B8` for what clears EXL, or find the real writer of physical `0x0000F230`.
 
 No source change this round (diagnostic-only). Per the user's own explicit instruction, next: tackle the 21 pre-existing failing regression tests.
+
+## Checkpoint (Round 122, task #172/#277 - see STATUS.md 162nd finding)
+
+Per the user's instruction to fix the 21 pre-existing failing regression tests, expected to find real bugs. Instead found the whole "21 failing" premise was a false alarm: all 21 were COMPILE_FAIL false negatives caused by staleness in the local, non-committed `/tmp/round97/run_batch.py` test harness - its compile-line database never got updated as later rounds added new cross-file dependencies (ee_timers.c, iop_icfg.c, iop_hle_intr.c, iop_dma.c cross-refs).
+
+Worse: even previously-"OK" tests now also fail to compile against their exact original recorded lines, meaning this session's own repeated "84 OK / 21 non-OK, zero new regressions" claims (Rounds 115-121) weren't based on genuine fresh recompiles.
+
+Fixed by writing a self-correcting harness that auto-detects each test's own #include "*.c" self-inclusions and links everything else. True result: **104/104 (100%) passing, zero real bugs**. The "105 total" figure was itself a harness artifact (one duplicate entry); there are 104 real test files.
+
+No source code changed - the bug was entirely in a local, disposable tool, never part of the repo. No Wii rebuild needed. This corrects the project's own historical self-reporting rather than fixing an emulator bug, since none existed.
+
+Next: per the user's original two-part instruction, both parts (0x8800 reverse-engineering, then the 21 failing tests) are now closed. Awaiting further direction, or continuing autonomous work on task #172's main thread (task #247's EXL=1 next steps) or other open items.

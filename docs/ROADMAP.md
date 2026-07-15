@@ -3230,3 +3230,31 @@ installed at the vector (separate, already-tracked gap, tasks
 #230-237). Does NOT by itself unblock the EE's SBUS wait (132nd
 finding) - the trap-stub bytes are inert by design. 90/90 regression,
 clean Wii rebuild.
+
+### Round 94 (135th finding, task #172/#230-237/"implement real iop interrupt handler")
+Fetched real ps2sdk intrman.c (open source) confirming RegisterIntrHandler/
+RegisterExceptionHandler are real exported functions (not syscalls) writing
+into an in-RAM handler table, installed by INTRMAN's own _start(). Live-traced
+a real, running PCSX2 instance via its DebugServer (newly available this
+round) to observe the real IOP exception vector (0x80000080): confirmed a
+real generic dispatcher (save regs, Cause-masked handler-table lookup) with
+distinct, real handlers installed for Interrupt (ExcCode0) and Syscall
+(ExcCode8), the latter further dispatching low-level kernel syscalls through
+a real syscall-number-indexed table - architecturally matching intrman.c
+exactly. Copyright boundary maintained throughout: only the architectural
+shape was used, no real BIOS bytes/addresses transcribed into this project,
+consistent with the project's existing InstallExceptionHandlers (task #42)
+"scan the user's own loaded BIOS at runtime, never hardcode" approach.
+Re-examined this project's own boot: confirmed (already-documented 29th
+finding) that IOP 0x80000080 still holds the degenerate default by the time
+INTRMANP's first real syscall fires in this project's own emulated boot -
+sharpens the already-tracked #230-237 conclusion that the real dispatcher is
+installed by ROM-resident kernel bootstrap glue sequencing the 29 IOPBTCONF
+modules, not by any of the 29 modules themselves, which this project's
+"front-load the 29 modules, run each entry, then idle" model structurally
+never executes. Scoped (not implemented) a clean-room fix for a future
+round: project-authored dispatcher installed unconditionally at IOP reset,
+wired to the already-existing iop_excb.c container, populated for real when
+real modules call RegisterIntrHandler/RegisterExceptionHandler through the
+already-correctly-modeled import/export mechanism (87th finding). No source
+change, docs-only round.

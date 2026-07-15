@@ -4666,3 +4666,36 @@ is installed at the vector (separate, already-tracked "registration
 chain" gap, tasks #230-237) - honest, not a fabrication, but also not
 a fix for the EE's SBUS wait (132nd finding) by itself. 90/90
 regression, clean Wii rebuild.
+
+## Checkpoint (Round 94 - 135th finding, task #172/#230-237/"implement real iop interrupt handler")
+
+Responded to the user's explicit request to implement a real IOP interrupt
+handler and audit for missing IOP functions. Fetched real, open-source
+ps2sdk `intrman.c` (confirms `RegisterIntrHandler`/`RegisterExceptionHandler`
+are real functions, not syscalls, writing into an in-RAM handler table
+installed by INTRMAN's own `_start()`). Used a newly-available live PCSX2
+DebugServer connection to observe the real IOP exception vector's actual
+architecture: a generic dispatcher (save regs, Cause-masked table lookup)
+with real, distinct handlers for Interrupt/Syscall exception classes -
+architecturally matching `intrman.c` exactly. **Strict copyright boundary
+maintained**: only the architectural shape was used; no real, copyrighted
+BIOS bytes/addresses were transcribed into this project, extending this
+project's existing "never embed real BIOS bytes" rule explicitly to real
+BIOS *code* - the same boundary `iop_hle_bios.c`'s `InstallExceptionHandlers`
+(task #42) already respects (scans the user's own loaded BIOS at runtime,
+never hardcodes). Re-examined this project's own boot and confirmed (per
+the already-documented 29th finding) IOP `0x80000080` is still the
+degenerate default by the time INTRMANP's first real syscall fires - this
+sharpens the already-tracked tasks #230-237 conclusion: the real dispatcher
+is installed by ROM-resident kernel bootstrap glue that sequences the 29
+IOPBTCONF modules, not by any of the 29 modules this project's own loader
+runs, so this project's boot model structurally has never executed it.
+Scoped a concrete, clean-room (non-BIOS-derived) design for implementing
+this project's own equivalent in a future round: a project-authored
+dispatcher installed unconditionally at IOP reset, wired to the already-
+existing `iop_excb.c` ExCB container, populated for real when real modules
+call `RegisterIntrHandler`/`RegisterExceptionHandler`-equivalent functions
+through the already-correctly-modeled import/export mechanism (87th
+finding: "355 imports resolved, 0 unresolved"). No source change this
+round - docs-only investigation, regression/rebuild skipped per standing
+convention.

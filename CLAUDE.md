@@ -5074,3 +5074,15 @@ Directly attacked task #247 per the user's detailed 3-point diagnostic plan. Tra
 Ran the user's own suggested forced-Status.EXL=0 experiment: result is conclusively worse, not better - it breaks the real interrupt-reentrancy protection and gets the CPU stuck re-raising the same interrupt 330M+ times with zero progress. This rules out a naive fix.
 
 No source change this round (diagnostic-only). Next: live-debug the exact fault site (pc=0x80011328 / the 0x81FE0 handler dispatch) against real hardware via the PCSX2 debugger bridge - the same methodology that resolved the 55th/154th findings - to find what real entry/value is missing from the empty registration table.
+
+## Checkpoint (Round 124, task #172/#247/#279 - see STATUS.md 164th finding)
+
+Continuing "trigger 154 solution" (live-hardware verification of task #247) per the user's request. Live-read two low-EE-RAM structures on the already-connected, real, mid-game GT3 session: the 96th finding's entry table (`0x80020E70`) is confirmed all-zero on REAL hardware too (its emptiness is normal, not a bug); the separate 111th finding's `AddIntcHandler` per-cause table (`0x80015D14`) IS populated with real entries, confirming that mechanism's format.
+
+The user then approved resetting the live session to trace a fresh boot for direct comparison. No reset/reboot tool exists anywhere in the `pcsx2-mcp` toolset (checked twice). A manual pseudo-reset via `write_register` was considered and rejected - it wouldn't clear IOP/GS/DMAC/RAM state, so it would produce a misleading trace while destroying the user's real, live game session for no reliable benefit. Not attempted.
+
+Instead, realized the fault address is inside static, resident kernel code whose content doesn't depend on boot progress - so the still-live, still-paused, mid-game session could be used directly, with zero risk, to disassemble the real code at our emulator's exact fault PC (`0x80011328`) and its caller.
+
+**This corrected the 163rd finding's framing.** `0x80011328` is not a dispatch-table walk - it's the word-granularity loop of a generic block-copy (memcpy-style) routine. Re-running the existing instrumented trace confirmed the copy's source pointer is a literal NULL at the fault, traced back to the unchecked return value of a separate lookup/allocator helper function, itself indexed by a field at offset `+0x22C` within the already-documented low-EE-RAM globals block (96th finding) - a different field than the previously-tracked table/count/retry-counter offsets.
+
+This narrows task #247's real fix target from "the whole registration/dispatch subsystem" to one specific helper function and field - smaller and more tractable. No source change this round (diagnostic-only; live inspection was read-only, no reset performed). Next: determine what real value belongs at the `+0x22C`-derived field/index consumed by that helper, using the same no-reset-required live-vs-emulation code comparison technique that produced this round's correction.

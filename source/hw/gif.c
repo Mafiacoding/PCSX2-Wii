@@ -1748,6 +1748,20 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
          * this takes effect. Not per-context. */
         g_gif.scanmsk = data_lo & 0x3u;
         break;
+    case GS_REG_TEXA: {
+        /* Round 107 (148th finding, task #254): TEXA - real bit
+         * layout per the manual: TA0 bits[7:0] (data_lo), AEM bit 15
+         * (data_lo), TA1 bits[39:32] (data_hi bits[7:0], since bit 32
+         * of the full 64-bit register is bit 0 of data_hi). Parsed
+         * and stored for completeness, but - since this codebase's
+         * texture sampler only supports PSMCT32/PSMT8/PSMT4, none of
+         * which lack a real alpha channel - deliberately never
+         * consumed by gs_sample_texel(). See gif.h's GS_REG_TEXA
+         * comment for the full citation. */
+        g_gif.texa_ta0 = data_lo & 0xFFu;
+        g_gif.texa_aem = (data_lo >> 15) & 0x1u;
+        g_gif.texa_ta1 = data_hi & 0xFFu;
+    } break;
     case GS_REG_TEX2_1:
     case GS_REG_TEX2_2: {
         /* Round 100 (141st finding, task #254): TEX2 - "subset of

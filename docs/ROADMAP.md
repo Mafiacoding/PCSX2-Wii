@@ -3382,3 +3382,9 @@ Count correction: the running "~18 total" figure since Round 97 undercounted `SI
 Implemented real GS `SCANMSK` (0x22, "Raster Address Mask Setting") per the official GS Users Manual. 2-bit MSK field: 00=normal, 01=reserved (treated as normal), 10=prohibit drawing pixels with even Y, 11=prohibit drawing pixels with odd Y. Genuinely testable effect - gated via `scanmsk_allows_y()` called at the top of `gs_finish_pixel()`, the single per-pixel funnel point for all 4 rasterizers. Not per-context. New test `tests/test_gs_scanmsk.c` (5 checks, all passing). Full regression: 81/102 (0 new failures). Clean Wii/devkitPPC rebuild, 0 errors.
 
 Closes 1 more confirmed-missing GS register (19 of 23 total across Rounds 97-106). Remaining: `TEXA`, `SIGNAL`, `FINISH`, `LABEL`. Committed directly to `main` (additive, well-tested, safety-gated).
+
+### Round 107 (148th finding, task #254, GS gap follow-up 11/N)
+
+Implemented real GS `TEXA` (0x3b, "Texture Alpha Value Setting") per the official GS Users Manual - only relevant for texture formats lacking a full 8-bit alpha channel (RGBA16/RGB24), neither supported by this codebase's PSMCT32/PSMT8/PSMT4-only sampler, so this is a documented, honest no-op (same convention as `TEXFLUSH`/`TEXCLUT`). Real fields (TA0/AEM/TA1) parsed and stored but not consumed. New test `tests/test_gs_texa.c` (2 checks, all passing, mirroring `test_gif_stq_sprite.c`'s SPRITE-texturing packet convention). Full regression: 82/103 (0 new failures). Clean Wii/devkitPPC rebuild, 0 errors.
+
+Closes 1 more confirmed-missing GS register (20 of 23 total across Rounds 97-107). Remaining: `SIGNAL`, `FINISH`, `LABEL`. Committed directly to `main` (additive, well-tested, safety-gated).

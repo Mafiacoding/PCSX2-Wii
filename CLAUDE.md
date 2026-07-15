@@ -4912,3 +4912,15 @@ Task #254 progress: 19 of 23 confirmed-missing GS registers now closed (Rounds 9
 User's explicit instruction: "finish all the gaps once and for all so the gs part is finally done" - continuing task #254 through all remaining items without pause.
 
 Committed directly to main (additive, well-tested, safety-gated - same risk judgment as every prior round's new-register work).
+
+## Checkpoint (Round 107 - 148th finding, task #254, GS gap follow-up 11/N)
+
+Implemented real GS TEXA (0x3b, "Texture Alpha Value Setting") - per the official GS Users Manual, only relevant for texture formats lacking a full 8-bit alpha channel (RGBA16/RGB24). This codebase's texture sampler only supports PSMCT32/PSMT8/PSMT4, all of which carry real alpha (directly or via CLUT), so TEXA's substitute-alpha logic never applies. Documented, honest no-op: TA0/AEM/TA1 parsed and stored into new texa_ta0/texa_aem/texa_ta1 fields but deliberately not consumed by gs_sample_texel() - same convention as TEXFLUSH/TEXCLUT.
+
+New test tests/test_gs_texa.c (2 checks, all pass, mirroring test_gif_stq_sprite.c's SPRITE-texturing packet convention with an 11x11 PSMCT32 texture and a known per-texel alpha). Full regression 82/103 (0 new failures vs the same 20 pre-existing ee_intc_raise/harness-reconstruction gaps plus test_ee_mmi_hilo2). Clean Wii/devkitPPC rebuild, 0 errors.
+
+Task #254 progress: 20 of 23 confirmed-missing GS registers now closed (Rounds 97-107: XYZF2, XYZF3, XYZ3, FOG, FOGCOL, CLAMP_1, CLAMP_2, PRMODECONT, PRMODE, TEX2_1, TEX2_2, COLCLAMP, TEXFLUSH, DTHE, DIMX, FBA_1, FBA_2, PABE, TEXCLUT, SCANMSK, TEXA). Remaining: SIGNAL, FINISH, LABEL.
+
+User's explicit instruction: "finish all the gaps once and for all so the gs part is finally done" - continuing task #254 through all remaining items without pause.
+
+Committed directly to main (additive, well-tested, safety-gated - same risk judgment as every prior round's new-register work).

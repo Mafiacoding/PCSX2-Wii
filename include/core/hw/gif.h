@@ -346,6 +346,29 @@
  * writes SCANMSK with MSK=2 or 3. */
 #define GS_REG_SCANMSK 0x22
 
+/* Round 107 (148th finding, task #254 - GS gap follow-up 11/N):
+ * TEXA - real address 0x3b per the official GS Users Manual ("TEXA :
+ * Texture Alpha Value Setting" - "This register sets the Alpha value
+ * to be referred to when the Alpha value of the texture is not an
+ * 8-bit value."). Real fields: TA0 (bits 7:0, the "As" value used
+ * when RGBA16's A=0, or for RGB24 which has no alpha at all), AEM
+ * (bit 15, alpha-expansion method - when 1, R=G=B=0 texels are
+ * treated as fully transparent regardless of TA0/TA1), TA1 (bits
+ * 39:32, the "As" value used when RGBA16's A=1). This register is
+ * only ever consulted for texture formats that lack a full 8-bit
+ * alpha channel: RGBA16(S) and RGB24. This codebase's texture
+ * sampler only supports PSMCT32/PSMT8/PSMT4 (see the pre-existing
+ * scope note above) - PSMCT32 carries its own real 8-bit alpha and
+ * PSMT8/PSMT4 resolve through a CLUT entry that itself carries real
+ * alpha, so TEXA's substitute-alpha logic never has anywhere to
+ * apply. RGBA16/RGB24 texture support is a documented, unsupported
+ * gap (same as TEX2's CSM2 gap, TEXCLUT's CSM2 gap). Parsed and
+ * stored for completeness (so a real TEXA write is never silently
+ * dropped as an unknown register) but deliberately not consumed by
+ * gs_sample_texel() - same honest no-op convention as TEXFLUSH/
+ * TEXCLUT above. */
+#define GS_REG_TEXA 0x3B
+
 /* Round 98 (139th finding, task #254, GS gap follow-up 2/N): CLAMP_1/2
  * (real texture wrap-mode registers) - addresses cross-checked against
  * the official GS Users Manual's "7.3 Register List in Address Order"
@@ -855,6 +878,12 @@ typedef struct {
      * see GS_REG_SCANMSK's comment above. Not per-context. Defaults
      * to 0 (normal drawing, no masking) - safety gate. */
     uint32_t scanmsk;
+    /* Round 107 (148th finding, task #254): TEXA - see
+     * GS_REG_TEXA's comment above. Stored for completeness but
+     * intentionally not consumed anywhere (this codebase's texture
+     * sampler is PSMCT32/PSMT8/PSMT4-only, none of which need a
+     * substitute alpha - same honest-inert convention as TEXCLUT). */
+    uint32_t texa_ta0, texa_aem, texa_ta1;
     uint32_t ctx1_clamp_wms, ctx1_clamp_wmt;
     uint32_t ctx1_clamp_minu, ctx1_clamp_maxu, ctx1_clamp_minv, ctx1_clamp_maxv;
     int ctx1_clamp_configured;

@@ -3258,3 +3258,24 @@ wired to the already-existing iop_excb.c container, populated for real when
 real modules call RegisterIntrHandler/RegisterExceptionHandler through the
 already-correctly-modeled import/export mechanism (87th finding). No source
 change, docs-only round.
+
+### Round 95 (136th finding, task #252, "implement everything... branch if unsure")
+Implemented the 135th finding's scoped fix, but diagnostics first revealed a
+bigger, previously-undetected bug: is_unconditional_trap_stub() (task #151/
+#152) fired identically for BOTH a real syscall falling through to the
+unclaimed exception vector (its original, correct scenario) AND a genuine
+hardware interrupt reaching the same dead vector once Status.IEc/IM2 are
+live (task #217) - silently treating an interrupted, still-working module
+as "boot complete" and skipping it. Diagnostic proof: modules 12-84 of the
+real IOPBTCONF list were being cut off after at most their first
+instruction. Fix: check Cause.ExcCode before deciding - ExcCode==8 (syscall)
+keeps the original "module complete" behavior; ExcCode==0 (interrupt) now
+acks the specific pending+enabled I_STAT bits and RFEs back to EPC, letting
+the interrupted module's real code resume. Verified: modules_run_to_
+completion rose to 28/29 (only 1 module still needs the bypass), EE-side
+real progress advanced from 0x8000CFD8 to a new wall, 0x8000F814. 90/90
+regression, clean Wii rebuild. Developed and verified on a dedicated branch
+(round95-iop-exception-dispatcher) before merging to main per this round's
+explicit "branch if unsure" instruction. PMODE/DISPFB1/DISPLAY1 still not
+written - real progress, not the finish line. The broader 135th-finding
+clean-room dispatcher design remains open for a future round.

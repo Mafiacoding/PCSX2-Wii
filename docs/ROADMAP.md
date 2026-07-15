@@ -3530,3 +3530,11 @@ Does not (and given this session's tool constraints, cannot) confirm whether thi
 - Net effect: narrows the real fix target from "the whole registration/dispatch subsystem" to one specific helper function and one specific field - a smaller, more tractable next step than previously understood. Task #247 remains open but materially advanced.
 - No source change (diagnostic-only; live inspection was read-only). Regression/rebuild skipped per standing convention for docs-only rounds.
 - See STATUS.md 164th finding for full details.
+
+### Round 125 (real source fix, task #172/#247/#280)
+- Live-disassembled one level further back from the 164th finding's caller site (still using the already-connected real GT3 session, no reset needed): the null memcpy source pointer is computed via a real KSEG3 (0xC0000000-0xFFFFFFFF) virtual address (`0xFFFF8xxx`).
+- Found and fixed a genuine, previously-unknown bug: `ee_mem_ptr()` treated ALL addresses >= 0x80000000 as flat-physical-mapped, when only KSEG0/KSEG1 (0x80000000-0xBFFFFFFF) are direct-mapped on real MIPS/R5900 - KSEG2/KSEG3 require real TLB translation, exactly like KUSEG. Fixed by routing addr>=0xC0000000 through `ee_tlb_translate()`.
+- Verified: compiles clean, full regression suite re-run (104/104 pass, same 5 pre-existing NO_MARKER harness quirks, zero real regressions), clean Wii/devkitPPC rebuild successful.
+- Directly confirmed via live real hardware that the address range in question (0xFFFF8000-0xFFFF8250) holds a real, richly-populated kernel data structure on real hardware, unlike our own (still-empty) backing RAM there - proving the fix targets a real, meaningful gap.
+- **Task #247 not yet fully closed**: our TLB already had an entry mapping this KSEG3 region (to an empty page), so the fix alone doesn't change the final fault outcome. The remaining gap is a second, separate one: the real kernel mechanism that populates this specific structure isn't modeled yet. Next: identify and implement that mechanism.
+- See STATUS.md 165th finding for full details, including the exact live-hardware values confirmed at this address.

@@ -603,26 +603,48 @@ static inline uint8_t *ee_mem_ptr(ee_state_t *st, uint32_t addr, uint32_t size)
     }
 
     uint32_t phys;
-    if (addr < 0x80000000u) {
-        /* KUSEG - needs real TLB translation, see ee_tlb_translate(). */
+    if (addr < 0x80000000u || addr >= 0xC0000000u) {
+        /* KUSEG (0x00000000-0x7FFFFFFF) AND KSEG2/KSEG3
+         * (0xC0000000-0xFFFFFFFF) are BOTH real TLB-mapped segments on
+         * the R5900 - only KSEG0/KSEG1 (0x80000000-0xBFFFFFFF) are
+         * unmapped/direct-physical. This project's memory dispatch
+         * originally only routed addr<0x80000000 through
+         * ee_tlb_translate() and treated everything >=0x80000000 -
+         * including KSEG2/KSEG3 - as flat-physical-masked
+         * (addr & 0x1FFFFFFF), silently misdecoding any real KSEG2/3
+         * access as an unrelated ROM/RAM byte instead of performing a
+         * real TLB lookup (or correctly raising a TLB Refill exception
+         * when unmapped). Found via task #247's null-pointer TLB fault
+         * investigation (round 124/164th finding): live-disassembling
+         * the exact real BIOS routine that computes our fault's null
+         * source pointer (via the PCSX2 debugger bridge, no reset
+         * needed since it's static kernel code) showed it legitimately
+         * computes and dereferences virtual addresses in the
+         * 0xFFFF8000-0xFFFF9000 range (KSEG3) - addresses this
+         * project's old flat mask silently misrouted into a coincidental
+         * ROM offset (or out-of-bounds NULL) rather than performing the
+         * real, valid TLB translation a booted real console would use
+         * for its own KSEG3-resident kernel data at this exact point in
+         * boot. See docs/STATUS.md's 165th finding. */
         if (!ee_tlb_translate(st, addr, &phys)) {
             st->mem_tlb_miss = 1; /* real TLB Refill exception territory - see callers below */
             return NULL;
         }
     } else {
-        /* Mask to the physical address FIRST, then decide ROM-vs-RAM.
-         * Real MIPS kseg0/kseg1 both decode to the same physical
-         * address space directly (segment bits only affect caching,
-         * not the physical target) - so the BIOS ROM (physical base
-         * 0x1FC00000) is reachable via its kseg1 uncached mirror
-         * (0xBFC00000-0xC0000000, the reset vector's own segment) AND
-         * its kseg0 cached mirror (0x9FC00000-0xA0000000). This
-         * project originally only special-cased the kseg1 form
-         * (checking the raw virtual address >= 0xBFC00000 before
-         * masking), which silently treated any kseg0 ROM-mirror access
-         * as a RAM access with a physical offset far past the end of
-         * RAM (returning NULL / a decoded-as-NOP 0) instead of the
-         * real ROM byte. Found via the COP0 PRId fix (see
+        /* KSEG0/KSEG1 (0x80000000-0xBFFFFFFF): unmapped, direct
+         * physical mapping - mask to the physical address FIRST, then
+         * decide ROM-vs-RAM. Real MIPS kseg0/kseg1 both decode to the
+         * same physical address space directly (segment bits only
+         * affect caching, not the physical target) - so the BIOS ROM
+         * (physical base 0x1FC00000) is reachable via its kseg1
+         * uncached mirror (0xBFC00000-0xC0000000, the reset vector's
+         * own segment) AND its kseg0 cached mirror (0x9FC00000-
+         * 0xA0000000). This project originally only special-cased the
+         * kseg1 form (checking the raw virtual address >= 0xBFC00000
+         * before masking), which silently treated any kseg0 ROM-mirror
+         * access as a RAM access with a physical offset far past the
+         * end of RAM (returning NULL / a decoded-as-NOP 0) instead of
+         * the real ROM byte. Found via the COP0 PRId fix (see
          * docs/STATUS.md's "round 5"): once boot took the correct
          * path, it jumped through pc=0x9FC4xxxx (kseg0 ROM) almost
          * immediately. */

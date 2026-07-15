@@ -3412,3 +3412,13 @@ Live PCSX2 connection finally available this session. Reset the running game to 
 Within that constraint, reproduced the 135th finding's real generic exception dispatcher shape at `0x80000080` fresh, independently, on this cold boot. New this round: confirmed the per-exception-class handler-slot table has exactly 2 of 16 slots (classes 0/Interrupt and 8/Syscall) holding a distinct value from the other 14 shared-default slots - matching real `intrman.c`'s cited `_start()` behavior exactly. Also read real `I_MASK` on the fully-booted system and found 8 distinct IRQ bits enabled - live confirmation that multiple real subsystems, not just EXCEPMAN/INTRMAN's own bootstrap, genuinely exercise the real `RegisterIntrHandler`/`EnableIntr` API surface Round 109's new dispatch table targets.
 
 Does not (and given this session's tool constraints, cannot) confirm whether this project's own boot model reaches a real call site for these APIs before its current resting point - that remains a host-native-instrumentation question for a future round. No source change - docs-only round.
+
+### Round 111
+- Host-native instrumented diagnostic (`/tmp/pcsx2-instrument20`, `diag_intr.c`) run against the real SCPH-10000 BIOS via this project's own `system_init()`/`system_run_interleaved()`, with no PCSX2/live-hardware dependency.
+- Confirmed for the first time that THIS PROJECT'S OWN boot model (not just reference/live hardware) genuinely calls `RegisterExceptionHandler` (classes 0, 8) and `RegisterIntrHandler` (irq 0x10, 0, 0xB, 0x2A, 0x2B, 2) - directly answers task #266/#267.
+- Found + fixed real bug: irq=0x2A/0x2B (real `IOP_IRQ_DMA_SIF0`/`IOP_IRQ_DMA_SIF1` per ps2sdk's cited `enum iop_irq_list`) were silently rejected by the original 32-entry table. `IOP_HLE_INTR_NUM_IRQ` changed 32 -> 64 (real max valid value is `IOP_IRQ_SW2` = 0x3F = 63).
+- Added 4 new regression checks to `tests/test_iop_hle_intr.c` (34 checks total, up from 30): irq=0x2A/0x2B/0x3F now succeed; irq=999 still correctly rejected.
+- Documented, explicitly scoped limitation: table can now *store* handlers for irq >= 32, but `iop_check_hw_interrupt()` still only *dispatches* from the 32-bit I_STAT/I_MASK range, so real dispatch to SIF0/SIF1-style handlers via that path remains a separate, unmodeled next step.
+- Full regression suite: 84 OK / 21 non-OK (unchanged pre-existing gaps) / 105 total - zero new regressions.
+- Clean Wii/devkitPPC rebuild verified.
+- See STATUS.md 152nd finding for full details.

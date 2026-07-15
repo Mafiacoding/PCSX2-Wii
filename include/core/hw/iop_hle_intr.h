@@ -140,7 +140,29 @@
  * itself executes a real `jr $ra`). */
 #define IOP_HLE_INTR_HANDLER_RETURN_TRAMPOLINE          0x000000E4u
 
-#define IOP_HLE_INTR_NUM_IRQ 32
+/* Round 111 (task #267, host-native instrumentation against the real
+ * SCPH-10000 BIOS): a real, direct diagnostic run of THIS project's
+ * own boot model (not just live-reference-hardware observation)
+ * caught real module code calling RegisterIntrHandler with
+ * irq=0x2A/0x2B - values this file's original 32-entry table (sized
+ * to match I_STAT/I_MASK's 32 hardware bits) silently rejected as
+ * "out of range", when they are in fact real, valid IOP_IRQ_DMA_SIF0/
+ * IOP_IRQ_DMA_SIF1 values per ps2sdk's own cited enum
+ * (iop/system/intrman/include/intrman.h's `enum iop_irq_list`) -
+ * RegisterIntrHandler's real irq parameter space is NOT limited to
+ * the 32 classic I_STAT bits; it also covers a second range of
+ * per-DMA-channel "soft" interrupt numbers (`IOP_IRQ_DMA_MDEC_IN=0x20`
+ * through `IOP_IRQ_DMA_SIO2_OUT=0x2D`) plus two software interrupts
+ * (`IOP_IRQ_SW1=0x3E`, `IOP_IRQ_SW2=0x3F`) dispatched by INTRMAN
+ * through its own internal handler table, not directly through
+ * I_STAT/I_MASK. `IOP_IRQ_SW2=0x3F` (63) is the real, cited highest
+ * value - sized to 64 (0-63 inclusive) to cover the full real range,
+ * not just the hardware register width. This is a genuine, evidence-
+ * based fix (real module code observed calling exactly these two
+ * SIF0/SIF1 DMA-completion irq numbers - directly relevant to this
+ * project's own extensive SIF/RPC investigation history, tasks
+ * #183/#184/#190 among others), not a defensive over-allocation. */
+#define IOP_HLE_INTR_NUM_IRQ 64
 #define IOP_HLE_INTR_NUM_EXC 16
 
 typedef struct {

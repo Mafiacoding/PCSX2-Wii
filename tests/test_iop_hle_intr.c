@@ -83,6 +83,34 @@ int main(void)
         st->gpr[31] = 0x001100C0u;
         iop_hle_intr_try_handle(st, IOP_HLE_INTR_REGISTER_INTR_HANDLER);
         CHECK(st->gpr[2] == (uint32_t)-1, "out-of-range irq returns -1, not success");
+
+        /* --- Round 111 regression guard: irq=0x2A/0x2B (real
+         * IOP_IRQ_DMA_SIF0/IOP_IRQ_DMA_SIF1 per ps2sdk's cited
+         * intrman.h enum) must NOT be rejected - a host-native
+         * diagnostic run against the real SCPH-10000 BIOS this round
+         * caught real module code registering exactly these two irq
+         * numbers, which the original 32-entry table silently
+         * dropped as "out of range". --- */
+        st->gpr[4] = 0x2A;
+        st->gpr[6] = 0x00150000u;
+        st->gpr[31] = 0x00150040u;
+        iop_hle_intr_try_handle(st, IOP_HLE_INTR_REGISTER_INTR_HANDLER);
+        CHECK(st->gpr[2] == 0, "real IOP_IRQ_DMA_SIF0 (0x2A) registers successfully, not rejected");
+        CHECK(iop_hle_intr_get_intr_handler(0x2A) == 0x00150000u, "IOP_IRQ_DMA_SIF0 handler stored");
+
+        st->gpr[4] = 0x2B;
+        st->gpr[6] = 0x00160000u;
+        st->gpr[31] = 0x00160040u;
+        iop_hle_intr_try_handle(st, IOP_HLE_INTR_REGISTER_INTR_HANDLER);
+        CHECK(st->gpr[2] == 0, "real IOP_IRQ_DMA_SIF1 (0x2B) registers successfully, not rejected");
+        CHECK(iop_hle_intr_get_intr_handler(0x2B) == 0x00160000u, "IOP_IRQ_DMA_SIF1 handler stored");
+
+        /* IOP_IRQ_SW2 = 0x3F (63), the real, cited highest valid irq value. */
+        st->gpr[4] = 0x3F;
+        st->gpr[6] = 0x00170000u;
+        st->gpr[31] = 0x00170040u;
+        iop_hle_intr_try_handle(st, IOP_HLE_INTR_REGISTER_INTR_HANDLER);
+        CHECK(st->gpr[2] == 0, "real IOP_IRQ_SW2 (0x3F, highest valid value) registers successfully");
     }
 
     /* --- RegisterExceptionHandler: real struct layout (next/info/

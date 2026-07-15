@@ -28,6 +28,8 @@ void gif_init(void)
     g_gif.cur_fog = 0xFFu;
     g_gif.prmodecont_ac = 1u; /* Round 99: default AC=1 ("use PRIM") - safety gate */
     g_gif.prmode = 0u;
+    g_gif.colclamp = 1u; /* Round 101: default CLAMP=1 - safety gate, matches pre-existing hardcoded behavior */
+    g_gif.colclamp_configured = 0;
 }
 
 gif_state_t *gif_get_state(void) { return &g_gif; }
@@ -181,6 +183,29 @@ static uint32_t gs_sample_texel(int32_t tex_x, int32_t tex_y)
  * it for the ABE check - Round 99, task #254. */
 static uint32_t gs_effective_attr_prim(void);
 
+/* Round 101 (142nd finding, task #254 - GS gap follow-up 5/N): COLCLAMP -
+ * see gif.h's GS_REG_COLCLAMP/colclamp field comments for the full
+ * citation. Applied at every RGB-channel clamp site in this file's
+ * render pipeline (alpha blend, fog blend, Gouraud interpolation,
+ * texture modulate) - not just the single "final" write, since this
+ * codebase's pipeline clamps defensively at each stage rather than
+ * carrying unclamped wide intermediates through to one final point;
+ * treating every one of those clamp sites as COLCLAMP-governed is the
+ * most faithful and consistent way to honor a MASK-mode configuration
+ * anywhere overflow can occur (texture modulate's (tex*color)/128 is
+ * the most likely real site to actually exceed 255, e.g. 255*255/128
+ * = 507) without a larger internal-precision rework. Negative inputs
+ * (not expected in practice, since every caller already computes non-
+ * negative sums/products) still wrap via the same low-8-bits masking,
+ * treating the value's two's-complement bit pattern like a real
+ * hardware register would. */
+static uint32_t gs_colclamp_channel(int32_t v)
+{
+    if (!g_gif.colclamp_configured || g_gif.colclamp)
+        return (uint32_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
+    return (uint32_t)v & 0xFFu;
+}
+
 static void gs_finish_pixel(int32_t xx, int32_t yy, uint32_t frag_color, uint32_t frag_z, int z_write_allowed)
 {
     uint32_t frag_r = rgba_channel(frag_color, 0);
@@ -256,18 +281,17 @@ static void gs_finish_pixel(int32_t xx, int32_t yy, uint32_t frag_color, uint32_
              * The coefficient is deliberately NOT clamped to [0,1] -
              * real hardware allows results >1.0x ("boosted" colors)
              * when coeff > 128, a genuine, documented hardware
-             * behavior some games rely on. The FINAL result IS
-             * clamped to [0,255] here (COLCLAMP=1, the default and
-             * overwhelmingly common real config) - COLCLAMP=0's real
-             * "wrap instead of clamp" alternative is a known,
-             * deliberately un-modeled gap, same honest-simplification
-             * pattern used elsewhere in this file. */
+             * behavior some games rely on. The FINAL result is passed
+             * through gs_colclamp_channel() (Round 101, task #254),
+             * which now genuinely honors COLCLAMP=0's real "wrap
+             * instead of clamp" mode - previously a known, deliberately
+             * un-modeled gap noted right here; closed this round. */
             int32_t r = ((r_a - r_b) * (int32_t)coeff) / 128 + r_d;
             int32_t g = ((g_a - g_b) * (int32_t)coeff) / 128 + g_d;
             int32_t b = ((b_a - b_b) * (int32_t)coeff) / 128 + b_d;
-            out_r = (uint32_t)(r < 0 ? 0 : (r > 255 ? 255 : r));
-            out_g = (uint32_t)(g < 0 ? 0 : (g > 255 ? 255 : g));
-            out_b = (uint32_t)(b < 0 ? 0 : (b > 255 ? 255 : b));
+            out_r = gs_colclamp_channel(r);
+            out_g = gs_colclamp_channel(g);
+            out_b = gs_colclamp_channel(b);
         }
 
         if (alpha_test_failed && g_gif.afail == GS_AFAIL_RGB_ONLY) {
@@ -503,9 +527,9 @@ static uint32_t apply_fog(uint32_t color, uint32_t fog)
     uint32_t nr = ((fog * r) + (inv * fcr)) >> 8;
     uint32_t ng = ((fog * g) + (inv * fcg)) >> 8;
     uint32_t nb = ((fog * b) + (inv * fcb)) >> 8;
-    if (nr > 255) nr = 255;
-    if (ng > 255) ng = 255;
-    if (nb > 255) nb = 255;
+    nr = gs_colclamp_channel((int32_t)nr);
+    ng = gs_colclamp_channel((int32_t)ng);
+    nb = gs_colclamp_channel((int32_t)nb);
     return rgba_pack(nr, ng, nb, a);
 }
 
@@ -685,10 +709,10 @@ static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, i
                     uint32_t g = (uint32_t)(b0 * rgba_channel(c0, 8)  + b1 * rgba_channel(c1, 8)  + b2 * rgba_channel(c2, 8)  + 0.5);
                     uint32_t b = (uint32_t)(b0 * rgba_channel(c0, 16) + b1 * rgba_channel(c1, 16) + b2 * rgba_channel(c2, 16) + 0.5);
                     uint32_t a = (uint32_t)(b0 * rgba_channel(c0, 24) + b1 * rgba_channel(c1, 24) + b2 * rgba_channel(c2, 24) + 0.5);
-                    if (r > 255) r = 255;
-                    if (g > 255) g = 255;
-                    if (b > 255) b = 255;
-                    if (a > 255) a = 255;
+                    r = gs_colclamp_channel((int32_t)r);
+                    g = gs_colclamp_channel((int32_t)g);
+                    b = gs_colclamp_channel((int32_t)b);
+                    a = gs_colclamp_channel((int32_t)a);
                     shaded_r = r; shaded_g = g; shaded_b = b; shaded_a = a;
                 }
 
@@ -766,10 +790,10 @@ static void rasterize_triangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, i
                         uint32_t g = (rgba_channel(texel, 8)  * shaded_g) / 128u;
                         uint32_t b = (rgba_channel(texel, 16) * shaded_b) / 128u;
                         uint32_t a = (rgba_channel(texel, 24) * shaded_a) / 128u;
-                        if (r > 255) r = 255;
-                        if (g > 255) g = 255;
-                        if (b > 255) b = 255;
-                        if (a > 255) a = 255;
+                        r = gs_colclamp_channel((int32_t)r);
+                        g = gs_colclamp_channel((int32_t)g);
+                        b = gs_colclamp_channel((int32_t)b);
+                        a = gs_colclamp_channel((int32_t)a);
                         out = rgba_pack(r, g, b, a);
                     }
                 }
@@ -978,10 +1002,10 @@ static void rasterize_sprite(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
                     uint32_t g = (rgba_channel(texel, 8)  * rgba_channel(g_gif.rgba, 8))  / 128u;
                     uint32_t b = (rgba_channel(texel, 16) * rgba_channel(g_gif.rgba, 16)) / 128u;
                     uint32_t a = (rgba_channel(texel, 24) * rgba_channel(g_gif.rgba, 24)) / 128u;
-                    if (r > 255) r = 255;
-                    if (g > 255) g = 255;
-                    if (b > 255) b = 255;
-                    if (a > 255) a = 255;
+                    r = gs_colclamp_channel((int32_t)r);
+                    g = gs_colclamp_channel((int32_t)g);
+                    b = gs_colclamp_channel((int32_t)b);
+                    a = gs_colclamp_channel((int32_t)a);
                     out = rgba_pack(r, g, b, a);
                 }
             }
@@ -1114,10 +1138,10 @@ static void rasterize_line(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
                     uint32_t g = (uint32_t)((1.0 - t) * rgba_channel(c0, 8)  + t * rgba_channel(c1, 8)  + 0.5);
                     uint32_t b = (uint32_t)((1.0 - t) * rgba_channel(c0, 16) + t * rgba_channel(c1, 16) + 0.5);
                     uint32_t a = (uint32_t)((1.0 - t) * rgba_channel(c0, 24) + t * rgba_channel(c1, 24) + 0.5);
-                    if (r > 255) r = 255;
-                    if (g > 255) g = 255;
-                    if (b > 255) b = 255;
-                    if (a > 255) a = 255;
+                    r = gs_colclamp_channel((int32_t)r);
+                    g = gs_colclamp_channel((int32_t)g);
+                    b = gs_colclamp_channel((int32_t)b);
+                    a = gs_colclamp_channel((int32_t)a);
                     out = rgba_pack(r, g, b, a);
                 }
                 uint32_t frag_fog = (pf < 0.0) ? 0u : (pf > 255.0 ? 255u : (uint32_t)(pf + 0.5));
@@ -1569,6 +1593,13 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
             g_gif.ctx2_tex_csa = csa; g_gif.ctx2_tex_cld = cld;
         }
     } break;
+    case GS_REG_COLCLAMP:
+        /* Round 101 (142nd finding, task #254): COLCLAMP.CLAMP (bit 0
+         * only, per the manual's BIT ASSIGN table) - see gs_colclamp_channel()
+         * above for the full citation and how this actually takes effect. */
+        g_gif.colclamp = data_lo & 0x1u;
+        g_gif.colclamp_configured = 1;
+        break;
     case GS_REG_TEX2_1:
     case GS_REG_TEX2_2: {
         /* Round 100 (141st finding, task #254): TEX2 - "subset of

@@ -228,6 +228,20 @@
  * buffer/size/format. */
 #define GS_REG_TEX2_1 0x16
 #define GS_REG_TEX2_2 0x17
+/* Round 101 (142nd finding, task #254 - GS gap follow-up 5/N): COLCLAMP -
+ * real address 0x46 per the official GS Users Manual ("COLCLAMP : Color
+ * Clamp Control"). A single, shared (not per-context) 1-bit register:
+ * CLAMP=1 clamps the final RGB pixel value to [0,255] (this project's
+ * pre-existing hardcoded behavior at every color-computation site -
+ * see gs_finish_pixel()'s alpha-blend comment, which explicitly flagged
+ * this as a known, deliberately un-modeled gap before this round);
+ * CLAMP=0 (MASK) instead wraps via the low 8 bits, a real, documented
+ * hardware behavior some effects rely on (e.g. intentional color
+ * "wraparound" glitch effects). Defaults to CLAMP=1 (colclamp=1,
+ * colclamp_configured=0) in gif_init() - the established safety-gate
+ * convention, so this is a no-op for every pre-existing test/demo
+ * unless it actually writes COLCLAMP. */
+#define GS_REG_COLCLAMP 0x46
 
 /* Round 98 (139th finding, task #254, GS gap follow-up 2/N): CLAMP_1/2
  * (real texture wrap-mode registers) - addresses cross-checked against
@@ -701,6 +715,13 @@ typedef struct {
      * PRMODECONT/PRMODE pair, shared across both contexts. */
     uint32_t prmodecont_ac;
     uint32_t prmode;
+    /* Round 101 (142nd finding, task #254): COLCLAMP - see the
+     * GS_REG_COLCLAMP comment above. Not per-context (single shared
+     * register). colclamp defaults to 1 (CLAMP) with colclamp_configured
+     * defaulting to 0, matching this project's pre-existing hardcoded
+     * clamp-to-[0,255] behavior at every RGB-computation site. */
+    uint32_t colclamp;
+    int colclamp_configured;
     uint32_t ctx1_clamp_wms, ctx1_clamp_wmt;
     uint32_t ctx1_clamp_minu, ctx1_clamp_maxu, ctx1_clamp_minv, ctx1_clamp_maxv;
     int ctx1_clamp_configured;

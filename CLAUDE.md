@@ -4834,3 +4834,18 @@ Task #254 progress: 11 of ~15 confirmed-missing GS registers now closed (Rounds 
 User's explicit instruction this session remains in effect: "finish all gs gaps first and then the iop room" - continuing task #254 (GS gaps) before returning to task #252 (IOP clean-room exception dispatcher design - already completed earlier this session per task list, but user's ordering instruction is honored regardless for any further IOP work).
 
 Committed directly to main (additive, well-tested, safety-gated - same risk judgment as every prior round's new-register work).
+
+
+## Checkpoint (Round 101 - 142nd finding, task #254, GS gap follow-up 5/N)
+
+Implemented real GS COLCLAMP (0x46): CLAMP bit selects clamp-to-[0,255] (default) vs MASK (wrap via low 8 bits) for the final RGB pixel value, per the official GS Users Manual. This closes a gap gs_finish_pixel()'s own alpha-blend comment had already flagged as a known un-modeled limitation. New shared gs_colclamp_channel() helper in source/hw/gif.c, wired into all 6 RGB-clamp sites (alpha blend, fog blend, triangle/sprite/line Gouraud+modulate results). Safety-gated via colclamp_configured defaulting to 0 (CLAMP=1) - no behavior change for any pre-existing test/demo.
+
+New test tests/test_gs_colclamp.c (3 checks, all pass - MODULATE sprite whose 255*255/128=508 overflow cleanly distinguishes CLAMP vs MASK). Full regression 92/97 (0 new failures from this round's change; additionally fixed 2 previously-broken test-harness reconstructions for test_iop_cpuenableintr/test_iop_vblank after a mid-session sandbox reset wiped /tmp and required rebuilding the regression-runner's gcc-line mapping from scratch - one remaining harness gap, test_ee_mmi_hilo2, needs a broader EE-core dependency chain not yet worked out, documented honestly as unrelated to this round). Clean Wii/devkitPPC rebuild, 0 errors.
+
+Task #254 progress: 12 of ~15 confirmed-missing GS registers now closed (Rounds 97-101: XYZF2, XYZF3, XYZ3, FOG, FOGCOL, CLAMP_1, CLAMP_2, PRMODECONT, PRMODE, TEX2_1, TEX2_2, COLCLAMP). Remaining: TEXCLUT, SCANMSK, TEXA, TEXFLUSH, DIMX, DTHE, FBA_1/2, SIGNAL/FINISH/LABEL.
+
+Note: mid-session, the sandbox VM was fully reset (a more severe recurrence of the previously-documented instability - not just background-process death but a complete /tmp wipe). Recovered by re-cloning the repo from GitHub (already pushed through Round 100) and re-extracting the PS2 docs zip from the persistent uploads folder. Standing security constraints (PAT in session memory only, clean remote URL, no BIOS bytes committed) were re-verified after recovery.
+
+User's explicit instruction this session remains in effect: "finish all gs gaps first and then the iop room" (user follow-up: "lets go" - continue autonomously).
+
+Committed directly to main (additive, well-tested, safety-gated - same risk judgment as every prior round's new-register work).

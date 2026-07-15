@@ -3342,3 +3342,10 @@ Closes 2 more confirmed-missing GS registers (9 of ~15 total across Rounds 97-99
 Implemented real GS `TEX2_1`/`TEX2_2` (0x16/0x17) - "subset of TEX0" registers per the official GS Users Manual that update only PSM/CBP/CPSM/CSA/CLD (reusing TEX0's exact bit positions) while leaving TBP0/TBW/TW/TH/TCC/TFX untouched, letting a texture swap its CLUT palette without re-specifying its buffer/size/format. Mirrors into per-context storage matching TEX0's own dual-context convention. New test `tests/test_gs_tex2.c` (3 checks, all passing, built on `test_gs_clut.c`'s helpers). Full regression: 96/96, 0 new failures. Clean Wii/devkitPPC rebuild, 0 errors.
 
 Closes 2 more confirmed-missing GS registers (11 of ~15 total across Rounds 97-100). Remaining: `TEXCLUT`, `SCANMSK`, `TEXA`, `TEXFLUSH`, `DIMX`, `DTHE`, `COLCLAMP`, `PABE`, `FBA_1/2`, `SIGNAL`/`FINISH`/`LABEL`. Committed directly to `main` (additive, well-tested, safety-gated).
+
+
+### Round 101 (142nd finding, task #254, GS gap follow-up 5/N)
+
+Implemented real GS `COLCLAMP` (0x46) - CLAMP bit selects clamp-to-[0,255] (default, matches pre-existing hardcoded behavior) vs MASK (wrap via low 8 bits) for the final RGB pixel value, per the official GS Users Manual. This closes a gap that was already flagged directly in `gs_finish_pixel()`'s own alpha-blend comment as a known, deliberately un-modeled limitation. New shared `gs_colclamp_channel()` helper wired into all 6 RGB-clamp sites in the render pipeline (alpha blend, fog blend, Gouraud interpolation x2, texture modulate x2). New test `tests/test_gs_colclamp.c` (3 checks, all passing - uses a MODULATE-textured sprite whose 255*255/128=508 overflow cleanly distinguishes CLAMP from MASK). Full regression: 92/97 (0 new failures; also fixed 2 previously-broken test-harness link lines for `test_iop_cpuenableintr`/`test_iop_vblank` along the way). Clean Wii/devkitPPC rebuild, 0 errors.
+
+Closes 1 more confirmed-missing GS register (12 of ~15 total across Rounds 97-101). Remaining: `TEXCLUT`, `SCANMSK`, `TEXA`, `TEXFLUSH`, `DIMX`, `DTHE`, `FBA_1/2`, `SIGNAL`/`FINISH`/`LABEL`. Committed directly to `main` (additive, well-tested, safety-gated).

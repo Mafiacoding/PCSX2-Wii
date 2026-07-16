@@ -1151,6 +1151,21 @@ static int iop_step(void)
         iop_mem_write32(st, addr & ~3u, (rt32 << shift) | (mem & (0x00FFFFFFu >> (24 - shift))));
     } break;
 
+    /* Round 128 (task #172/#196, 168th finding): CACHE (primary
+     * opcode 0x2F) - standard MIPS I/II instruction (public ISA,
+     * independent of any BIOS-specific data), real IOP kernel code
+     * issues it routinely (e.g. around DMA buffer boundaries) to
+     * invalidate/writeback cache lines. This project models no real
+     * instruction/data cache at all for either core (already-
+     * established, honestly-scoped simplification used throughout -
+     * same rationale as the "no cycle-accurate timing" scope), so
+     * CACHE is architecturally correct as a pure no-op here: with no
+     * cache to act on, there is nothing for it to do. Found via
+     * host-native instrumentation showing the IOP halting on this
+     * exact opcode immediately after Round 127's timing fix unblocked
+     * further boot progress. */
+    case 0x2F: /* CACHE */ break;
+
     default:
     {
         char buf[96];

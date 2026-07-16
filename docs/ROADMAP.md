@@ -3554,3 +3554,10 @@ Does not (and given this session's tool constraints, cannot) confirm whether thi
 - **Major result**: the previously-permanent Status.EXL=1 lockup (task #247's entire subject since the 161st finding) no longer reproduces - the EE now executes a real ERET and returns to normal execution instead of getting stuck. Boot now reaches `pc=0x8000F864`, inside the SAME already-documented wait loop from task #196 (0x8000F768), not a new crash.
 - **Task #247 status**: materially advanced, likely substantially resolved at its original root. Next steps toward a visible splash screen should resume from the 0x8000F768 wait loop (task #196's pre-existing scope) rather than task #247's original EXL=1 framing.
 - See STATUS.md 167th finding for full details.
+
+### Round 128 (real source fix, task #172/#196)
+- Round 127's timing fix let the IOP run further than ever before, immediately revealing a new gap: unimplemented primary opcode 0x2F (CACHE) - a standard MIPS instruction real kernel code issues routinely, never implemented since this project models no real cache at all.
+- Fixed: added CACHE as a no-op in `iop_core.c`'s primary-opcode dispatch - architecturally correct given the project's already-established no-cache-model scope.
+- Verified: compiles clean, full regression suite re-run (104/104, zero real regressions), clean Wii/devkitPPC rebuild successful.
+- IOP now runs further (0x80000208 -> 0x80000420) before hitting a new wall: fetching raw word 0xFFFFFFFF at 0x8000041C - unlike CACHE, this looks like fetching from never-populated memory rather than a genuine missing-opcode gap. Likely a loader/RAM-population gap (our IOP RAM-resident bootstrap image possibly shorter than real hardware's), not yet confirmed.
+- See STATUS.md 168th finding for full details. Next step: determine why IOP RAM is unpopulated past this point and what real content (if any) should be there.

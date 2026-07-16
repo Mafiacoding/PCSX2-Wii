@@ -564,6 +564,45 @@ static int iop_step(void)
         return st->halted ? 1 : 0;
     }
 
+    /* Round 129 (task #172/#196, 169th finding, real fix): synthetic
+     * default/spurious-interrupt-return stub. Real MIPS/R3000A
+     * hardware fixed-vectors EVERY exception to 0x80000080 (or
+     * 0xBFC00180 when Status.BEV=1) - real kernel software installs
+     * a genuine dispatcher there very early in boot. This project
+     * doesn't model that installation (and, per this project's
+     * standing clean-room convention, never will by transcribing
+     * real BIOS bytes to reconstruct one) - previously, whenever
+     * iop_hle_intr_dispatch_interrupt() (just above, in the
+     * interrupt-raise path) found no module-registered handler for
+     * the firing IRQ and fell through to this fixed vector, the CPU
+     * fetched whatever incidental RAM content happened to be sitting
+     * at 0x80000080 - traced this round to stale bytes left over from
+     * an earlier, unrelated real cache-flush instruction sequence
+     * (see docs/STATUS.md's 169th finding for the full write-history
+     * trace), eventually halting on a genuinely garbage word one
+     * unrelated module's own store instruction had scribbled there.
+     * Since the real, module-registered-handler path is ALREADY tried
+     * first (immediately above, in the code that jumps here),
+     * reaching this exact fixed address always means "no handler is
+     * registered for this specific IRQ" - precisely the case a
+     * minimal, clean-room default handler exists for. Modeled the
+     * same way this project's other synthetic HLE stubs are (A0/B0/
+     * C0 BIOS traps, etc.): acknowledge and RFE-equivalent return,
+     * rather than attempting to reconstruct real kernel dispatcher
+     * bytes. Deliberately NOT applied to the BEV=1 ROM vector
+     * (0xBFC00180) - that address is genuine ROM content already
+     * executed correctly by this project; the gap is specific to the
+     * RAM-resident BEV=0 vector, which nothing ever populates. */
+    if (pc == 0x80000080u && st->exception_pending) {
+        st->cop0[12] = (st->cop0[12] & ~0x0Fu) | ((st->cop0[12] & 0x3Cu) >> 2); /* RFE-equivalent Status stack pop */
+        st->exception_pending = 0;
+        uint32_t epc = st->cop0[14];
+        st->pc = epc;
+        st->next_pc = epc + 4u;
+        st->instructions_executed++;
+        return 0;
+    }
+
     /* Guard against PC escaping into memory this project doesn't
      * model as real, fetchable code (round 14 finding: a live-traced
      * real BIOS boot path executes a genuine JALR $s1 whose target

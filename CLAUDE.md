@@ -5190,3 +5190,7 @@ Answered the user's Pfad-1-vs-Pfad-2 design question with evidence: decoded the 
 ## Checkpoint (Round 142)
 
 Implemented the real B0-table Event subsystem (TestEvent et al.) the user asked for after Round 141's finding - cited, tested (11/11), regressed (106/106), Wii-rebuilt. Live re-verification shows the fix is correct but doesn't move the boot trace's stall point: the two events the traced loop polls decode to real, plausible handles (class 3, specs 5/15) that were legitimately opened earlier in boot, but this project's boot path never calls the matching DeliverEvent for them - likely because the existing IOP VBLANK IRQ model (Round 93/216) doesn't route through this new event system yet. That's the concrete next thread. See STATUS.md's 182nd finding / ROADMAP.md Round 142.
+
+## Checkpoint (Round 143)
+
+Corrected Round 142's unverified "VBLANK" guess after further investigation - real evidence (emumaster's actual firstfile()/B(42h) code) shows the sibling event class is memory-card-related, not VBLANK, redirecting the search toward the kernel/driver F00000xxh event family (possibly tied to the existing SIO2/memory-card scaffold). Exact class still unconfirmed - no fix attempted, docs-only correction. See STATUS.md's 183rd finding.

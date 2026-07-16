@@ -51,6 +51,7 @@
 #include "core/hw/iop_spu2.h" /* SPU2 register scaffold - task #95 */
 #include "core/hw/iop_cdvd.h" /* CDVD register scaffold, no-disc boot case - ROADMAP section 7 */
 #include "core/hw/iop_cdrom_legacy.h" /* Round 133 (173rd finding): PS1-legacy CD-ROM Index/Status Register - see header for full trace/citation */
+#include "core/hw/iop_sio2.h" /* Round 135 (175th finding): SIO2 controller/memory-card serial interface - see header for full trace/citation */
 #include "core/hw/iop_hle_bios.h"
 #include "core/hw/iop_hle_modules.h"
 #include "core/hw/iop_hle_intr.h"
@@ -101,6 +102,12 @@ uint8_t iop_mem_read8(iop_state_t *st, uint32_t addr)
     uint8_t cdrom_legacy_val;
     if (iop_cdrom_legacy_mmio_read8(addr, &cdrom_legacy_val))
         return cdrom_legacy_val;
+
+    /* Round 135 (task #172/#292, 175th finding): SIO2 - see
+     * iop_sio2.h for the full citation trail. */
+    uint8_t sio2_val;
+    if (iop_sio2_mmio_read8(addr, &sio2_val))
+        return sio2_val;
 
     uint8_t *p = iop_mem_ptr(st, addr, 1);
     return p ? *p : 0;
@@ -200,6 +207,10 @@ uint32_t iop_mem_read32(iop_state_t *st, uint32_t addr)
     uint32_t icfg_val;
     if (iop_icfg_mmio_read32(addr, &icfg_val))
         return icfg_val;
+    /* Round 135 (175th finding): SIO2 - see iop_sio2.h. */
+    uint32_t sio2_val32;
+    if (iop_sio2_mmio_read32(addr, &sio2_val32))
+        return sio2_val32;
 
     uint8_t *p = iop_mem_ptr(st, addr, 4);
     if (!p) return 0;
@@ -215,6 +226,10 @@ void iop_mem_write8(iop_state_t *st, uint32_t addr, uint8_t val)
     /* Round 133 (173rd finding) - see iop_mem_read8()'s matching
      * comment above. */
     if (iop_cdrom_legacy_mmio_write8(addr, val))
+        return;
+
+    /* Round 135 (175th finding): SIO2 - see iop_sio2.h. */
+    if (iop_sio2_mmio_write8(addr, val))
         return;
 
     uint8_t *p = iop_mem_ptr(st, addr, 1);
@@ -268,6 +283,9 @@ void iop_mem_write32(iop_state_t *st, uint32_t addr, uint32_t val)
         return;
     if (iop_icfg_mmio_write32(addr, val))
         return;
+    /* Round 135 (175th finding): SIO2 - see iop_sio2.h. */
+    if (iop_sio2_mmio_write32(addr, val))
+        return;
 
     uint8_t *p = iop_mem_ptr(st, addr, 4);
     if (!p) return;
@@ -287,6 +305,7 @@ int iop_core_init(const bios_image_t *bios)
     iop_spu2_init(); /* SPU2 register scaffold - task #95, see core/hw/iop_spu2.h */
     iop_cdvd_init(); /* CDVD register scaffold, no-disc boot case - see core/hw/iop_cdvd.h */
     iop_cdrom_legacy_init(); /* PS1-legacy CD-ROM Index/Status Register - Round 133, see core/hw/iop_cdrom_legacy.h */
+    iop_sio2_init(); /* SIO2 controller/memory-card interface - Round 135, see core/hw/iop_sio2.h */
     iop_hle_bios_init(); /* IOP BIOS syscall trap (A0/B0/C0) - see core/hw/iop_hle_bios.h */
     iop_hle_modules_init(); /* IOP module registry scaffold - see core/hw/iop_hle_modules.h */
     iop_hle_intr_init(); /* Round 109: clean-room RegisterIntrHandler/RegisterExceptionHandler HLE table - see core/hw/iop_hle_intr.h */

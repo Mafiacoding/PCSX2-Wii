@@ -5162,3 +5162,7 @@ Decoded Round 132's traced PS1-legacy CD-ROM Index/Status Register poll (`0x1F80
 ## Checkpoint (Round 134, task #172/#288 - see STATUS.md 174th finding)
 
 Investigation-only round, no source change. Chunked 80M-IOP-instruction watch trace (per-10M checkpoints) confirms Round 133's fix produced sustained real forward progress (IOP pc genuinely differs at nearly every checkpoint, not stuck) and that SIF_STAT_SIFINIT stays 0 throughout. New generic unhandled-MMIO trap found two real, unmodeled hardware blocks: PS1-legacy SPU voice/control registers (`0x1F801C00`-`0x1F801DB6`, likely a boot-time reset pass) and the real SIO2 controller (`0x1F808240`-`0x1F80825C`, genuinely new). No fix attempted - both are scoped as future candidates, SIO2 being the more concrete one since it's a self-contained, previously-untouched real hardware block. Docs updated (STATUS.md/ROADMAP.md/this checkpoint), commit/push/rsync to follow.
+
+## Checkpoint (Round 135, task #172/#292 - see STATUS.md 175th finding)
+
+Implemented real, cited SIO2 register scaffold (`source/hw/iop_sio2.c`/`.h`) covering `0x1F808200`-`0x1F80827F` per ps2tek's documented register table - the exact addresses Round 134 found unhandled. Real address space/structure only; RECV1-3 "peripheral connected" bits intentionally not fabricated. Regression 104/104, clean Wii rebuild. First of five items from the user's explicit request (SIO2/memory card/CDVD verify/ISO-BIN loader/SPU2 audio) - remaining four tracked as Rounds 136-139.

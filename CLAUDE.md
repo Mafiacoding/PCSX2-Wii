@@ -5174,3 +5174,7 @@ Implemented PS1-legacy SPU register scaffold (`source/hw/iop_spu_legacy.c`/`.h`,
 ## Checkpoint (Round 138, task #172/#295 - see STATUS.md 178th finding)
 
 Fetched real MCMAN error-code enum (ps2sdk libmc-common.h) - confirmed existing MC_RPCCMD_INIT reply is real/correct, deliberately left MC_RPCCMD_OPEN unchanged (no confirmed citation for the exact no-card code, same discipline as Round 132). Comment-only source change citing the real codes for a future round. Regression 104/104, clean Wii rebuild. Third of 5 items from user's request; SIO2 (135), SPU legacy (136), CDVD verify (137) also done. ISO/BIN loader (139) remains.
+
+## Checkpoint (Round 139, task #172/#296 - see STATUS.md 179th finding)
+
+Implemented + tested real ISO9660 loader (`source/core/iso_loader.c`/`.h`, `tests/test_iso_loader.c`, 11/11 assertions pass). Public standard, no clean-room concerns. Deliberately NOT wired into the live CDVD boot trace (would change this project's validated diskless-boot scenario - a separate future increment). Regression 105/105, clean Wii rebuild. **Closes the user's 5-part request**: SIO2 (135), PS1-legacy SPU scaffold/not-real-audio (136), CDVD verify (137), MCMAN citations/no-guess (138), ISO9660 loader (139).

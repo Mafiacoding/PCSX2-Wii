@@ -31,9 +31,25 @@ static const int s_irq_bit[EE_TIMERS_COUNT] = { 9, 10, 11, 12 };
 
 static ee_timers_state_t g_timers;
 
+/* Round 127 (task #172/#247, 167th finding): real EE clock is
+ * 294,912,000 Hz; real NTSC horizontal-sync (HSYNC) line rate is
+ * 15,734.264 Hz - both well-established, publicly documented
+ * hardware/analog-video constants, independent of any BIOS-specific
+ * data. Their ratio gives a real HBLNK period of ~18,743 EE bus
+ * cycles, i.e. how many of this project's "1 instruction = 1 cycle"
+ * ticks (see file-level comment) correspond to one real HSYNC pulse.
+ * g_bus_tick_counter is a free-running count of ee_timers_tick()
+ * calls, used to gate CLKS=1/2/3 timers to their real, slower-than-
+ * BUSCLK increment rates (previously all four CLKS values were
+ * silently treated as BUSCLK/1:1 - see header comment for how this
+ * was found and why it mattered for task #247). */
+static const uint64_t EE_HBLNK_PERIOD_CYCLES = 18743ull;
+static uint64_t g_bus_tick_counter = 0;
+
 void ee_timers_init(void)
 {
     memset(&g_timers, 0, sizeof(g_timers));
+    g_bus_tick_counter = 0;
 }
 
 ee_timers_state_t *ee_timers_get_state(void) { return &g_timers; }
@@ -133,11 +149,26 @@ void ee_timers_tick(void)
      * exact real value real code is arming COMP against. */
     static const uint32_t EE_TIMER_MAX_COUNT = 0xFFFFu;
 
+    g_bus_tick_counter++;
+
     for (int i = 0; i < EE_TIMERS_COUNT; i++) {
         ee_timer_t *t = &g_timers.t[i];
 
         if (!(t->mode & EE_CNT_MODE_CUE))
             continue; /* real: CUE=0 means the counter is stopped */
+
+        /* Round 127 (167th finding): CLKS clock-source divider gate.
+         * Real hardware's four dividers all run off a continuously
+         * advancing bus clock, not a per-timer phase reset at
+         * CUE-set time, hence gating on the shared free-running
+         * g_bus_tick_counter rather than restarting a counter local
+         * to this timer. */
+        switch (t->mode & EE_CNT_MODE_CLKS) {
+            case 0: break; /* BUSCLK: every tick, unchanged prior behavior */
+            case 1: if (g_bus_tick_counter % 16ull) continue; break;   /* BUSCLK/16 */
+            case 2: if (g_bus_tick_counter % 256ull) continue; break;  /* BUSCLK/256 */
+            default: if (g_bus_tick_counter % EE_HBLNK_PERIOD_CYCLES) continue; break; /* HBLNK (CLKS=3) */
+        }
 
         t->count++;
 

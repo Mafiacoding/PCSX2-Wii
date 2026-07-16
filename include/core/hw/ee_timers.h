@@ -49,12 +49,24 @@
  *     status, cleared by software rewriting MODE - same convention
  *     iop_timers.c already uses for its own TARGET_FLAG/OVERFLOW_FLAG).
  *
- * Explicitly NOT modeled (matching iop_timers.h's own scope
- * disclaimer): CLKS alternate clock-source selects (BUSCLK/8/16/256 -
- * real hardware's non-1:1 dividers), GATE modes, ZRET's exact
- * zero-return timing edge cases beyond a plain wrap-on-match, and
- * T0/T1's HOLD-latch-on-external-signal behavior (HOLD is modeled as
- * a plain read/write register with no real gate-triggered latching).
+ * Round 127 (task #172/#247, 167th finding): CLKS (bits 0-1, clock
+ * source select) is now modeled - see ee_timers_tick()'s own comment
+ * in ee_timers.c for the full citation trail and rationale. Found via
+ * live host-native instrumentation of this project's own interpreter
+ * (observing what MODE value the real BIOS itself configures - not
+ * transcribed BIOS bytes, just an observed runtime register value)
+ * that real boot code configures Timer3 with CLKS=3 (HBLNK), which
+ * this project's original 1-instruction=1-tick model silently treated
+ * identically to CLKS=0 (BUSCLK) - causing Timer3 to reach its
+ * COMP=0xFFFF target roughly 18,743x too fast relative to real
+ * elapsed time, firing its interrupt long before real kernel
+ * bootstrap code could have reached the same point of execution.
+ *
+ * Still explicitly NOT modeled (matching iop_timers.h's own scope
+ * disclaimer): GATE modes, ZRET's exact zero-return timing edge cases
+ * beyond a plain wrap-on-match, and T0/T1's HOLD-latch-on-external-
+ * signal behavior (HOLD is modeled as a plain read/write register
+ * with no real gate-triggered latching).
  */
 
 typedef struct {
@@ -71,7 +83,7 @@ typedef struct {
 /* Real EE T*_MODE bit layout (pcsx2/Counters.h's tCOUNTER/rcntMode
  * union), see the file-level comment above for which of these this
  * project's simplified tick model actually honors. */
-#define EE_CNT_MODE_CLKS        0x0003u /* bits 0-1, clock source, not modeled (always treated as BUSCLK/1:1) */
+#define EE_CNT_MODE_CLKS        0x0003u /* bits 0-1, clock source: 0=BUSCLK, 1=BUSCLK/16, 2=BUSCLK/256, 3=HBLNK - modeled since Round 127 */
 #define EE_CNT_MODE_GATE_ENABLE 0x0004u /* not modeled */
 #define EE_CNT_MODE_GATE_MODE   0x0018u /* bits 3-4, not modeled */
 #define EE_CNT_MODE_ZERO_RETURN 0x0020u

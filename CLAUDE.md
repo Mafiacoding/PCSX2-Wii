@@ -5194,3 +5194,7 @@ Implemented the real B0-table Event subsystem (TestEvent et al.) the user asked 
 ## Checkpoint (Round 143)
 
 Corrected Round 142's unverified "VBLANK" guess after further investigation - real evidence (emumaster's actual firstfile()/B(42h) code) shows the sibling event class is memory-card-related, not VBLANK, redirecting the search toward the kernel/driver F00000xxh event family (possibly tied to the existing SIO2/memory-card scaffold). Exact class still unconfirmed - no fix attempted, docs-only correction. See STATUS.md's 183rd finding.
+
+## Checkpoint (Round 144)
+
+Confirmed the user's CD-ROM/memory-card hypothesis with project-internal evidence (no external citation needed): nothing in the codebase ever calls the new event-delivery function from the CD-ROM/CDVD/SIO2/memory-card hardware models - they're honest register scaffolds without real command/response/completion signaling, already self-documented as such since Rounds 133/135/137/138. So structurally, no real completion-event wait involving these subsystems can ever resolve, independent of the exact PS1 kernel event-class number (which remains unconfirmed - only a secondary AI-search paraphrase, not used as a fix basis). This correctly identifies CD-ROM and memory card as the two subsystems the next real increment should target. See STATUS.md's 184th finding.

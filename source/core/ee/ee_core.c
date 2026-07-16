@@ -2825,6 +2825,36 @@ static int ee_step(void)
                                  * cited branch above this one, the
                                  * same way 0x70 originally was before
                                  * this generalization. */
+                                /* Round 138 (task #172/#295, 178th finding): real
+                                 * MCMAN error-code enum now fetched and cited
+                                 * (ps2sdk common/include/libmc-common.h,
+                                 * https://raw.githubusercontent.com/ps2dev/
+                                 * ps2sdk/master/common/include/libmc-common.h):
+                                 * sceMcResSucceed=0, sceMcResChangedCard=-1,
+                                 * sceMcResNoFormat=-2, sceMcResFullDevice=-3,
+                                 * sceMcResNoEntry=-4, sceMcResDeniedPermit=-5,
+                                 * sceMcResNotEmpty=-6, sceMcResUpLimitHandle=-7,
+                                 * sceMcResFailReplace=-8, sceMcResFailResetAuth=
+                                 * -11, sceMcResFailDetect=-12,
+                                 * sceMcResFailDetect2=-13,
+                                 * sceMcResDeniedPS1Permit=-51,
+                                 * sceMcResFailAuth=-90. Device types:
+                                 * sceMcTypeNoCard=0/PS1=1/PS2=2/PDA=3. INIT's
+                                 * real handler (sceMcInit()) genuinely succeeds
+                                 * with no card present, so result=0 below is
+                                 * confirmed correct for rpc_number==0x70, not
+                                 * just a placeholder. For OPEN (0x71) and other
+                                 * real card-dependent commands, this project has
+                                 * NOT yet fetched real mcserv.c/libmc.c source
+                                 * confirming which specific code a real no-card
+                                 * sceMcOpen() returns - sceMcResFailDetect(-12)/
+                                 * sceMcResFailDetect2(-13) are the most
+                                 * plausible real fits by name alone, but that is
+                                 * an inference, not a citation, so result=0
+                                 * remains unchanged here rather than guessing
+                                 * (same discipline as Round 132's declined
+                                 * SIO2/CD-ROM guess). See STATUS.md's 178th
+                                 * finding for the full trail. */
                                 ee_mem_write32(st, call_recvbuf + 0u, 0u); /* mcRpcStat_t.result = 0 (success) - generalized across all MCSERV commands (see comment) */
                                 ee_mem_write32(st, call_recvbuf + 4u, 0u); /* mcRpcStat_t.mcserv_version (unqueried) */
                                 ee_mem_write32(st, call_recvbuf + 8u, 0u); /* mcRpcStat_t.mcman_version (unqueried) */

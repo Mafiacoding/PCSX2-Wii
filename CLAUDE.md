@@ -5170,3 +5170,7 @@ Implemented real, cited SIO2 register scaffold (`source/hw/iop_sio2.c`/`.h`) cov
 ## Checkpoint (Round 136, task #172/#293 - see STATUS.md 177th finding)
 
 Implemented PS1-legacy SPU register scaffold (`source/hw/iop_spu_legacy.c`/`.h`, `0x1F801C00`-`0x1F801DFF`). Explicitly NOT real audio output (no ADPCM/mixing/DMA/AESND) - register scaffold only, matching `iop_spu2.c`'s own long-standing honest limitation. Regression 104/104, clean Wii rebuild. Second of 5 items from user's request; SIO2 (Round 135) and CDVD verify (Round 137) also done this session; memory card (Round 138) and ISO/BIN loader (Round 139) remain.
+
+## Checkpoint (Round 138, task #172/#295 - see STATUS.md 178th finding)
+
+Fetched real MCMAN error-code enum (ps2sdk libmc-common.h) - confirmed existing MC_RPCCMD_INIT reply is real/correct, deliberately left MC_RPCCMD_OPEN unchanged (no confirmed citation for the exact no-card code, same discipline as Round 132). Comment-only source change citing the real codes for a future round. Regression 104/104, clean Wii rebuild. Third of 5 items from user's request; SIO2 (135), SPU legacy (136), CDVD verify (137) also done. ISO/BIN loader (139) remains.

@@ -5145,3 +5145,12 @@ Traced the EE's `0x80005E60`-`0x80005EB4` debounce-read loop to its true caller:
 **Result**: IOP's pc=0x8003ECF4 lockup is broken - genuinely advances to pc=0x00032C64 within the same 45M-instruction budget, still running normally. mark_iop_boot_complete() doesn't fire within this budget yet (more real IOP module-loading work remains), so the EE's SBUS_SMFLG wait isn't resolved this round - real, verified regression fix, honestly scoped as partial progress. Regression 104/104, clean Wii rebuild.
 
 **Next step**: continue tracing IOP progress past 0x00032C64 toward mark_iop_boot_complete() actually firing, which should unblock the EE's SBUS_SMFLG wait for real.
+
+
+## Checkpoint (Round 132, task #172/#196/#221 - see STATUS.md 172nd finding)
+
+Traced past Round 131's fix: the IOP genuinely advances but hits a second real infinite wait at 0x00032C58-0x00032CD4, precisely localized (via self-read raw instruction words, not the live disassembler) to a busy-wait on the real IOP SIO2 (controller/memory-card interface) data register at 0x1F801800 - part of the same device-address-table pattern already found and deprioritized under task #221, now pinpointed to one concrete register and caller. This project has never modeled SIO2 at all, so the polled byte never changes.
+
+No fix this round - implementing genuine SIO2 protocol/no-device-connected semantics is a properly-scoped future hardware-model increment, not a small safe fix; fabricating an "always ready" response would be exactly the kind of unprincipled hack this project has consistently declined. Investigation-only round, no regression/rebuild needed.
+
+**Next step**: research the real SIO2/PADMAN "no device connected" response or timeout behavior (real PS2 hardware boots to OSDSYS fine with no controller/memory card attached) well enough to implement a citable, honest default - the concrete next increment for task #172/#221.

@@ -3584,3 +3584,10 @@ Traced the EE's `0x80005E60`-`0x80005EB4` spin-wait to its true caller (a real `
 Verified: IOP's previously-permanent `pc=0x8003ECF4` (stuck across every checkpoint 5M-45M instructions) now genuinely advances to `pc=0x00032C64` at the same 45M-instruction budget, still running cleanly. `mark_iop_boot_complete()` doesn't fire within this budget yet, so the EE's SBUS_SMFLG wait isn't resolved this round - honest, real, verified regression fix, not a full resolution.
 
 Full regression suite: 104/104 pass (0 failures; 14 `NO_MARKER` harness quirks spot-checked, all genuinely passing). Clean Wii/devkitPPC rebuild: exit 0, same single pre-existing unrelated warning. See STATUS.md's 171st finding for the full trace.
+
+
+### Round 132 (task #172/#196/#221, 172nd finding, investigation only)
+
+Traced the IOP's post-Round-131 progress further: it advances past the old `0x8003ECF4` lockup but settles into a second, genuine infinite busy-wait at `0x00032C58`-`0x00032CD4` (confirmed via 1.78M+ repeated calls with constant `$ra`/`$a0`/`$v0=0`, not bounded iteration as first appeared). Traced the exact condition via raw-instruction-word self-reads (not the live disassembler, which reflects different RAM-resident module content for a differently-booted session): the loop polls a byte through a pointer that resolves to the real IOP SIO2 controller/memory-card interface data register (`0x1F801800`) - part of the same real hardware-address "device table" already found and deprioritized under task #221. This project has never modeled SIO2, so the polled byte never changes.
+
+No fix landed this round (implementing real SIO2 protocol/timeout semantics is a properly-scoped future increment, not a safe one-line fix) - investigation and precise localization only. See STATUS.md's 172nd finding.

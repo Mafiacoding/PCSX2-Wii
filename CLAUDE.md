@@ -5178,3 +5178,7 @@ Fetched real MCMAN error-code enum (ps2sdk libmc-common.h) - confirmed existing 
 ## Checkpoint (Round 139, task #172/#296 - see STATUS.md 179th finding)
 
 Implemented + tested real ISO9660 loader (`source/core/iso_loader.c`/`.h`, `tests/test_iso_loader.c`, 11/11 assertions pass). Public standard, no clean-room concerns. Deliberately NOT wired into the live CDVD boot trace (would change this project's validated diskless-boot scenario - a separate future increment). Regression 105/105, clean Wii rebuild. **Closes the user's 5-part request**: SIO2 (135), PS1-legacy SPU scaffold/not-real-audio (136), CDVD verify (137), MCMAN citations/no-guess (138), ISO9660 loader (139).
+
+## Checkpoint (Round 140)
+
+Traced the exact cause of the EE's permanent SBUS_SMFLG wait-spin: `SIF_STAT_SIFINIT` is only ever written by `mark_iop_boot_complete()`, gated by `g.booted_ok`, which is only set inside `iop_module_loader_boot()` - a one-shot rescue hook that fires only if the IOP pc escapes fetchable memory (`iop_core.c:734`). A 45M-instruction diagnostic confirmed this never happens: the IOP pc has stayed within real, fetchable BIOS/kernel code the entire trace. So the module loader has never actually run, correcting the earlier (Rounds 131-134) assumption that the IOP was "deep in module loading." No fix applied - this is architectural, not a fabricable bit/value; needs either real IRX execution or a citable alternate completion signal. See STATUS.md's 180th finding / ROADMAP.md Round 140.

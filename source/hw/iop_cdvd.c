@@ -34,12 +34,29 @@ void iop_cdvd_init(void)
 
 int iop_cdvd_mmio_read8(uint32_t addr, uint8_t *out)
 {
-    if (addr < IOP_CDVD_BASE || addr >= IOP_CDVD_BASE + 0x1000u) return 0;
+    /* Round 130 (task #172/#196, 170th finding): the IOP has no MMU/
+     * TLB, so KUSEG (0x1F402xxx), KSEG0 (0x9F402xxx) and KSEG1
+     * (0xBF402xxx) all address the SAME physical CDVD register page -
+     * real code frequently polls hardware status via the KSEG1
+     * (uncached) alias specifically to avoid a stale cached read
+     * during a busy-wait, exactly the pattern task #165 already found
+     * and fixed for the SIF mailbox window (see sif.c's matching
+     * comment). This check previously only accepted the bare KUSEG
+     * form, so a real KSEG1-alias poll (e.g. 0xBF40200A) silently
+     * fell through to unmapped/out-of-range RAM (always reading 0)
+     * instead of the real register - found via live host-native
+     * tracing showing the IOP polling this exact KSEG1 address in a
+     * tight loop after Round 129's exception-vector fix unblocked
+     * further boot progress. Masking off the segment-select bits
+     * before the window check, same as sif.c's iop_mem_ptr()-style
+     * convention, fixes all three aliases at once. */
+    uint32_t phys = addr & 0x1FFFFFFFu;
+    if (phys < IOP_CDVD_BASE || phys >= IOP_CDVD_BASE + 0x1000u) return 0;
     /* Real hardware mirrors these byte registers across the whole
      * 4KB page - PCSX2's psxHw4Read8/Write8 masks the address to its
      * low 8 bits before dispatching, so replicate that here rather
      * than only accepting the first IOP_CDVD_SIZE bytes of the page. */
-    uint32_t off = (addr - IOP_CDVD_BASE) & 0xFFu;
+    uint32_t off = (phys - IOP_CDVD_BASE) & 0xFFu;
 
     if (off == OFF_ERROR) {
         /* Real behavior: reading ERROR returns its current value and
@@ -60,8 +77,12 @@ int iop_cdvd_mmio_read8(uint32_t addr, uint8_t *out)
 
 int iop_cdvd_mmio_write8(uint32_t addr, uint8_t value)
 {
-    if (addr < IOP_CDVD_BASE || addr >= IOP_CDVD_BASE + 0x1000u) return 0;
-    uint32_t off = (addr - IOP_CDVD_BASE) & 0xFFu;
+    /* Round 130 (170th finding): same KUSEG/KSEG0/KSEG1 aliasing fix
+     * as iop_cdvd_mmio_read8() above - see that function's comment
+     * for the full citation trail. */
+    uint32_t phys = addr & 0x1FFFFFFFu;
+    if (phys < IOP_CDVD_BASE || phys >= IOP_CDVD_BASE + 0x1000u) return 0;
+    uint32_t off = (phys - IOP_CDVD_BASE) & 0xFFu;
 
     g_regs[off] = value;
 

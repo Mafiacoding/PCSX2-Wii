@@ -3569,3 +3569,9 @@ Does not (and given this session's tool constraints, cannot) confirm whether thi
 - Verified: compiles clean, full regression suite re-run (104/104, zero real regressions), clean Wii/devkitPPC rebuild successful.
 - **Major result**: across the same 45M-instruction trace that halted in every prior round, neither core halts at all after this fix - IOP runs cleanly to the slice cap, EE reaches a genuinely new, far-more-advanced boot state (pc=0x80005E98) never seen before in this investigation.
 - Task #172/#196 status: substantially advanced, superseding the original 0x8000F768 wait-loop resumption plan. See STATUS.md 169th finding for full details. Next: characterize the new boot state and find the next real milestone.
+
+### Round 130 (real source fix, task #172/#196)
+- Live-disassembled the IOP's Round-129 resting point (pc=0x8003ECF4): a KSEG1-alias byte read of the real CDVD STATUS register (0xBF40200A).
+- Found and fixed the same KUSEG/KSEG0/KSEG1-aliasing gap task #165 already fixed for SIF: iop_cdvd.c's read8/write8 compared the raw address against the bare KUSEG base, missing KSEG1-alias accesses (silently falling through to unmapped RAM, always reading 0).
+- Fixed by masking addr & 0x1FFFFFFF before the window check, same convention as sif.c. Verified: compiles clean, regression 104/104 (zero real regressions), clean Wii/devkitPPC rebuild successful.
+- Honest caveat: same trace produces an identical final state before/after - real, correct fix, but not (by itself) what's gating this specific loop. See STATUS.md 170th finding.

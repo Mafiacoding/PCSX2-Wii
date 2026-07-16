@@ -594,11 +594,52 @@ static int iop_step(void)
      * executed correctly by this project; the gap is specific to the
      * RAM-resident BEV=0 vector, which nothing ever populates. */
     if (pc == 0x80000080u && st->exception_pending) {
+        /* Round 131 (task #172/#196/#286, real fix): the guard above
+         * only ever checked pc/exception_pending, never Cause.ExcCode
+         * - so it also caught genuine SYSCALL/BREAK/Trap exceptions
+         * that fall through to this exact same fixed vector (this
+         * project's boot model has no real dispatcher installed here
+         * for those either, same root gap as the interrupt case
+         * Round 129 fixed). Those exception classes are NOT
+         * restartable the way interrupts are: real MIPS semantics
+         * (universal ISA behavior, not BIOS-specific - any R3000A/
+         * MIPS I reference) require EPC+4 on return from a
+         * synchronous, software-triggered exception, since EPC points
+         * AT the triggering instruction itself and simply re-running
+         * it would refire the identical exception forever. This
+         * project's OWN code already established exactly this
+         * EPC+4-plus-$v0=0 convention for the sibling "SYSCALL fell
+         * through to an unclaimed BREAK trap-stub" case above (Round
+         * 29/task #124) - this fix applies the identical, already-
+         * proven convention here instead of inventing a new one.
+         * Diagnosed via host-native instrumentation (scratch copy,
+         * real repo untouched during diagnosis): a real SYSCALL
+         * (raw instruction word 0x0000000C, funct=0x0C) landing at
+         * this vector was being resumed at bare EPC by the Round 129
+         * stub, infinite-looping on the same SYSCALL forever - the
+         * exact cause of the IOP's Round 130 "resting point"
+         * (pc=0x8003ECF4) never actually being a resolved wait, just
+         * an unresolved exception refiring every 2 instructions. */
+        uint32_t exc_code = (st->cop0[13] & 0x7Cu) >> 2u;
         st->cop0[12] = (st->cop0[12] & ~0x0Fu) | ((st->cop0[12] & 0x3Cu) >> 2); /* RFE-equivalent Status stack pop */
         st->exception_pending = 0;
         uint32_t epc = st->cop0[14];
-        st->pc = epc;
-        st->next_pc = epc + 4u;
+        if (exc_code == 0x08u || exc_code == 0x09u || exc_code == 0x0Du) {
+            /* Syscall / Breakpoint / Trap - synchronous, non-
+             * restartable: skip past the triggering instruction and
+             * return the same generic "unimplemented, default value"
+             * result this project already uses for every other
+             * unclaimed BIOS/syscall call site. */
+            st->gpr[2] = 0; /* $v0 = 0 */
+            st->pc = epc + 4u;
+            st->next_pc = epc + 8u;
+        } else {
+            /* Interrupt (ExcCode==0) or any other restartable class -
+             * unchanged Round 129 behavior: resume the interrupted
+             * instruction itself. */
+            st->pc = epc;
+            st->next_pc = epc + 4u;
+        }
         st->instructions_executed++;
         return 0;
     }

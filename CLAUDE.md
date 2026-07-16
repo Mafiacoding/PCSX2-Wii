@@ -5128,3 +5128,20 @@ Fixed: added a synthetic, clean-room default exception-return stub (RFE-equivale
 **Major result**: across the same 45M-instruction trace that has hit a wall in every prior round of this whole investigation, NEITHER core halts anymore. The IOP runs cleanly to the slice cap still executing real module code; the EE reaches a genuinely new, far-more-advanced boot state (pc=0x80005E98) never observed before. This is the first fully-clean, zero-halt trace in this investigation's history.
 
 **Next step**: characterize this new boot state (task #172/#196 continuation) to find the next real milestone toward a visible splash screen - the previous 0x8000F768 wait-loop framing is now superseded since boot has moved well past it.
+
+
+## Checkpoint (Round 130, task #172/#196 - see STATUS.md 170th finding)
+
+Following Round 129's zero-halt breakthrough, investigated the IOP's new resting point (pc=0x8003ECF4, stable across checkpoints). Live disassembly showed a KSEG1-alias (uncached) read of what decodes to the real CDVD STATUS register (phys 0x1F40200A). Found and fixed the same KUSEG/KSEG0/KSEG1 address-aliasing gap already fixed once for the SIF mailbox (task #165): `iop_cdvd_mmio_read8`/`write8` (`source/hw/iop_cdvd.c`) only matched the bare KUSEG address form, silently missing the KSEG1 alias real polling code actually uses. Fixed by masking `addr & 0x1FFFFFFF` before the window check, mirroring sif.c's established convention. Verified: compiles clean, regression 104/104, clean Wii/devkitPPC rebuild successful.
+
+**Honest caveat, confirmed by Round 131's follow-up**: this specific trace's observable outcome didn't change from this fix alone - the IOP was ALSO separately stuck on an unrelated bug (a real SYSCALL exception infinite-refiring at the same general vector Round 129 patched, not yet found this round). The CDVD KSEG-alias fix is real, correct, and independently verified (same bug class, same fix pattern as task #165) - it just wasn't, by itself, sufficient to unblock this trace. See Round 131 for the actual blocker.
+
+## Checkpoint (Round 131, task #172/#196/#286 - see STATUS.md 171st finding)
+
+Traced the EE's `0x80005E60`-`0x80005EB4` debounce-read loop to its true caller: a real `sceSifInit()`-equivalent busy-waiting on `SIF_STAT_SIFINIT` (SBUS_SMFLG bit 16) - the same milestone this project's own 131st-134th findings (Round 91-93) already established `mark_iop_boot_complete()` sets unconditionally. Found the IOP was never reaching that point at all: it was permanently parked at pc=0x8003ECF4 (Round 130's resting point) executing a raw instruction word of 0x0000000C - a genuine SYSCALL, not the CDVD-status code Round 130's live-session cross-reference had suggested (RAM-resident module code differs between this project's own diskless boot and a differently-booted live PCSX2 session at the same address - an important caveat for future RAM-region investigation).
+
+**Root cause: a real Round 129 regression.** The synthetic default-exception-vector stub only guarded on pc/exception_pending, never Cause.ExcCode - so it also intercepted genuine SYSCALL/BREAK/Trap exceptions reaching the same fixed vector (not just the interrupt case it was built and tested for), and incorrectly resumed them at bare EPC instead of EPC+4, infinite-looping the same SYSCALL forever. Fixed by checking Cause.ExcCode and applying this project's own already-established EPC+4/$v0=0 convention (Round 29/task #124's BREAK-fallback handler) for Syscall/Breakpoint/Trap, leaving Interrupt/other classes on the original Round 129 behavior.
+
+**Result**: IOP's pc=0x8003ECF4 lockup is broken - genuinely advances to pc=0x00032C64 within the same 45M-instruction budget, still running normally. mark_iop_boot_complete() doesn't fire within this budget yet (more real IOP module-loading work remains), so the EE's SBUS_SMFLG wait isn't resolved this round - real, verified regression fix, honestly scoped as partial progress. Regression 104/104, clean Wii rebuild.
+
+**Next step**: continue tracing IOP progress past 0x00032C64 toward mark_iop_boot_complete() actually firing, which should unblock the EE's SBUS_SMFLG wait for real.

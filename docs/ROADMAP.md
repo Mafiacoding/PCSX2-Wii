@@ -3575,3 +3575,12 @@ Does not (and given this session's tool constraints, cannot) confirm whether thi
 - Found and fixed the same KUSEG/KSEG0/KSEG1-aliasing gap task #165 already fixed for SIF: iop_cdvd.c's read8/write8 compared the raw address against the bare KUSEG base, missing KSEG1-alias accesses (silently falling through to unmapped RAM, always reading 0).
 - Fixed by masking addr & 0x1FFFFFFF before the window check, same convention as sif.c. Verified: compiles clean, regression 104/104 (zero real regressions), clean Wii/devkitPPC rebuild successful.
 - Honest caveat: same trace produces an identical final state before/after - real, correct fix, but not (by itself) what's gating this specific loop. See STATUS.md 170th finding.
+
+
+### Round 131 (task #172/#196/#286, 171st finding, real source fix)
+
+Traced the EE's `0x80005E60`-`0x80005EB4` spin-wait to its true caller (a real `sceSifInit()`-equivalent busy-waiting on `SIF_STAT_SIFINIT`), then found the IOP was permanently stuck *before* ever reaching `mark_iop_boot_complete()` - at `pc=0x8003ECF4`, a resting point the 170th finding (Round 130) had noted but not resolved. Root cause: Round 129's synthetic default-exception-vector stub (`source/core/iop/iop_core.c`) resumed EVERY exception reaching the unclaimed vector at bare EPC - correct for interrupts, but wrong for genuine SYSCALL/BREAK/Trap exceptions also routed there (real MIPS semantics require EPC+4 for those, since they aren't restartable) - causing an infinite SYSCALL refire. Fixed by checking `Cause.ExcCode` and applying the already-established (Round 29/task #124) EPC+4/`$v0`=0 convention for Syscall/Breakpoint/Trap, unchanged bare-EPC behavior for Interrupt/other.
+
+Verified: IOP's previously-permanent `pc=0x8003ECF4` (stuck across every checkpoint 5M-45M instructions) now genuinely advances to `pc=0x00032C64` at the same 45M-instruction budget, still running cleanly. `mark_iop_boot_complete()` doesn't fire within this budget yet, so the EE's SBUS_SMFLG wait isn't resolved this round - honest, real, verified regression fix, not a full resolution.
+
+Full regression suite: 104/104 pass (0 failures; 14 `NO_MARKER` harness quirks spot-checked, all genuinely passing). Clean Wii/devkitPPC rebuild: exit 0, same single pre-existing unrelated warning. See STATUS.md's 171st finding for the full trace.

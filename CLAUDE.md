@@ -5166,3 +5166,7 @@ Investigation-only round, no source change. Chunked 80M-IOP-instruction watch tr
 ## Checkpoint (Round 135, task #172/#292 - see STATUS.md 175th finding)
 
 Implemented real, cited SIO2 register scaffold (`source/hw/iop_sio2.c`/`.h`) covering `0x1F808200`-`0x1F80827F` per ps2tek's documented register table - the exact addresses Round 134 found unhandled. Real address space/structure only; RECV1-3 "peripheral connected" bits intentionally not fabricated. Regression 104/104, clean Wii rebuild. First of five items from the user's explicit request (SIO2/memory card/CDVD verify/ISO-BIN loader/SPU2 audio) - remaining four tracked as Rounds 136-139.
+
+## Checkpoint (Round 136, task #172/#293 - see STATUS.md 177th finding)
+
+Implemented PS1-legacy SPU register scaffold (`source/hw/iop_spu_legacy.c`/`.h`, `0x1F801C00`-`0x1F801DFF`). Explicitly NOT real audio output (no ADPCM/mixing/DMA/AESND) - register scaffold only, matching `iop_spu2.c`'s own long-standing honest limitation. Regression 104/104, clean Wii rebuild. Second of 5 items from user's request; SIO2 (Round 135) and CDVD verify (Round 137) also done this session; memory card (Round 138) and ISO/BIN loader (Round 139) remain.

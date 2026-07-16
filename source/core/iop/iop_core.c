@@ -50,6 +50,7 @@
 #include "core/hw/iop_timers.h"
 #include "core/hw/iop_spu2.h" /* SPU2 register scaffold - task #95 */
 #include "core/hw/iop_cdvd.h" /* CDVD register scaffold, no-disc boot case - ROADMAP section 7 */
+#include "core/hw/iop_cdrom_legacy.h" /* Round 133 (173rd finding): PS1-legacy CD-ROM Index/Status Register - see header for full trace/citation */
 #include "core/hw/iop_hle_bios.h"
 #include "core/hw/iop_hle_modules.h"
 #include "core/hw/iop_hle_intr.h"
@@ -90,6 +91,16 @@ uint8_t iop_mem_read8(iop_state_t *st, uint32_t addr)
     uint8_t cdvd_val;
     if (iop_cdvd_mmio_read8(addr, &cdvd_val))
         return cdvd_val;
+
+    /* Round 133 (task #172/#221/#288, 173rd finding): the separate
+     * PS1-legacy CD-ROM controller block (0x1F801800-0x1F801803),
+     * NOT to be confused with the PS2-native CDVD page above - see
+     * iop_cdrom_legacy.h for the full instruction-level trace that
+     * found this project's own IOP boot path polls this exact
+     * register's PRMEMPT bit. */
+    uint8_t cdrom_legacy_val;
+    if (iop_cdrom_legacy_mmio_read8(addr, &cdrom_legacy_val))
+        return cdrom_legacy_val;
 
     uint8_t *p = iop_mem_ptr(st, addr, 1);
     return p ? *p : 0;
@@ -201,6 +212,11 @@ void iop_mem_write8(iop_state_t *st, uint32_t addr, uint8_t val)
     if (iop_cdvd_mmio_write8(addr, val))
         return;
 
+    /* Round 133 (173rd finding) - see iop_mem_read8()'s matching
+     * comment above. */
+    if (iop_cdrom_legacy_mmio_write8(addr, val))
+        return;
+
     uint8_t *p = iop_mem_ptr(st, addr, 1);
     if (p) *p = val;
 }
@@ -270,6 +286,7 @@ int iop_core_init(const bios_image_t *bios)
     iop_timers_init(); /* IOP counter/timer register stub - see core/hw/iop_timers.h */
     iop_spu2_init(); /* SPU2 register scaffold - task #95, see core/hw/iop_spu2.h */
     iop_cdvd_init(); /* CDVD register scaffold, no-disc boot case - see core/hw/iop_cdvd.h */
+    iop_cdrom_legacy_init(); /* PS1-legacy CD-ROM Index/Status Register - Round 133, see core/hw/iop_cdrom_legacy.h */
     iop_hle_bios_init(); /* IOP BIOS syscall trap (A0/B0/C0) - see core/hw/iop_hle_bios.h */
     iop_hle_modules_init(); /* IOP module registry scaffold - see core/hw/iop_hle_modules.h */
     iop_hle_intr_init(); /* Round 109: clean-room RegisterIntrHandler/RegisterExceptionHandler HLE table - see core/hw/iop_hle_intr.h */

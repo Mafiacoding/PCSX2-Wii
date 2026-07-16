@@ -54,6 +54,7 @@
 #include "core/hw/iop_sio2.h" /* Round 135 (175th finding): SIO2 controller/memory-card serial interface - see header for full trace/citation */
 #include "core/hw/iop_spu_legacy.h" /* Round 136 (177th finding): PS1-legacy SPU register block - see header for full trace/citation */
 #include "core/hw/iop_hle_bios.h"
+#include "core/hw/iop_hle_events.h"
 #include "core/hw/iop_hle_modules.h"
 #include "core/hw/iop_hle_intr.h"
 #include "core/hw/iop_module_loader.h" /* real IOP module/IRX loader - task #92 */
@@ -323,6 +324,7 @@ int iop_core_init(const bios_image_t *bios)
     iop_sio2_init(); /* SIO2 controller/memory-card interface - Round 135, see core/hw/iop_sio2.h */
     iop_spu_legacy_init(); /* PS1-legacy SPU register block - Round 136, see core/hw/iop_spu_legacy.h */
     iop_hle_bios_init(); /* IOP BIOS syscall trap (A0/B0/C0) - see core/hw/iop_hle_bios.h */
+    iop_hle_events_init(); /* Round 142: real B0-table Event subsystem - see core/hw/iop_hle_events.h */
     iop_hle_modules_init(); /* IOP module registry scaffold - see core/hw/iop_hle_modules.h */
     iop_hle_intr_init(); /* Round 109: clean-room RegisterIntrHandler/RegisterExceptionHandler HLE table - see core/hw/iop_hle_intr.h */
     iop_module_loader_reset(); /* real module/IRX boot sequencer - see core/hw/iop_module_loader.h */

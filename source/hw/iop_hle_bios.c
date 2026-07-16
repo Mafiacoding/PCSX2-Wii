@@ -9,6 +9,7 @@
  */
 #include "core/hw/iop_hle_bios.h"
 #include "core/hw/iop_excb.h"
+#include "core/hw/iop_hle_events.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -561,6 +562,72 @@ int iop_hle_bios_try_handle(iop_state_t *st, uint32_t pc)
         iop_mem_write32(st, buf + IOP_JMPBUF_OFF_GP, st->gpr[28]); /* $gp */
         st->gpr[2] = 0;
         g_hle.setjmp_calls++;
+        g_hle.known_calls_handled++;
+        st->pc      = ra;
+        st->next_pc = ra + 4;
+        return 1;
+    } else if (pc == IOP_HLE_TABLE_B0 && function == IOP_HLE_B0_DELIVER_EVENT) {
+        /* Round 142 (182nd finding, task #172): real B(07h)
+         * DeliverEvent(class,spec) - see iop_hle_events.h for the
+         * full citation trail (psx-spx function name/number, real
+         * open-source emumaster HLE for the exact status/mode bit
+         * values and class/spec hashing algorithm this project
+         * re-derives clean-room). */
+        iop_hle_event_deliver(st);
+        g_hle.known_calls_handled++;
+        st->pc      = ra;
+        st->next_pc = ra + 4;
+        return 1;
+    } else if (pc == IOP_HLE_TABLE_B0 && function == IOP_HLE_B0_OPEN_EVENT) {
+        /* Round 142: real B(08h) OpenEvent(class,spec,mode,func). */
+        iop_hle_event_open(st);
+        g_hle.known_calls_handled++;
+        st->pc      = ra;
+        st->next_pc = ra + 4;
+        return 1;
+    } else if (pc == IOP_HLE_TABLE_B0 && function == IOP_HLE_B0_CLOSE_EVENT) {
+        /* Round 142: real B(09h) CloseEvent(handle). */
+        iop_hle_event_close(st);
+        g_hle.known_calls_handled++;
+        st->pc      = ra;
+        st->next_pc = ra + 4;
+        return 1;
+    } else if (pc == IOP_HLE_TABLE_B0 && function == IOP_HLE_B0_WAIT_EVENT) {
+        /* Round 142: real B(0Ah) WaitEvent(handle) - non-blocking
+         * simplification, see iop_hle_events.h header comment. */
+        iop_hle_event_wait(st);
+        g_hle.known_calls_handled++;
+        st->pc      = ra;
+        st->next_pc = ra + 4;
+        return 1;
+    } else if (pc == IOP_HLE_TABLE_B0 && function == IOP_HLE_B0_TEST_EVENT) {
+        /* Round 142 (182nd finding): real B(0Bh) TestEvent(handle) -
+         * the exact function this project's Round 140/141 traced its
+         * persistent IOP boot loop to be calling, previously falling
+         * through to a hardcoded $v0=0 default (see the 181st
+         * finding in docs/STATUS.md for the full root-cause trail). */
+        iop_hle_event_test(st);
+        g_hle.known_calls_handled++;
+        st->pc      = ra;
+        st->next_pc = ra + 4;
+        return 1;
+    } else if (pc == IOP_HLE_TABLE_B0 && function == IOP_HLE_B0_ENABLE_EVENT) {
+        /* Round 142: real B(0Ch) EnableEvent(handle). */
+        iop_hle_event_enable(st);
+        g_hle.known_calls_handled++;
+        st->pc      = ra;
+        st->next_pc = ra + 4;
+        return 1;
+    } else if (pc == IOP_HLE_TABLE_B0 && function == IOP_HLE_B0_DISABLE_EVENT) {
+        /* Round 142: real B(0Dh) DisableEvent(handle). */
+        iop_hle_event_disable(st);
+        g_hle.known_calls_handled++;
+        st->pc      = ra;
+        st->next_pc = ra + 4;
+        return 1;
+    } else if (pc == IOP_HLE_TABLE_B0 && function == IOP_HLE_B0_UNDELIVER_EVENT) {
+        /* Round 142: real B(20h) UnDeliverEvent(class,spec). */
+        iop_hle_event_undeliver(st);
         g_hle.known_calls_handled++;
         st->pc      = ra;
         st->next_pc = ra + 4;

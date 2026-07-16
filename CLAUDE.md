@@ -5186,3 +5186,7 @@ Traced the exact cause of the EE's permanent SBUS_SMFLG wait-spin: `SIF_STAT_SIF
 ## Checkpoint (Round 141)
 
 Answered the user's Pfad-1-vs-Pfad-2 design question with evidence: decoded the small IOP address cluster from Round 140 and found it's a real, cited BIOS call - `B(0Bh) TestEvent(event)` via this project's own already-existing B0 kernel HLE table - that our own HLE never implements (falls through to a hardcoded `$v0=0` default), so its exit test can never pass. Recommended next step: implement `TestEvent` for real (once the EvCB status-field encoding is sourced - not yet found), extending the SAME HLE table B(18h)/B(19h) already use, rather than either literal Pfad-1 PC-hook or a full Pfad-2 module-execution rewrite. See STATUS.md's 181st finding / ROADMAP.md Round 141.
+
+## Checkpoint (Round 142)
+
+Implemented the real B0-table Event subsystem (TestEvent et al.) the user asked for after Round 141's finding - cited, tested (11/11), regressed (106/106), Wii-rebuilt. Live re-verification shows the fix is correct but doesn't move the boot trace's stall point: the two events the traced loop polls decode to real, plausible handles (class 3, specs 5/15) that were legitimately opened earlier in boot, but this project's boot path never calls the matching DeliverEvent for them - likely because the existing IOP VBLANK IRQ model (Round 93/216) doesn't route through this new event system yet. That's the concrete next thread. See STATUS.md's 182nd finding / ROADMAP.md Round 142.

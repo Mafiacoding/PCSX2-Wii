@@ -5718,3 +5718,45 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
   with fresh scrutiny; if confirmed, trace backward from the second
   wait's own caller/return address to find the real upstream branch
   divergence, rather than looking for any signal to add.
+
+## Round 432 continued (same round): live re-verification - the second BOOTEND wait is reached via a real EE-kernel interrupt-dispatch trampoline (0x80001460), from TWO DIFFERENT real kernel call sites - connects to this project's own much older AddIntcHandler investigation thread
+
+- Fresh live re-verification (not trusting old logs) confirms both
+  calls to the wait primitive really do check a0=0x00040000/BOOTEND,
+  from the identical ra=0x00082410 call site inside OSDSYS's own code.
+- First hypothesis (a periodic per-tick function with a rare deep
+  branch, based on 1922 "entries" to 0x00082018) was WRONG - that
+  address is actually inside a real quadword-clear loop; the 1922
+  count was loop-iteration noise, not distinct calls. Caught and
+  discarded before writing it up as a claim - a real methodology
+  lesson.
+- Correct measurement (anchored on the actual `jal 0x00082220` call
+  site, immune to the clear-loop's iteration count): exactly 2 real
+  calls, both from ra=0x0008208C.
+- Tracing one more level up (the true entry, 0x00082008): called
+  exactly twice, but from TWO DIFFERENT real kernel addresses -
+  0x80005184 and 0x800057AC, both KSEG0 BIOS-kernel space, not
+  OSDSYS's own code looping on itself.
+- Both kernel call sites share the identical real pattern right
+  before calling in: `jal 0x80001460` (shared trampoline) wrapped in
+  what look like real EI/DI interrupt-enable/disable ops - the
+  classic shape of a registered-interrupt-handler dispatch.
+- This structurally matches this project's own much older,
+  extensively-documented AddIntcHandler/EE-kernel-interrupt-dispatch
+  investigation (dozens of earlier findings already in this file -
+  Cause=0x8800, 0x80001798 per-cause table, Round 186's real
+  syscall 16/17 implementation, the VBLANK_S/VBLANK_E thread).
+- **Reframed conclusion**: OSDSYS's 0x00082008 routine is very likely
+  a real, registered interrupt handler (plausibly VBLANK), not a
+  boot-time-only init function - being invoked twice is then normal,
+  expected behavior, and the real open question becomes whether its
+  own internal logic is supposed to still check BOOTEND on later
+  invocations (this project may be missing a state transition that
+  should make that check trivially pass), or whether one function
+  body wrongly conflates first-time-init vs. per-interrupt logic.
+- No fix implemented - confirming the real cause needs disassembling
+  0x80001460 itself, not yet done.
+- **Next**: disassemble 0x80001460 and the immediate context around
+  both kernel call sites to identify the real interrupt cause/
+  registration context, directly continuing this project's own
+  long-running AddIntcHandler/VBLANK dispatch thread.

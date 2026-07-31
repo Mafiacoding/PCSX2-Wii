@@ -5791,3 +5791,31 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
   and compare this project's delivery cadence against real hardware -
   continuing the project's own pre-existing VBLANK/AddIntcHandler
   thread rather than opening a new one.
+
+## Round 433 (task #193): rules out wrong interrupt cadence - the long gap is a real, already-documented low-level VBLANK-poll wait; narrows the open question to a missing guard inside the handler body itself
+
+- Sampled Status.IE/EXL every 1M instructions across the ~29M-
+  instruction gap between the two BOOTEND-wait handler invocations.
+- Found Status.IE=0 continuously for ~17M instructions (instr 42M-
+  59M), with the EE parked in this project's own already-documented
+  real I_STAT-polling VBLANK-wait routine (0x8000AF70-family) -
+  a real, mask-independent waiting convention, not a bug.
+- **Rules out hypothesis (b)** (wrong interrupt cadence/delivery) -
+  the gap is real, legitimate BIOS behavior in a different routine
+  entirely, not evidence of broken interrupt delivery.
+- **Confirms hypothesis (a) is the only remaining explanation**:
+  since Round 432 already proved BOOTEND can't legitimately re-fire,
+  and this round proves the handler's 2nd invocation is itself
+  legitimate (not a cadence bug), real OSDSYS's handler body must
+  contain a branch that skips the BOOTEND-wait on later invocations,
+  and this project is either missing that branch or the state it
+  depends on.
+- Re-confirmed (fresh live dump) the 0x0008BE00/0x0008BE04 global
+  struct reads identically (all-zero) on both invocations - not the
+  guard. The guard, if it exists, must be inside 0x00082220 itself or
+  one of its sub-calls (0x00083900, 0x00083070, 0x00082FD0,
+  0x00083028, 0x0008305C - not yet individually disassembled).
+- No fix implemented.
+- **Next**: disassemble those sub-calls looking for a state-check/
+  early-return pattern consistent with a real "already initialized,
+  skip full init" guard.

@@ -78,6 +78,13 @@ void iop_hle_event_deliver(iop_state_t *st)
     st->gpr[2] = 0;
 }
 
+void iop_hle_event_deliver_raw(uint32_t class_code, uint32_t spec_mask)
+{
+    int ev = hash_ev(class_code);
+    int spec = hash_spec(spec_mask);
+    deliver_ev_spec(ev, spec);
+}
+
 void iop_hle_event_open(iop_state_t *st)
 {
     int ev = clamp_ev(hash_ev(st->gpr[4]));

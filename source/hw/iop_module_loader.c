@@ -7,6 +7,8 @@
 #include "core/hw/sif.h"
 #include "core/hw/iop_intc.h"
 #include "core/hw/iop_hle_intr.h"
+#include "core/hw/iop_hle_thread.h" /* Round 389: real THREADMAN thread/semaphore HLE */
+#include "core/hw/iop_hle_heap.h" /* Round 421: real SYSMEM heap-export sentinel gates */
 #include <string.h>
 #include <stdio.h>
 
@@ -42,7 +44,22 @@
  * prologue corrupted its own saved $ra via a stack write to
  * whatever garbage address $sp held, causing it to "return" to
  * address 0 instead of this loader's trampoline. */
-#define INITIAL_SP (IOP_RAM_SIZE_CONST - 0x100u)
+/* Round 416 (task #152): 0x100 bytes of headroom below the top of
+ * 2MB IOP RAM was never enough - live watches (docs/STATUS.md Round
+ * 415/416) proved LOADCORE's own real init function's stack frame
+ * (nested alloca()-sized buffers for its module-count-dependent
+ * registration-list walk) needs more than that, and every
+ * stack-relative access past the 2MB boundary silently reads back 0
+ * / silently drops writes (iop_mem_ptr()'s own bounds check returns
+ * NULL past st->ram_size - see iop_core.c), which is exactly what a
+ * live watch on this loop's own retry counter showed: permanently
+ * stuck at 0, its own increment never actually persisting. Widened
+ * to 0x4000 (16KB) - still safely within the documented gap between
+ * the thread-stack-arena's own end (0x001F0000, see iop_heap.c's own
+ * arena-placement comment) and the top of RAM (0x00200000), leaving
+ * a large, defensively generous margin for any single module's own
+ * init-time stack usage without colliding with that separate arena. */
+#define INITIAL_SP (IOP_RAM_SIZE_CONST - 0x4000u)
 #define IOP_RAM_SIZE_CONST 0x00200000u
 
 /* Module-entry $a0 argument (task #92's documented "third boundary",
@@ -138,6 +155,7 @@ static struct {
 
     uint32_t bump_next;
     uint32_t trampoline_addr;
+    int idle_transition_done; /* Round 425: see the one-time gate at this trap's own call site */
     uint32_t boot_info_addr; /* see BOOT_INFO_RAM_MB's comment below */
 
     export_registry_entry_t exports[EXPORT_REGISTRY_MAX];
@@ -222,8 +240,18 @@ static int locate_and_parse_romdir(const uint8_t *data, uint32_t size)
         if (name[0] == '\0' && extinfo == 0 && psize == 0) break; /* real terminator entry */
 
         romdir_entry_t *e = &g.romdir[g.romdir_count++];
-        strncpy(e->name, name, 10);
-        e->name[10] = '\0';
+        /* Round 332: `name` (the local 11-byte buffer just above) is
+         * already explicitly null-terminated at index 10 before this
+         * point, so a straight memcpy of all 11 bytes is both fully
+         * safe and clearer than the previous strncpy(...,10) - which
+         * was ALSO safe (the explicit e->name[10]='\0' right after it
+         * guaranteed termination regardless of what strncpy copied),
+         * but triggered a real, if harmless, devkitPPC/GCC
+         * -Wstringop-truncation warning because strncpy's own
+         * semantics can't statically prove non-truncation from a
+         * 10-byte source with no guaranteed embedded NUL. No
+         * behavioral change - same bytes end up in e->name either way. */
+        memcpy(e->name, name, 11);
         e->payload_off = payload_off;
         e->size = psize;
 
@@ -469,8 +497,38 @@ static void link_imports_one(iop_state_t *st, const iop_elf_load_result_t *res)
              * would be non-NULL for these too, since INTRMAN/EXCEPMAN
              * really do export them - see the 42nd/135th findings). */
             uint32_t intr_sentinel = iop_hle_intr_sentinel_for_import(imp->name, ord);
+            /* Round 389: same precedent, extended to THREADMAN's two
+             * real exported libraries (thbase/thsemap) - see
+             * core/hw/iop_hle_thread.h for the full design and the
+             * real (library, ordinal) citations. Checked at the same
+             * priority as the intr_sentinel check just above (before
+             * normal resolution), for the identical reason: real
+             * module code calling e.g. CreateThread should reach this
+             * project's own real scheduler, not fall through to
+             * THREADMAN's own real ROM code whose internal scheduling
+             * bookkeeping this project has never modeled. */
+            uint32_t thread_sentinel = iop_hle_thread_sentinel_for_import(imp->name, ord);
+            /* Round 421 (task #160, docs/STATUS.md Round 420 root
+             * cause): same precedent again, extended to SYSMEM's real
+             * heap-management exports (AllocSysMemory/FreeSysMemory/
+             * QueryMemSize/QueryMaxFreeMemSize/QueryTotalFreeMemSize)
+             * - see core/hw/iop_hle_heap.h for the full design. Real
+             * module calls to these now reach this project's own
+             * already-tested synthetic heap model (iop_heap.c, Round
+             * 401) instead of real, un-coordinated SYSMEM ROM code
+             * whose heap arena collides with this project's own
+             * separate module-loading bump_alloc() arena. */
+            uint32_t heap_sentinel = iop_hle_heap_sentinel_for_import(imp->name, ord);
             if (intr_sentinel != 0) {
                 uint32_t j_instr = 0x08000000u | ((intr_sentinel >> 2) & 0x03FFFFFFu);
+                iop_mem_write32(st, stub_addr, j_instr);
+                g.stats.imports_resolved++;
+            } else if (heap_sentinel != 0) {
+                uint32_t j_instr = 0x08000000u | ((heap_sentinel >> 2) & 0x03FFFFFFu);
+                iop_mem_write32(st, stub_addr, j_instr);
+                g.stats.imports_resolved++;
+            } else if (thread_sentinel != 0) {
+                uint32_t j_instr = 0x08000000u | ((thread_sentinel >> 2) & 0x03FFFFFFu);
                 iop_mem_write32(st, stub_addr, j_instr);
                 g.stats.imports_resolved++;
             } else if (exp && ord < exp->fptr_count) {
@@ -1019,6 +1077,39 @@ static void mark_iop_boot_complete(void)
      * part of a _LoadExecPS2-triggered reset - see the full citation
      * in sif.h above sif_note_iop_boot_completed_once()'s declaration. */
     sif_note_iop_boot_completed_once();
+
+    /* Round 263/264/265 (task #423, 303rd/304th/305th finding):
+     * REVERTED after further measurement - see the full account in
+     * docs/STATUS.md's 305th finding. Short version: setting
+     * `DMAC_STAT` bit 0x80 (SIF2) here genuinely unblocks the
+     * `0x8000CFD0` OR-condition (real, cited mechanism - see the
+     * removed code's own citation, preserved in git history at commit
+     * a4e66d9) and, combined with Round 264's `SIF_F260` fix, avoids
+     * the real kernel panic Round 263 first hit. BUT Round 265 found
+     * that leaving this `DMAC_STAT` bit permanently set (nothing in
+     * this project ever acknowledges/clears it, since no real SIF2
+     * transfer ever actually completes to trigger a real ack) creates
+     * a genuine, persistent DMAC interrupt condition
+     * (`dma_dmac_interrupt_pending()`) that combines with the EE's
+     * own real, frequently-firing timer interrupt (COP0 Cause
+     * observed as `0x8800` = IP7 timer | IP3 DMAC at the exact
+     * moment this fires) into a self-sustaining interrupt storm:
+     * direct A/B measurement showed 1,285,710 dispatches of the real
+     * exception vector in a 42M-instruction run WITH this fix, all of
+     * it spent re-entering/re-exiting the exception handler and NEVER
+     * once reaching OSDSYS's real per-frame dispatcher
+     * (`0x8000CF88`, hit count exactly 0) - versus 4,188,801 real,
+     * productive dispatcher visits in the SAME budget WITHOUT this
+     * fix (SIF_F260's reactive rule and the broadened SBUS shortcut
+     * alone are sufficient to unblock real forward progress, and do
+     * so far more successfully than this fix does). Real, cited
+     * mechanism or not, this fix produces a strictly worse outcome
+     * than not having it - so it's removed. If a future round finds
+     * the real, missing "service and acknowledge the SIF2 completion"
+     * counterpart (the piece this project doesn't model, matching
+     * Round 263's original honest conclusion that a real DATA
+     * payload, not just a status bit, is what's actually needed
+     * here), it should be re-added together with that fix, not alone. */
 }
 
 int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
@@ -1181,8 +1272,39 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
 
     if (!g.booted_ok || pc != g.trampoline_addr) return 0;
 
+    /* Round 425 (task #164, docs/STATUS.md Round 424/425), corrected
+     * by Round 426 (task #165): once every module is exhausted, `pc`
+     * stays parked at `g.trampoline_addr` forever (nothing moves it
+     * away), so this trap re-fires every time IOP returns here with
+     * nothing left to dispatch - including legitimately after a real
+     * interrupt wakes IOP from idle, its handler runs, and RFEs back
+     * to this exact saved EPC. Round 425's first attempt gated the
+     * ENTIRE completion block (including `st->idle = 1`) behind a
+     * single one-shot flag - live-traced in Round 426 and found to be
+     * too broad: after the first real wake, `idle` never got set back
+     * to 1, permanently defeating the intended idle/wake cycle (IOP
+     * would spin calling this now-harmless no-op every single step
+     * instead of genuinely idling again). Corrected split: re-parking
+     * into idle (`st->idle = 1`) is a real, repeatable, correct action
+     * that must run on every one of these re-entries; only the one-
+     * time module-completion bookkeeping below (the message,
+     * `mark_iop_boot_complete()`, and the Status.IEc/exception_pending
+     * leftover-artifact corrections - see their own comments) is
+     * actually meant to run exactly once. */
+    if (g.idle_transition_done) {
+        st->idle = 1;
+        return 1;
+    }
+
     g.stats.modules_run_to_completion++;
     if (advance_to_next_module(st)) return 1;
+
+    /* From here on, every module has genuinely run to completion for
+     * the first time - the one-time completion/idle-transition path.
+     * Setting the flag here (not above) is what keeps modules 2..N's
+     * own normal per-module dispatch working - see this function's
+     * own header trap-check comment for the full reasoning. */
+    g.idle_transition_done = 1;
 
     /* Every module in the real BIOS's own IOPBTCONF/IOPBTCON2 list
      * has now been front-loaded (task #92, extended by the 31st

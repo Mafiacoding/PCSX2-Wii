@@ -182,6 +182,123 @@ int main(void)
         CHECK(g_dma.icr == 0u && g_dma.icr2 == 0u, "invalid channels (5, 13, -1) are safely ignored, no register touched");
     }
 
+    /* Round 199 (task #367): SIF0 (channel 9) CHCR-STR-bit kick now
+     * actually moves bytes, closing the gap Round 197's 237th finding
+     * root-caused (the receive-side primitive Round 198 built had no
+     * IOP-side sender ever calling it). See iop_dma_sif0_try_transfer()'s
+     * doc comment in iop_dma.c for the full citation trail. */
+    {
+        static uint8_t iop_ram[65536];
+        static uint8_t ee_ram[65536];
+        memset(iop_ram, 0, sizeof(iop_ram));
+        memset(ee_ram, 0, sizeof(ee_ram));
+
+        iop_dma_init();
+        iop_dma_bind_iop_ram(iop_ram, sizeof(iop_ram));
+        dma_init();
+        dma_bind_ee_ram(ee_ram, sizeof(ee_ram));
+
+        /* Known payload at IOP RAM offset 0x1000, 2 quadwords (32 bytes) */
+        for (int i = 0; i < 32; i++) iop_ram[0x1000 + i] = (uint8_t)(0x50 + i);
+
+        /* EE side "arms" its own SIF0 channel first, matching real
+         * usage order (EE programs its receive destination, then the
+         * IOP sends) - see the honest scope note in iop_dma.h. */
+        dma_get_state()->chan[DMA_CHANNEL_SIF0].madr = 0x2000;
+
+        /* IOP side: MADR = source offset in IOP RAM, BCR = 8 words
+         * per block * 1 block = 8 words = 32 bytes = 2 quadwords
+         * (SyncMode-1-style: BS=8 in bits 0-15, BA=1 in bits 16-31). */
+        g_dma.ch[9].madr = 0x1000;
+        g_dma.ch[9].bcr  = (1u << 16) | 8u;
+
+        CHECK(iop_dma_mmio_write32(0x1F801528u, 0x01000000u) == 1,
+              "SIF0 CHCR write with STR bit accepted");
+
+        CHECK(memcmp(ee_ram + 0x2000, iop_ram + 0x1000, 32) == 0,
+              "SIF0 kick: payload actually landed in EE RAM at the EE's own armed MADR");
+        CHECK(dma_get_state()->chan[DMA_CHANNEL_SIF0].madr == 0x2000 + 32,
+              "SIF0 kick: EE-side MADR advanced by the real transferred length");
+        CHECK(dma_get_state()->chan[DMA_CHANNEL_SIF0].quadwords_transferred == 2,
+              "SIF0 kick: EE-side lifetime counter reflects the 2 quadwords moved");
+        CHECK((g_dma.ch[9].chcr & 0x01000000u) == 0u,
+              "SIF0 kick: IOP-side STR bit auto-cleared upon completion (real hardware behavior)");
+        CHECK((g_dma.icr2 & (1u << (2 + 24))) != 0u,
+              "SIF0 kick: real per-channel completion IRQ flag set via the existing Round 114 path");
+
+        /* SyncMode-0-style BCR (BA=0, plain word count in bits 0-15)
+         * is also honored - 4 words = 1 quadword, no fabricated
+         * assumption that only one BCR convention is real. */
+        memset(ee_ram, 0, sizeof(ee_ram));
+        dma_init();
+        dma_bind_ee_ram(ee_ram, sizeof(ee_ram));
+        dma_get_state()->chan[DMA_CHANNEL_SIF0].madr = 0x3000;
+        iop_dma_init();
+        iop_dma_bind_iop_ram(iop_ram, sizeof(iop_ram));
+        g_dma.ch[9].madr = 0x1000;
+        g_dma.ch[9].bcr  = 4u; /* BA=0 -> plain word count */
+        iop_dma_mmio_write32(0x1F801528u, 0x01000000u);
+        CHECK(memcmp(ee_ram + 0x3000, iop_ram + 0x1000, 16) == 0,
+              "SIF0 kick: SyncMode-0-style BCR (plain word count, BA=0) also transfers correctly");
+
+        /* CHCR write WITHOUT the STR bit must NOT trigger a transfer -
+         * pure register latch, matching every other channel/every
+         * prior CHCR write in this file. */
+        memset(ee_ram, 0, sizeof(ee_ram));
+        dma_init();
+        dma_bind_ee_ram(ee_ram, sizeof(ee_ram));
+        iop_dma_init();
+        iop_dma_bind_iop_ram(iop_ram, sizeof(iop_ram));
+        g_dma.ch[9].madr = 0x1000;
+        g_dma.ch[9].bcr  = 8u;
+        iop_dma_mmio_write32(0x1F801528u, 0x00000000u); /* STR bit clear */
+        CHECK(dma_get_state()->chan[DMA_CHANNEL_SIF0].quadwords_transferred == 0u,
+              "SIF0 CHCR write without STR bit does NOT trigger a transfer");
+
+        /* Note: the "no IOP RAM bound" safety path
+         * (iop_dma_sif0_try_transfer()'s `if (!g_iop_ram) return;`,
+         * mirroring dma_channel_receive_quadwords()'s own contract)
+         * isn't separately exercised here - iop_dma_bind_iop_ram()
+         * is a one-time wiring (same documented convention as
+         * dma_bind_ee_ram()/dma_init() above: init() deliberately
+         * doesn't clear the RAM binding), so once bound earlier in
+         * this same test run there's no clean way to unbind it again
+         * to test the null case without adding a real unbind API this
+         * project doesn't otherwise need. */
+    }
+
+    /* --- Round 206 (task #366): iop_dma_channel_write_bytes() - the
+     * generic "device writes bytes INTO IOP RAM" primitive iop_cdvd.c
+     * now uses for real ReadCd/ReadDvd sector delivery (channel 3,
+     * CDROM). See iop_dma.h's own citation for the full rationale. */
+    {
+        uint8_t iop_ram2[0x10000];
+        memset(iop_ram2, 0, sizeof(iop_ram2));
+        iop_dma_init();
+        iop_dma_bind_iop_ram(iop_ram2, sizeof(iop_ram2));
+        g_dma.ch[3].madr = 0x2000u;
+
+        uint8_t payload[16];
+        for (int i = 0; i < 16; i++) payload[i] = (uint8_t)(0xA0 + i);
+
+        CHECK(iop_dma_channel_write_bytes(3, payload, 16) == 1,
+              "iop_dma_channel_write_bytes: succeeds when IOP RAM is bound and destination is in-range");
+        CHECK(memcmp(iop_ram2 + 0x2000u, payload, 16) == 0,
+              "iop_dma_channel_write_bytes: bytes actually land at the channel's MADR");
+        CHECK(g_dma.ch[3].madr == 0x2000u + 16u,
+              "iop_dma_channel_write_bytes: MADR auto-advances by the written byte count");
+
+        /* Out-of-bounds destination: must be a safe no-op, not a
+         * buffer overrun. */
+        g_dma.ch[3].madr = (uint32_t)sizeof(iop_ram2) - 4u;
+        CHECK(iop_dma_channel_write_bytes(3, payload, 16) == 0,
+              "iop_dma_channel_write_bytes: correctly refuses a write that would run past IOP RAM");
+
+        /* Invalid channel index: also a safe no-op. */
+        CHECK(iop_dma_channel_write_bytes(99, payload, 16) == 0,
+              "iop_dma_channel_write_bytes: correctly refuses an out-of-range channel index");
+    }
+
     printf("\n%d check(s) failed\n", failures);
     return failures ? 1 : 0;
 }

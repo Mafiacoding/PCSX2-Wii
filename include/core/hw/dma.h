@@ -164,6 +164,93 @@ void dma_channel_kick(int channel);
 void dma_channel_signal_done(int channel);
 
 /*
+ * Round 198 (task #365): the missing INBOUND (device -> EE RAM)
+ * write capability, identified as a genuine structural gap by Round
+ * 197's (237th finding) full disassembly-traced root-cause chase:
+ * transfer_quadwords()/ram_ptr() (see dma.c) only ever READ from EE
+ * RAM to feed a registered sink - i.e. outbound. Real hardware's SIF0
+ * channel (DMA_CHANNEL_SIF0 above, physical base 0x1000C000) is a
+ * fixed-direction "fromIOP" channel - genuinely inbound, IOP-sourced
+ * data written INTO EE RAM (as opposed to SIF1/"toIOP", the reverse;
+ * both directions are real, standard, well-documented PS2 DMA
+ * architecture, already cited via PCSX2's Dmac.h throughout this
+ * file - not new terminology invented for this round).
+ *
+ * dma_channel_receive_quadwords() models that direction: writes
+ * 'qwc' quadwords of caller-supplied bytes (already real PS2-order
+ * little-endian bytes, exactly as if captured off a real IOP-side
+ * source buffer - a raw byte-for-byte copy is endian-safe regardless
+ * of host CPU byte order, same reasoning ram_ptr()'s existing raw
+ * uint8_t* contract already relies on for the outbound direction) to
+ * the target channel's OWN MADR register (the same real EE-main-
+ * memory-address register the outbound path already reads FROM -
+ * real hardware's MADR is a plain memory address, its meaning as
+ * source or destination is fixed only by which direction that
+ * specific channel is wired for), then advances MADR/decrements QWC
+ * and signals completion (dma_channel_signal_done()) exactly like a
+ * completed outbound transfer already does - matching real
+ * hardware's behavior of updating DMAC_STAT/MADR/QWC identically
+ * regardless of transfer direction.
+ *
+ * Returns 1 on success, 0 if EE RAM isn't bound or the destination
+ * range falls outside it (mirrors transfer_quadwords()'s contract).
+ *
+ * Honest scope (see docs/STATUS.md's 238th finding): this function
+ * is real, tested in isolation (tests/test_dma_inbound.c), and
+ * available for any real IOP-side producer to call - but as of this
+ * round nothing yet calls it for the specific RAM[0x80020E3C] OSDSYS
+ * gate Round 197 traced (238th finding correctly scopes that the
+ * exact real IOP-side trigger for THAT specific field is still
+ * unconfirmed by any citable source, and is deliberately not guessed
+ * here). This closes the "the capability doesn't exist at all" half
+ * of Round 197's root cause; wiring a genuine, cited producer into it
+ * for that specific gate remains explicitly open future work.
+ */
+int dma_channel_receive_quadwords(int channel, const uint8_t *data, uint32_t qwc);
+
+/*
+ * Round 225 (task #366/#172, 265th finding): a companion to
+ * dma_channel_receive_quadwords() for the SIF-RPC reply call sites
+ * this project has built since Rounds 191-212 (ee_core.c's
+ * sif_cmd_iop_send_rpcinit_ready()/sif_cmd_iop_send_rpc_bind_rend()/
+ * the syscall-119 MCSERV/PADMAN/SPU2/IOPHEAP/LOADFILE reply
+ * branches). Round 224's own investigation found those sites already
+ * call dma_channel_signal_done(DMA_CHANNEL_SIF0) after writing their
+ * reply bytes directly via ee_mem_write32() - so the real DMAC_STAT
+ * completion bit and the resulting Cause.IP3 exception (via
+ * ee_check_dmac_interrupt(), confirmed correctly wired this round)
+ * were ALREADY firing; Round 224's finding that "no real completion
+ * signal accompanies these replies" was itself inaccurate and is
+ * corrected in docs/STATUS.md's 265th finding.
+ *
+ * What genuinely was still missing: those sites never touched the
+ * SIF0 channel's own MADR/QWC/quadwords_transferred bookkeeping, so
+ * real BIOS/kernel code that reads the channel's hardware registers
+ * directly (rather than only reacting to the DMAC_STAT IRQ) would see
+ * stale state after one of these synthetic replies landed. This
+ * function closes that gap: given the exact EE destination address a
+ * reply was actually written to and its real byte length, it updates
+ * MADR (advanced past the delivered data, mirroring real hardware's
+ * post-transfer register state), decrements QWC (clamped, never
+ * underflows, same convention as dma_channel_receive_quadwords()),
+ * increments the lifetime transferred-quadwords counter, and calls
+ * dma_channel_signal_done() - i.e. the exact same real bookkeeping
+ * dma_channel_receive_quadwords() performs, without redoing the byte
+ * copy (already done by the caller) and without requiring the
+ * channel's MADR to already equal the destination first (unlike
+ * dma_channel_receive_quadwords(), which targets the channel's
+ * CURRENT MADR - not usable here since this project has not
+ * confirmed real EE-side code programs SIF0's MADR to these specific
+ * synthetic reply-buffer addresses before receiving a reply).
+ * nbytes is rounded UP to a whole quadword count (16-byte real DMA
+ * transfer granularity) - every real call site's packet size is
+ * already quadword-aligned (24 and 48 bytes), so this rounding is a
+ * defensive no-op for current callers, not a behavior change.
+ */
+void dma_channel_note_reply_delivered(int channel, uint32_t dest_addr, uint32_t nbytes);
+
+
+/*
  * Task #176: directly sets (enabled=1) or clears (enabled=0) channel
  * `channel`'s bit in DMAC_STAT's upper (enable-mask) half. Real
  * hardware's EnableDmac()/DisableDmac() BIOS calls (invoked via EE

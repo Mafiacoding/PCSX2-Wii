@@ -64,7 +64,51 @@
  * bad $gp). Dynamic/shared-library-style GOT/PLT MIPS ABI features
  * are not implemented either - real IOP modules don't appear to use
  * them (no such relocation types were observed).
- */
+ *
+ * Round 375 (task #212 continuation, user-shared source: real ps2sdk
+ * `iop/system/loadcore/src/loadcore.c`, reached via
+ * https://ps2dev.github.io/ps2sdk/structaouthdr.html): this file is
+ * real, public source explicitly noted as "Based on the module from
+ * SCE SDK 3.1.0" - i.e. the actual real loadcore reimplementation,
+ * not a guess. It independently CONFIRMS every numeric convention
+ * this project's own iop_elf.c already uses, found separately via the
+ * two citations above:
+ *   - `enum ELF_reloc_types` in loadcore.c: R_MIPS_32=2, R_MIPS_26=4,
+ *     R_MIPS_HI16=5, R_MIPS_LO16=6 - byte-for-byte identical to this
+ *     file's own values.
+ *   - `SHT_LOPROC_IOPMOD` = 0x80, combined with `SHT_LOPROC` =
+ *     0x70000000, giving 0x70000080 - identical to this project's own
+ *     SHT_MIPS_IOPMOD constant.
+ *   - `RegisterLibraryEntries()`/`ProbeExecutableObject()` check
+ *     `exports->magic != 0x41C00000` and `importtmp1->magic ==
+ *     0x41E00000` - identical to the 0x41c00000/0x41e00000 magic
+ *     numbers already cited above (and also independently found via
+ *     EECONF's own real disassembly - see iop_cdvd.h's EECONF
+ *     citation, which cites the same 0x41C00000 magic).
+ * Three independently-sourced confirmations (a real BIOS byte-dump,
+ * two public reference documents, and now this real reimplementation
+ * source) agreeing exactly is strong evidence this file's real-format
+ * understanding is correct, not merely plausible.
+ *
+ * loadcore.c ALSO supplies exactly the "on-disk-vs-runtime
+ * transformation" this project has not attempted to replicate (see
+ * iop_module_loader.h's own "WHAT THIS DOES NOT DO" scope note):
+ * `ProbeExecutableObject()` locates a module's `struct iopmod` (found
+ * via the SHT_LOPROC_IOPMOD-typed program header) and copies its
+ * fields into a `FileInfo_t`; `LoadExecutableObject()`/`CopyModInfo()`
+ * then place a real `ModuleInfo_t` exactly 0x30 (48) bytes BEFORE the
+ * module's own relocated `text_start` address and populate it from
+ * that `FileInfo_t`. This is real, concrete, byte-exact ground truth
+ * for the exact gap iop_module_loader.h's scope note declined to
+ * fabricate - available now if a future round decides constructing a
+ * byte-exact `ModuleInfo_t` chain (to support real
+ * GetLibraryEntryTable/QueryLibraryEntryTable syscalls from
+ * later-loaded modules) becomes necessary. Not attempted this round -
+ * this project's own existing, different bookkeeping (a separate
+ * registration-list/slot-address scheme, not the real -0x30-before-
+ * text_start convention) still works for every module this project
+ * has run so far, and replacing it is a nontrivial, currently
+ * unmotivated change, not a bug fix. */
 
 #define IOP_ELF_MAX_TABLES 8
 #define IOP_ELF_MODNAME_MAX 32

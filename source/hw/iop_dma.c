@@ -5,6 +5,7 @@
 #include "core/hw/iop_dma.h"
 #include "core/hw/iop_intc.h" /* Round 114: iop_intc_raise/iop_intc_raise_soft */
 #include <string.h>
+#include "core/hw/dma.h" /* Round 199: dma_channel_receive_quadwords() - the EE-side inbound-write primitive Round 198 built */
 
 #define DMA_PCR   0x1F8010F0u
 #define DMA_ICR   0x1F8010F4u
@@ -39,6 +40,98 @@ static iop_dma_state_t g_dma;
 void iop_dma_init(void)
 {
     memset(&g_dma, 0, sizeof(g_dma));
+}
+
+static uint8_t *g_iop_ram = NULL;
+static uint32_t g_iop_ram_size = 0;
+
+void iop_dma_bind_iop_ram(uint8_t *ram, uint32_t ram_size)
+{
+    g_iop_ram = ram;
+    g_iop_ram_size = ram_size;
+}
+
+#define IOP_DMA_SIF0_CHANNEL 9
+
+/*
+ * Round 199 (task #367): SIF0 (channel 9, real "fromIOP" direction -
+ * psx-spx's DMA Channels page, cross-referenced with this project's
+ * own dma.h SIF0 doc comment) is the one channel where writing CHCR
+ * with the real, cited STR/"start" bit (bit 24 - psx-spx's own CHCR
+ * bit table, already used by this project's icr_write()/DMAC_STAT
+ * logic elsewhere) now actually MOVES bytes, instead of only
+ * latching the register - closing exactly the gap Round 197's 237th
+ * finding root-caused (dma.c had a receive-side primitive with no
+ * IOP-side sender ever calling it).
+ *
+ * Real, cited semantics used here (psx-spx DMA Channels page):
+ *   - BCR (Dn_BCR): "BC/BS/BA can be in range 0001h..FFFFh (or 0=
+ *     10000h)" - SyncMode 1 gives total length = BS (bits 0-15) * BA
+ *     (bits 16-31) words; SyncMode 0 gives a plain BC word count in
+ *     bits 0-15 with bits 16-31 unused. This project doesn't have a
+ *     citable source for which SyncMode real IOP SIF0 hardware always
+ *     uses, so BOTH real conventions are honored defensively: if the
+ *     upper 16 bits (BA) are zero, the lower 16 bits are treated as a
+ *     plain word count (SyncMode-0-style); otherwise BS*BA is used
+ *     (SyncMode-1-style). Either way, the result is a real, in-range
+ *     word count - never an invented number.
+ *   - CHCR bit 24 (STR/start) is the only bit gated on here. CHCR bit
+ *     0 (real direction bit) is deliberately NOT asserted to any
+ *     specific fixed value for this channel, since no citable IOP-
+ *     specific source fixes it - this project doesn't guess.
+ *
+ * Honest scope, not fabricated: no DREQ/handshake timing is modeled
+ * (the transfer happens synchronously and instantly on this single
+ * MMIO write, same simplification this project's EE-side
+ * dma_channel_kick() already makes for its own channels). Data lands
+ * at the EE's SIF0 channel's CURRENT MADR - i.e. this assumes the EE
+ * side has already programmed its own SIF0 destination address first,
+ * matching real usage order (EE arms its receive channel, then the
+ * IOP sends) but not independently re-verified against a citable
+ * source for this exact ordering guarantee. SIF1 (channel 10, the
+ * reverse "toIOP" direction) remains completely unmodeled - it would
+ * need a symmetric "write into IOP RAM" primitive this round did not
+ * build; noted as open scope, not silently skipped.
+ */
+static void iop_dma_sif0_try_transfer(iop_dma_channel_t *ch)
+{
+    if (!g_iop_ram)
+        return; /* iop_dma_bind_iop_ram() never called - safe no-op, mirrors dma_channel_receive_quadwords()'s own no-RAM-bound safety check */
+
+    uint32_t bs = ch->bcr & 0xFFFFu;
+    uint32_t ba = (ch->bcr >> 16) & 0xFFFFu;
+    if (bs == 0) bs = 0x10000u; /* real "0 means 10000h" convention */
+    uint32_t total_words = (ba == 0) ? bs : (bs * ba);
+
+    uint32_t total_bytes = total_words * 4u;
+    uint32_t qwc = total_bytes / 16u; /* SIF transfers are quadword-granular in real practice */
+    if (qwc == 0) {
+        ch->chcr &= ~0x01000000u; /* nothing to move, but still clear STR - matches "auto-cleared upon completion" even for a degenerate 0-length kick */
+        return;
+    }
+
+    if ((uint64_t)ch->madr + (uint64_t)(qwc * 16u) > (uint64_t)g_iop_ram_size) {
+        ch->chcr &= ~0x01000000u; /* out-of-bounds source: clear STR, drop the transfer rather than reading past IOP RAM */
+        return;
+    }
+
+    dma_channel_receive_quadwords(DMA_CHANNEL_SIF0, g_iop_ram + ch->madr, qwc);
+    ch->chcr &= ~0x01000000u; /* real hardware auto-clears STR upon completion */
+    iop_dma_signal_channel_done(IOP_DMA_SIF0_CHANNEL); /* real per-channel completion IRQ path, already existing (Round 114) */
+}
+
+int iop_dma_channel_write_bytes(int channel, const uint8_t *data, uint32_t nbytes)
+{
+    if (!g_iop_ram)
+        return 0; /* iop_dma_bind_iop_ram() never called */
+    if (channel < 0 || channel >= IOP_DMA_NUM_CHANNELS)
+        return 0;
+    iop_dma_channel_t *ch = &g_dma.ch[channel];
+    if ((uint64_t)ch->madr + (uint64_t)nbytes > (uint64_t)g_iop_ram_size)
+        return 0; /* out-of-bounds destination: drop rather than write past IOP RAM */
+    memcpy(g_iop_ram + ch->madr, data, nbytes);
+    ch->madr += nbytes;
+    return 1;
 }
 
 iop_dma_state_t *iop_dma_get_state(void) { return &g_dma; }
@@ -170,12 +263,22 @@ int iop_dma_mmio_write32(uint32_t addr, uint32_t value)
     switch (sub_off) {
         case 0x00: c->madr = value; return 1;
         case 0x04: c->bcr  = value; return 1;
-        case 0x08:
+        case 0x08: {
             c->chcr = value;
             /* Real hardware/PCSX2 calls the channel's own transfer
-             * function here (psxDma0/DmaExec/DmaExec2) - NOT modeled,
-             * see the header comment. This is a register latch only. */
+             * function here (psxDma0/DmaExec/DmaExec2). Round 199:
+             * for SIF0 (channel 9) specifically, if the real STR/
+             * start bit (24) is set, this now actually performs the
+             * transfer - see iop_dma_sif0_try_transfer()'s doc
+             * comment for the full citation trail and honest scope.
+             * Every other channel remains a register latch only, as
+             * originally documented. */
+            int this_channel = (int)(c - g_dma.ch);
+            if (this_channel == IOP_DMA_SIF0_CHANNEL && (value & 0x01000000u)) {
+                iop_dma_sif0_try_transfer(c);
+            }
             return 1;
+        }
         case 0x0C: c->tadr = value; return 1;
         default:   return 1; /* unmodeled sub-offset: accepted, discarded */
     }

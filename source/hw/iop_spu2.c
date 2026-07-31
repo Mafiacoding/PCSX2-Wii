@@ -11,6 +11,24 @@ void iop_spu2_init(void)
     memset(g_regs, 0, sizeof(g_regs));
 }
 
+uint32_t iop_spu2_voice_reg_addr(int core, int voice, uint32_t voice_reg_offset)
+{
+    uint32_t core_base = IOP_SPU2_BASE + (core ? SPU2_CORE1_OFFSET : 0u);
+    return core_base + (uint32_t)voice * SPU2_VOICE_STRIDE + voice_reg_offset;
+}
+
+uint32_t iop_spu2_voice_addr_reg_addr(int core, int voice, uint32_t vaddr_reg_offset)
+{
+    uint32_t core_base = IOP_SPU2_BASE + (core ? SPU2_CORE1_OFFSET : 0u);
+    return core_base + SPU2_VADDR_BASE + (uint32_t)voice * SPU2_VADDR_STRIDE + vaddr_reg_offset;
+}
+
+uint32_t iop_spu2_core_reg_addr(int core, uint32_t core_reg_offset)
+{
+    uint32_t core_base = IOP_SPU2_BASE + (core ? SPU2_CORE1_OFFSET : 0u);
+    return core_base + core_reg_offset;
+}
+
 int iop_spu2_mmio_read16(uint32_t addr, uint16_t *out)
 {
     if (addr < IOP_SPU2_BASE || addr >= IOP_SPU2_BASE + IOP_SPU2_SIZE) return 0;

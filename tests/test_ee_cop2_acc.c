@@ -93,8 +93,8 @@ int main(void)
     uint8_t *prog = bios.data;
     int i = 0;
 
-    /* r4 = 0x1000 (RAM base pointer) */
-    wle32(prog + (i++)*4, enc_lui(4, 0x0000));
+    /* r4 = 0x80001000 (RAM base pointer, Round 363: KSEG0 direct-mapped, not raw KUSEG) */
+    wle32(prog + (i++)*4, enc_lui(4, 0x8000));
     wle32(prog + (i++)*4, enc_ori(4, 4, 0x1000));
 
     /* LQ r5 <- RAM[0x1000] (VF1: 2,3,4,5), LQ r6 <- RAM[0x1010] (VF2: 10,20,30,40) */
@@ -147,7 +147,7 @@ int main(void)
         bios_image_t bios2; memset(&bios2, 0, sizeof(bios2));
         bios2.data = calloc(1, BIOS_MAX_SIZE); bios2.size = BIOS_MAX_SIZE; bios2.loaded = 1;
         uint8_t *p2 = bios2.data; int j = 0;
-        wle32(p2 + (j++)*4, enc_lui(4, 0x0000));
+        wle32(p2 + (j++)*4, enc_lui(4, 0x8000));
         wle32(p2 + (j++)*4, enc_ori(4, 4, 0x1000));
         wle32(p2 + (j++)*4, (0x1E << 26) | (4 << 21) | (5 << 16) | 0x0000);
         wle32(p2 + (j++)*4, (0x1E << 26) | (4 << 21) | (6 << 16) | 0x0010);
@@ -180,7 +180,7 @@ int main(void)
         bios_image_t bios3; memset(&bios3, 0, sizeof(bios3));
         bios3.data = calloc(1, BIOS_MAX_SIZE); bios3.size = BIOS_MAX_SIZE; bios3.loaded = 1;
         uint8_t *p3 = bios3.data; int j = 0;
-        wle32(p3 + (j++)*4, enc_lui(4, 0x0000));
+        wle32(p3 + (j++)*4, enc_lui(4, 0x8000));
         wle32(p3 + (j++)*4, enc_ori(4, 4, 0x1000));
         wle32(p3 + (j++)*4, (0x1E << 26) | (4 << 21) | (5 << 16) | 0x0000);
         wle32(p3 + (j++)*4, (0x1E << 26) | (4 << 21) | (6 << 16) | 0x0010);
@@ -209,7 +209,7 @@ int main(void)
         bios_image_t bios4; memset(&bios4, 0, sizeof(bios4));
         bios4.data = calloc(1, BIOS_MAX_SIZE); bios4.size = BIOS_MAX_SIZE; bios4.loaded = 1;
         uint8_t *p4 = bios4.data; int j = 0;
-        wle32(p4 + (j++)*4, enc_lui(4, 0x0000));
+        wle32(p4 + (j++)*4, enc_lui(4, 0x8000));
         wle32(p4 + (j++)*4, enc_ori(4, 4, 0x1000));
         wle32(p4 + (j++)*4, (0x1E << 26) | (4 << 21) | (5 << 16) | 0x0000);
         wle32(p4 + (j++)*4, (0x1E << 26) | (4 << 21) | (6 << 16) | 0x0010);
@@ -241,7 +241,7 @@ int main(void)
         bios_image_t bios5; memset(&bios5, 0, sizeof(bios5));
         bios5.data = calloc(1, BIOS_MAX_SIZE); bios5.size = BIOS_MAX_SIZE; bios5.loaded = 1;
         uint8_t *p5 = bios5.data; int j = 0;
-        wle32(p5 + (j++)*4, enc_lui(4, 0x0000));
+        wle32(p5 + (j++)*4, enc_lui(4, 0x8000));
         wle32(p5 + (j++)*4, enc_ori(4, 4, 0x1000));
         wle32(p5 + (j++)*4, (0x1E << 26) | (4 << 21) | (5 << 16) | 0x0000);
         wle32(p5 + (j++)*4, enc_qmtc2(5, 1));
@@ -273,7 +273,7 @@ int main(void)
         bios_image_t bios6; memset(&bios6, 0, sizeof(bios6));
         bios6.data = calloc(1, BIOS_MAX_SIZE); bios6.size = BIOS_MAX_SIZE; bios6.loaded = 1;
         uint8_t *p6 = bios6.data; int j = 0;
-        wle32(p6 + (j++)*4, enc_lui(4, 0x0000));
+        wle32(p6 + (j++)*4, enc_lui(4, 0x8000));
         wle32(p6 + (j++)*4, enc_ori(4, 4, 0x1000));
         wle32(p6 + (j++)*4, (0x1E << 26) | (4 << 21) | (5 << 16) | 0x0000);
         wle32(p6 + (j++)*4, (0x1E << 26) | (4 << 21) | (6 << 16) | 0x0010);

@@ -189,6 +189,190 @@ uint32_t sif_cmd_iop_get_ee_recvbuf(void);
 void sif_note_iop_boot_completed_once(void);
 int sif_iop_boot_completed_once(void);
 
+/* Round 372 continuation (task #212, 84th finding): two new
+ * real-world sources cross-referenced against the honest gap cited
+ * above ("real PS2 hardware would have its IOP kernel genuinely
+ * reboot and re-run its own module list at this point ... but this
+ * project has no real IOP-reboot-internals source to model that
+ * precisely"):
+ *
+ * (1) A user-supplied, real PCSX2 1.5.0 console log (17 pages,
+ *     BIOS "USA v02.00(14/06/2004)") showing the exact real, external
+ *     message sequence emitted during a genuine OSDSYS-triggered IOP
+ *     reboot: "Get Reboot Request From EE" -> "PlayStation 2
+ *     ======== Update rebooting.." -> "PlayStation 2 ========
+ *     Update reboot complete" -> "cdvdman Init" -> "rmreset
+ *     start"/"rmreset end" -> "clearspu: completed" -> "Pad Driver
+ *     for OSD" -> a fresh IOP kernel re-banner -> a real rom0:
+ *     file-open sequence (OSDVER, ROMVER, XDEV9, FONTM, FNTIMAGE,
+ *     SNDIMAGE, TEXIMAGE, ICOIMAGE, TZLIST, PS1ID, PS1VERA,
+ *     rom1:DVDID). This is genuine, observed EXTERNAL behavior
+ *     (console print statements), not IOP kernel-internal source -
+ *     it confirms WHEN/WHAT real hardware prints, not HOW LOADCORE/
+ *     MODLOAD work internally. Also note: this log's BIOS revision
+ *     (v02.00) is newer than this project's own emulated
+ *     scph10000.bin (v1.00), so the exact rom0: filenames/order are
+ *     not assumed to transfer byte-for-byte to this project's BIOS.
+ *
+ * (2) The real technical reference https://psi-rockin.github.io/ps2tek/
+ *     (via its actively-maintained fork/mirror,
+ *     https://israpps.github.io/ps2tek/PS2/BIOS/IOP_REBOOT.html,
+ *     "BIOS IOP REBOOT - SIF Reboot Server"), which DOES describe the
+ *     real IOP-internal mechanism at a summary level (not
+ *     disassembly): the EE sends real SIF command 80000003h with an
+ *     argument string of the form "rom0:UDNL [image files...] [-v]";
+ *     the IOP's own REBOOT handler calls MODLOAD.ReBootStart, which
+ *     cleans up all module libraries and jumps to IOPBOOT; IOPBOOT
+ *     bootstraps SYSMEM and LOADCORE; LOADCORE loads all modules
+ *     listed in IOPBTCONF2; MODLOAD is then reloaded and installs a
+ *     post-boot callback in LOADCORE that jumps to the UDNL module;
+ *     UDNL scans the provided image files for the newest modules,
+ *     then triggers a SECOND SYSMEM/LOADCORE bootstrap, this time
+ *     reading IOPBTCONF and loading the newest available modules
+ *     (from the image files, falling back to the boot ROM's own
+ *     copies) - only then is the reboot complete.
+ *
+ * This closes the "no real source at all" half of the original gap
+ * (a real, citable description of the mechanism now exists), but
+ * does NOT close the "precisely model it" half: this project has no
+ * real ROMDIR/IOPBTCONF/IOPBTCONF2 module-table source, no real
+ * MODLOAD/LOADCORE/UDNL binary or disassembly, and (per source (1)'s
+ * own caveat) no confirmation the exact file list transfers to this
+ * project's specific v1.00 BIOS revision. Implementing a literal
+ * SYSMEM/LOADCORE/UDNL re-bootstrap from only a prose summary would
+ * mean fabricating the missing internals rather than modeling real
+ * ones - the same "do NOT bypass a real kernel mechanism in
+ * software... let real code run it" task #180 lesson this project
+ * has applied consistently elsewhere (_ExecPS2, _LoadExecPS2,
+ * CreateThread/StartThread - see ee_core.c) argues against a
+ * fabricated stand-in here too, absent the real module/LOADCORE
+ * source those other cases had. The existing, already-cited
+ * SIF_SMFLAG re-signal (sif_mmio_write32, guarded by
+ * g_iop_boot_completed_once && g_ee_loadexecps2_seen) therefore
+ * remains this project's honest, minimal response: re-asserting the
+ * SAME real, already-earned completion fact, not a claim of literally
+ * re-running IOPBOOT/LOADCORE/UDNL. Documented here as newly-
+ * corroborated (not newly-closed) per task #212's ongoing standard of
+ * citing only what has actually been verified against a real source. */
+
+/* Round 373 continuation (task #212, 85th finding): user-supplied real
+ * source code - Open PS2 Loader's ioprp.c/system.c and ps2sdk's
+ * ee/iopreboot/src/SifIopRebootBuffer.c - fills in exactly the
+ * "precisely model it" gap Round 372 left open, at the ACTUAL SOURCE
+ * level (not prose summary) for the specific buffer-based reboot
+ * class real homebrew loaders (POPStarter-style) use. Three concrete,
+ * source-verified findings:
+ *
+ * (1) STRONG VALIDATION of this project's existing fix. ps2sdk's real
+ *     SifIopRebootBuffer() ends with EXACTLY the same real register
+ *     writes this project's own sif_mmio_write32() SIF_SMFLAG
+ *     re-signal already performs:
+ *         sceSifSetReg(SIF_REG_SMFLAG, SIF_STAT_SIFINIT);
+ *         sceSifSetReg(SIF_REG_SMFLAG, SIF_STAT_CMDINIT);
+ *         sceSifSetReg(SIF_REG_SMFLAG, SIF_STAT_BOOTEND);
+ *     This is not this project's own workaround approximating real
+ *     behavior - it is, verbatim, the real completion signal a real
+ *     buffer-based IOP reboot performs on real hardware. (SifIopReset,
+ *     the plain-device-path variant OPL's own normal, non-DECI2-debug
+ *     sysReset() actually calls, is a real ROM-driven reboot and does
+ *     not need this manual re-signal - real BIOS-resident code would
+ *     set these bits itself, matching this project's own existing
+ *     _LoadExecPS2-triggered-reload framing.)
+ *
+ * (2) The real reason UDNL "can only access IOPRP images from known
+ *     devices" (user's own framing, now source-confirmed): a
+ *     buffer-based reboot cannot just point UDNL at an EE-side memory
+ *     buffer directly, because UDNL's ROM-resident code only knows how
+ *     to scan real IOP device drivers (cdrom0:, mc0:, etc.) for
+ *     ROMDIR-style images. SifIopRebootBuffer() works around this by:
+ *     (a) DMA-transferring a small, special "imgdrv" IOP module
+ *         (_imgdrv_irx) PLUS the actual IOPRP payload PLUS a
+ *         synthesized IOPBTCONF image into IOP RAM via sceSifSetDma;
+ *     (b) patching two fixed offsets inside the imgdrv module image
+ *         (located by scanning for literal marker words 0xDEC1DEC1/
+ *         0xDEC2DEC2) with the just-DMA'd buffer pointers/sizes -
+ *         this is how the two payloads get wired to the driver
+ *         instance before it's even loaded;
+ *     (c) loading rom0:SYSCLIB (a real ROM module) then the imgdrv
+ *         module itself (SifLoadModuleBuffer) - this registers virtual
+ *         devices "img0:" (-> the IOPRP payload) and "img1:" (-> the
+ *         synthesized IOPBTCONF), i.e. imgdrv is a real, minimal IOP
+ *         block-device driver whose sole job is to make an EE-supplied
+ *         RAM buffer LOOK like a real IOP device to UDNL;
+ *     (d) only then loading the REAL, unmodified rom0:UDNL, passing it
+ *         the argument string "img0:\0img1:" - the exact same real
+ *         calling convention a disc-based reboot uses
+ *         ("rom0:UDNL [image files] [-v]", Round 372's ps2tek
+ *         citation), just pointed at the freshly-registered virtual
+ *         devices instead of a real cdrom0:/mc0: path.
+ *     generateIOPBTCONF_img() also does a real, source-confirmed
+ *     rename trick: if the caller's own IOPRP image already contains
+ *     an "IOPBTCONF" ROMDIR entry, it is renamed in-place to
+ *     "XOPBTCONF" (so the real UDNL's own scan of the ORIGINAL image
+ *     will not find it) while a fresh, synthesized IOPBTCONF
+ *     (wrapping the same original bytes) is exposed via the separate
+ *     "img1:" virtual device instead - real, deliberate misdirection
+ *     of UDNL's own real device-scanning logic, not a bug.
+ *
+ * (3) The real 99.99 EXTINFO version-number trick (user-observed) is
+ *     baked into Open PS2 Loader's precompiled base IOPRP.img
+ *     template, NOT computed at runtime. ioprp.c's own
+ *     patch_IOPRP_image() only memcpy's replacement CDVDMAN/CDVDFSV/
+ *     EESYNC module bytes over the corresponding ROMDIR entries
+ *     (copying romdir_out->fileSize from the new payload) - it copies
+ *     romdir_out->extinfo_size verbatim from the ORIGINAL template
+ *     entry and never touches EXTINFO version bytes at all. This means
+ *     the 99.99 value the user observed must already be present in
+ *     the base IOPRP.img binary shipped inside Open PS2 Loader's own
+ *     repo (modules/iopcore/IOPRP.img) for those three specific
+ *     entries - a build-time authoring choice (to always outrank any
+ *     onboard/disc-supplied module of the same name during UDNL's own
+ *     real newest-version-wins selection, Round 372's citation),
+ *     not a runtime patch this code performs.
+ *
+ * FORWARD-LOOKING SCOPING NOTE (directly per the user's own warning):
+ * if this project ever attempts to intercept a real IOP-reboot SIFCMD
+ * packet and short-circuit it by reading the packet's own argument
+ * string and loading "the file it points to" directly, that shortcut
+ * would silently mis-handle this entire buffer-based reboot class -
+ * the argument string for these reboots is NOT a real, directly
+ * readable device+file path at all ("img0:"/"img1:" only resolve
+ * through the imgdrv driver instance that must ALREADY be loaded and
+ * patched first). Any future real implementation attempt in this area
+ * must model (or explicitly, honestly special-case) this virtual-
+ * device layer rather than assuming every reboot argument names a
+ * real, disc/ROM-resident file - still no such implementation is
+ * attempted this round, for the same task #180/#212 reasons as
+ * Round 372 (no real MODLOAD/LOADCORE/UDNL binary or disassembly to
+ * model the actual module-loading side precisely). */
+
+
+/* Round 251 (task #411, 291st finding): host-native, exact
+ * per-instruction instrumentation (not sampling - see STATUS.md) of
+ * the fixed-up interpreter proved sif_mmio_write32's SIF_SMFLAG
+ * re-signal above (guarded by g_iop_boot_completed_once) was ALSO
+ * firing on an entirely normal, MUCH earlier SIF_SMFLAG debounce-and-
+ * consume cycle inside OSDSYS's own boot-completion polling loop
+ * (0x8000CDF8, disassembled this round: it debounces SIF_SMFLAG via
+ * 0x8000CC68, masks the result with 0x3FFFFFFF, and only escapes its
+ * own self-re-entry when that masked value reads zero) - long before
+ * _LoadExecPS2 (EE syscall 6) is ever invoked. The ORIGINAL task #212
+ * citation for this re-signal explicitly grounds it in real, observed
+ * behavior "AFTER this project's own newly-implemented _LoadExecPS2
+ * ... let real BIOS ROM code run its own re-initialization sequence"
+ * - i.e. it was always meant to apply only to that later, post-
+ * _LoadExecPS2 reload scenario, not to this earlier, normal ack. This
+ * flag distinguishes the two: sif_note_ee_loadexecps2_seen() is called
+ * once, for real, from ee_core.c's EE syscall 6 (_LoadExecPS2)
+ * handler (the same real, already-cited exception-raising dispatch
+ * this project's own task #212/#195 work established), and the
+ * SIF_SMFLAG re-signal now additionally requires it - closing the
+ * true, root-cause explanation for the long-standing "0x8000CC68
+ * wall" (Round 179/345/346/362) without touching the original,
+ * still-valid _LoadExecPS2-reload fix this guards. */
+void sif_note_ee_loadexecps2_seen(void);
+int sif_ee_loadexecps2_seen(void);
+
 /* Returns how many times sif_cmd_iop_handle_init_cmd() has been
  * called so far (0 if never). Used by ee_core.c to decide when to
  * synthesize the IOP's SIF_CMD_SET_SREG(RPCINIT,1) response - see the
@@ -329,6 +513,9 @@ uint32_t sif_cmd_iop_get_rpc_bind_count(void);
 #define SIF_SID_SPU2DRV         0x80000601u /* real, iop/sound/rspu2drv/src/include/rs_i.h "sce_SPU_DEV" */
 #define SIF_SID_IOPHEAP         0x80000003u /* real, ee/kernel/src/iopheap.c "sceSifBindRpc(&_ih_cd, 0x80000003, 0)" (SifInitIopHeap) */
 #define SIF_SID_CDVD_INIT       0x80000592u /* real, ee/rpc/cdvd/src/libcdvd.c "#define CD_SERVER_INIT 0x80000592", bound by sceCdInit() - task #209 continuation (80th finding) */
+#define SIF_SID_CDVD_NCMD       0x80000595u /* real, ee/rpc/cdvd/src/ncmd.c "#define CD_SERVER_NCMD 0x80000595", bound by _CdCheckNCmd() - task #423 continuation (Round 276, 317th finding) */
+#define SIF_SID_CDVD_SCMD       0x80000593u /* real, ee/rpc/cdvd/src/scmd.c "#define CD_SERVER_SCMD 0x80000593", bound by _CdCheckSCmd() - Round 302, real blocking (Synchronous) CDVD command service, sibling of SIF_SID_CDVD_NCMD above */
+#define SIF_SID_FILEIO          0x80000001u /* real, ee/kernel/src/fileio.c "sceSifBindRpc(&_fio_cd, 0x80000001, 0)" (fioInit(), the EE kernel-level file-IO API - fioOpen/fioClose/fioRead/etc.), matching real iop/fs/fileio/src/fileio.c "sceSifRegisterRpc(&fileio_rpc_service_data, 0x80000001, (SifRpcFunc_t)fileio_rpc_service_handler, ...)" on the IOP side. Both real source files retrieved and cited via raw.githubusercontent.com/ps2dev/ps2sdk/master/ - Round 303, real "silently never replied to" blocker Round 302's CDVD_SCMD fix exposed. */
 
 void sif_cmd_iop_track_bind_sid(uint32_t cd_ptr, uint32_t sid);
 uint32_t sif_cmd_iop_lookup_bind_sid(uint32_t cd_ptr); /* returns 0 if not found */

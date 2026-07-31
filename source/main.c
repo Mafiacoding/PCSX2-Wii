@@ -15,17 +15,20 @@
  * refreshing chunks so the UI stays responsive and provably alive -
  * see draw_boot_progress_hud()/draw_heartbeat()). Every chunk checks
  * the REAL GS privileged registers (via gs_get_state()); the moment
- * PMODE indicates an active display circuit, it decodes the REAL
- * DISPFB1 hardware fields (FBP in 2048-word units, FBW in 64-pixel
- * units - converted to this project's own gs_mem.h word/pixel
- * convention, per that header's own note that this conversion is the
- * caller's job) and blits the REAL GS local memory content the BIOS/
- * game itself configured - not a canned test pattern. As of this
- * round (see docs/STATUS.md's "Round 29 continued" sections), GS
- * registers stay at their power-on-zero state through the traced
- * boot window, so this path is not yet exercised in practice - but it
- * is real, correct scaffolding for whenever GS setup does occur,
- * rather than a synthetic substitute.
+ * PMODE indicates an active display circuit, it checks WHICH circuit
+ * (EN1 vs EN2 - fixed Round 212/task #366, see the fix's own comment
+ * further down in this file for why this matters: a real PCSX2
+ * session at the real BIOS splash used Circuit 2, not Circuit 1) and
+ * decodes that circuit's REAL DISPFB hardware fields (FBP in
+ * 2048-word units, FBW in 64-pixel units - converted to this
+ * project's own gs_mem.h word/pixel convention, per that header's own
+ * note that this conversion is the caller's job) and blits the REAL
+ * GS local memory content the BIOS/game itself configured - not a
+ * canned test pattern. As of this round (see docs/STATUS.md's "Round
+ * 29 continued" sections), GS registers stay at their power-on-zero
+ * state through the traced boot window, so this path is not yet
+ * exercised in practice - but it is real, correct scaffolding for
+ * whenever GS setup does occur, rather than a synthetic substitute.
  *
  * NATIVE WII TEST MENU: everything below the "wii_console_setup"
  * helper and above "int main" is a small, self-contained, native Wii
@@ -49,14 +52,70 @@
 #include "core/iop/iop_core.h"
 #include "core/system.h"
 #include "core/bios_loader.h"
+#include "core/hw/iop_cdvd.h"
+#include "core/hw/iop_cdrom_legacy.h"
 #include "core/hw/gs.h"
 #include "core/hw/gs_mem.h"
 #include "core/hw/gs_wii_output.h"
 #include "core/hw/dma.h"
 #include "core/hw/gif.h"
+#include "core/hw/iop_sio2.h"
 
 static void *xfb = NULL;
 static GXRModeObj *rmode = NULL;
+
+/* Round 272 (task #423, 313th finding): translate the real Wii
+ * GameCube-style controller's held-button mask (libogc's real
+ * PAD_BUTTON_ / PAD_TRIGGER_ bits, from PAD_ButtonsHeld()) into a
+ * real PS2 digital-pad pressed-mask (IOP_PAD_BTN_*, psx-spx-cited,
+ * already defined in iop_sio2.h) and feed it to this project's own
+ * already-implemented, real host-side pad API
+ * (iop_sio2_pad_set_buttons(), Round 184/195).
+ *
+ * This is a port-level control-mapping DESIGN CHOICE, not a claim
+ * about real PS2 hardware behavior - there is no "real" Wii-to-PS2
+ * button mapping to cite, since the Wii never shipped a PS2 pad
+ * pass-through. The mapping below follows the common-sense
+ * face-button correspondence used by most emulators/ports that
+ * support both pads (Wii A/B/X/Y sit in the same physical ring
+ * position as PS2 Cross/Circle/Square/Triangle when both pads are
+ * held the same way), and is documented here explicitly as a design
+ * choice so it is never confused with a cited hardware fact:
+ *   Wii A      -> PS2 Cross    (both are the primary "confirm" button)
+ *   Wii B      -> PS2 Circle
+ *   Wii X      -> PS2 Square
+ *   Wii Y      -> PS2 Triangle
+ *   Wii Start  -> PS2 Start
+ *   Wii D-pad  -> PS2 D-pad (direct correspondence)
+ *   Wii L/R    -> PS2 L1/R1
+ *   Wii Z      -> PS2 Select
+ *
+ * Round 272 also tested (host-native scratch diagnostic, not shipped
+ * here) whether simply holding Cross from boot start unblocks
+ * OSDSYS's idle loop or triggers any CD-ROM auto-boot activity - it
+ * does not (0 SIO2 register writes either way, identical trace to the
+ * no-press baseline - see docs/STATUS.md's 313th finding for the
+ * full account). This wiring is shipped anyway because it is a real,
+ * correct, useful feature for actual interactive use on real Wii
+ * hardware once further boot progress is made - not because it was
+ * found to unblock anything on its own. */
+static uint16_t wii_pad_to_ps2_pad(uint16_t wii_held)
+{
+    uint16_t ps2 = 0;
+    if (wii_held & PAD_BUTTON_A)     ps2 |= IOP_PAD_BTN_CROSS;
+    if (wii_held & PAD_BUTTON_B)     ps2 |= IOP_PAD_BTN_CIRCLE;
+    if (wii_held & PAD_BUTTON_X)     ps2 |= IOP_PAD_BTN_SQUARE;
+    if (wii_held & PAD_BUTTON_Y)     ps2 |= IOP_PAD_BTN_TRIANGLE;
+    if (wii_held & PAD_BUTTON_START) ps2 |= IOP_PAD_BTN_START;
+    if (wii_held & PAD_BUTTON_UP)    ps2 |= IOP_PAD_BTN_UP;
+    if (wii_held & PAD_BUTTON_DOWN)  ps2 |= IOP_PAD_BTN_DOWN;
+    if (wii_held & PAD_BUTTON_LEFT)  ps2 |= IOP_PAD_BTN_LEFT;
+    if (wii_held & PAD_BUTTON_RIGHT) ps2 |= IOP_PAD_BTN_RIGHT;
+    if (wii_held & PAD_TRIGGER_L)    ps2 |= IOP_PAD_BTN_L1;
+    if (wii_held & PAD_TRIGGER_R)    ps2 |= IOP_PAD_BTN_R1;
+    if (wii_held & PAD_TRIGGER_Z)    ps2 |= IOP_PAD_BTN_SELECT;
+    return ps2;
+}
 
 static void wii_console_setup(void)
 {
@@ -243,6 +302,21 @@ static int   g_bios_ok = 0;
 static int   g_system_started = 0;
 static bios_image_t g_bios;
 
+/* Round 209 (task 366/371): real disc-image mounting for the ACTUAL
+ * persistent boot flow, not just throwaway host-native diagnostics.
+ * Rounds 170/207 already proved iso_loader.c/iop_cdvd_mount_iso()/
+ * iop_cdrom_legacy_mount_iso() correctly parse a real PS2 disc image
+ * and serve real sector data - but until this round, main.c never
+ * called either mount function at all, so the actual Wii build had
+ * no disc to read even if real BIOS/EELOAD code tried to read one.
+ * Mirrors the existing BIOS search-path convention: sd:/pcsx2/games/,
+ * checked once. A missing disc is NOT a hard error - real PS2
+ * hardware also boots fine with no disc inserted (it shows the
+ * browser/opening screen instead of a disc-boot fast path); only a
+ * real BIOS is mandatory to proceed at all. */
+static int   g_disc_checked = 0;
+static int   g_disc_ok = 0;
+
 /* Round 29 continued (task #126): real BIOS boot as the PRIMARY,
  * automatic action - see the top-of-file header comment for the full
  * rationale. Runs the actual EE/IOP interleaved scheduler in bounded
@@ -334,6 +408,34 @@ static void run_real_boot_flow(void)
     printf("[+] BIOS loaded: %s  size=%u  rom_ver=%s\n",
            g_bios.name, (unsigned)g_bios.size, g_bios.version_string);
 
+    /* Round 209: real disc mount, once, best-effort. Mounted on BOTH
+     * real register interfaces since it is not yet established which
+     * one (if either) real BIOS/kernel code actually uses to read
+     * SYSTEM.CNF (Round 205-207) - giving the real boot every real
+     * chance to succeed regardless of which path it tries. Missing
+     * disc is logged, not fatal - matches real PS2 boot-with-no-disc
+     * behavior. */
+    if (!g_disc_checked) {
+        g_disc_checked = 1;
+        int cdvd_rc   = iop_cdvd_mount_iso("sd:/pcsx2/games/game.bin");
+        if (cdvd_rc != 0)
+            cdvd_rc = iop_cdvd_mount_iso("sd:/pcsx2/games/game.iso");
+        int legacy_rc = iop_cdrom_legacy_mount_iso("sd:/pcsx2/games/game.bin");
+        if (legacy_rc != 0)
+            legacy_rc = iop_cdrom_legacy_mount_iso("sd:/pcsx2/games/game.iso");
+        g_disc_ok = (cdvd_rc == 0) || (legacy_rc == 0);
+        if (g_disc_ok) {
+            if (cdvd_rc == 0)
+                iop_cdvd_set_disc_present(0x12 /* CDVD_TYPE_PS2CD, Round 170's cited constant */);
+            printf("[+] Disc image mounted: sd:/pcsx2/games/game.bin (or .iso)\n");
+        } else {
+            printf("[i] No disc image found at sd:/pcsx2/games/ - booting BIOS only\n");
+            printf("    (place a real PS2 disc dump there as game.bin/game.iso\n");
+            printf("    for a real disc-boot attempt; real hardware also boots\n");
+            printf("    fine with no disc, just without a game to run).\n");
+        }
+    }
+
     if (!g_system_started) {
         system_init(&g_bios, &g_bios);
         g_system_started = 1;
@@ -349,10 +451,13 @@ static void run_real_boot_flow(void)
     uint64_t total_slices = 0;
     int stopped_by_user = 0;
 
+    iop_sio2_pad_connect();
+
     for (;;) {
         VIDEO_WaitVSync();
         PAD_ScanPads();
         uint16_t held = PAD_ButtonsHeld(0);
+        iop_sio2_pad_set_buttons(wii_pad_to_ps2_pad(held));
 
         if (!(ee->halted && iop->halted)) {
             system_run_interleaved(BOOT_CHUNK_SLICES);
@@ -360,11 +465,39 @@ static void run_real_boot_flow(void)
         }
 
         /* PMODE bits 0/1 = EN1/EN2 (circuit 1/2 enabled) - real,
-         * documented GS register semantics, not a guess. */
-        int display_active = (gs->pmode & 0x3u) != 0;
+         * documented GS register semantics, not a guess.
+         *
+         * Round 212 fix (task #366/#172, 252nd finding): this used to
+         * always call decode_dispfb(gs->dispfb1, ...) regardless of
+         * which circuit PMODE actually enabled. A real PCSX2 debugger
+         * session at the real BIOS splash screen (user-provided
+         * screenshots) showed PMODE=0x66 - EN1=0, EN2=1 - with
+         * DISPFB2/DISPLAY2 populated with real, structured values
+         * (DISPFB2's FBW field decodes to 640px, a genuine PS2
+         * resolution) while DISPFB1/DISPLAY1 stayed exactly zero, the
+         * same "DISPLAY1 never written" symptom this project has
+         * chased since the 94th/126th/223rd findings. That symptom is
+         * consistent with Circuit 1 legitimately never being used by
+         * this BIOS at all - Circuit 2 is what actually drives the
+         * picture. The old code's `display_active` check already
+         * correctly went true on EN2 alone (mask 0x3 covers both
+         * bits), but the blit itself was hardcoded to Circuit 1's
+         * dispfb, so even a real, hardware-accurate GS setup writing
+         * only Circuit 2 would have silently produced no picture here.
+         * Fixed by choosing the circuit to blit from based on which
+         * EN bit is actually set (EN1 preferred if both are somehow
+         * set, matching real hardware's Circuit-1-is-primary
+         * convention; EN2 used otherwise) instead of assuming
+         * Circuit 1. gs_state_t/gs.c already modeled dispfb2/display2
+         * correctly at their real addresses (0x12000090/0x120000A0) -
+         * only this call site needed the fix. */
+        int en1 = (gs->pmode & 0x1u) != 0;
+        int en2 = (gs->pmode & 0x2u) != 0;
+        int display_active = en1 || en2;
         if (display_active) {
+            uint64_t active_dispfb = en1 ? gs->dispfb1 : gs->dispfb2;
             uint32_t bp_words, bw_pixels;
-            decode_dispfb(gs->dispfb1, &bp_words, &bw_pixels);
+            decode_dispfb(active_dispfb, &bp_words, &bw_pixels);
             if (bw_pixels > 0) {
                 uint32_t blit_h = rmode->xfbHeight > 140 ? rmode->xfbHeight - 140 : 0;
                 gs_blit_psmct32_to_xfb(xfb, rmode->fbWidth, 0, 140,

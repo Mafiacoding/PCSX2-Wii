@@ -196,6 +196,66 @@ void dma_channel_signal_done(int channel)
     g_dma.d_stat |= (1u << channel);
 }
 
+/*
+ * Round 198 (task #365): the missing inbound (device -> EE RAM)
+ * write capability - see the doc comment on this function's
+ * declaration in dma.h for the full citation trail and honest scope
+ * note. Mirrors transfer_quadwords()'s contract exactly, just in the
+ * reverse direction: writes to the channel's own MADR instead of
+ * reading from it, using a plain byte-for-byte copy (endian-safe
+ * regardless of host CPU, same reasoning as ram_ptr()'s existing raw
+ * uint8_t* contract for the outbound side - no multi-byte integer
+ * interpretation happens here, so the PPC-host/little-endian-PS2-
+ * data mismatch that requires explicit byte assembly in ram_read32()
+ * simply doesn't apply to a raw copy).
+ */
+int dma_channel_receive_quadwords(int channel, const uint8_t *data, uint32_t qwc)
+{
+    if (channel < 0 || channel >= DMA_CHANNEL_COUNT)
+        return 0;
+    if (!g_ee_ram)
+        return 0;
+    if (qwc == 0)
+        return 1;
+
+    dma_channel_t *ch = &g_dma.chan[channel];
+    uint32_t len = qwc * 16u;
+    if ((uint64_t)ch->madr + (uint64_t)len > (uint64_t)g_ee_ram_size)
+        return 0;
+
+    memcpy(g_ee_ram + ch->madr, data, len);
+    ch->madr += len;
+    ch->qwc = (ch->qwc > qwc) ? (ch->qwc - qwc) : 0u;
+    ch->quadwords_transferred += qwc;
+
+    dma_channel_signal_done(channel); /* real completion status, same as the outbound path */
+    return 1;
+}
+
+/*
+ * Round 225 (task #366/#172, 265th finding): see the doc comment in
+ * dma.h above this function's declaration for full grounding. Mirrors
+ * dma_channel_receive_quadwords()'s real bookkeeping exactly, minus
+ * the byte copy (the caller already performed it directly via
+ * ee_mem_write32, matching this project's existing SIF-RPC reply
+ * pattern) and targeting the caller-supplied dest_addr instead of the
+ * channel's pre-existing MADR.
+ */
+void dma_channel_note_reply_delivered(int channel, uint32_t dest_addr, uint32_t nbytes)
+{
+    if (channel < 0 || channel >= DMA_CHANNEL_COUNT)
+        return;
+
+    dma_channel_t *ch = &g_dma.chan[channel];
+    uint32_t qwc = (nbytes + 15u) / 16u; /* round up to whole quadwords - real DMA transfer granularity */
+
+    ch->madr = dest_addr + qwc * 16u;
+    ch->qwc = (ch->qwc > qwc) ? (ch->qwc - qwc) : 0u;
+    ch->quadwords_transferred += qwc;
+
+    dma_channel_signal_done(channel);
+}
+
 void dma_channel_set_irq_enable(int channel, int enabled)
 {
     if (channel < 0 || channel >= DMA_CHANNEL_COUNT)

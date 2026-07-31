@@ -74,8 +74,8 @@ int main(void) {
     uint8_t *prog = bios.data;
     int i = 0;
 
-    /* r4 = 0x1000 (base pointer) */
-    wle32(prog+(i++)*4, enc_lui(4, 0x0000));
+    /* r4 = 0x80001000 (base pointer, Round 363: KSEG0 direct-mapped, not raw KUSEG) */
+    wle32(prog+(i++)*4, enc_lui(4, 0x8000));
     wle32(prog+(i++)*4, enc_ori(4, 4, 0x1000));
 
     /* Canonical MIPS unaligned-load idiom (matches real GCC-generated

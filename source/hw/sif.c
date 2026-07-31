@@ -3,6 +3,7 @@
  * exact per-register semantics and PCSX2 source cross-reference.
  */
 #include "core/hw/sif.h"
+#include "core/hw/ee_intc.h"
 #include <string.h>
 
 #define SIF_MSCOM  0x1000F200u
@@ -13,12 +14,28 @@
 #define SIF_F250   0x1000F250u
 #define SIF_F260   0x1000F260u
 
+/* Round 317 (task #423 continuation): real EE INTC source index 1 =
+ * INTC_SBUS - same real, cited constant iop_icfg.c already defines
+ * locally for its own SBUS-raising write handler (PCSX2's Dmac.h enum
+ * INTCIrqs / ps2sdk's kernel.h identical list). Defined locally here
+ * too, matching that file's own established style (ee_intc.h only
+ * names the sources it has historically raised itself), since this
+ * is a second, independent real trigger site for the same source. */
+#define EE_INTC_IRQ_SBUS 1
+
 static sif_state_t g_sif;
 
 /* task #212 continuation (82nd/83rd findings): moved ahead of
  * sif_mmio_write32 (declaration-order fix, same class of bug as the
  * earlier g_bind_sid_table_* case in this file). */
 static int g_iop_boot_completed_once;
+
+/* Round 251 (task #411, 291st finding): same declaration-order fix,
+ * for the same reason - sif_mmio_write32's SIF_SMFLAG case (below)
+ * needs to see this before its own first use. See the citation above
+ * sif_note_ee_loadexecps2_seen()'s declaration in sif.h for the full
+ * grounding of why this flag exists and what real gap it closes. */
+static int g_ee_loadexecps2_seen;
 
 void sif_init(void)
 {
@@ -88,7 +105,32 @@ int sif_mmio_write32(uint32_t addr, uint32_t value)
              * handshake) immediately, rather than leaving OSDSYS
              * parked forever on a flag this project's own model is
              * fully entitled to consider still true. */
-            if ((value & 0x00040000u) && g_iop_boot_completed_once) {
+            if ((value & 0x00040000u) && g_iop_boot_completed_once
+                                          && g_ee_loadexecps2_seen) {
+                /* Round 251 (task #411, 291st finding): added the
+                 * g_ee_loadexecps2_seen guard. Host-native
+                 * instrumentation (exact, per-instruction hit
+                 * counters, not sampling - see STATUS.md) proved this
+                 * re-signal was ALSO firing on a much earlier, entirely
+                 * normal SIF_SMFLAG debounce-and-consume cycle inside
+                 * OSDSYS's own boot-completion polling loop
+                 * (0x8000CDF8, disassembled this round), long before
+                 * _LoadExecPS2 (EE syscall 6) is ever invoked - the
+                 * original task #212 citation (see sif.h) explicitly
+                 * grounds this re-signal in "AFTER this project's own
+                 * newly-implemented _LoadExecPS2 ... let real BIOS ROM
+                 * code run its own re-initialization sequence", i.e.
+                 * the fix was always meant to apply only to that
+                 * later, post-_LoadExecPS2 scenario. Without this
+                 * guard, the unconditional re-signal meant
+                 * SIF_SMFLAG's SIFINIT/CMDINIT/BOOTEND bits could never
+                 * actually read back as cleared to the EE, so
+                 * OSDSYS's own poll loop (which debounces SMFLAG,
+                 * masks it with 0x3FFFFFFF, and only escapes its
+                 * self-re-entry when the masked result is zero) could
+                 * never see success and looped forever - the real,
+                 * root-cause explanation for the long-standing
+                 * "0x8000CC68 wall" (Round 179/345/346/362). */
                 g_sif.smflag |= 0x00010000u /* SIF_STAT_SIFINIT */
                               |  0x00020000u /* SIF_STAT_CMDINIT */
                               |  0x00040000u /* SIF_STAT_BOOTEND */;
@@ -112,7 +154,47 @@ int sif_mmio_write32(uint32_t addr, uint32_t value)
             g_sif.f250 = value;
             return 1;
         case SIF_F260:
-            g_sif.f260 = value;
+            /* Round 264 (task #423, 304th finding): reactive real-
+             * value response, same established pattern as SIF_SMFLAG
+             * above (the g_iop_boot_completed_once-gated re-signal) -
+             * when the EE writes its own real "not yet ready" sentinel
+             * (0xFF - confirmed via fresh disassembly of the real
+             * sceSifInit()-equivalent routine reaching this exact
+             * write for the first time this project's boot trace has
+             * ever executed it, cross-checked against this project's
+             * own already-existing citation of that same routine
+             * "clears SIF_F260 to 0xFF") AND the IOP's own real module
+             * loading has already genuinely completed
+             * (g_iop_boot_completed_once, the same real flag the
+             * SMFLAG path above already uses), respond immediately
+             * with the real, already-cited hardware default
+             * (0x1D000060, sif_init()'s own reset value) instead of
+             * leaving the temporary sentinel in place.
+             *
+             * Why this matters: Round 264 found a real EE kernel
+             * routine (0x8000CEA8-0x8000CED4) reads this exact
+             * register right after the SIF2-completion wait
+             * (iop_module_loader.c's mark_iop_boot_complete() fix)
+             * resolves, tests bit 2, and calls a real panic handler
+             * ("bus error while dma transfer", 0x8000B9D0) if it's
+             * still set - which it always was, since nothing in this
+             * project ever updated F260 after the EE's own init wrote
+             * the temporary 0xFF sentinel. Real hardware's IOP-side
+             * SIF driver would publish its genuine register-mirror
+             * address here once ready; this models that handshake's
+             * end state using the register's own already-cited real
+             * default, not a fabricated value - see
+             * iop_module_loader.h's citation for the paired SIF2 fix
+             * this depends on. Verified via host-native diagnostic:
+             * without this fix, the SIF2 fix alone reproduces the
+             * panic; with both, the EE proceeds cleanly into real,
+             * repeated interrupt/exception handling (COP0 context
+             * save/restore at 0x80010FA8-0x80011044) with no crash. */
+            if (value == 0xFFu && g_iop_boot_completed_once) {
+                g_sif.f260 = 0x1D000060u;
+            } else {
+                g_sif.f260 = value;
+            }
             return 1;
         default:
             return 0;
@@ -182,8 +264,39 @@ int sif_iop_mmio_write32(uint32_t addr, uint32_t value)
         case 0x20: g_sif.msflag = value; return 1; /* plain overwrite,
                                                       * NOT an OR - see
                                                       * header comment */
-        case 0x30: g_sif.smflag = value; return 1; /* plain overwrite,
-                                                      * NOT an AND-clear */
+        case 0x30: {
+            /* Round 317 (task #423 continuation, following the
+             * user's own relayed research pointing at real
+             * sceSifSetSMFlag() behavior): real hardware's IOP-side
+             * sceSifSetSMFlag() does not just store a value into
+             * SMFLAG - it is THE real mechanism that raises the EE's
+             * SBUS interrupt (EE_INTC_STAT bit 1), confirmed via
+             * ps2sdk/community documentation ("sceSifSetSMFlag...
+             * triggering the appropriate SBUS interrupt on the
+             * receiving side" - the IOP kernel's own SIF1 handling
+             * depends on this exact interrupt firing to know the EE
+             * has been signaled). This project's real, already-cited
+             * mark_iop_boot_complete() (iop_module_loader.c) already
+             * performs the real SMFLAG write this event represents
+             * (SIF_STAT_SIFINIT/CMDINIT/BOOTEND, citing real ps2sdk
+             * SIFMAN/SIFCMD init behavior) through this exact real
+             * MMIO entry point (source/core/iop/iop_core.c's generic
+             * IOP MMIO dispatcher) - it just never propagated to the
+             * EE-visible interrupt line before now: a genuine,
+             * previously-missing piece of already-modeled real
+             * behavior, not a new fabrication.
+             *
+             * Raised only on a genuine 0->1 transition (new bits
+             * appearing that were not already set) rather than on
+             * every write, matching real hardware's "a new signal has
+             * arrived" semantics and avoiding a spurious re-raise on
+             * a write that only restates already-pending bits. */
+            uint32_t old_smflag = g_sif.smflag;
+            g_sif.smflag = value;
+            if ((value & ~old_smflag) != 0u)
+                ee_intc_raise(EE_INTC_IRQ_SBUS);
+            return 1;
+        }
         case 0x40: g_sif.ctrl   = value; return 1;
         case 0x50: g_sif.f250   = value; return 1;
         case 0x60: g_sif.f260   = value; return 1;
@@ -231,6 +344,17 @@ int sif_iop_boot_completed_once(void)
     return g_iop_boot_completed_once;
 }
 
+/* Round 251 (task #411, 291st finding) - see sif.h for full grounding. */
+void sif_note_ee_loadexecps2_seen(void)
+{
+    g_ee_loadexecps2_seen = 1;
+}
+
+int sif_ee_loadexecps2_seen(void)
+{
+    return g_ee_loadexecps2_seen;
+}
+
 void sif_cmd_iop_init(void)
 {
     uint32_t i;
@@ -244,6 +368,7 @@ void sif_cmd_iop_init(void)
     }
     g_bind_sid_table_next = 0;
     g_iop_boot_completed_once = 0;
+    g_ee_loadexecps2_seen = 0;
 }
 
 void sif_cmd_iop_handle_init_cmd(uint32_t ee_recvbuf_addr)

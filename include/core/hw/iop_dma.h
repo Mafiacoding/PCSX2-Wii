@@ -62,12 +62,26 @@
  *   0x1F801570 DMA_PCR2 - same idea as DMA_PCR, for channels 7-12.
  *   0x1F801574 DMA_ICR2 - same idea as DMA_ICR, for channels 7-12.
  *
- * NOT modeled: actual transfer execution for any channel, the
+ * NOT modeled: actual transfer execution for any channel EXCEPT
+ * channel 9 (SIF0, "fromIOP") as of Round 199 below, the
  * interrupt/exception side effects PCSX2's ICR write handler
  * triggers (iopIntcIrq/psxDmaInterrupt - no such wiring exists in
  * iop_core.c yet), and DMA_ICR's 16-bit "high half" write variant
  * (0x1F8010F6) since this project only models 32-bit hardware
  * register access elsewhere too.
+ *
+ * Round 199 (task #367) update: channel 9 (SIF0, "fromIOP") is now a
+ * PARTIAL exception to the "no actual transfer execution" scope note
+ * above - see the doc comment on iop_dma_mmio_write32()'s CHCR case
+ * in iop_dma.c for the full citation trail (psx-spx's real, cited
+ * CHCR/BCR bit layout) and honest gaps (no DREQ/handshake timing
+ * modeled, CHCR bit 0's direction value not asserted for this
+ * channel specifically since no citable IOP-specific source fixes
+ * it, SIF1/channel 10 - the reverse "toIOP" direction - remains
+ * entirely unmodeled pending a symmetric EE-side "write into IOP
+ * RAM" capability this round did not build). Every other channel
+ * remains exactly as this file originally documented: register latch
+ * only.
  */
 #ifndef PCSX2_WII_IOP_DMA_H
 #define PCSX2_WII_IOP_DMA_H
@@ -92,6 +106,19 @@ typedef struct {
 } iop_dma_state_t;
 
 void iop_dma_init(void);
+
+/*
+ * Round 199 (task #367): binds the IOP's own 2MB RAM so
+ * iop_dma_mmio_write32()'s CHCR handler can actually read real
+ * source bytes for a SIF0 (channel 9, "fromIOP" per psx-spx's real,
+ * cited channel table cross-referenced with this project's own
+ * dma.h) send, instead of only latching the register value. Mirrors
+ * this project's existing dma_bind_ee_ram() (core/hw/dma.h) exactly -
+ * same one-time wiring done by iop_core_init() right after IOP RAM is
+ * allocated.
+ */
+void iop_dma_bind_iop_ram(uint8_t *ram, uint32_t ram_size);
+
 
 int iop_dma_mmio_read32(uint32_t addr, uint32_t *out);
 int iop_dma_mmio_write32(uint32_t addr, uint32_t value);
@@ -128,5 +155,33 @@ iop_dma_state_t *iop_dma_get_state(void);
  * specifically, rather than asserting a single unified theory of the
  * whole register this project doesn't have full evidence for. */
 void iop_dma_signal_channel_done(int channel);
+
+/*
+ * Round 206 (task #366): generic "device writes bytes INTO IOP RAM at
+ * a channel's current MADR" primitive - the missing counterpart to
+ * iop_dma_sif0_try_transfer()'s "read bytes FROM IOP RAM" direction,
+ * needed by iop_cdvd.c's new real N-command ReadCd/ReadDvd
+ * implementation (channel 3, CDROM - see this header's own channel
+ * table above, and ps2tek's "CDVD Reads and Seeks" page, directly
+ * cited in iop_cdvd.c: "the CDVD DMA channel can store the data in
+ * memory"). Generic rather than CDVD-specific since any future
+ * "device -> IOP RAM" channel (MDEC out, SPU, etc.) would need the
+ * identical primitive - same reasoning as dma_channel_receive_
+ * quadwords() being generic on the EE side.
+ *
+ * Writes `nbytes` bytes from `data` into IOP RAM starting at
+ * ch[channel].madr, then advances that channel's MADR by `nbytes`
+ * (matching real hardware's own auto-incrementing address behavior
+ * during a burst transfer - the same convention this project's own
+ * EE-side dma.c already documents for its channels). Returns 1 on
+ * success, 0 if IOP RAM isn't bound yet (iop_dma_bind_iop_ram()) or
+ * the write would run past the end of IOP RAM (safe no-op, matches
+ * iop_dma_sif0_try_transfer()'s existing out-of-bounds handling).
+ * Does NOT touch CHCR/STR or raise any IRQ - callers (iop_cdvd.c)
+ * handle their own real per-command completion/IRQ semantics, since
+ * those are channel/command-specific, not part of this generic byte-
+ * mover primitive.
+ */
+int iop_dma_channel_write_bytes(int channel, const uint8_t *data, uint32_t nbytes);
 
 #endif

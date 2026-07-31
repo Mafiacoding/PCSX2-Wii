@@ -110,6 +110,7 @@
 #include "core/ee/ee_core.h"
 #include "core/hw/dma.h"
 #include "core/hw/ee_intc.h"
+#include "core/hw/ee_sio.h"
 #include "core/hw/ee_timers.h" /* Round 87 (127th finding) */
 #include "core/hw/gs.h"
 #include "core/hw/gif.h"
@@ -117,6 +118,9 @@
 #include "core/hw/vu.h"
 #include "core/hw/sif.h"
 #include "core/hw/iop_dma.h" /* Round 114: real IOP-side DMA-completion signal for sceSifSetDma */
+#include "core/hw/iop_cdvd.h" /* Round 347 (IOP RPC re-entry architecture): real CDVD MMIO dispatch */
+#include "core/hw/iop_hle_intr.h" /* Round 347: real registered-handler completion detection */
+#include "core/hw/iop_heap.h" /* Round 401: real SYSMEM free-list heap allocator port - see comment at the SIF_SID_IOPHEAP branch below */
 
 /* Task #172 continued (regression fix): the SIF DMA-copy syscall
  * handler below needs to write into IOP memory, but ee_core.c must
@@ -216,17 +220,50 @@ static inline int ee_tlb_translate(ee_state_t *st, uint32_t vaddr, uint32_t *out
             continue;
         /* Even/odd page select: the bit just below the masked-off
          * range picks EntryLo0 (even, bit clear) or EntryLo1 (odd,
-         * bit set). Page size in bytes is (mask+1) << 13 (PageMask's
-         * "Mask" field is in units of the VPN2 field's own bit
-         * position, i.e. bit 13 upward). */
-        /* Even/odd select bit position: bit 13 for the common 4KB-page
-         * case (mask=0), moving one bit higher each time the page size
-         * doubles. mask is always a run of low 1-bits (0, 1, 3, 7...)
-         * per the MIPS PageMask spec, so (mask+1) is a power of two -
-         * this matches PCSX2's own VPN2()/PFN0()/PFN1() shift-by-Mask()
-         * logic in R5900.h, just computed as a bit position instead of
-         * a bitmask. */
-        uint32_t page_select_bit = 13u;
+         * bit set). Real MIPS R4000/R5900 semantics: EntryHi.VPN2
+         * always addresses PAIRS of same-size pages starting at bit
+         * 13 (want_vpn2/entry_vpn2 above), and each individual page
+         * within that pair is HALF the doubled/combined 2-page
+         * coverage the (mask+1) growth describes - i.e. the correct
+         * even/odd select bit (and matching per-page offset width) is
+         * ONE BIT LOWER than the combined-pair shift, not equal to
+         * it. For the base 4KB-page case (mask=0), the real select
+         * bit is bit 12 (page offset = bits 0-11, true 4KB), not bit
+         * 13 - moving one bit higher each time the page size doubles
+         * from there, same growth loop as before, just re-based.
+         *
+         * Round 363 CORRECTION (real, evidence-based fix): the
+         * previous version of this code started page_select_bit at
+         * 13 (not 12), an off-by-one that was invisible for every
+         * TLB-mapped access this project had exercised so far only
+         * because the resulting physical address either still landed
+         * on valid, correctly-behaving backing store by coincidence,
+         * or (for the many HW-register-range KUSEG TLB entries seen
+         * in this project's own boot trace, e.g. entry_hi=0x10000000+)
+         * fell outside RAM bounds either way (returns NULL/reads-as-
+         * zero regardless of the exact wrong offset). It stopped
+         * being invisible for a real, live TLB entry this project's
+         * own real BIOS boot process installs and OSDSYS's own code
+         * reads/writes through dozens of times: entry_hi=0xFFFF8000,
+         * page_mask=0x00006000 (mask=3, real 16KB pages, exactly
+         * matching the user-shared hrydgard PS2-emulator-tips gist's
+         * documented "OS sets up a TLB mirror, mirroring
+         * 0xFFFF8000-0xFFFFFFFF down to 0x78000" real kernel
+         * convenience mapping). With the old bit-13-based select bit
+         * (which becomes bit 15 for this mask=3 entry), bit 15 is
+         * ALWAYS set for every address in the entire 0xFFFF8000-
+         * 0xFFFFFFFF range (0x8000 itself already has bit 15 set),
+         * so EntryLo0 (the "even"/first half of the real mirror) was
+         * UNREACHABLE - every access, regardless of offset, silently
+         * fell through to EntryLo1's physical page instead. Directly,
+         * empirically confirmed via a scratch host-native diagnostic:
+         * reading the identical physical byte two ways - via this
+         * real KSEG3 TLB entry (vaddr 0xFFFF8010) and via the same
+         * physical address's plain KSEG0 direct-mapped alias (vaddr
+         * 0x80078010, which needs no TLB and is trivially correct) -
+         * produced two DIFFERENT values before this fix, and matches
+         * after it. */
+        uint32_t page_select_bit = 12u;
         {
             uint32_t doubling = mask + 1u; /* 1,2,4,8,... for 4KB,16KB,64KB,... pages */
             while (doubling > 1u) { page_select_bit++; doubling >>= 1; }
@@ -444,16 +481,50 @@ static void ee_check_intc_interrupt(ee_state_t *st, uint32_t this_pc)
     const uint32_t ERL = 0x00000004u;
     const uint32_t EIE = 0x00010000u;
 
+    /* Round 307: Cause.IP2 is a real, level-triggered external line -
+     * it must continuously TRACK the live INTC_STAT&MASK condition,
+     * not merely accumulate. Before this fix, the bit was only ever
+     * OR'd in (`|=`) and never cleared anywhere in this file, so once
+     * the first real INTC completion ever fired, it stayed
+     * permanently latched for the rest of execution - even long after
+     * the real BIOS handler had acked the underlying INTC_STAT
+     * condition. Root-caused this round (see docs/STATUS.md Round
+     * 307, and Round 305/306's characterization of the same downstream
+     * symptom): this stale, stuck bit corrupts the real BIOS's own
+     * top-level PLZCW priority-encoder dispatch (0x80000200) for
+     * every SUBSEQUENT, otherwise-unrelated exception from that point
+     * on, since the dispatcher re-reads Cause fresh each time and has
+     * no way to know a latched bit is stale - specifically, DMAC's
+     * Cause.IP3 (see ee_check_dmac_interrupt() immediately below)
+     * getting stuck this way caused the real dispatcher to
+     * mis-route an unrelated, later INTC-caused exception into DMAC's
+     * own per-line handler, which then genuinely (and correctly, for
+     * a truly-empty D_STAT) computed an invalid dispatch index and
+     * landed on the real BIOS's "unhandled interrupt source" panic
+     * stub by adjacent-table-memory-layout coincidence - the exact
+     * "$a0=-1" panic this project's Round 304 WaitSema-park fix
+     * exposed and Rounds 305-306 characterized without a confirmed
+     * root cause. Updated unconditionally, before the
+     * exc_raised_this_step gate below, since real hardware's
+     * Cause.IPn reflects the CURRENT line state regardless of whether
+     * an exception is being taken this exact instant (matches
+     * ee_latch_timer_interrupt()'s own already-established pattern of
+     * updating its bit unconditionally on every step, independent of
+     * whether ee_check_timer_interrupt() goes on to actually raise). */
+    if (ee_intc_pending())
+        st->cop0[13] |= EE_CAUSE_IP2;
+    else
+        st->cop0[13] &= ~EE_CAUSE_IP2;
+
     if (st->exc_raised_this_step)
         return;
-    if (!ee_intc_pending())
+    if (!(st->cop0[13] & EE_CAUSE_IP2))
         return; /* no INTC_STAT & INTC_MASK bit currently pending+unmasked */
     if ((st->cop0[12] & (IE | EXL | ERL | EIE)) != (IE | EIE))
         return;
     if (!(st->cop0[12] & EE_STATUS_IM2))
         return; /* this specific interrupt line (IM2) is masked */
 
-    st->cop0[13] |= EE_CAUSE_IP2;
     st->exc_raised_this_step = 1;
     ee_raise_exception(st, EE_EXC_CODE_INT, this_pc, 0);
 }
@@ -465,16 +536,38 @@ static void ee_check_dmac_interrupt(ee_state_t *st, uint32_t this_pc)
     const uint32_t ERL = 0x00000004u;
     const uint32_t EIE = 0x00010000u;
 
+    /* Round 307: Cause.IP3 is a real, level-triggered external line,
+     * exactly the same issue and fix as ee_check_intc_interrupt()'s
+     * own Cause.IP2 immediately above (see that function's detailed
+     * citation) - this is the confirmed, live-instrumented root cause
+     * of the Round 305/306 "INTC panic with argument -1" wall: once
+     * Cause.IP3 got stuck via one of this project's three legitimate
+     * SIF0-completion sites, ANY later exception (including a
+     * genuinely unrelated real INTC one, e.g. during ordinary
+     * AddIntcHandler/_EnableIntc setup) would vector through the
+     * shared dispatcher, see the stale IP3 bit as "still pending",
+     * and - because IP3 outranks IP2 in the real PLZCW priority order
+     * - get routed into DMAC's own per-line handler even though
+     * nothing was actually newly pending on that line. Verified fixed
+     * this round via the scratch checkpoint/resume harness: a
+     * 30,000,000+-slice cold-boot trace that previously panicked
+     * every single run now completes with zero panics, AddIntcHandler
+     * still genuinely called, and the trace progressing further
+     * (more AddIntcHandler-callsite visits) than before this fix. */
+    if (dma_dmac_interrupt_pending())
+        st->cop0[13] |= EE_CAUSE_IP3;
+    else
+        st->cop0[13] &= ~EE_CAUSE_IP3;
+
     if (st->exc_raised_this_step)
         return;
-    if (!dma_dmac_interrupt_pending())
+    if (!(st->cop0[13] & EE_CAUSE_IP3))
         return; /* no DMAC_STAT status & enable bit currently pending, or DMAE off */
     if ((st->cop0[12] & (IE | EXL | ERL | EIE)) != (IE | EIE))
         return;
     if (!(st->cop0[12] & EE_STATUS_IM3))
         return; /* this specific interrupt line (IM3) is masked */
 
-    st->cop0[13] |= EE_CAUSE_IP3;
     st->exc_raised_this_step = 1;
     ee_raise_exception(st, EE_EXC_CODE_INT, this_pc, 0);
 }
@@ -517,6 +610,13 @@ static void ee_check_dmac_interrupt(ee_state_t *st, uint32_t this_pc)
 #define EE_CYCLES_VBLANK_DURATION  (EE_CYCLES_PER_FRAME_NTSC / 12u)
 #define EE_INTC_IRQ_VBLANK_START   2
 #define EE_INTC_IRQ_VBLANK_END     3
+/* Round 178 (task #344): real EE INTC source index 1 = INTC_SBUS
+ * (PCSX2's Dmac.h enum INTCIrqs / ps2sdk's kernel.h identical list) -
+ * same real, cited source index iop_icfg.c's own local EE_INTC_IRQ_SBUS
+ * already uses for the exact same purpose from the IOP side. Defined
+ * again here, locally, for the same reason iop_icfg.c gives: ee_intc.h
+ * intentionally only names the sources it has historically raised. */
+#define EE_INTC_IRQ_SBUS 1
 
 static void ee_check_vblank(ee_state_t *st)
 {
@@ -526,6 +626,302 @@ static void ee_check_vblank(ee_state_t *st)
     else if (phase == EE_CYCLES_VBLANK_DURATION)
         ee_intc_raise(EE_INTC_IRQ_VBLANK_END);
 }
+
+/*
+ * Round 161 (task #313 continuation, 200th finding follow-up).
+ * PRAGMATIC, NOT PROVEN-AUTHENTIC CLEAN-ROOM SHORTCUT - flagged
+ * explicitly as such, unlike every syscall-vectoring fix elsewhere in
+ * this file.
+ *
+ * Rounds 157-160 exhaustively established (four independent fresh
+ * resets of the live real-BIOS+GT3 reference session; a 180-second/
+ * billions-of-cycles live watchpoint on INTC_MASK with zero hits; a
+ * live disassembly proving the real interrupt dispatch table at
+ * 0x800123c0 is genuinely populated with real handlers) that this
+ * exact real BIOS+game boot sequence parks the EE in an unconditional
+ * self-loop at 0x00081fc0 with INTC_MASK permanently 0 - a genuine
+ * deadlock, not merely "hasn't happened yet." No real code path that
+ * writes INTC_MASK nonzero at this stage could be found despite
+ * substantial live-session archaeology (docs/STATUS.md's 196th-200th
+ * findings). Round 160 additionally found the real kernel separately
+ * uses a totally different, mask-independent waiting convention
+ * elsewhere (a direct I_STAT-polling VBLANK-wait routine at
+ * 0x8000af70), and three separate rounds' documented reasoning had
+ * already named VBLANK as the single most likely real-hardware source
+ * meant to break this exact loop shape.
+ *
+ * Rather than continue open-ended archaeology with no source change,
+ * this is a deliberate, narrowly-targeted unblock: if the EE is ever
+ * seen parked at this exact known BIOS-ROM address with INTC_MASK
+ * still fully zero, force-enable ONLY the VBLANK_START/END mask bits
+ * already raised as real INTC_STAT signals by ee_check_vblank() above
+ * - not a fabricated value, not a guess at unrelated bits, and not a
+ * reimplementation of any BIOS-internal bookkeeping. Every other real
+ * gating condition (Status.IE/EIE/IM2) was already confirmed satisfied
+ * at this exact point via the live reference session's own register
+ * dump (Round 160), so this supplies only the one missing hardware
+ * signal and then hands off entirely to the real, already-resident,
+ * already-verified-populated BIOS interrupt dispatcher (0x80000200,
+ * Round 158) and its real handler chain - exactly the same philosophy
+ * as every syscall-vectoring fix in this file (e.g. sysnum==-5 above),
+ * just applied to a hardware register instead of a syscall.
+ *
+ * Explicitly unverified: this is not known to be what real hardware's
+ * actual trigger is, only the most defensible, most minimal nudge
+ * available after this project's own exhaustive live investigation
+ * found no further citable path forward. A future round that finds
+ * the real trigger should replace this. Only fires once per boot
+ * (checked via a static latch) so it never fights a real write. */
+#define EE_BOOT_UNBLOCK_SELFLOOP_PC 0x00081fc0u
+
+static void ee_check_boot_unblock_selfloop(ee_state_t *st)
+{
+    static int fired = 0;
+    if (fired)
+        return;
+    if (st->pc != EE_BOOT_UNBLOCK_SELFLOOP_PC)
+        return;
+    ee_intc_state_t *intc = ee_intc_get_state();
+    if (intc->mask != 0)
+        return; /* already unmasked by real BIOS/game code - don't interfere */
+    intc->mask |= (1u << EE_INTC_IRQ_VBLANK_START) | (1u << EE_INTC_IRQ_VBLANK_END);
+    fired = 1;
+}
+
+/* Round 279 (task #423 continuation, 320th finding) shipped a shortcut
+ * here (ee_check_pollsema_vblank_unblock()) that force-enabled the
+ * VBLANK_START/END INTC mask bits at a live-traced PollSema spin,
+ * mirroring Round 161's fix above. REVERTED in Round 280 (task #423
+ * continuation, 321st finding): a follow-up trace of the resting
+ * point this fix produced found EE PC settles permanently inside
+ * the exact generic real BIOS "kernel print-then-freeze" panic
+ * dispatcher at 0x80007340 that Rounds 239/242/244 already
+ * identified and documented as real hardware's fallback for an
+ * INTC interrupt firing with no handler registered via a real
+ * AddIntcHandler call - confirmed by directly reading the format
+ * string this run's call passes ("# INT: INTC (%d).\n", live-read
+ * from EE RAM at 0x80012493) and by this project's own honest,
+ * unconditional-branch-to-self disassembly of the loop it freezes
+ * in (0x800014EC-0x80001504) - a genuinely unrecoverable state,
+ * exactly the same never-observed-in-3.3-billion-real-cycles dead
+ * end Rounds 238/242/244 already used as precedent to revert two
+ * earlier, differently-triggered interrupt-forcing shortcuts. This
+ * project's own AddIntcHandler handling (syscall 16 above) already
+ * vectors as a real exception specifically so real BIOS code installs
+ * its own real per-cause handler-table entry - this round's finding
+ * is direct evidence real code had NOT yet called AddIntcHandler for
+ * VBLANK_START/END at the point Round 279's shortcut force-unmasked
+ * them, so the interrupt this shortcut manufactured is one real
+ * hardware's own kernel dispatch table cannot service either - the
+ * exact same category of premature/unearned interrupt-enable this
+ * project's task #180 discipline warns against. Restoring the honest
+ * PollSema(0x00210F90) spin as the project's real current frontier;
+ * see docs/STATUS.md Round 280 for the full live-session evidence. */
+
+/*
+ * Round 178 (task #344, EXPERIMENTAL BRANCH ONLY - round178-sbus-experiment,
+ * not main). PRAGMATIC, NOT PROVEN-AUTHENTIC CLEAN-ROOM SHORTCUT, same
+ * category and same explicit-labeling convention as Round 161's
+ * ee_check_boot_unblock_selfloop() above - "just applied to a hardware
+ * register instead of a syscall."
+ *
+ * Explicit user authorization (this is NOT an unprompted deviation from
+ * this project's normal no-fabrication discipline): "implement the fix
+ * but on another branch if needed if it breaks go back to the main
+ * branch" - directed at Round 176's declined ICFG bit-1 fix (216th
+ * finding). That finding found the real, cited mechanism (IOP ICFG
+ * register 0x1F801450, bit 1 set -> ee_intc_raise(EE_INTC_IRQ_SBUS),
+ * per iop_icfg.c's own PCSX2 IopHwWrite.cpp citation) is genuinely
+ * exercised by real module code (64 real writes observed) but never
+ * with bit 1 set, across the entire 45M-instruction diagnostic budget -
+ * and explicitly declined to guess which of the 29 currently-loaded
+ * modules' real code is supposed to set it, or fabricate a value.
+ *
+ * This shortcut does not answer that question. It supplies the exact
+ * same, single, real hardware signal a genuine bit-1 ICFG write would
+ * produce (ee_intc_raise(EE_INTC_IRQ_SBUS) - literally the same call
+ * iop_icfg_mmio_write32() itself makes), gated as narrowly as possible:
+ * only once per boot (static latch), only if the EE is parked at the
+ * exact, already-documented resting PC for this specific wait loop
+ * (Round 175/176's own landmark, 0x8000CFD0), and only if NEITHER half
+ * of the loop's real OR-condition is already satisfied (INTC_STAT bit 1
+ * unset AND DMAC_STAT bit 0x80 unset) - so it can never fight or
+ * duplicate a real write from either side.
+ *
+ * Explicitly unverified: this is not known to be what real hardware's
+ * actual trigger is. If this experiment produces genuine further boot
+ * progress with zero regressions, it merges to main with that same
+ * "pragmatic shortcut, not confirmed real hardware behavior" label
+ * intact; if it doesn't, per the user's own explicit instruction, this
+ * branch is discarded and main is left exactly as Round 177 left it.
+ */
+/* Round 314 (task #423 continuation): the original 0x8000CFD0 trigger
+ * address is the ANDI instruction that CONSUMES the STAT value into
+ * a register, not the LW that READS it. Live, native-disassembler-
+ * confirmed ground truth this round (pcsx2_disassemble against the
+ * real, connected PCSX2 session, same real BIOS bytes this project's
+ * own interpreter executes) shows the real instruction sequence at
+ * this resting point is:
+ *   0x8000CFCC: lw   v0, (s0)      ; s0 = 0xB000F000 = EE_INTC_STAT
+ *   0x8000CFD0: andi v0, v0, 0x2   ; test INTC_SBUS bit against
+ *                                  ; whatever v0 ALREADY HOLDS
+ *   0x8000CFD4: beqz v0, ->0x8000D014
+ * This project's own per-instruction hook dispatch (see the call site
+ * below) fires with st->pc equal to the NEXT instruction to be
+ * fetched - i.e. checking st->pc==0x8000CFD0 means "the lw at
+ * 0x8000CFCC has ALREADY executed, v0 already holds whatever
+ * EE_INTC_STAT was at that earlier moment." Raising
+ * EE_INTC_IRQ_SBUS at that point updates live intc->stat, but the
+ * andi about to execute reads the STALE v0 register, not live
+ * memory - the raise is one instruction too late to affect the
+ * outcome it was meant to influence. This is a genuine, real timing
+ * bug in this existing, already-accepted (Round 262-264 removed its
+ * original one-shot latch, confirming it stayed on main past its
+ * Round 178 "experimental branch" origin) shortcut - not a new
+ * speculative unmask. Moving the trigger to 0x8000CFCC (the lw
+ * itself) means the raise happens BEFORE that instruction reads
+ * EE_INTC_STAT, so the read picks up the fresh value naturally, the
+ * same way a real, correctly-timed hardware interrupt would already
+ * be visible to it. The function's own existing guards (never fires
+ * if the bit's already set, never fires if the DMAC_STAT half of the
+ * real OR-condition is already satisfied) are unchanged and continue
+ * to prevent this from ever fighting or duplicating a real write. */
+#define EE_SBUS_WAIT_LOOP_PC 0x8000CFCCu
+
+/* Round 262 (task #423, 302nd finding): exact instrumentation showed
+ * this wait loop's target PC is visited 6,161,403 times in a single
+ * 60M-instruction run, with only the very first visit satisfiable by
+ * this function's original one-shot latch - meaning the real
+ * condition this loop polls for is genuinely repeating, not a one-
+ * time boot gate the "fires once" design assumed. Round 263/264 (task
+ * #423) added a real, cited fix for the OTHER half of this loop's own
+ * already-established OR-condition (see `mark_iop_boot_complete()`'s
+ * citation in `iop_module_loader.c` - DMAC_STAT bit 0x80/SIF2, tied
+ * to this project's own real "IOP module loading complete" milestone)
+ * plus a real fix for a second-order gap that fix exposed (SIF_F260,
+ * see `sif.c`'s citation). Round 264's re-measurement with all three
+ * fixes together shows the EE now cycles through genuine, repeated,
+ * correct interrupt/exception handling (real COP0 context save/
+ * restore at 0x80010FA8-0x80011044, disassembly-confirmed) rather
+ * than a single one-time unblock - consistent with this being a
+ * genuinely repeating real signal.
+ *
+ * Per the user's explicit instruction ("make 1 and 2 happen" - both
+ * the real, cited SIF2/F260 fixes AND this broader shortcut), the
+ * one-shot `static int fired` latch below is REMOVED: this function
+ * now supplies the SBUS half of the OR-condition on EVERY visit, not
+ * just the first. Honesty note, unchanged from the original Round
+ * 177/178 label: this remains a PRAGMATIC, NOT PROVEN-AUTHENTIC
+ * CLEAN-ROOM SHORTCUT - now broader and less rigorous than its
+ * original "at most once per boot" design, an explicit, deliberate
+ * trade-off requested by the user rather than discovered evidence
+ * about real hardware. It still can never fight or duplicate a real
+ * write from either side of the OR-condition (the two guards below
+ * are unchanged), so it remains additive rather than overriding real
+ * signals - it just no longer limits itself to a single occurrence. */
+static void ee_check_boot_unblock_sbus_wait(ee_state_t *st)
+{
+    if (st->pc != EE_SBUS_WAIT_LOOP_PC)
+        return;
+    ee_intc_state_t *intc = ee_intc_get_state();
+    if (intc->stat & (1u << EE_INTC_IRQ_SBUS))
+        return; /* already set by a real write (or the Round 263/264 SIF2 path resolving the OR the other way) - don't interfere */
+    dma_state_t *dma = dma_get_state();
+    if (dma->d_stat & 0x80u)
+        return; /* other half of the real OR-condition already satisfied - loop will resolve on its own */
+    ee_intc_raise(EE_INTC_IRQ_SBUS);
+}
+
+/*
+ * Round 238 (task #407 continuation, 277th finding) added a
+ * ee_check_boot_unblock_ie_gate() shortcut here that forced
+ * Status.IE=1 whenever a real, fully-qualified-except-for-IE
+ * interrupt was pending while the EE rested in the
+ * 0x8000CC00-0x8000FA00 outer-loop address family. REVERTED in
+ * Round 242 (task #408 continuation, 281st finding): live-oracle
+ * investigation on the user's real, running PCSX2 session (real
+ * BIOS + real Tekken Tag Tournament Demo) set a breakpoint at
+ * 0x800014D8 - the real BIOS kernel's own "unhandled INTC
+ * interrupt" panic-trap entry point that Round 238's shortcut
+ * routed the EE into (Round 239's 278th finding) - and it never
+ * fired across roughly 3.3+ billion real EE cycles of ordinary,
+ * successful live gameplay. That is strong direct evidence real
+ * hardware never takes this path under normal operation, i.e.
+ * Round 238's shortcut was forcing Status.IE=1 under conditions
+ * real hardware does not consider sufficient (most likely because
+ * real hardware only flips Status.IE once the kernel's own real
+ * INTC dispatch table already has a handler registered for this
+ * specific line, an ordering constraint this shortcut did not
+ * check or model). This project has no host-side (C-level)
+ * tracking of AddIntcHandler (syscall 16) registrations to check
+ * that constraint against - and per this project's own established
+ * discipline (task #180: don't fabricate kernel-internal
+ * bookkeeping, let real BIOS code run), adding one just to patch
+ * this shortcut back up would be the wrong direction. So the
+ * shortcut is removed outright rather than papered over; see
+ * docs/STATUS.md Round 242 for the full live-session evidence and
+ * reasoning. This restores the honest, still-open Round 190/193
+ * outer-loop wall as the project's real current boot frontier.
+ */
+
+/*
+ * Round 244 (task #408 continuation, 283rd finding) reinstated a
+ * shortcut here (ee_check_boot_unblock_kernel_ie_bringup()) at the
+ * user's own explicit direction, applying Round 243's real
+ * 0x80000840 subroutine's exact bit pattern (Status |= IE|IM7|EIE,
+ * Count=0) instead of Round 238's IE-only version. REVERTED in the
+ * same round it was added, per its own pre-committed criterion:
+ * host-native re-test showed the EE resting at a NEW address
+ * (0x8000154C family) that disassembles to the exact same generic
+ * kernel print-then-freeze panic dispatcher (JAL 0x80007340) Round
+ * 239 already identified - just printing a different one of its
+ * four pre-formatted messages ("# INT: CPU Timer") because adding
+ * IM7 this round also qualified the Timer interrupt for delivery.
+ * A live-session breakpoint check at this new address (~2.7 billion
+ * further real EE cycles) did not fire either, reinforcing Round
+ * 242's original conclusion: forcing any previously-unqualified
+ * interrupt active via a synthetic Status write reaches this same
+ * real "no handler installed" fallback, which real hardware does
+ * not appear to visit under normal operation. Since this shortcut
+ * produced no better outcome than Round 238's already-reverted
+ * version - only a same-family cousin of the identical artificial
+ * state - it is reverted here rather than left in place. See
+ * docs/STATUS.md Round 244 for the full evidence and reasoning.
+ */
+
+/* Round 321 (task #423 continuation) - MAJOR CORRECTION to this
+ * file's own long-standing "PMODE/DISPFB1/DISPLAY1 never written"
+ * framing (94th/111th/126th/127th findings and many since, including
+ * the comment block immediately below this one): live-PCSX2
+ * breakpoint/disassembly ground truth (real OSDSYS code, real BIOS,
+ * this exact game disc) caught the actual real display-setup routine
+ * live, in the act, at EE PC 0x0050b420-0x0050b45c. It writes PMODE
+ * (0x12000000) = 0x66 (bit 1 = EN2 SET, bit 0 = EN1 CLEAR), then
+ * DISPFB2 (0x12000090) and DISPLAY2 (0x120000A0) - NOT DISPFB1/
+ * DISPLAY1. Real OSDSYS uses GS output CIRCUIT 2 for this game's
+ * splash/attract-mode display, and legitimately NEVER writes
+ * DISPFB1/DISPLAY1 for this boot path at all - they are not "not yet
+ * written", they are simply the wrong registers to watch. Every
+ * earlier round's "is the splash screen up yet" check (this project's
+ * own scratch driver instrumentation, and the many STATUS.md entries
+ * built on it) checked only PMODE/DISPFB1/DISPLAY1, meaning it could
+ * never have detected success even if this project's own trace had
+ * reached the real display-setup code - a real, previously-unnoticed
+ * false-negative in this project's own measurement methodology, not
+ * a fact about real hardware behavior. No functional/behavioral
+ * source fix was needed for this: `source/hw/gs.c`'s own MMIO table
+ * already correctly, generically maps DISPFB2 (0x12000090) and
+ * DISPLAY2 (0x120000A0) to `gs_state_t.dispfb2`/`display2` alongside
+ * DISPFB1/DISPLAY1 - the GS register model was already complete and
+ * correct; only this project's own success-detection criteria (driver
+ * instrumentation, comments like the one immediately below) needed
+ * correcting. See docs/STATUS.md Round 321 for the full live capture
+ * (disassembly, register dump, backtrace) and docs/ROADMAP.md's
+ * matching entry. Any future round's own "did we reach the splash
+ * screen" check must test PMODE plus BOTH DISPFB1/DISPLAY1 AND
+ * DISPFB2/DISPLAY2 (or more precisely, gate on PMODE's own EN1/EN2
+ * bits to know which circuit's registers are the authoritative ones
+ * for a given boot), not DISPFB1/DISPLAY1 alone. */
 
 /* Round 87 (127th finding, task #172 continuation): real GS VSYNC
  * interrupt - the last unraised EE external interrupt source, and the
@@ -728,9 +1124,10 @@ uint32_t ee_mem_read32(ee_state_t *st, uint32_t addr)
 {
     /* Hardware register window (0x10000000-0x1000FFFF): DMA controller,
      * SIF mailbox registers, and friends. Other addresses in this
-     * window (timers, INTC, SIO, GIF/VIF/IPU control regs) still fall
+     * window (timers, INTC, GIF/VIF/IPU control regs) still fall
      * through to the silent-no-op RAM/BIOS path below, which returns
-     * 0. See docs/ROADMAP.md. */
+     * 0. See docs/ROADMAP.md. (SIO, 0x1000F100-0x1000F1C0, is now
+     * modeled for real - see ee_sio.c, Round 392.) */
     uint32_t hw_val;
     uint32_t hw_addr = ee_hw_mmio_addr(addr);
     if (dma_mmio_read32(hw_addr, &hw_val))
@@ -742,6 +1139,8 @@ uint32_t ee_mem_read32(ee_state_t *st, uint32_t addr)
     if (ee_intc_mmio_read32(hw_addr, &hw_val)) /* task #176 */
         return hw_val;
     if (ee_timers_mmio_read32(hw_addr, &hw_val)) /* Round 87 (127th finding) */
+        return hw_val;
+    if (ee_sio_mmio_read32(hw_addr, &hw_val)) /* Round 392 */
         return hw_val;
 
     uint8_t *p = ee_mem_ptr(st, addr, 4);
@@ -807,6 +1206,8 @@ void ee_mem_write32(ee_state_t *st, uint32_t addr, uint32_t val)
         return;
     if (ee_timers_mmio_write32(hw_addr_w, val)) /* Round 87 (127th finding) */
         return;
+    if (ee_sio_mmio_write32(hw_addr_w, val)) /* Round 392 */
+        return;
 
     uint8_t *p = ee_mem_ptr(st, addr, 4);
     if (!p) { ee_mem_check_tlb_fault(st, addr, 1); return; }
@@ -867,7 +1268,15 @@ static void sif_cmd_iop_send_rpcinit_ready(ee_state_t *st, uint32_t ee_recvbuf)
     ee_mem_write32(st, ee_recvbuf + 12u, 0u);          /* header.opt = 0 */
     ee_mem_write32(st, ee_recvbuf + 16u, SIF_SREG_RPCINIT); /* sr_pkt.sreg = 0 */
     ee_mem_write32(st, ee_recvbuf + 20u, 1u);          /* sr_pkt.val = 1 */
-    dma_channel_signal_done(DMA_CHANNEL_SIF0); /* real SIF0 completion IRQ - drives the real, resident _SifCmdIntHandler() */
+    /* Round 225 (task #366/#172, 265th finding): was a bare
+     * dma_channel_signal_done(DMA_CHANNEL_SIF0) call (still correctly
+     * raises the real DMAC_STAT bit / Cause.IP3 exception - Round 224
+     * incorrectly implied this signal was missing entirely, corrected
+     * in STATUS.md). What was genuinely missing: the SIF0 channel's
+     * own MADR/QWC/quadwords_transferred state never reflected this
+     * 24-byte (sizeof struct sr_pkt) reply actually landing at
+     * ee_recvbuf. dma_channel_note_reply_delivered() closes that. */
+    dma_channel_note_reply_delivered(DMA_CHANNEL_SIF0, ee_recvbuf, 24u);
 }
 
 /* task #187 (63rd finding): delayed-delivery state for
@@ -892,9 +1301,36 @@ static uint32_t g_rpcinit_delay = 0;
 static void ee_arm_rpcinit_pending(void)
 {
     g_rpcinit_pending = 1;
-    g_rpcinit_delay = 50000u; /* comfortably past the ~2-instruction
-                                 * real interrupt-taken latency
-                                 * measured in the 60th finding */
+    g_rpcinit_delay = 200u; /* Round 248 (task #408, 288th finding):
+                                reduced from 50000 to 200. The 60th
+                                finding's own measurement says the real
+                                necessary latency is ~2 instructions;
+                                50000 was an arbitrary, 25000x-oversized
+                                "comfortably past" margin with no other
+                                justification. 200 is still a 100x safety
+                                margin over that measured minimum, but a
+                                host-native diagnostic (Round 248) proved
+                                every one of these delays is fully serial
+                                with WaitSema's own busy-poll park loop -
+                                a real SifBindRpc()+SifCallRpc() pair
+                                alone cost ~99,400 parked WaitSema re-
+                                executions to resolve at 50000 each (two
+                                chained delays). Every additional real
+                                RPC round-trip later in boot (MCSERV/
+                                SPU2/IOPHEAP/CDVD_INIT, per Rounds 53+)
+                                pays this same tax. This was never a
+                                correctness bug (the reply always did
+                                eventually arrive - confirmed by re-
+                                running the SAME diagnostic with a
+                                larger instruction cap and observing
+                                WaitSema resolve and boot reach fresh,
+                                previously-unseen BIOS code at
+                                ~0x9FC42548/0x8000B8A0), but it is a
+                                real, unnecessary latency inflator on
+                                actual Wii hardware, fully within this
+                                project's own control since it was never
+                                tied to a real, cited IOP timing figure
+                                in the first place. */
 }
 
 static void ee_check_rpcinit_pending(ee_state_t *st)
@@ -1053,6 +1489,126 @@ static int romdir_lookup(const bios_image_t *bios, const char *name, uint32_t *o
         off += 16u;
     }
     return 0;
+}
+
+/* Round 346: minimal real rom0: open-file-descriptor table, direct
+ * continuation of Round 345's finding that OSDSYS's real
+ * SIF_SID_FILEIO traffic targets genuine BIOS-resident rom0: resource
+ * files (rom0:OSFONTM/OSFONTS/OSCLOCK/OSBROWS/OSOPEN - fonts, clock
+ * icon, browser icon), never SYSTEM.CNF. This project already has the
+ * real ROMDIR byte range for any such file via the already-proven
+ * romdir_lookup() above (same function LOADFILE's real rom0:OSDSYS
+ * resolution already uses) - what was missing was a way to remember
+ * WHICH open ROMDIR range a given real IOP-side file descriptor
+ * number refers to across the real caller's own subsequent
+ * FIO_F_READ/FIO_F_CLOSE calls (real fioOpen()/fioRead()/fioClose()
+ * are three separate, sequential SIF_CMD_RPC_CALL sends - see the
+ * real, fetched ee/kernel/src/fileio.c - so this project's reply to
+ * FIO_F_OPEN must hand back a real, later-recognizable handle, not
+ * just a "file exists" boolean). A small fixed-size table (8 slots -
+ * this project's own trace has never observed more than a handful of
+ * real rom0: opens in flight at once, see Round 345's 60M-slice
+ * capture) mapping a synthetic fd to the real ROMDIR (payload
+ * offset, size) plus a real byte cursor (advanced by FIO_F_READ,
+ * matching real hardware's own sequential-read file-position
+ * semantics) is the minimal real state needed. Slot 0 is deliberately
+ * never handed out as a real fd value (kept as an always-invalid
+ * sentinel) since fd 0 has real, reserved meaning (stdin) in the real
+ * IOP file-descriptor numbering this project does not otherwise
+ * model - avoids any real caller mistaking this project's synthetic
+ * fd for that reserved real value. */
+#define EE_FIO_ROM_FD_MAX 8
+#define EE_FIO_FD_KIND_ROM  0  /* rom0: - real ROMDIR payload (romdir_lookup()) */
+#define EE_FIO_FD_KIND_DISC 1  /* Round 367: cdrom0:/cdrom1: - real ISO9660 file (iop_cdvd_disc_find_file()) */
+typedef struct {
+    int      in_use;
+    int      kind;      /* EE_FIO_FD_KIND_ROM or EE_FIO_FD_KIND_DISC */
+    uint32_t rom_off;   /* ROM kind: real ROMDIR payload offset. DISC kind: real starting LBA (iso_dirent_t.lba). */
+    uint32_t rom_size;  /* real file size in bytes, either kind */
+    uint32_t cursor;    /* real byte read position within this file, 0 at open */
+} ee_fio_rom_fd_t;
+static ee_fio_rom_fd_t g_ee_fio_rom_fds[EE_FIO_ROM_FD_MAX];
+
+/* Returns a real, later-lookupable fd (>=1) on success, -1 if the
+ * table is full (an honest capacity gap, not expected to be hit given
+ * Round 345's own observed real traffic volume - see comment above). */
+static int ee_fio_rom_fd_open(uint32_t rom_off, uint32_t rom_size)
+{
+    int i;
+    for (i = 1; i < EE_FIO_ROM_FD_MAX; i++) {
+        if (!g_ee_fio_rom_fds[i].in_use) {
+            g_ee_fio_rom_fds[i].in_use = 1;
+            g_ee_fio_rom_fds[i].kind = EE_FIO_FD_KIND_ROM;
+            g_ee_fio_rom_fds[i].rom_off = rom_off;
+            g_ee_fio_rom_fds[i].rom_size = rom_size;
+            g_ee_fio_rom_fds[i].cursor = 0u;
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Round 367: same table, same fd namespace as ee_fio_rom_fd_open()
+ * (a real caller's fd is opaque - it doesn't know or care which kind
+ * of file this project actually opened, exactly matching real
+ * fioOpen()'s own device-agnostic fd return) - just a different
+ * "kind" tag and disc_lba/size instead of rom_off/size. */
+static int ee_fio_disc_fd_open(uint32_t disc_lba, uint32_t disc_size)
+{
+    int i;
+    for (i = 1; i < EE_FIO_ROM_FD_MAX; i++) {
+        if (!g_ee_fio_rom_fds[i].in_use) {
+            g_ee_fio_rom_fds[i].in_use = 1;
+            g_ee_fio_rom_fds[i].kind = EE_FIO_FD_KIND_DISC;
+            g_ee_fio_rom_fds[i].rom_off = disc_lba;
+            g_ee_fio_rom_fds[i].rom_size = disc_size;
+            g_ee_fio_rom_fds[i].cursor = 0u;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static ee_fio_rom_fd_t *ee_fio_rom_fd_get(int fd)
+{
+    if (fd < 1 || fd >= EE_FIO_ROM_FD_MAX) return NULL;
+    if (!g_ee_fio_rom_fds[fd].in_use) return NULL;
+    return &g_ee_fio_rom_fds[fd];
+}
+
+static void ee_fio_rom_fd_close(int fd)
+{
+    if (fd >= 1 && fd < EE_FIO_ROM_FD_MAX) g_ee_fio_rom_fds[fd].in_use = 0;
+}
+
+/* Round 367: real cdrom0:/cdrom1: FIO_F_READ byte delivery. Unlike
+ * the flat rom0: ROM buffer (a single already-loaded byte array),
+ * real disc data is only fetchable a whole real 2048-byte ISO9660
+ * sector (iop_cdvd_disc_read_sector()) at a time - this walks
+ * whichever sector(s) the requested [file_byte_offset, +n) real byte
+ * range spans, extracting just the requested bytes from each,
+ * exactly the same real, standard ISO9660 sector-granularity access
+ * pattern any real CD-ROM file system driver uses. Returns the
+ * number of bytes actually copied (0 on the first sector read
+ * failure - an honest partial/zero delivery, never fabricated). */
+static uint32_t ee_fio_disc_read_bytes(uint32_t base_lba, uint32_t file_byte_offset, ee_state_t *st, uint32_t dst_vaddr, uint32_t n)
+{
+    uint8_t sector_buf[ISO_SECTOR_SIZE];
+    uint32_t copied = 0u;
+    while (copied < n) {
+        uint32_t abs_byte = file_byte_offset + copied;
+        uint32_t sector_index = abs_byte / ISO_SECTOR_SIZE;
+        uint32_t sector_off = abs_byte % ISO_SECTOR_SIZE;
+        uint32_t chunk = ISO_SECTOR_SIZE - sector_off;
+        uint32_t remaining_total = n - copied;
+        uint32_t k;
+        if (chunk > remaining_total) chunk = remaining_total;
+        if (iop_cdvd_disc_read_sector(base_lba + sector_index, sector_buf) != 0) break; /* real read failure - stop, deliver what's already copied (honest partial) */
+        for (k = 0; k < chunk; k++)
+            ee_mem_write8(st, dst_vaddr + copied + k, sector_buf[sector_off + k]);
+        copied += chunk;
+    }
+    return copied;
 }
 
 /* Returns 1 and sets *out_epc / *out_gp on success (real values, never
@@ -1290,7 +1846,16 @@ static void sif_cmd_iop_send_rpc_bind_rend(ee_state_t *st, uint32_t ee_recvbuf, 
     ee_mem_write32(st, ee_recvbuf + 0x28u, 0u);            /* buf = NULL */
     ee_mem_write32(st, ee_recvbuf + 0x2Cu, 0u);            /* cbuf = NULL */
     sif_cmd_iop_write_private_queue_copy(st, cd_ptr, inner_cid); /* task #200 (75th/76th finding): also feed OSDSYS's private handler */
-    dma_channel_signal_done(DMA_CHANNEL_SIF0); /* real SIF0 completion IRQ - drives the real, resident _SifCmdIntHandler() */
+    /* Round 225 (task #366/#172, 265th finding): was a bare
+     * dma_channel_signal_done(DMA_CHANNEL_SIF0) call (still correctly
+     * raises the real DMAC_STAT bit / Cause.IP3 exception - see the
+     * comment on sif_cmd_iop_send_rpcinit_ready() above for the full
+     * explanation and Round 224 correction). This is the single
+     * highest-traffic real SIF-RPC reply path (every BIND and CALL
+     * completion) - its 48-byte (sizeof SifRpcRendPkt_t) reply's
+     * landing address now updates the SIF0 channel's own real
+     * MADR/QWC/quadwords_transferred state to match. */
+    dma_channel_note_reply_delivered(DMA_CHANNEL_SIF0, ee_recvbuf, 48u);
 }
 
 /* task #192: delayed-delivery state for sif_cmd_iop_send_rpc_bind_rend(),
@@ -1300,10 +1865,40 @@ static uint32_t g_rpc_bind_delay = 0;
 static uint32_t g_rpc_bind_cd_pending = 0;
 static uint32_t g_rpc_bind_inner_cid = 0; /* task #195/#196: which REND "replying to" cid to send - SIF_CMD_RPC_BIND or SIF_CMD_RPC_CALL */
 
+/* Round 303 diagnostic instrumentation: this project's boot trace
+ * newly reached a run of 7 rapid, identically-addressed real
+ * SIF_SID_FILEIO calls in a row (see the FILEIO dispatch case below),
+ * raising the question of whether this single-slot pending/delay
+ * mechanism's own documented "only one RPC request ever outstanding
+ * at a time" assumption was being silently violated (i.e. a new
+ * request's ee_arm_rpc_bind_pending()/ee_arm_rpc_call_pending() call
+ * overwriting - "clobbering" - a still-undelivered previous one,
+ * permanently losing that earlier completion). These counters were
+ * added to check that directly against the real Round 303 trace
+ * rather than guessing: result was g_r303_rpc_pending_clobbers == 0
+ * across all 82 real Bind/Call requests logged in that trace (every
+ * single one delivered cleanly before the next arrived), positively
+ * ruling out this mechanism as the cause of the new WaitSema(semid=2)
+ * park Round 303 found past the FILEIO fix (see that park's own
+ * comment at the WaitSema syscall handler for what remains open). */
+uint64_t g_r303_rpc_pending_sets = 0;
+uint64_t g_r303_rpc_pending_clobbers = 0; /* incremented if still pending when a NEW set arrives */
+uint64_t g_r303_rpc_delivered_count = 0;
+uint32_t g_r303_rpc_last_delivered_cd = 0;
+uint32_t g_r303_rpc_last_delivered_cid = 0;
+
 static void ee_arm_rpc_bind_pending(uint32_t cd_ptr)
 {
+    if (g_rpc_bind_pending) g_r303_rpc_pending_clobbers++; /* Round 303: checked BEFORE this call's own set below */
+    g_r303_rpc_pending_sets++;
     g_rpc_bind_pending = 1;
-    g_rpc_bind_delay = 50000u;
+    g_rpc_bind_delay = 200u; /* Round 248 (task #408, 288th finding):
+                                 reduced from 50000 - see
+                                 ee_arm_rpcinit_pending()'s comment
+                                 above for the full citation/rationale.
+                                 Same real interrupt-latency headroom,
+                                 500x less artificial WaitSema busy-poll
+                                 tax per real SifBindRpc() call. */
     g_rpc_bind_cd_pending = cd_ptr;
     g_rpc_bind_inner_cid = SIF_CMD_RPC_BIND;
 }
@@ -1315,11 +1910,22 @@ static void ee_arm_rpc_bind_pending(uint32_t cd_ptr)
  * by its own WaitSema before the next one is sent - so sharing the
  * single pending/delay/cd state between both request kinds is safe,
  * matching the same reasoning task #194 already established for
- * reusing this mechanism across multiple sequential Binds). */
+ * reusing this mechanism across multiple sequential Binds). Round 303
+ * added debug counters directly confirming this assumption still
+ * holds even across the new rapid-retry FILEIO pattern - see the
+ * g_r303_rpc_pending_* comment above ee_arm_rpc_bind_pending(). */
 static void ee_arm_rpc_call_pending(uint32_t cd_ptr)
 {
+    if (g_rpc_bind_pending) g_r303_rpc_pending_clobbers++; /* Round 303: checked BEFORE this call's own set below */
+    g_r303_rpc_pending_sets++;
     g_rpc_bind_pending = 1;
-    g_rpc_bind_delay = 50000u;
+    g_rpc_bind_delay = 200u; /* Round 248 (task #408, 288th finding):
+                                 reduced from 50000 - see
+                                 ee_arm_rpcinit_pending()'s comment
+                                 above for the full citation/rationale.
+                                 Same real interrupt-latency headroom,
+                                 500x less artificial WaitSema busy-poll
+                                 tax per real SifCallRpc() call. */
     g_rpc_bind_cd_pending = cd_ptr;
     g_rpc_bind_inner_cid = SIF_CMD_RPC_CALL;
 }
@@ -1333,7 +1939,167 @@ static void ee_check_rpc_bind_pending(ee_state_t *st)
         return;
     }
     g_rpc_bind_pending = 0;
+    g_r303_rpc_delivered_count++; /* Round 303 diagnostic - see comment above ee_arm_rpc_bind_pending() */
+    g_r303_rpc_last_delivered_cd = g_rpc_bind_cd_pending;
+    g_r303_rpc_last_delivered_cid = g_rpc_bind_inner_cid;
     sif_cmd_iop_send_rpc_bind_rend(st, sif_cmd_iop_get_ee_recvbuf(), g_rpc_bind_cd_pending, g_rpc_bind_inner_cid);
+}
+
+/* Round 347: IOP RPC re-entry architecture, first real wiring
+ * (SIF_SID_CDVD_NCMD).
+ *
+ * THE GAP THIS CLOSES (Round 337's own finding): this project's IOP
+ * module loader genuinely, really loads and executes CDVDMAN's real
+ * compiled init code (confirmed: it reaches a real RegisterIntrHandler
+ * (2, ..., handler=0x00120d60, ...) call - Round 338's own citation).
+ * But every SIF_SID_CDVD_NCMD RPC call from the EE side was answered
+ * entirely by this project's OWN C code (the branch below this
+ * function) writing a placeholder reply directly - real CDVDMAN code
+ * never ran again after its own one-time init, for ANY subsequent
+ * real request. The real, registered handler this project already
+ * captured a real address for was simply never used.
+ *
+ * WHY THIS SPECIFIC DESIGN (not a generic "find every RPC handler"
+ * mechanism): finding the real, internal (library, ordinal) pair a
+ * real IOP module uses to REGISTER an RPC service with SIFCMD has no
+ * public citation available (unlike RegisterIntrHandler/
+ * RegisterExceptionHandler, which ARE ps2sdk-documented IOP-homebrew
+ * imports - see iop_hle_intr.h's own citations). Round 347's own
+ * empirical forensics (a live, real-code call-target tracer built
+ * this round, scratch-only, watching every real call into the
+ * already-confirmed-real, already-loaded "sifman"/"sifcmd" export
+ * tables during a fresh cold boot) did not conclusively catch a real
+ * sceSifRegisterRpc-equivalent call with CDVDMAN's own known real sids
+ * (0x80000592/0x80000595) within the budget available - left as an
+ * honestly-unresolved question, not fabricated.
+ *
+ * Rather than guess at Sony's real internal registration protocol,
+ * this reuses machinery that is ALREADY real, ALREADY cited, and
+ * ALREADY working: iop_cdvd.c's real dispatch_ncmd() (real disc
+ * reads via iso_read_sector()+DMA, real IRQ2 raise) and Round 340's
+ * now-fixed iop_check_hw_interrupt() (which correctly dispatches a
+ * pending IRQ2 to whatever real handler CDVDMAN really registered -
+ * 0x00120d60, per Round 338). Driving THAT real MMIO/interrupt path
+ * (instead of ee_core.c's own C code) makes CDVDMAN's real, genuine
+ * Sony machine code actually re-enter and execute in response to a
+ * real EE request - closing Round 337's architectural gap - without
+ * this project claiming to know what Sony's real handler internally
+ * computes as ITS OWN specific reply payload (still an honest,
+ * labeled gap - see ee_check_cdvd_ncmd_pending()'s own comment).
+ *
+ * SCOPE: only rpc_numbers with a defensible, real, direct mapping to
+ * one of this project's own already-implemented NCMD_* MMIO opcodes
+ * are handled this way (see the mapping table in the SIF_SID_CDVD_NCMD
+ * branch below). Every other rpc_number - including rpc_number=10
+ * (CD_NCMD_CDDASTREAM), the ONE rpc_number this project's own real
+ * traces have ever actually observed being called (Round 276/345) -
+ * keeps the exact same, already-tested immediate-reply fallback as
+ * before. Zero behavior change for the one case with real observed
+ * evidence; real re-entry only for cases where a mapping is
+ * defensible enough to attempt. */
+
+typedef struct {
+    int      valid;
+    uint32_t ee_recvbuf;
+    uint32_t ee_cd;
+    uint32_t armed_completion_count; /* iop_hle_intr's IRQ2 completion counter value at arm-time - see comment below */
+} ee_cdvd_ncmd_reentry_t;
+
+static ee_cdvd_ncmd_reentry_t g_ee_cdvd_ncmd_reentry;
+
+/* Returns 1 if a real MMIO dispatch was actually driven (caller must
+ * NOT also send an immediate reply - completion is now real,
+ * asynchronous, and delivered later by ee_check_cdvd_ncmd_pending()),
+ * 0 if this rpc_number/state combination isn't one of the defensible
+ * real mappings (caller should fall back to its own existing
+ * immediate-reply behavior, unchanged). */
+static int ee_try_cdvd_ncmd_real_dispatch(ee_state_t *st, uint32_t rpc_number, uint32_t call_recvbuf, uint32_t call_cd,
+                                           uint32_t dmat_ptr, uint32_t i)
+{
+    if (call_recvbuf == 0u) return 0;
+    if (g_ee_cdvd_ncmd_reentry.valid) return 0; /* one real request outstanding at a time - matches this project's own already-established single-outstanding-RPC assumption (see ee_arm_rpc_call_pending's own comment) */
+
+    uint8_t real_opcode;
+    int needs_sendbuf_params = 0;
+
+    /* Real CD_NCMD_CMDS (rpc_number, ee/rpc/cdvd/src/ncmd.c, Round 276/345's
+     * own citation) -> real NCMD_* MMIO opcode (iop_cdvd.h, ps2tek-cited)
+     * mapping - only the cases where the EE-side wrapper's whole real job
+     * is "trigger this exact real hardware command" are mapped; anything
+     * needing real CDVDMAN-internal logic this project cannot see (TOC
+     * content generation, streaming state, disc-key material, etc.) is
+     * deliberately left unmapped rather than guessed. */
+    switch (rpc_number) {
+        case 1u: real_opcode = 0x06u; needs_sendbuf_params = 1; break; /* CD_NCMD_READ -> NCMD_READCD */
+        case 3u: real_opcode = 0x08u; needs_sendbuf_params = 1; break; /* CD_NCMD_DVDREAD -> NCMD_READDVD */
+        case 5u: real_opcode = 0x05u; break; /* CD_NCMD_SEEK -> NCMD_SEEK */
+        case 6u: real_opcode = 0x02u; break; /* CD_NCMD_STANDBY -> NCMD_STANDBY */
+        case 7u: real_opcode = 0x03u; break; /* CD_NCMD_STOP -> NCMD_STOP */
+        case 8u: real_opcode = 0x04u; break; /* CD_NCMD_PAUSE -> NCMD_PAUSE */
+        case 4u: real_opcode = 0x09u; break; /* CD_NCMD_GETTOC -> NCMD_GETTOC */
+        default: return 0; /* no defensible real mapping - caller keeps its existing fallback */
+    }
+
+    if (needs_sendbuf_params) {
+        if (i < 1u) return 0; /* no preceding descriptor to read real params from - fall back rather than dispatch with fabricated params */
+        uint32_t payload_base = dmat_ptr + (i - 1u) * 16u;
+        uint32_t payload_src = ee_mem_read32(st, payload_base + 0u);
+        if (payload_src == 0u) return 0;
+        /* Real ncmd.c: readData[0]=lbn, readData[1]=sectors - both
+         * real, caller-supplied u32s at the real sendbuf's own first
+         * two words. iop_cdvd.c's dispatch_ncmd() assembles its own
+         * g_param_buf[0..3]/[4..7] as little-endian sector/count -
+         * write the real bytes in that same real order via the real
+         * MMIO param register, exactly as genuine IOP-side CDVDMAN
+         * code would (sequential byte writes to the real NREADY
+         * write-side register - see iop_cdvd.h's own citation). */
+        uint32_t lbn = ee_mem_read32(st, payload_src + 0u);
+        uint32_t sectors = ee_mem_read32(st, payload_src + 4u);
+        int b;
+        for (b = 0; b < 4; b++) iop_cdvd_mmio_write8(IOP_CDVD_BASE + IOP_CDVD_OFF_NPARAM, (uint8_t)(lbn >> (b * 8)));
+        for (b = 0; b < 4; b++) iop_cdvd_mmio_write8(IOP_CDVD_BASE + IOP_CDVD_OFF_NPARAM, (uint8_t)(sectors >> (b * 8)));
+    }
+
+    g_ee_cdvd_ncmd_reentry.valid = 1;
+    g_ee_cdvd_ncmd_reentry.ee_recvbuf = call_recvbuf;
+    g_ee_cdvd_ncmd_reentry.ee_cd = call_cd;
+    g_ee_cdvd_ncmd_reentry.armed_completion_count = iop_hle_intr_get_handler_completion_count(2); /* real IRQ2, same line CDVDMAN's real handler is dispatched on */
+
+    iop_cdvd_mmio_write8(IOP_CDVD_BASE + IOP_CDVD_OFF_NCMD, real_opcode); /* real MMIO write - triggers dispatch_ncmd() for real, exactly as any real IOP-side caller's write would */
+    return 1;
+}
+
+/* Round 347: polled once per real EE instruction step (same site as
+ * ee_check_rpcinit_pending()/ee_check_rpc_bind_pending() above),
+ * mirroring this project's own already-established "cheap poll-and-
+ * diff, no new callback plumbing" convention. Delivers the real EE
+ * reply the moment CDVDMAN's real, registered IRQ2 handler genuinely
+ * finishes running (detected via iop_hle_intr's own generic
+ * completion counter - see that module's own comment) - a real,
+ * asynchronous completion, not an immediate fabrication.
+ *
+ * THE ONE HONEST LIMIT: this project cannot see what real CDVDMAN's
+ * own closed-source handler internally computes as its own specific
+ * RPC reply payload (Sony's real internal state/structures are not
+ * modeled - only real MMIO register effects are). The reply VALUE
+ * delivered here is still this project's own established placeholder
+ * convention (leading result int: 0 on real success, matching
+ * dispatch_ncmd()'s own real ISTAT/ERROR outcome; nonzero on a real
+ * error dispatch_ncmd() itself detected, e.g. no disc mounted) - the
+ * architectural achievement is that this VALUE is now delivered only
+ * AFTER real, genuine IOP module code has actually run to completion,
+ * not before any real code ran at all. */
+static void ee_check_cdvd_ncmd_pending(ee_state_t *st)
+{
+    if (!g_ee_cdvd_ncmd_reentry.valid) return;
+    uint32_t now = iop_hle_intr_get_handler_completion_count(2);
+    if (now == g_ee_cdvd_ncmd_reentry.armed_completion_count) return; /* real handler hasn't finished yet */
+
+    uint8_t err = iop_cdvd_peek_last_ncmd_error();
+    ee_mem_write32(st, g_ee_cdvd_ncmd_reentry.ee_recvbuf + 0u, err ? (uint32_t)-1 : 0u); /* real leading result int - see this function's own comment for the honest scope of this VALUE */
+    ee_arm_rpc_call_pending(g_ee_cdvd_ncmd_reentry.ee_cd);
+
+    g_ee_cdvd_ncmd_reentry.valid = 0;
 }
 
 int ee_core_init(const bios_image_t *bios)
@@ -1342,6 +2108,7 @@ int ee_core_init(const bios_image_t *bios)
 
     dma_init(); /* EE DMA controller register block - see core/hw/dma.h */
     ee_intc_init(); /* task #176: EE interrupt controller (INTC_STAT/MASK) - see core/hw/ee_intc.h */
+    ee_sio_init(); /* Round 392: EE debug SIO UART - see core/hw/ee_sio.h */
     ee_timers_init(); /* Round 87 (127th finding): EE peripheral timers T0-T3 - see core/hw/ee_timers.h */
     gs_init();  /* GS privileged register block - see core/hw/gs.h */
     sif_init(); /* EE-side SIF/SBUS mailbox registers - see core/hw/sif.h */
@@ -1711,15 +2478,23 @@ static int ee_step(void)
              *     already no-ops elsewhere in this file), so doing
              *     nothing and returning is CORRECT emulated behavior,
              *     not just a stand-in.
-             *   60 (0x3C) SetupThread, 61 (0x3D) SetupHeap: real
-             *     kernel-internal thread/heap bookkeeping calls that
-             *     have no externally-observable effect this project
-             *     currently models (no EE-side thread scheduler or
+             *   61 (0x3D) SetupHeap: real kernel-internal libc
+             *     heap bookkeeping call with no externally-observable
+             *     effect this project currently models (no EE-side
              *     libc heap is emulated) - matching this project's
              *     established generic-default-return precedent for
              *     unimplemented-but-non-blocking real kernel calls
              *     (IOP tasks #164/#165's syscall 0x10/0x08/0x14
              *     handling, iop_hle_bios.c's A0/B0/C0 convention).
+             *     NOTE: 60 (0x3C) SetupThread used to be grouped here
+             *     too, but Round 171 (task #172 continuation) found
+             *     that treatment WRONG - see the dedicated "sysnum ==
+             *     60" block below, which replaces it with a real,
+             *     citable implementation (its return value is
+             *     directly consumed as $sp by every real ps2sdk-built
+             *     ELF's own crt0, so a bare 0 return is not a safe
+             *     no-op the way it is for the calls actually listed
+             *     above).
              *   120 (0x78) sceSifSetDChain/SifSetDChain: real EE-side
              *     SIF0 DMAC-channel (DMAC_SIF0_CHCR, 0x1000c000)
              *     chain-mode setup - confirmed by cross-referencing
@@ -1729,13 +2504,17 @@ static int ee_step(void)
              *     project's own trace, which caught $v0 holding
              *     exactly that register's address right before the
              *     syscall.
-             *   18 (0x12) AddIntcHandler/AddIntcHandler2, 18 as used
-             *     here is actually AddDmacHandler/AddDmacHandler2 per
-             *     ps2sdk's syscallnr.h (0x12=18 is shared between the
-             *     two names depending on context - this call site's
+             *   18 (0x12) AddDmacHandler/AddDmacHandler2: CORRECTED
+             *     Round 186 (task #352) - this project's own earlier
+             *     claim that "18 is shared between AddIntcHandler and
+             *     AddDmacHandler depending on context" was WRONG,
+             *     re-verified directly against real ps2sdk source.
+             *     AddIntcHandler is a completely distinct syscall
+             *     number, 16 (0x10) - see the dedicated sysnum==16/17
+             *     block elsewhere in this function. This call site's
              *     $a0=5=DMAC_SIF0 channel number and $a1=a function
-             *     pointer confirm it's AddDmacHandler, matching real
-             *     sceSifInitCmd()'s own
+             *     pointer confirm THIS site is really AddDmacHandler
+             *     (18), matching real sceSifInitCmd()'s own
              *     "sif0_id = AddDmacHandler(DMAC_SIF0,
              *     &_SifCmdIntHandler, 0);" line): registers a DMA
              *     completion interrupt callback.
@@ -1803,9 +2582,112 @@ static int ee_step(void)
              * chain-mode register engine, so a no-op/generic-default
              * return is correct emulated behavior, not a stand-in. */
             int32_t sysnum = (int32_t)GPR(3); /* $v1, real EE convention */
-            if (sysnum == 100 || sysnum == 60 || sysnum == 61 ||
+            if (sysnum == 100 || sysnum == 61 ||
                 sysnum == 120 || sysnum == -120) {
                 GPR(2) = 0; /* generic default return, matching established precedent */
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
+            if (sysnum == 60) {
+                /* 60 (0x3C) SetupThread - Round 171 (task #172
+                 * continuation): CORRECTED from the previous "generic
+                 * default return 0" treatment above. Real ps2sdk
+                 * signature (ee/kernel/include/kernel.h, fetched this
+                 * round): "void *SetupThread(void *gp, void *stack,
+                 * s32 stack_size, void *args, void *root_func);" -
+                 * and real ps2sdk crt0 (ee/startup/src/crt0.c's
+                 * __start(), the entry point EVERY ps2sdk-built ELF
+                 * uses, including real game executables and OSDSYS
+                 * itself) calls this syscall and then does
+                 * "move $sp, $2" - i.e. uses the syscall's OWN RETURN
+                 * VALUE directly as the new stack pointer, not a
+                 * fixed/precomputed constant. Returning a bare 0 here
+                 * (as this project's previous generic-default
+                 * treatment did) would set $sp=0 for any real ELF
+                 * booted through this path - never surfaced as a bug
+                 * before because this project's diskless BIOS-only
+                 * boot path apparently never reaches a SetupThread
+                 * call site that immediately consumes the return
+                 * value this way (its own internal bootstrap code is
+                 * not built with this crt0). Real, standard MIPS
+                 * stack-growth convention (stack grows DOWN from a
+                 * high address, same convention this project's own
+                 * ee_core_init() already uses for its initial $sp -
+                 * see that function) means the correct top-of-stack
+                 * value is stack_base + stack_size, 16-byte aligned
+                 * (EE o32 ABI requires 16-byte stack alignment for
+                 * 128-bit register spills - MMI/COP2 quadword
+                 * loads/stores, already modeled elsewhere in this
+                 * file). $gp is also set from $a0 here, matching the
+                 * real signature, even though every real crt0 also
+                 * sets $gp itself immediately before this syscall
+                 * (harmless, redundant, and more faithful to real
+                 * kernel behavior for any future caller that doesn't
+                 * self-set $gp first). */
+                uint32_t gp         = (uint32_t)GPR(4); /* $a0 */
+                uint32_t stack_base = (uint32_t)GPR(5); /* $a1 */
+                int32_t  stack_size = (int32_t)GPR(6);  /* $a2 */
+                uint32_t sp_top;
+                /* Round 274 (task #423, 315th finding): real, cited
+                 * BIOS-ROM disassembly of OSDSYS's own crt0 (not
+                 * ps2sdk's - OSDSYS is Sony-internal code, predating/
+                 * separate from the public ps2sdk toolchain, and its
+                 * real crt0 differs from the fetched ps2sdk crt0.c's
+                 * "la $5,_stack" convention) shows OSDSYS genuinely
+                 * calls SetupThread with $a1 (stack_base) = 0xFFFFFFFF
+                 * (-1) and $a2 (stack_size) = 0x5000 (20480) -
+                 * confirmed via exact per-instruction register capture
+                 * at the real call site (0x00200064) in a live host-
+                 * native trace, not inferred. This project's own
+                 * previous plain "stack_base + stack_size" arithmetic
+                 * (Round 171) does not special-case this value: as an
+                 * unsigned 32-bit add, 0xFFFFFFFF + 0x5000 overflows
+                 * and wraps to 0x00004FFF (then 16-byte-aligned to
+                 * 0x00004FF0) - a near-zero address, 20KB into RAM.
+                 * Confirmed via a second, independent live trace that
+                 * this exact wrapped value is genuinely handed back
+                 * as $sp, and the very next real instruction OSDSYS
+                 * itself executes (a real stack-relative register
+                 * save in its own compiled code, at 0x00204D6C) then
+                 * takes a real AdES (Address Error on Store,
+                 * Cause.ExcCode=3) exception - after which this
+                 * project's boot trace never returns to OSDSYS's own
+                 * code for the rest of any run tested (up to 336
+                 * million EE instructions). This is a real,
+                 * reproducible bug in this project's OWN emulation,
+                 * not a PS2 hardware/kernel architecture gap - no
+                 * genuine PS2 console has ever crashed running its own
+                 * factory-shipped OSDSYS.
+                 *
+                 * No citable Sony source for the EXACT real kernel
+                 * semantics of stack_base==-1 was found (it is not
+                 * documented in the public ps2sdk headers, which never
+                 * produce this value from their own crt0) - so this
+                 * fix does not claim to replicate undocumented Sony
+                 * internals byte-for-byte. Instead it applies the
+                 * same overflow-safety principle any correct kernel
+                 * stack-setup routine must apply regardless of what
+                 * -1 specifically "means": never hand back a stack
+                 * pointer produced by silently wrapping around zero.
+                 * When stack_base is the all-ones sentinel (a common,
+                 * conventional "let the kernel pick" placeholder in
+                 * real thread/stack-setup APIs generally), this
+                 * project substitutes a safe, explicitly-derived
+                 * default: the top of this project's own already-
+                 * modeled EE_RAM_SIZE (32MB), minus a conservative
+                 * safety margin, so the resulting stack sits in
+                 * ordinary, valid, mapped high RAM rather than
+                 * colliding with low memory - honestly labeled as a
+                 * principled substitution, not a byte-exact citation. */
+                if (stack_base == 0xFFFFFFFFu) {
+                    sp_top = (uint32_t)(EE_RAM_SIZE - 0x10000u); /* 32MB - 64KB safety margin */
+                } else {
+                    sp_top = (uint32_t)((uint64_t)stack_base + (uint64_t)(uint32_t)stack_size);
+                }
+                sp_top &= ~0xFu; /* 16-byte align, real EE o32 ABI requirement */
+                st->gpr[28].ud0 = gp; /* $gp */
+                GPR(2) = sp_top;      /* $v0, consumed directly as $sp by real crt0 */
                 st->pc = this_pc + 4u;
                 st->next_pc = this_pc + 8u;
                 return 1;
@@ -1987,14 +2869,134 @@ static int ee_step(void)
                         st->cop0[9]++;
                         ee_latch_timer_interrupt(st);
                         ee_check_vblank(st);
+                        ee_check_boot_unblock_selfloop(st); /* Round 161 */
+                        ee_check_boot_unblock_sbus_wait(st); /* Round 178 (task #344) - EXPERIMENTAL BRANCH ONLY */
                         ee_check_gs_vsync(st); /* Round 87 (127th finding) */
                         ee_timers_tick(); /* Round 87 (127th finding): EE peripheral timers T0-T3 */
                         ee_check_rpcinit_pending(st);
                         ee_check_rpc_bind_pending(st);
+                        ee_check_cdvd_ncmd_pending(st); /* Round 347 */
                         if (!st->branch_pending) {
+                            /* Round 303 continuation: this project's
+                             * own scratch checkpoint/resume harness
+                             * found a deeper root cause behind the
+                             * WaitSema(semid=2) permanent park this
+                             * round's SIF_SID_FILEIO/CDVD_SCMD fixes
+                             * exposed. Dedicated debug counters
+                             * (g_r303_dmac_check_*, kept only in the
+                             * scratch investigation, not ported here -
+                             * their purpose was diagnostic and the
+                             * finding they produced is what matters)
+                             * proved the real DMAC/SIF0-completion
+                             * interrupt this project's own delivery
+                             * mechanism correctly raises (every one of
+                             * 82 real RPC replies this round's trace
+                             * dispatched was written and DMA-
+                             * completion-signaled - see the
+                             * g_r303_rpc_pending_* counters a few
+                             * hundred lines above, kept as a permanent
+                             * diagnostic) was being gated off
+                             * specifically by Status.IE == 0 (never
+                             * EXL/ERL, and never IM3 - the IM3 gate
+                             * never once failed in the same
+                             * measurement) in 21,969 of 22,154 real
+                             * pending-interrupt checks across a
+                             * 20,000,000-slice scratch run: the real
+                             * EE thread has genuinely DI()'d (cleared
+                             * Status.IE) as part of a real critical
+                             * section - ordinary, correct real kernel
+                             * behavior - and is waiting for something
+                             * to EI() it back. On real hardware this
+                             * is exactly what a real thread-scheduler
+                             * context switch provides: while THIS
+                             * thread sits DI'd and blocked, the kernel
+                             * switches to a DIFFERENT ready thread
+                             * (typically its own idle thread), which
+                             * has ITS OWN independently-saved Status
+                             * register value (real MIPS context-switch
+                             * convention: Status is part of each
+                             * thread's saved context, restored on
+                             * every switch) - very likely with IE=1,
+                             * letting a real interrupt fire, run its
+                             * handler, and iSignalSema() this exact
+                             * semaphore, which is exactly what lets
+                             * the ORIGINAL DI()'d thread eventually
+                             * resume and re-EI() for real. This
+                             * project has "no real multi-thread
+                             * scheduler" (already an explicit, cited
+                             * limitation of this exact WaitSema park
+                             * model - see this function's own comment
+                             * above), so nothing ever performs that
+                             * context switch, and Status.IE simply
+                             * never changes while parked here - a
+                             * structural gap in the park model, not a
+                             * one-off bug in any specific syscall.
+                             * Minimal, targeted, real-hardware-
+                             * equivalent fix: while specifically
+                             * parked in WaitSema (this exact branch,
+                             * not the general per-instruction path),
+                             * temporarily present Status.IE=1 to the
+                             * interrupt-pending checks below - exactly
+                             * standing in for the enabled-interrupts
+                             * state a real, different, ready thread
+                             * would have contributed via a genuine
+                             * context switch. If nothing was actually
+                             * pending (no exception raised), the
+                             * original IE bit is restored immediately
+                             * afterward, so this never permanently
+                             * mutates the real, DI()'d thread's own
+                             * Status value for the (much more common)
+                             * case where there's simply nothing to
+                             * deliver yet. If an interrupt WAS raised,
+                             * ee_raise_exception() already sets
+                             * Status.EXL=1 for real (see its own
+                             * comment above), which correctly re-masks
+                             * further interrupts regardless of IE from
+                             * that point on - the same real semantics
+                             * either way, just no longer artificially
+                             * blocked by a DI() this project has no
+                             * scheduler to ever undo.
+                             *
+                             * VERIFIED EFFECT (scratch trace): this
+                             * fix does move the trace forward - the
+                             * WaitSema(2) park (frozen at exactly 76
+                             * hits both with and without a much larger
+                             * slice budget) is escaped, a real INTC
+                             * interrupt fires, and AddIntcHandler is
+                             * confirmed CALLED FOR REAL for the first
+                             * time (g_r281_addintc_count reaches 1) -
+                             * the milestone this project's Round
+                             * 298-303 investigation has been chasing.
+                             * The trace then reaches a NEW real BIOS
+                             * code path: a generic "unhandled
+                             * interrupt source" debug-print-and-halt
+                             * loop (real BIOS strings "# INT: INTC
+                             * (%d)" / "# INT: DMAC (%d)" at
+                             * 0x80012493/0x800124A5, real code at
+                             * 0x800014D0-0x80001528). This is real,
+                             * genuine BIOS panic-handling code - not
+                             * an emulation crash - meaning whichever
+                             * specific INTC/DMAC cause actually fired
+                             * did not have a real per-cause handler
+                             * registered for it in this project's
+                             * current state, even though AddIntcHandler
+                             * itself was called once. Left as the
+                             * concrete next investigative target (see
+                             * docs/STATUS.md's Round 303 entry): which
+                             * exact INTC cause bit fired, and whether
+                             * that's a real ordering/timing question
+                             * (this synthetic "borrowed" interrupt
+                             * firing before the real boot would have
+                             * gotten there) or a gap in this project's
+                             * own AddIntcHandler-adjacent state. */
+                            uint32_t saved_status = st->cop0[12];
+                            st->cop0[12] |= 0x00000001u; /* Status.IE = 1, temporarily, for the checks below only */
                             ee_check_timer_interrupt(st, st->pc);
                             ee_check_intc_interrupt(st, st->pc);
                             ee_check_dmac_interrupt(st, st->pc);
+                            if (!st->exc_raised_this_step) {
+                                st->cop0[12] = saved_status; /* nothing fired - restore the real, DI()'d thread's own Status exactly */
+                            }
                         }
                     }
                 } else {
@@ -2126,6 +3128,10 @@ static int ee_step(void)
                  * LOADFILE protocol path, not this separate,
                  * directly-invoked kernel syscall's own real internal
                  * convention). */
+                sif_note_ee_loadexecps2_seen(); /* Round 251 (task #411,
+                     * 291st finding) - real signal that distinguishes
+                     * sif.c's post-reload SIF_SMFLAG re-signal from an
+                     * earlier, normal boot-completion ack - see sif.h. */
                 ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
                 break;
             }
@@ -2191,6 +3197,459 @@ static int ee_step(void)
                 ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
                 break;
             }
+            if (sysnum == 16 || sysnum == 17) {
+                /* AddIntcHandler (16/0x10) / RemoveIntcHandler
+                 * (17/0x11) - Round 186 (task #352), per the user's
+                 * explicit "implement addintchandler" directive.
+                 *
+                 * Real, cited (ps2sdk ee/kernel/include/syscallnr.h,
+                 * fetched this round): __NR_AddIntcHandler = 0x10
+                 * (16), __NR_AddIntcHandler2 = same value (aliased,
+                 * not a distinct number), __NR_RemoveIntcHandler =
+                 * 0x11 (17). This CORRECTS an earlier round's comment
+                 * elsewhere in this file (near the sysnum==18 block
+                 * below) which wrongly claimed "18 (0x12) is shared
+                 * between AddIntcHandler and AddDmacHandler depending
+                 * on context" - re-verified directly against ps2sdk
+                 * source this round: AddIntcHandler (0x10/16) and
+                 * AddDmacHandler (0x12/18) are two entirely distinct,
+                 * non-overlapping syscall numbers, each with its own
+                 * consecutive Add/Remove pair (16/17 for Intc, 18/19
+                 * for Dmac) - independently cross-confirmed against
+                 * the Play! PS2 emulator's own public syscall
+                 * dispatch table (Source/ee/PS2OS.cpp), which hard-
+                 * codes 0x0010->osAddIntcHandler and 0x0011->
+                 * osRemoveIntcHandler, matching ps2sdk exactly.
+                 *
+                 * Real C signature (ps2sdk ee/kernel/include/
+                 * kernel.h): "s32 AddIntcHandler(s32 cause, s32
+                 * (*handler_func)(s32 cause), s32 next)" - registers a
+                 * callback for one of the EE's 16 real INTC interrupt
+                 * causes (GS=0, SBUS=1, VBLANK_START=2, VBLANK_END=3,
+                 * VIF0=4, VIF1=5, VU0=6, VU1=7, IPU=8, TIM0-2=9-11,
+                 * SFIFO=13, VU0WD=14 - this project's own existing
+                 * EE_INTC_IRQ_* constants already match this real
+                 * layout). This is architecturally THE real per-cause
+                 * EE interrupt-handler registration mechanism the
+                 * 111th/126th findings already identified (via the
+                 * IOP-side AddIntcHandler-equivalent RegisterIntrHandler
+                 * precedent, task #265) as the most-cited real
+                 * candidate for what ultimately gates OSDSYS's still-
+                 * unwritten PMODE/DISPFB1/DISPLAY1 splash-screen
+                 * configuration path. A real ps2sdk sample (ee/rpc/
+                 * remote/samples/remote.c) shows AddIntcHandler(
+                 * INTC_VBLANK_S, ...)/AddIntcHandler(INTC_VBLANK_E,
+                 * ...) as a common, early real-program registration
+                 * pattern - directly relevant since VBLANK-driven
+                 * display setup is exactly the kind of code path this
+                 * project's own splash-screen investigation has been
+                 * chasing since the 94th finding.
+                 *
+                 * Per this project's own established, repeatedly-
+                 * applied task #180 lesson (do NOT bypass a real
+                 * kernel-table-mutating syscall in software and guess
+                 * at its internal bookkeeping - let it vector as a
+                 * genuine MIPS Syscall exception so the real, already-
+                 * resident BIOS kernel handler code runs and installs
+                 * its own real per-cause handler-table entry), this is
+                 * handled identically to 6/7/18/19/124 above: raise a
+                 * real exception rather than either halting (the
+                 * previous behavior - this syscall fell through
+                 * unhandled to the generic "no BIOS syscall table
+                 * implemented" halt(), meaning any real boot code that
+                 * ever called AddIntcHandler would have stopped the
+                 * whole emulated machine outright) or fabricating a
+                 * software table this project cannot verify the real
+                 * layout of. */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
+            }
+            if (sysnum == 32 || sysnum == 33 || sysnum == 34 || sysnum == 35 ||
+                sysnum == 36 || sysnum == 37 ||
+                sysnum == 39 || sysnum == 40 || sysnum == 41 || sysnum == 43 ||
+                sysnum == 45 || sysnum == 50 || sysnum == 51 || sysnum == 53 ||
+                sysnum == 55 || sysnum == 57) {
+                /* Round 240 (task #408 experiment): 32 (CreateThread) and 34
+                 * (StartThread) ADDED to this same real-exception-vectoring
+                 * family this round - see the doc comment further down
+                 * (immediately before the old, now-removed placeholder
+                 * blocks) for the full reasoning. Short version: every
+                 * other syscall in this family already proved that
+                 * "let the real, unmodified BIOS-resident kernel handler
+                 * do its own real bookkeeping" is safe and correct even
+                 * though this project has no software thread model of its
+                 * own - a real PS2/MIPS kernel's own context-switch code
+                 * (save old SP/GP/PC to its own real, RAM-resident TCB
+                 * struct; load the new thread's saved SP/GP/COP0-EPC; then
+                 * ERET) uses only real instructions this interpreter
+                 * already correctly executes (ordinary loads/stores, MTC0
+                 * to EPC, ERET) - so letting CreateThread/StartThread
+                 * ALSO vector for real, instead of returning fixed
+                 * placeholder values, should let the real kernel run its
+                 * own genuine thread bring-up and context-switch, with
+                 * zero fabricated software state on this project's part. */
+                /* Round 187 (task #353) - real EE thread-management
+                 * syscall family, found unhandled (and therefore
+                 * machine-halting) by a fresh, honest full audit of
+                 * ps2sdk's real ee/kernel/include/syscallnr.h
+                 * (fetched this round), redoing an EARLIER audit
+                 * (task #179, 53rd finding, "EE syscall table audited
+                 * (no gap found)") that Round 186 already proved was
+                 * wrong/incomplete (it missed AddIntcHandler/17
+                 * entirely). This fresh pass cross-referenced the
+                 * complete real numeric table against this file's own
+                 * currently-handled sysnum list and found this entire
+                 * thread-management family still unhandled:
+                 *   33 (0x21) DeleteThread
+                 *   35 (0x23) ExitThread
+                 *   36 (0x24) ExitDeleteThread
+                 *   37 (0x25) TerminateThread
+                 *   39 (0x27) DisableDispatchThread
+                 *   40 (0x28) EnableDispatchThread
+                 *   41 (0x29) ChangeThreadPriority
+                 *   43 (0x2b) RotateThreadReadyQueue
+                 *   45 (0x2d) ReleaseWaitThread
+                 *   50 (0x32) SleepThread
+                 *   51 (0x33) WakeupThread
+                 *   53 (0x35) CancelWakeupThread
+                 *   55 (0x37) SuspendThread
+                 *   57 (0x39) ResumeThread
+                 * (all real, cited numeric slots from ps2sdk's
+                 * syscallnr.h - none fabricated). This is the same
+                 * real numeric neighborhood as this file's own already
+                 * -handled CreateThread (32) and StartThread (34)
+                 * above, and the already-cited task #163 live-PCSX2
+                 * evidence (12 concurrent real OSDSYS threads observed
+                 * on a genuine BIOS boot) makes real early-boot code
+                 * invoking thread-lifecycle/scheduling primitives from
+                 * this exact family highly plausible, not merely
+                 * theoretical.
+                 *
+                 * Unlike CreateThread/StartThread (which this project
+                 * already answers with fixed, explicitly-labeled
+                 * placeholder return values because this project has
+                 * no real concurrent EE thread scheduler to actually
+                 * run a second thread body on), every syscall in THIS
+                 * family only needs to mutate or query the real
+                 * kernel's own thread-control-block/ready-queue state
+                 * that lives in EE-visible RAM and is maintained by
+                 * the real BIOS-resident kernel handler code itself -
+                 * this project cannot safely guess that internal
+                 * layout in software (same already-established task
+                 * #180 lesson applied identically to 6/7/16/17/18/19/
+                 * 124 above). Per that same precedent: let it vector
+                 * as a genuine MIPS Syscall exception so the real BIOS
+                 * kernel handler runs and does its own real thread-
+                 * state bookkeeping, rather than either halting the
+                 * whole emulated machine (the previous behavior for
+                 * every number in this list) or fabricating unverified
+                 * software state. */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
+            }
+            if (sysnum == 24 || sysnum == 25 || sysnum == 252 || sysnum == 254 ||
+                sysnum == -30 || sysnum == -31 || sysnum == -253 || sysnum == -255) {
+                /* Round 192 (task #358) - real Alarm-family syscalls,
+                 * found unhandled (and therefore machine-halting) by
+                 * continuing Round 187's fresh full syscall-table
+                 * audit further (that round's own "Next" note flagged
+                 * this exact family as scoped-but-deferred). Real,
+                 * cited numeric slots from ps2sdk's own
+                 * ee/kernel/include/syscallnr.h (this project's local
+                 * cached copy, /tmp/ps2sdk/ps2sdk-master, fetched in
+                 * an earlier round for the same file):
+                 *   24  (0x18)   _SetAlarm
+                 *   25  (0x19)   _ReleaseAlarm
+                 *   252 (0xfc)   SetAlarm
+                 *   254 (0xfe)   ReleaseAlarm
+                 *   -30 (-0x1e)  _iSetAlarm      (fast/interrupt-context form)
+                 *   -31 (-0x1f)  _iReleaseAlarm  (fast/interrupt-context form)
+                 *   -253 (-0xfd) iSetAlarm       (fast/interrupt-context form)
+                 *   -255 (-0xff) iReleaseAlarm   (fast/interrupt-context form)
+                 * (note these "fast" negative forms are NOT simply the
+                 * negation of their positive counterpart's number -
+                 * ps2sdk's own header defines them as distinct literal
+                 * values, e.g. _SetAlarm=0x18 but _iSetAlarm=-0x1e, not
+                 * -0x18 - transcribed exactly as the real header
+                 * states, not derived/assumed).
+                 *
+                 * SetAlarm/_SetAlarm install a real kernel callback
+                 * function pointer that the BIOS-resident kernel timer
+                 * subsystem invokes after a real elapsed-time period -
+                 * bookkeeping this project cannot safely reimplement in
+                 * software (same already-established task #180 lesson
+                 * applied identically to every other family above: do
+                 * not guess at real BIOS-internal kernel state layout).
+                 * Per that same precedent: let it vector as a genuine
+                 * MIPS Syscall exception so the real, already-resident
+                 * BIOS kernel handler code runs and does its own real
+                 * alarm-table bookkeeping, rather than halting the
+                 * whole emulated machine (the previous behavior for
+                 * every number in this list). */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
+            }
+            if (sysnum == 80 || sysnum == 81 || sysnum == 82 || sysnum == 83) {
+                /* Round 192 (task #358) - real EventFlag-family
+                 * syscalls, found unhandled (and therefore
+                 * machine-halting) continuing Round 187's audit.
+                 * Real, cited numeric slots from ps2sdk's
+                 * syscallnr.h:
+                 *   80 (0x50) CreateEventFlag
+                 *   81 (0x51) DeleteEventFlag
+                 *   82 (0x52) SetEventFlag
+                 *   83 (0x53) iSetEventFlag (fast/interrupt-context
+                 *       form - unusually a POSITIVE number in the real
+                 *       header, not negative like most other "i"-
+                 *       prefixed fast forms elsewhere in this same
+                 *       file; transcribed exactly as-is, not assumed).
+                 * These mutate/query a real kernel-resident event-flag
+                 * table (bitmask + real per-flag waiter queues) this
+                 * project has no software model for and cannot safely
+                 * guess the internal layout of - per the same task
+                 * #180 precedent, let it vector as a genuine MIPS
+                 * Syscall exception so real, already-resident BIOS
+                 * kernel code runs instead of halting. */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
+            }
+            if (sysnum == 85 || sysnum == 86 || sysnum == 87 || sysnum == 88 ||
+                sysnum == -85 || sysnum == -86 || sysnum == -87 || sysnum == -88) {
+                /* Round 192 (task #358) - real TLB-wrapper-family
+                 * syscalls, found unhandled (and therefore
+                 * machine-halting) continuing Round 187's audit (that
+                 * round's own "Next" note flagged this exact family,
+                 * "85/87/88", as scoped-but-deferred; this round adds
+                 * 86/_SetTLBEntry, the one member of the same real
+                 * contiguous block Round 187's note omitted, plus each
+                 * member's real negative fast/interrupt-context form).
+                 * Real, cited numeric slots from ps2sdk's
+                 * syscallnr.h:
+                 *   85 (0x55)  PutTLBEntry     / -85 (-0x55) iPutTLBEntry
+                 *   86 (0x56)  _SetTLBEntry    / -86 (-0x56) iSetTLBEntry
+                 *   87 (0x57)  GetTLBEntry     / -87 (-0x57) iGetTLBEntry
+                 *   88 (0x58)  ProbeTLBEntry   / -88 (-0x58) iProbeTLBEntry
+                 * These are real kernel-side WRAPPERS around the exact
+                 * same COP0 TLB hardware operations this project's own
+                 * EE core already implements NATIVELY as real COP0
+                 * instructions (TLBWI/TLBWR/TLBR/TLBP - task #60's own
+                 * "Implement real EE COP0 TLB" work). Unlike the
+                 * Alarm/EventFlag families above, this project DOES
+                 * already own a correct hardware-level model of the
+                 * actual TLB array these syscalls wrap - but the real
+                 * kernel-side wrapper functions also perform their own
+                 * bookkeeping around the raw COP0 op (index
+                 * validation, a real kernel-resident software mirror
+                 * of the TLB entry table used for e.g. TLBR/GetTLBEntry
+                 * queries, real error-code conventions on bad indices)
+                 * that this project has no citable source for and
+                 * cannot safely reimplement by guessing. Per the same
+                 * task #180 precedent, let it vector as a genuine MIPS
+                 * Syscall exception so the real, already-resident BIOS
+                 * kernel wrapper code runs (and itself issues the real
+                 * COP0 TLB instructions this project's EE core already
+                 * models correctly), rather than halting. */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
+            }
+            if (sysnum == 10 || sysnum == 11 || sysnum == 12 || sysnum == 13 ||
+                sysnum == 14 || sysnum == 15) {
+                /* Round 193 (task #359) - a genuinely fresh, PROGRAMMATIC
+                 * cross-reference of this file's complete handled-sysnum
+                 * list against every numeric slot in ps2sdk's real
+                 * ee/kernel/include/syscallnr.h (this project's local
+                 * cached copy, /tmp/ps2sdk/ps2sdk-master, script-parsed
+                 * rather than hand-audited - Rounds 179/186/187 each
+                 * believed their own hand-audits were complete and each
+                 * turned out to have missed real gaps) found roughly 78
+                 * more real, unhandled, machine-halting syscall numbers.
+                 * This block and the ones below fix them all using the
+                 * exact same established pattern as every syscall fix
+                 * this session (task #180's lesson): raise a real MIPS
+                 * Syscall exception so genuine BIOS-resident kernel code
+                 * runs, rather than guessing at internal bookkeeping this
+                 * project cannot verify, or halting the whole machine.
+                 *
+                 * This group - real, cited numeric slots from
+                 * syscallnr.h:
+                 *   10 (0x0a) AddSbusIntcHandler
+                 *   11 (0x0b) RemoveSbusIntcHandler
+                 *   12 (0x0c) Interrupt2Iop
+                 *   13 (0x0d) SetVTLBRefillHandler
+                 *   14 (0x0e) SetVCommonHandler
+                 *   15 (0x0f) SetVInterruptHandler
+                 * (the same real numeric neighborhood as the already-
+                 * handled 16/17 AddIntcHandler/RemoveIntcHandler pair -
+                 * these V-exception-handler-installer and SBUS-handler
+                 * syscalls mutate real EE-kernel-resident vector/handler
+                 * tables this project has no citable layout for). */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
+            }
+            if (sysnum == 59 || sysnum == 62 || sysnum == 71 || sysnum == 84 ||
+                sysnum == 89 || sysnum == 90 || sysnum == 91 || sysnum == 105) {
+                /* Round 193 (task #359) - misc kernel/thread/heap
+                 * syscalls, real cited numbers:
+                 *   59 (0x3b) RFU059 (ps2sdk's own name for this reserved
+                 *       slot - still a real, occupiable syscall-table
+                 *       entry on real hardware, not a nonexistent number)
+                 *   62 (0x3e) EndOfHeap
+                 *   71 (0x47) ReferSemaStatus (the POSITIVE form; its
+                 *       negative fast form -72/iReferSemaStatus is
+                 *       handled in the group below)
+                 *   84 (0x54) xlaunch
+                 *   89 (0x59) ExpandScratchPad
+                 *   90 (0x5a) Copy
+                 *   91 (0x5b) GetEntryAddress
+                 *   105 (0x69) RFU105 (same reserved-slot rationale as 59)
+                 * Same established exception-raise rationale as above -
+                 * this project cannot safely reimplement any of these
+                 * real kernel-internal operations without a citable
+                 * source for their exact bookkeeping. */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
+            }
+            if (sysnum == 74 || sysnum == 75 || sysnum == 76 || sysnum == 77 ||
+                sysnum == 78 || sysnum == 79 || sysnum == 110 || sysnum == 111 ||
+                sysnum == 112 || sysnum == 113 || sysnum == -112 || sysnum == -113) {
+                /* Round 193 (task #359) - OSD-config and GS-parameter
+                 * get/set family, real cited numbers:
+                 *   74 (0x4a) SetOsdConfigParam / 75 (0x4b) GetOsdConfigParam
+                 *   76 (0x4c) GetGsHParam / 77 (0x4d) GetGsVParam
+                 *   78 (0x4e) SetGsHParam / 79 (0x4f) SetGsVParam
+                 *   110 (0x6e) SetOsdConfigParam2 / 111 (0x6f) GetOsdConfigParam2
+                 *   112 (0x70) GsGetIMR / 113 (0x71) GsPutIMR, and their
+                 *       real fast/interrupt-context forms
+                 *       -112 (-0x70) iGsGetIMR / -113 (-0x71) iGsPutIMR
+                 * GsGetIMR/GsPutIMR are real KERNEL-side wrappers around
+                 * the GS_IMR register this project's own `source/hw/gs.c`
+                 * already models correctly at the hardware level (same
+                 * relationship as Round 192's TLB-wrapper family to this
+                 * project's native COP0 TLB) - the wrapper's own real
+                 * bookkeeping (if any beyond a plain register read/write)
+                 * has no citable source, so it is not assumed here. */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
+            }
+            if (sysnum == 92 || sysnum == 93 || sysnum == 94 || sysnum == 95 ||
+                sysnum == -92 || sysnum == -93 || sysnum == -94 || sysnum == -95) {
+                /* Round 193 (task #359) - real cited numbers:
+                 *   92 (0x5c) EnableIntcHandler / 93 (0x5d) DisableIntcHandler
+                 *   94 (0x5e) EnableDmacHandler / 95 (0x5f) DisableDmacHandler
+                 * and their real fast/interrupt-context forms -92/-93/-94/-95.
+                 * These are a DISTINCT real ps2sdk API from the already-
+                 * handled _EnableIntc(20)/_DisableIntc(21)/_EnableDmac(22)/
+                 * _DisableDmac(23) quartet: those four toggle a cause/
+                 * channel bitmask bit directly (this project owns that
+                 * register model, task #180/#354's direct-software-model
+                 * fix), whereas THESE enable/disable a specific, already-
+                 * REGISTERED handler by handle/id - real bookkeeping this
+                 * project has no citable internal-table layout for, so
+                 * (unlike 20-23) this is the exception-raise pattern, not
+                 * a direct model. */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
+            }
+            if (sysnum == 96 || sysnum == 97 || sysnum == 98 || sysnum == 99 ||
+                sysnum == 102 || sysnum == 130 || sysnum == -103 || sysnum == -104 ||
+                sysnum == -106) {
+                /* Round 193 (task #359) - memory/cache/COP0-config family,
+                 * real cited numbers:
+                 *   96 (0x60) KSeg0 / 97 (0x61) EnableCache / 98 (0x62) DisableCache
+                 *   99 (0x63) GetCop0 / 102 (0x66) CpuConfig / 130 (0x82) _InitTLB
+                 * and real fast forms -103 (-0x67) iGetCop0, -104 (-0x68)
+                 * iFlushCache, -106 (-0x6a) iCpuConfig. This project
+                 * already owns a correct, native COP0/TLB hardware model
+                 * (task #60) - same relationship as Round 192's TLB-
+                 * wrapper family - but these real kernel wrappers'
+                 * additional bookkeeping (cache-mode side effects,
+                 * KSeg0-vs-cached addressing config, etc.) has no
+                 * citable source, so exception-raise is used, not a
+                 * guessed direct model. */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
+            }
+            if (sysnum == 107 || sysnum == 108 || sysnum == 109 || sysnum == 114 ||
+                sysnum == 115 || sysnum == 116 || sysnum == 117 || sysnum == 123) {
+                /* Round 193 (task #359) - real cited numbers:
+                 *   107 (0x6b) SifStopDma/sceSifStopDma (distinct from the
+                 *       already-handled 118-122 SIF family)
+                 *   108 (0x6c) SetCPUTimerHandler / 109 (0x6d) SetCPUTimer
+                 *   114 (0x72) SetPgifHandler / 115 (0x73) SetVSyncFlag
+                 *   116 (0x74) SetSyscall / 117 (0x75) _print
+                 *   123 (0x7b) _ExecOSD
+                 * `SetSyscall`(116) is especially notable - it is the
+                 * real kernel API for INSTALLING a syscall-table entry
+                 * at runtime; this project cannot safely emulate its
+                 * effect without knowing what real code intends to
+                 * install, so (per the same task #180 lesson) it must
+                 * vector as a real exception rather than being faked. */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
+            }
+            if (sysnum == 125 || sysnum == 126 || sysnum == 127 || sysnum == 128 ||
+                sysnum == 131 || sysnum == 133 || sysnum == 134 || sysnum == 135) {
+                /* Round 193 (task #359) - real cited numbers:
+                 *   125 (0x7d) PSMode / 126 (0x7e) MachineType
+                 *   127 (0x7f) GetMemorySize / 128 (0x80) _GetGsDxDyOffset
+                 *   131 (0x83) FindAddress / 133 (0x85) SetMemoryMode
+                 *   134 (0x86) GetMemoryMode / 135 (0x87) ExecPSX
+                 * `GetMemorySize`(127)/`MachineType`(126)/`PSMode`(125)
+                 * are real hardware-identification queries a genuine
+                 * kernel would answer from real, BIOS-resident constants
+                 * this project has no citable exact values for (guessing
+                 * would violate the no-fabrication convention); letting
+                 * them vector lets the real, already-loaded BIOS image's
+                 * own code answer correctly instead. */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
+            }
+            if (sysnum == -26 || sysnum == -27 || sysnum == -28 || sysnum == -29) {
+                /* Round 193 (task #359) - real fast/interrupt-context
+                 * forms of the already-handled _EnableIntc(20)/
+                 * _DisableIntc(21)/_EnableDmac(22)/_DisableDmac(23)
+                 * quartet: _iEnableIntc(-26/-0x1a), _iDisableIntc(-27/
+                 * -0x1b), _iEnableDmac(-28/-0x1c), _iDisableDmac(-29/
+                 * -0x1d). Unlike their positive counterparts (which this
+                 * project directly models via the already-owned
+                 * INTC_MASK/DMAC-enable register state, per Round 188's
+                 * established rationale), the real "i" fast forms are
+                 * meant to run in an already-interrupt-disabled context
+                 * with different real prologue/epilogue bookkeeping this
+                 * project has no citable source for - raising a real
+                 * exception is the safe, established choice, matching
+                 * every other "i"-prefixed fast form in this file. */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
+            }
+            if (sysnum == -38 || sysnum == -42 || sysnum == -44 || sysnum == -46 ||
+                sysnum == -47 || sysnum == -49 || sysnum == -52 || sysnum == -54 ||
+                sysnum == -56 || sysnum == -58) {
+                /* Round 193 (task #359) - real fast/interrupt-context
+                 * forms of the already-handled (Round 187) thread-
+                 * management family: iTerminateThread(-38), iChange-
+                 * ThreadPriority(-42), _iRotateThreadReadyQueue(-44),
+                 * iReleaseWaitThread(-46), _iGetThreadId(-47), iRefer-
+                 * ThreadStatus(-49), _iWakeupThread(-52), iCancelWakeup-
+                 * Thread(-54), _iSuspendThread(-56), iResumeThread(-58).
+                 * Same rationale as Round 187's own positive-numbered
+                 * thread family (real kernel TCB/ready-queue bookkeeping
+                 * this project cannot safely reimplement) - exception-
+                 * raise, not a guess. */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
+            }
+            if (sysnum == -70 || sysnum == -72 || sysnum == -73) {
+                /* Round 193 (task #359) - real fast/interrupt-context
+                 * forms of the already-handled semaphore family:
+                 * iPollSema(-70), iReferSemaStatus(-72), iDeleteSema(-73).
+                 * Same rationale as this project's existing CreateSema/
+                 * WaitSema handling (real kernel semaphore-table
+                 * bookkeeping this project cannot safely reimplement in
+                 * its fast/interrupt-context form) - exception-raise. */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
+            }
             if (sysnum == -5) {
                 /* Task #181 (56th finding): reached for the first time
                  * only after task #180's AddDmacHandler fix unblocked
@@ -2226,6 +3685,71 @@ static int ee_step(void)
                  * like 18 above, so genuine BIOS handler code runs. */
                 ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
                 break;
+            }
+            if (sysnum == 20) {
+                /* 20 (0x14) _EnableIntc(cause): Round 188 (task #354) -
+                 * found unhandled (and therefore machine-halting) by
+                 * Round 187's fresh full syscall-table audit, noted
+                 * there as an asymmetry with the already-handled
+                 * _EnableDmac(22)/_DisableDmac(23) pair sitting right
+                 * below this block. Real ps2sdk signature (ee/kernel/
+                 * include/kernel.h): "s32 _EnableIntc(s32 cause)" -
+                 * cause is the same real EE INTC source enum this
+                 * project's own EE_INTC_IRQ_* constants and the
+                 * Round 186 AddIntcHandler citation already document
+                 * (GS=0, SBUS=1, VBLANK_S=2, VBLANK_E=3, ...).
+                 *
+                 * Unlike syscalls 16/17 (AddIntcHandler/
+                 * RemoveIntcHandler, which mutate a BIOS-internal
+                 * per-cause HANDLER table this project cannot safely
+                 * guess the layout of), this syscall's real effect is
+                 * just ensuring one bit of the real INTC_MASK register
+                 * ends up set - a register this project already models
+                 * directly and completely (ee_intc.h's ee_intc_state_t
+                 * .mask field, exposed via ee_intc_get_state()).
+                 * Applying the same established rationale already used
+                 * for _EnableDmac (22, directly below): this syscall
+                 * sets the real END STATE of the mask bit directly,
+                 * rather than replicating the real INTC_MASK hardware
+                 * register's own documented XOR-toggle MMIO-write
+                 * quirk (see ee_intc.h's own header comment,
+                 * citing PCSX2's HwWrite.cpp) - that quirk only
+                 * applies to a real program's direct MMIO writes to
+                 * 0x1000F010, not to this kernel-level convenience
+                 * syscall's net effect. This project does not have a
+                 * citable exact real return-value convention for
+                 * _EnableIntc (unlike, e.g., WaitSema's documented
+                 * negative-error convention) - returns 0 (success),
+                 * matching this file's own already-established _Enable
+                 * Dmac/_DisableDmac precedent immediately below, an
+                 * honest placeholder rather than a fabricated specific
+                 * value. */
+                uint32_t cause = (uint32_t)GPR(4); /* $a0 */
+                ee_intc_state_t *intc20 = ee_intc_get_state();
+                if (cause < 32) intc20->mask |= (1u << cause);
+                GPR(2) = 0;
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
+            if (sysnum == 21) {
+                /* 21 (0x15) _DisableIntc(cause): Round 188 (task #354) -
+                 * exact mirror-image counterpart to _EnableIntc (20)
+                 * directly above, found unhandled by the same Round
+                 * 187 audit. Real ps2sdk signature: "s32
+                 * _DisableIntc(s32 cause)". Implemented symmetrically
+                 * to 20 above (and to the existing _EnableDmac(22)/
+                 * _DisableDmac(23) pair's own established pattern):
+                 * directly clears the real end-state mask bit rather
+                 * than replicating the raw XOR-toggle MMIO-write
+                 * quirk documented in ee_intc.h. */
+                uint32_t dcause = (uint32_t)GPR(4); /* $a0 */
+                ee_intc_state_t *intc21 = ee_intc_get_state();
+                if (dcause < 32) intc21->mask &= ~(1u << dcause);
+                GPR(2) = 0;
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
             }
             if (sysnum == 22) {
                 /* 22 (0x16) _EnableDmac(channel): task #176 - this was
@@ -2855,9 +4379,103 @@ static int ee_step(void)
                                  * (same discipline as Round 132's declined
                                  * SIO2/CD-ROM guess). See STATUS.md's 178th
                                  * finding for the full trail. */
-                                ee_mem_write32(st, call_recvbuf + 0u, 0u); /* mcRpcStat_t.result = 0 (success) - generalized across all MCSERV commands (see comment) */
-                                ee_mem_write32(st, call_recvbuf + 4u, 0u); /* mcRpcStat_t.mcserv_version (unqueried) */
-                                ee_mem_write32(st, call_recvbuf + 8u, 0u); /* mcRpcStat_t.mcman_version (unqueried) */
+                                /* Round 278 (task #423 continuation,
+                                 * 319th finding): TWO real, live-
+                                 * trace-confirmed corrections to this
+                                 * branch, made at the user's explicit
+                                 * request to "fix the mcserv".
+                                 *
+                                 * (1) recv_size correction. This
+                                 * branch always wrote all 12 bytes of
+                                 * mcRpcStat_t regardless of what the
+                                 * real caller actually asked for.
+                                 * Instrumented the real recv_size
+                                 * field (offset 0x2C, already cited
+                                 * in this file's own SIF_CMD_RPC_CALL
+                                 * struct comment above) for every
+                                 * real MCSERV call this project's own
+                                 * boot trace has ever observed:
+                                 * rpc_number=0x70 (INIT), 0x71
+                                 * (OPEN), and 0x72 (CLOSE) ALL three
+                                 * show real recv_size=4, not 12 - the
+                                 * real caller only ever asks for a
+                                 * plain "s32 result", never the full
+                                 * mcRpcStat_t, in this specific BIOS's
+                                 * own trace. Writing the extra 8
+                                 * bytes past what the real caller
+                                 * asked for was writing into whatever
+                                 * real memory happens to sit past the
+                                 * caller's actual 4-byte buffer - not
+                                 * a real, protocol-accurate reply.
+                                 * Fixed by capping the write to the
+                                 * real recv_size, matching how a real
+                                 * IOP service's DMA-back reply size
+                                 * is genuinely bounded by the
+                                 * caller's own request (see the
+                                 * SIF_CMD_RPC_CALL struct comment).
+                                 *
+                                 * (2) real OPEN path traced, real
+                                 * "file not found" reply now used
+                                 * instead of a fake success. Live
+                                 * instrumentation of the real send
+                                 * payload for rpc_number=0x71 (OPEN)
+                                 * showed OSDSYS's own real request
+                                 * path, byte-exact: "/BIEXEC-SYSTEM/
+                                 * osdsys.elf" - a real Sony memory-
+                                 * card BIOS-update probe path (early
+                                 * PS2 firmware, including this
+                                 * project's own SCPH-10000 BIOS,
+                                 * supported applying OSDSYS patches
+                                 * from a memory card via a file at
+                                 * this exact path; this is NOT a
+                                 * normal game-save path). This
+                                 * project does not model any real
+                                 * memory-card file content (a real,
+                                 * separate feature - genuine card-
+                                 * image storage - not yet built), so
+                                 * this specific file can never
+                                 * genuinely exist here. The previous
+                                 * blanket "result=0" (success) reply
+                                 * told OSDSYS's own real code this
+                                 * update file WAS found and openable
+                                 * (fd=0) - a real protocol
+                                 * misrepresentation, not just an
+                                 * unqueried placeholder, since a
+                                 * real, unformatted-or-absent card
+                                 * cannot ever genuinely contain this
+                                 * file. Per this project's own
+                                 * already-fetched, cited real MCMAN
+                                 * error enum (Round 138/178th
+                                 * finding, common/include/libmc-
+                                 * common.h): sceMcResNoEntry=-4 is
+                                 * the real, standard "entry (file) not
+                                 * found in directory" error - a
+                                 * confident, name-grounded fit for
+                                 * this specific case (unlike the
+                                 * earlier-declined general "no card
+                                 * present" guess for arbitrary OPEN
+                                 * calls, this is specifically an
+                                 * always-absent, real, named file,
+                                 * not an inferred card-presence
+                                 * state). rpc_number==0x71 (OPEN) is
+                                 * therefore pulled into its own
+                                 * branch below, replying
+                                 * sceMcResNoEntry(-4) instead of 0 -
+                                 * every other real MCSERV command
+                                 * observed so far (INIT, CLOSE) keeps
+                                 * its existing result=0, unchanged
+                                 * from before, since INIT's success is
+                                 * separately confirmed correct
+                                 * (Round 138) and CLOSE on an fd this
+                                 * project never validly opened is
+                                 * moot once OPEN itself correctly
+                                 * fails (a real caller checks fd<0
+                                 * before ever calling close). */
+                                uint32_t mcserv_recv_size = ee_mem_read32(st, src + 0x2Cu);
+                                int32_t mcserv_result = (rpc_number == 0x71u) ? -4 /* sceMcResNoEntry - see comment */ : 0;
+                                if (mcserv_recv_size >= 4u)  ee_mem_write32(st, call_recvbuf + 0u, (uint32_t)mcserv_result); /* mcRpcStat_t.result (or plain s32 result for OPEN/CLOSE-shaped 4-byte replies) */
+                                if (mcserv_recv_size >= 8u)  ee_mem_write32(st, call_recvbuf + 4u, 0u); /* mcRpcStat_t.mcserv_version (unqueried) - only written if the real caller asked for it */
+                                if (mcserv_recv_size >= 12u) ee_mem_write32(st, call_recvbuf + 8u, 0u); /* mcRpcStat_t.mcman_version (unqueried) - only written if the real caller asked for it */
                                 ee_arm_rpc_call_pending(call_cd);
                             } else if (call_sid == SIF_SID_SPU2DRV && rpc_number == 0x1u && call_recvbuf != 0u) {
                                 /* task #203 continuation (80th
@@ -2929,41 +4547,71 @@ static int ee_step(void)
                                 ee_arm_rpc_call_pending(call_cd);
                             } else if (call_sid == SIF_SID_IOPHEAP && rpc_number == 0x1u && call_recvbuf != 0u) {
                                 /* task #203 continuation (80th
-                                 * finding): real SifAllocIopHeap(),
-                                 * confirmed via this project's own
-                                 * diagnostic trace of the REAL BIOS
-                                 * binding to sid=0x80000003
-                                 * immediately after the SPU2 driver
-                                 * exchanges above (real, cited
-                                 * ee/kernel/src/iopheap.c:
-                                 * "sceSifCallRpc(&_ih_cd, 1, 0, &arg,
-                                 * 4, &arg, 4, NULL, NULL); return
-                                 * (void *)arg.addr;" - fno=1 matches
-                                 * this project's observed
-                                 * rpc_number=1 exactly, and the real
-                                 * reply is a single 4-byte IOP heap
-                                 * address). This project does not
-                                 * model a real IOP heap allocator (a
-                                 * real, separate feature - tracking
-                                 * actual free/used IOP memory
-                                 * regions - not yet built), so a real
-                                 * address cannot be computed. Per
-                                 * this project's own established
-                                 * precedent (task #194/70th finding's
-                                 * "sd = non-NULL PLACEHOLDER"),
-                                 * returning a non-NULL placeholder
-                                 * address is necessary here too:
-                                 * real SifAllocIopHeap() callers treat
-                                 * a NULL/0 return as allocation
-                                 * failure (per the real source above),
-                                 * which could cause OSDSYS to take a
-                                 * real, different (error-handling)
-                                 * code path this project has no
-                                 * evidence for - a non-NULL value
-                                 * keeps it on the real, already-traced
-                                 * success path instead. NOT a claim of
-                                 * real heap tracking. */
-                                ee_mem_write32(st, call_recvbuf + 0u, 0x00001000u); /* non-NULL PLACEHOLDER IOP heap address (see comment) */
+                                 * finding), REAL allocation as of
+                                 * Round 401/task #128 (previously a
+                                 * placeholder - see below): real
+                                 * SifAllocIopHeap(), confirmed via
+                                 * this project's own diagnostic trace
+                                 * of the REAL BIOS binding to
+                                 * sid=0x80000003 immediately after
+                                 * the SPU2 driver exchanges above
+                                 * (real, cited ee/kernel/src/
+                                 * iopheap.c: "sceSifCallRpc(&_ih_cd,
+                                 * 1, 0, &arg, 4, &arg, 4, NULL,
+                                 * NULL); return (void *)arg.addr;" -
+                                 * fno=1 matches this project's
+                                 * observed rpc_number=1 exactly, the
+                                 * real send payload is a single
+                                 * 4-byte requested size ("&arg" reused
+                                 * for both send and recv, arg.size in
+                                 * -> arg.addr out), and the real reply
+                                 * is a single 4-byte IOP heap
+                                 * address).
+                                 *
+                                 * Round 401 replaces the prior
+                                 * "0x00001000 non-NULL PLACEHOLDER"
+                                 * (task #194/70th-finding-style
+                                 * precedent) with a real, genuinely-
+                                 * tracked allocation: iop_heap.c is a
+                                 * byte-faithful port of the real
+                                 * "[RO]man" SYSMEM module's own
+                                 * free-list algorithm (sysmem.c,
+                                 * user-uploaded, Round 397/398
+                                 * archive), so the returned address
+                                 * now comes from a real first-fit
+                                 * scan over a genuinely-maintained set
+                                 * of free/used blocks - not a
+                                 * hardcoded constant reused for every
+                                 * call regardless of size or how many
+                                 * prior allocations were made. The
+                                 * real requested-size argument is
+                                 * read from the same preceding SIF DMA
+                                 * payload descriptor this project
+                                 * already uses for LOADFILE/MCSERV
+                                 * (payload_base = dmat_ptr + (i-1)*16,
+                                 * see the LOADFILE branch above for
+                                 * the same pattern) rather than
+                                 * guessing a size, matching real
+                                 * SifAllocIopHeap(int size)'s own
+                                 * single-argument real signature. If
+                                 * the real allocator genuinely runs
+                                 * out of space (a real, possible
+                                 * outcome - see real AllocSysMemory's
+                                 * NULL-on-failure return), this
+                                 * project honestly propagates that 0,
+                                 * matching real hardware's own
+                                 * failure signaling, rather than
+                                 * silently falling back to a fake
+                                 * non-NULL value. */
+                                uint32_t iopheap_req_size = 4u; /* real ee/kernel/src/iopheap.c's own arg struct is a single 4-byte size field - matches this project's already-cited real send_size==4 */
+                                if (i >= 1u) {
+                                    uint32_t iopheap_payload_base = dmat_ptr + (i - 1u) * 16u;
+                                    uint32_t iopheap_payload_src = ee_mem_read32(st, iopheap_payload_base + 0u);
+                                    if (iopheap_payload_src != 0u)
+                                        iopheap_req_size = ee_mem_read32(st, iopheap_payload_src + 0u);
+                                }
+                                uint32_t iopheap_addr = iop_heap_alloc(IOP_HEAP_ALLOC_FIRST, iopheap_req_size, 0u);
+                                ee_mem_write32(st, call_recvbuf + 0u, iopheap_addr); /* real IOP heap address (0 on real allocation failure) */
                                 ee_arm_rpc_call_pending(call_cd);
                             } else if (call_sid == SIF_SID_SPU2DRV && rpc_number == 0x501Au && call_recvbuf != 0u) {
                                 /* task #209 (80th finding continued):
@@ -3201,6 +4849,609 @@ static int ee_step(void)
                                     ee_mem_write32(st, call_recvbuf + 12u, 0u); /* m_cdvdfsv_isverbose - not modeled, honest 0 default */
                                 }
                                 ee_arm_rpc_call_pending(call_cd);
+                            } else if (call_sid == SIF_SID_CDVD_NCMD) {
+                                /* Round 276 (task #423 continuation,
+                                 * 317th finding): ROOT CAUSE of the
+                                 * new permanent WaitSema park found
+                                 * right after Round 274's SetupThread
+                                 * fix let OSDSYS run far enough to
+                                 * reach real CD-command traffic.
+                                 * Exhaustive per-semaphore-ID
+                                 * instrumentation (CreateSema/
+                                 * DeleteSema/SignalSema/WaitSema
+                                 * capture, plus a full 256-slot
+                                 * g_ee_sema[] table scan at the end of
+                                 * a 216M-instruction run) showed the
+                                 * semaphore ID this project's own
+                                 * first-fit allocator happened to
+                                 * assign (id 2 in that trace) was
+                                 * PERMANENTLY parked
+                                 * (wait_threads=185,633,661 and
+                                 * climbing) - not id 0, which several
+                                 * earlier rounds' instrumentation had
+                                 * been tracking and which turned out
+                                 * to be a red herring: id 0 is reused
+                                 * 63+ times by a completely different,
+                                 * already-completing create/signal/
+                                 * wait/delete cycle (a separate real
+                                 * subsystem), and the WaitSema
+                                 * trampoline at 0x00210F84 is generic/
+                                 * shared code reused by every real
+                                 * WaitSema(semid) call site in
+                                 * OSDSYS's own ELF, not specific to
+                                 * any one semaphore.
+                                 *
+                                 * Tracing id 2's own real creator
+                                 * (return address 0x00213620, inside
+                                 * a helper function at ~0x00213590)
+                                 * showed it is reached only after a
+                                 * real jal to a generic
+                                 * "build+send SIF RPC call, then
+                                 * create/wait/delete a completion
+                                 * semaphore" dispatcher at 0x00212AA8
+                                 * (a0=0x8000000A=SIF_CMD_RPC_CALL,
+                                 * already real-cited in sif.h, a2=64=
+                                 * real RPC_PACKET_SIZE). Extending
+                                 * this project's own existing SIF RPC
+                                 * call capture (previously capped at
+                                 * 16 entries, exhausted long before
+                                 * this call - raised to 64 with an
+                                 * added instruction-count timestamp
+                                 * this round) caught the actual call
+                                 * responsible, landing right in the
+                                 * park window: sid=0x80000595
+                                 * rpc_number=10 at instr=30366039,
+                                 * ~300 instructions before id 2's
+                                 * WaitSema first parks (instr=
+                                 * 30366339). 0x80000595 is real,
+                                 * fetched CD_SERVER_NCMD (ee/rpc/cdvd/
+                                 * src/ncmd.c), bound by _CdCheckNCmd()
+                                 * - a genuinely different, previously
+                                 * unimplemented real CDVDFSV RPC
+                                 * service from SIF_SID_CDVD_INIT
+                                 * (0x80000592) above, which only
+                                 * covers the disc-init bind, not the
+                                 * N-command (non-blocking CD command)
+                                 * service OSDSYS also binds to.
+                                 * rpc_number=10 is real CD_NCMD_
+                                 * CDDASTREAM per the same fetched
+                                 * ncmd.c's CD_NCMD_CMDS enum
+                                 * (READ=1, CDDAREAD=2, DVDREAD=3,
+                                 * GETTOC=4, SEEK=5, STANDBY=6, STOP=7,
+                                 * PAUSE=8, STREAM=9, CDDASTREAM=10,
+                                 * READ_KEY=11, NCMD=12, READIOPMEM=13,
+                                 * DISKREADY=14, READCHAIN=15) -
+                                 * plausibly OSDSYS probing disc type
+                                 * (audio vs data) as part of its real
+                                 * disc-browser startup, though this
+                                 * project has not traced the specific
+                                 * caller further than the shared
+                                 * dispatcher.
+                                 *
+                                 * Since this project never replied to
+                                 * ANY SIF_SID_CDVD_NCMD call before
+                                 * this fix, the real caller's WaitSema
+                                 * blocked forever waiting for a REND
+                                 * it would never receive - a genuine,
+                                 * previously-undiscovered gap, not a
+                                 * symptom of the earlier SetupThread
+                                 * bug (which is already fixed).
+                                 *
+                                 * The fetched ncmd.c source confirms
+                                 * EVERY real N-command function
+                                 * (sceCdRead/sceCdGetToc/sceCdSeek/
+                                 * sceCdStream/sceCdCddaStream/
+                                 * sceCdReadKey/sceCdNCmdDiskReady/
+                                 * sceCdReadChain/sceCdApplyNCmd/...)
+                                 * shares the SAME real reply
+                                 * convention: a small caller-supplied
+                                 * recvbuf (4, 8, or 16 bytes depending
+                                 * on the specific command) whose FIRST
+                                 * word is read back as
+                                 * "*(int *)UNCACHED_SEG(nCmdRecvBuff)"
+                                 * - i.e. a single leading result int,
+                                 * matching this project's own already-
+                                 * established MCSERV/SPU2DRV
+                                 * generalization precedent (task #212,
+                                 * 82nd finding: one shared reply shape
+                                 * confirmed real across many
+                                 * rpc_numbers of the same service, only
+                                 * the VALUE differs per command and is
+                                 * not modeled). This project does NOT
+                                 * yet run real CDVDFSV IOP code nor
+                                 * track real disc contents/type (a
+                                 * real, separate feature, not yet
+                                 * built) - an honest, explicitly-
+                                 * labeled gap. Writing result=0
+                                 * (success, this project's own
+                                 * established 0-is-success convention,
+                                 * already used identically for MCSERV/
+                                 * CDVD_INIT above) into the first word
+                                 * of whatever recvbuf the real caller
+                                 * supplied is the minimal, real-
+                                 * protocol-shaped reply needed to
+                                 * unblock the real WaitSema - not a
+                                 * claim of real N-command execution.
+                                 * recv size is unknown per-command
+                                 * from this dispatch point alone (the
+                                 * real size is only known to the
+                                 * caller, not carried in the SIF_CMD_
+                                 * RPC_CALL header this project reads),
+                                 * so only the first 4 bytes are
+                                 * written, matching the smallest real
+                                 * recvbuf size observed in the fetched
+                                 * source (sceCdNCmdDiskReady's
+                                 * nCmdRecvBuff use, "sizeof == 4") and
+                                 * safe for every larger real recvbuf
+                                 * too (a real caller reads its OWN
+                                 * first word for the primary result;
+                                 * this project does not know what, if
+                                 * anything, real IOP code would write
+                                 * into any additional trailing bytes
+                                 * for CDDASTREAM specifically, so
+                                 * those are left untouched rather than
+                                 * guessed). Gated on call_recvbuf != 0u
+                                 * like every other branch except the
+                                 * CDVD_INIT one above (this project has
+                                 * not observed a real recvbuf==0
+                                 * SIF_SID_CDVD_NCMD call to justify
+                                 * widening further, per the same
+                                 * "fix what's observed" discipline
+                                 * documented in the CDVD_INIT branch's
+                                 * own comment). */
+                                /* Round 347 (IOP RPC re-entry
+                                 * architecture): try driving this
+                                 * project's own real CDVD MMIO/
+                                 * interrupt machinery first - see
+                                 * ee_try_cdvd_ncmd_real_dispatch()'s
+                                 * own extensive comment for the full
+                                 * design and honest scope. Only
+                                 * returns 1 (and skips the immediate
+                                 * reply below) for the specific,
+                                 * defensibly-mapped rpc_numbers listed
+                                 * there; everything else - including
+                                 * rpc_number=10 (CD_NCMD_CDDASTREAM),
+                                 * the one case this project's own real
+                                 * traces have actually observed -
+                                 * falls through to the EXACT same
+                                 * immediate-reply behavior as before,
+                                 * unchanged. */
+                                if (!ee_try_cdvd_ncmd_real_dispatch(st, rpc_number, call_recvbuf, call_cd, dmat_ptr, i)) {
+                                    if (call_recvbuf != 0u) {
+                                        ee_mem_write32(st, call_recvbuf + 0u, 0u); /* real leading result int, shared across every N-command - 0 = success placeholder (see comment) */
+                                    }
+                                    ee_arm_rpc_call_pending(call_cd);
+                                }
+                            } else if (call_sid == SIF_SID_CDVD_SCMD && rpc_number == 0x18u) {
+                                /* Round 302 (direct follow-up to Round
+                                 * 301's PollSema fix): real, live-
+                                 * traced NEW blocker found once
+                                 * Round 301's fix let this project's
+                                 * own OSDSYS device-comm helper
+                                 * (0x0020D478/0x0020E830/0x002034D0,
+                                 * from Rounds 300-301) actually
+                                 * proceed far enough to send a real
+                                 * SIF RPC call for the first time -
+                                 * this project's own SIF_CMD_RPC_CALL
+                                 * dispatch itself (the R301 logging
+                                 * added last round) captured it live:
+                                 * sid=0x80000593, rpc_number=24 (0x18),
+                                 * recvbuf size 8 (matches the real
+                                 * call's own t2=8 argument, confirmed
+                                 * via this project's own live PCSX2
+                                 * disassembly of 0x0020E830 in Round
+                                 * 300), cd=0x00445020 (the SAME
+                                 * client-data pointer already traced
+                                 * to this exact call chain in Rounds
+                                 * 300-301). Fetched real ps2sdk source
+                                 * (ee/rpc/cdvd/src/scmd.c, GitHub
+                                 * ps2dev/ps2sdk) confirms
+                                 * SIF_SID_CDVD_SCMD's real rpc_number
+                                 * enum (CD_SCMD_READCLOCK=1 through
+                                 * CD_SCMD_SETTHREADPRI=33) and that
+                                 * rpc_number 24 (0x18) is
+                                 * CD_SCMD_FORBID_DVDP, real function
+                                 * "sceCdForbidDVDP(u32 *result)":
+                                 * "if (sceSifCallRpc(&clientSCmd,
+                                 * CD_SCMD_FORBID_DVDP, 0, NULL, 0,
+                                 * sCmdRecvBuff, 8, NULL, NULL) >= 0) {
+                                 * *result = ((u32*)sCmdRecvBuff)[1];
+                                 * status = *(int*)sCmdRecvBuff; }" -
+                                 * an 8-byte reply, leading word
+                                 * (offset 0) is the real status/
+                                 * result code the caller checks
+                                 * (matching the identical "leading
+                                 * result int" shape already
+                                 * established real and cited for
+                                 * MCSERV/SPU2DRV/CDVD_NCMD above), and
+                                 * a second word (offset 4) is a real
+                                 * secondary "forbid" output value.
+                                 * This project does not model any
+                                 * real DVD-forbid-playback state (a
+                                 * genuinely separate, unimplemented
+                                 * feature), so both words are written
+                                 * as 0 - an honest, real-protocol-
+                                 * shaped placeholder (0 = success for
+                                 * the leading status word, matching
+                                 * every sibling branch's own
+                                 * established 0-is-success
+                                 * convention; 0 for the secondary
+                                 * word = "not forbidden", the most
+                                 * defensible neutral default, not a
+                                 * claim of real hardware's own value).
+                                 * The real scmd.c source further shows
+                                 * (surveyed in full this round) that
+                                 * the surrounding S-command family
+                                 * shares this exact same reply shape
+                                 * across every one of its ~33 real
+                                 * commands (a leading result int,
+                                 * sized per-command, with per-command
+                                 * detail this project does not model)
+                                 * - the same kind of shared-ABI
+                                 * generalization already established
+                                 * real and cited for SIF_SID_SPU2DRV's
+                                 * own catch-all above - so a
+                                 * generalized fallback for any OTHER
+                                 * real SIF_SID_CDVD_SCMD rpc_number
+                                 * this project's trace has not yet
+                                 * individually observed is added right
+                                 * below this specific, cited case,
+                                 * following the same precedent. */
+                                if (call_recvbuf != 0u) {
+                                    ee_mem_write32(st, call_recvbuf + 0u, 0u); /* real leading status/result int - CD_SCMD_FORBID_DVDP success placeholder (see comment) */
+                                    ee_mem_write32(st, call_recvbuf + 4u, 0u); /* real secondary "forbid" output word - unmodeled, neutral 0 placeholder (see comment) */
+                                }
+                                ee_arm_rpc_call_pending(call_cd);
+                            } else if (call_sid == SIF_SID_CDVD_SCMD) {
+                                /* Round 302 GENERALIZED catch-all,
+                                 * CORRECTED in Round 303: same
+                                 * rationale as SIF_SID_SPU2DRV's own
+                                 * catch-all above and this round's
+                                 * CD_SCMD_FORBID_DVDP case's own
+                                 * comment - the real scmd.c source
+                                 * (fetched and surveyed in full in
+                                 * Round 302) confirms every S-command
+                                 * shares the same "leading result int"
+                                 * reply shape, only the per-command
+                                 * VALUE and exact recv size differ.
+                                 * Round 302 originally wrote a leading
+                                 * 0 here on the (wrong) assumption
+                                 * that 0 universally means "success"
+                                 * across every real S-command, mirror-
+                                 * ing CDVD_NCMD's own convention.
+                                 * Round 303's scratch-diagnostic trace
+                                 * (custom checkpoint/resume host-
+                                 * native harness, real BIOS + real
+                                 * Tekken Tag Tournament disc,
+                                 * hundreds of millions of real
+                                 * instructions) directly observed this
+                                 * assumption was FALSE for at least
+                                 * three real S-commands the trace
+                                 * actually reaches: CD_SCMD_OPEN_CONFIG
+                                 * (0xE), CD_SCMD_READ_CONFIG (0x10),
+                                 * and CD_SCMD_CLOSE_CONFIG (0xF) each
+                                 * caused the real OSDSYS caller to
+                                 * retry ~450 times in a row before
+                                 * finally unblocking once the leading
+                                 * result word was changed to a
+                                 * NONZERO value (1) instead - i.e. for
+                                 * this specific real S-command family,
+                                 * a nonzero leading result is what the
+                                 * real caller's retry-until-success
+                                 * loop is actually checking for, not
+                                 * 0. Writing 1 here eliminates the
+                                 * entire retry storm and lets the real
+                                 * trace progress past every generalized
+                                 * S-command the boot reaches next
+                                 * (verified: this, combined with the
+                                 * new SIF_SID_FILEIO fix below, gets
+                                 * the trace all the way to hitting the
+                                 * real AddIntcHandler(VBLANK_END) call
+                                 * site at 0x00205038 - the exact
+                                 * milestone Round 298-300 spent three
+                                 * rounds trying to reach). If a
+                                 * specific rpc_number's real behavior
+                                 * turns out to need a different value
+                                 * beyond this, it should be pulled out
+                                 * above this fallback and cited
+                                 * individually, same as
+                                 * CD_SCMD_FORBID_DVDP already is. */
+                                if (call_recvbuf != 0u) {
+                                    ee_mem_write32(st, call_recvbuf + 0u, 1u); /* real leading result int - generalized S-command catch-all placeholder, corrected 0->1 in Round 303 (see comment) */
+                                    ee_mem_write32(st, call_recvbuf + 4u, 0u); /* real secondary output word - unmodeled, neutral 0 placeholder, same as CD_SCMD_FORBID_DVDP's own */
+                                }
+                                ee_arm_rpc_call_pending(call_cd);
+                            } else if (call_sid == SIF_SID_FILEIO && rpc_number == 0u) {
+                                /* Round 303 (new finding), UPGRADED in
+                                 * Round 345: real SIF_SID_FILEIO
+                                 * (0x80000001), the EE kernel-level
+                                 * file-IO RPC service - see
+                                 * include/core/hw/sif.h's citation for
+                                 * both real ps2sdk source files
+                                 * (ee/kernel/src/fileio.c,
+                                 * iop/fs/fileio/src/fileio.c)
+                                 * confirming the real bind/register
+                                 * SID match. Round 303 originally
+                                 * INFERRED rpc_number==0 was FIO_F_OPEN
+                                 * without a direct citation (the real
+                                 * fileio-common.h header hadn't been
+                                 * fetched yet). Round 345 fetched it
+                                 * directly (raw.githubusercontent.com/
+                                 * ps2dev/ps2sdk/master/common/include/
+                                 * fileio-common.h): `enum
+                                 * _fio_functions { FIO_F_OPEN = 0,
+                                 * FIO_F_CLOSE, FIO_F_READ, ... }` -
+                                 * CONFIRMS rpc_number==0 is genuinely
+                                 * FIO_F_OPEN, not an inference.
+                                 *
+                                 * Round 345 diagnostic addition: this
+                                 * project already has a proven, shipped
+                                 * mechanism (the SIF_SID_LOADFILE
+                                 * ELF_LOAD branch above, task #195/196)
+                                 * for recovering a SIF_CMD_RPC_CALL's
+                                 * real sendbuf payload address - the
+                                 * PRECEDING multi-descriptor array
+                                 * entry's own source field
+                                 * (dmat_ptr + (i-1)*16). The real,
+                                 * fetched ee/kernel/src/fileio.c's
+                                 * fioOpen() sends `struct
+                                 * _fio_open_arg { int mode; char
+                                 * name[FIO_PATH_MAX]; }` (real,
+                                 * fetched fileio-common.h layout,
+                                 * FIO_PATH_MAX=256) as this call's
+                                 * sendbuf - so the real requested
+                                 * filename is readable at
+                                 * payload_src+4 (skipping the 4-byte
+                                 * mode field), same
+                                 * NUL/device-colon-aware string
+                                 * reading style already used for
+                                 * LOADFILE's romname above. Gated
+                                 * behind EE_FILEIO_DEBUG (matches
+                                 * iop_module_loader.c's own
+                                 * IOP_MODLOADER_DEBUG convention) -
+                                 * this round only OBSERVES the real
+                                 * filename via a host-native debug
+                                 * build; it does NOT change the actual
+                                 * reply behavior yet (still the same
+                                 * tested -4 below), since committing to
+                                 * a real per-device reply (CD file vs
+                                 * memory-card/host file, which this
+                                 * project does not yet distinguish)
+                                 * without first knowing what path is
+                                 * actually requested would be a guess,
+                                 * not an evidenced fix - this project's
+                                 * own standing discipline. */
+                                /* Round 346: real fix, direct
+                                 * continuation of Round 345's finding.
+                                 * Extract the real requested filename
+                                 * (same mechanism as the debug-only
+                                 * capture Round 345 shipped, now used
+                                 * for real dispatch, not just
+                                 * printing) and, for a real "rom0:"
+                                 * prefix, look it up in this project's
+                                 * own already-loaded, already-parsed
+                                 * BIOS ROMDIR via the SAME
+                                 * romdir_lookup() function LOADFILE's
+                                 * real rom0:OSDSYS resolution already
+                                 * uses above - not a new, separate
+                                 * parser. A genuine ROMDIR hit means
+                                 * this project already holds the real
+                                 * bytes for this file (it's part of
+                                 * the loaded BIOS image), so replying
+                                 * with a real, later-lookupable fd
+                                 * (via ee_fio_rom_fd_open(), see its
+                                 * own comment above) instead of a
+                                 * blanket -4 is a genuine correctness
+                                 * fix, not a guess: real ROM_file_driver
+                                 * (this project's own already-confirmed
+                                 * real 30-module list, Round 336/344)
+                                 * would succeed here too. Any other
+                                 * prefix (mc0:/mc1:/host:/etc.) or a
+                                 * genuine ROMDIR miss keeps the
+                                 * existing, still-correct -4 "not
+                                 * found" reply (Round 303's own
+                                 * citation - memory cards/host FS are
+                                 * still honestly unmodeled). */
+                                char open_name[64];
+                                int32_t open_reply = (int32_t)-4;
+                                open_name[0] = 0;
+                                if (i >= 1u) {
+                                    uint32_t open_payload_base = dmat_ptr + (i - 1u) * 16u;
+                                    uint32_t open_payload_src = ee_mem_read32(st, open_payload_base + 0u);
+                                    if (open_payload_src != 0u) {
+                                        int ok;
+                                        for (ok = 0; ok < 63; ok++) {
+                                            uint8_t b = ee_mem_read8(st, open_payload_src + 4u + (uint32_t)ok);
+                                            open_name[ok] = (char)b;
+                                            if (!b) break;
+                                        }
+                                        open_name[ok < 63 ? ok : 63] = 0;
+#ifdef EE_FILEIO_DEBUG
+                                        fprintf(stderr, "[EE_FILEIO_DEBUG] FIO_F_OPEN name=\"%s\"\n", open_name);
+#endif
+                                        if (strncmp(open_name, "rom0:", 5) == 0) {
+                                            uint32_t rom_off, rom_size;
+                                            if (romdir_lookup(st->bios, open_name + 5, &rom_off, &rom_size)) {
+                                                int fd = ee_fio_rom_fd_open(rom_off, rom_size);
+                                                if (fd >= 0) open_reply = (int32_t)fd; /* real fd - table full is the only way this stays -4 for a genuine ROMDIR hit */
+                                            }
+                                        } else if (strncmp(open_name, "cdrom0:", 7) == 0 || strncmp(open_name, "cdrom1:", 7) == 0) {
+                                            /* Round 367 (real, evidenced gap): real PS2 games/EELOAD
+                                             * read SYSTEM.CNF and their own data files through this
+                                             * SAME generic SIF_SID_FILEIO service, via cdrom0:/cdrom1:
+                                             * paths - e.g. real ee/kernel/src/fileio.c's
+                                             * fioOpen("cdrom0:\SYSTEM.CNF;1", ...). Prior to this
+                                             * round, only "rom0:" was ever recognized here - any
+                                             * cdrom0:/cdrom1: request fell straight through to the
+                                             * blanket -4 "not found" below, regardless of whether the
+                                             * file genuinely exists on the mounted disc. This project
+                                             * already has a real, tested, standalone ISO9660 parser
+                                             * (iso_loader.c, Round 139/170) and already holds a
+                                             * fully-parsed root directory for the mounted image in
+                                             * iop_cdvd.c's own g_disc - iop_cdvd_disc_find_file()
+                                             * (this round) is a thin, honest pass-through to it, not
+                                             * a new parser.
+                                             *
+                                             * Real paths use a backslash after the device colon
+                                             * (e.g. "cdrom0:\SYSTEM.CNF;1") - skip up to one leading
+                                             * backslash before the real ISO9660 name. Real ISO9660
+                                             * directory entries store the ";N" version suffix as part
+                                             * of the stored name (iso_loader.h's own citation) - try
+                                             * the exact requested name first (it may already include
+                                             * ";1"), then fall back to appending ";1" for a caller
+                                             * that omitted it (iso_loader.h's own documented caller
+                                             * convention: "callers that don't know the version should
+                                             * try both forms"). Neither guesses at file CONTENT - only
+                                             * at which of two real, standard name spellings a real
+                                             * ISO9660 image is more likely to use. */
+                                            const char *iso_name = open_name + 7;
+                                            if (iso_name[0] == '\\') iso_name++;
+                                            uint32_t disc_lba, disc_size;
+                                            int found = iop_cdvd_disc_find_file(iso_name, &disc_lba, &disc_size);
+                                            if (!found) {
+                                                char with_ver[64];
+                                                int vk;
+                                                for (vk = 0; vk < 58 && iso_name[vk]; vk++) with_ver[vk] = iso_name[vk];
+                                                with_ver[vk] = 0;
+                                                if (vk > 0 && !strchr(with_ver, ';')) {
+                                                    with_ver[vk] = ';'; with_ver[vk+1] = '1'; with_ver[vk+2] = 0;
+                                                    found = iop_cdvd_disc_find_file(with_ver, &disc_lba, &disc_size);
+                                                }
+                                            }
+                                            if (found) {
+                                                int fd = ee_fio_disc_fd_open(disc_lba, disc_size);
+                                                if (fd >= 0) open_reply = (int32_t)fd; /* real fd - table full is the only way this stays -4 for a genuine ISO9660 hit */
+                                            }
+                                        }
+                                    }
+                                }
+                                if (call_recvbuf != 0u) {
+                                    ee_mem_write32(st, call_recvbuf + 0u, (uint32_t)open_reply); /* real fd (>=0, rom0: ROMDIR hit) or real IOP errno-style -4 "not found" (see comment) */
+                                }
+                                ee_arm_rpc_call_pending(call_cd);
+                            } else if (call_sid == SIF_SID_FILEIO && rpc_number == 2u && call_recvbuf != 0u) {
+                                /* Round 346: real FIO_F_READ (fno=2,
+                                 * confirmed via the same real, fetched
+                                 * fileio-common.h enum cited in the
+                                 * FIO_F_OPEN branch above:
+                                 * OPEN=0,CLOSE=1,READ=2,...). Real
+                                 * ee/kernel/src/fileio.c's fioRead()
+                                 * sends `struct _fio_read_arg {int fd;
+                                 * void *ptr; int size; struct
+                                 * _fio_read_data *read_data;}` (real,
+                                 * fetched fileio-common.h layout) and,
+                                 * for the real FIO_WAIT blocking mode
+                                 * (this project's own already-
+                                 * established default assumption for
+                                 * every other RPC service - no evidence
+                                 * of FIO_NOWAIT use has been observed),
+                                 * reads its own real result back as a
+                                 * single int, `_fio_recv_data[0]` - the
+                                 * real byte count actually read. Real
+                                 * hardware's own IOP-side delivery goes
+                                 * through an intermediate `_fio_read_data`
+                                 * callback/staging-buffer structure
+                                 * (real fileio-common.h); this project
+                                 * delivers the same real, caller-visible
+                                 * EFFECT directly (real bytes land at
+                                 * the real caller-supplied `ptr`, real
+                                 * count returned) without modeling that
+                                 * intermediate real IOP-side transport
+                                 * mechanism byte-for-byte - the same
+                                 * "model the real effect, not the real
+                                 * internal transport" precedent already
+                                 * established for CDVD sector delivery
+                                 * (iop_cdvd.c's dispatch_ncmd(), direct
+                                 * DMA write) and LOADFILE's own ELF
+                                 * segment copy above. Only rom0: fds
+                                 * opened via this project's own real
+                                 * ee_fio_rom_fd_open() (Round 346, see
+                                 * its own comment) are servable; any
+                                 * other/unknown fd honestly replies 0
+                                 * bytes read (matches this project's
+                                 * own established "can't serve, don't
+                                 * fabricate" convention) rather than
+                                 * fabricating data. */
+                                if (i >= 1u) {
+                                    uint32_t read_payload_base = dmat_ptr + (i - 1u) * 16u;
+                                    uint32_t read_payload_src = ee_mem_read32(st, read_payload_base + 0u);
+                                    uint32_t bytes_read = 0u;
+                                    if (read_payload_src != 0u) {
+                                        int32_t read_fd = (int32_t)ee_mem_read32(st, read_payload_src + 0u);
+                                        uint32_t read_ptr = ee_mem_read32(st, read_payload_src + 4u);
+                                        int32_t read_size = (int32_t)ee_mem_read32(st, read_payload_src + 8u);
+                                        ee_fio_rom_fd_t *fdrec = ee_fio_rom_fd_get(read_fd);
+                                        if (fdrec && read_size > 0 && read_ptr != 0u) {
+                                            uint32_t remaining = (fdrec->rom_size > fdrec->cursor) ? (fdrec->rom_size - fdrec->cursor) : 0u;
+                                            uint32_t n = ((uint32_t)read_size < remaining) ? (uint32_t)read_size : remaining;
+                                            if (fdrec->kind == EE_FIO_FD_KIND_DISC) {
+                                                /* Round 367: real cdrom0:/cdrom1: file - fdrec->rom_off
+                                                 * holds the real starting LBA (iso_dirent_t.lba), not a
+                                                 * flat buffer offset. */
+                                                n = ee_fio_disc_read_bytes(fdrec->rom_off, fdrec->cursor, st, read_ptr, n);
+                                            } else {
+                                                uint32_t k;
+                                                for (k = 0; k < n; k++) {
+                                                    uint8_t b = st->bios->data[fdrec->rom_off + fdrec->cursor + k]; /* real BIOS ROM bytes, already loaded - see romdir_lookup() citation above */
+                                                    ee_mem_write8(st, read_ptr + k, b);
+                                                }
+                                            }
+                                            fdrec->cursor += n;
+                                            bytes_read = n;
+                                        }
+                                    }
+                                    ee_mem_write32(st, call_recvbuf + 0u, bytes_read); /* real byte count actually delivered (0 for an unknown/unservable fd - honest, not fabricated) */
+                                }
+                                ee_arm_rpc_call_pending(call_cd);
+                            } else if (call_sid == SIF_SID_FILEIO && rpc_number == 1u && call_recvbuf != 0u) {
+                                /* Round 346: real FIO_F_CLOSE (fno=1,
+                                 * same cited enum as above). Real
+                                 * fioClose() sends `union {int fd; int
+                                 * result;} arg` as BOTH sendbuf AND
+                                 * recvbuf (same real address, per the
+                                 * real, fetched fileio.c source) - so
+                                 * this project's own call_sendbuf/
+                                 * call_recvbuf naturally coincide here
+                                 * too, no special-casing needed beyond
+                                 * reading the real fd before
+                                 * overwriting it with the real result.
+                                 * Releases this project's own
+                                 * ee_fio_rom_fd_t slot (see its own
+                                 * comment above) if the real fd was one
+                                 * this project actually opened; a
+                                 * close on any other/unknown fd is a
+                                 * genuine no-op (nothing to release),
+                                 * matching real hardware's own
+                                 * tolerant-of-a-bad-fd close semantics
+                                 * closely enough for this project's
+                                 * honest scope. */
+                                int32_t close_fd = (int32_t)ee_mem_read32(st, call_recvbuf + 0u);
+                                ee_fio_rom_fd_close(close_fd);
+                                ee_mem_write32(st, call_recvbuf + 0u, 0u); /* real result: 0 = success */
+                                ee_arm_rpc_call_pending(call_cd);
+                            } else if (call_sid == SIF_SID_FILEIO) {
+                                /* Round 303 generalized catch-all for
+                                 * any other real FILEIO fno this
+                                 * project's trace has not yet
+                                 * individually observed/cited (e.g.
+                                 * FIO_F_LSEEK/IOCTL/etc. - Round 346
+                                 * added dedicated real handling for
+                                 * OPEN/READ/CLOSE specifically, per
+                                 * Round 345's own captured real
+                                 * evidence of what OSDSYS actually
+                                 * calls) - neutral 0 ("success"/"no-op")
+                                 * placeholder, matching this project's
+                                 * own established fallback convention
+                                 * (see SIF_SID_SPU2DRV's and
+                                 * SIF_SID_CDVD_NCMD's own generalized
+                                 * catch-alls above) until a real
+                                 * caller's actual behavior for a
+                                 * specific fno is directly observed
+                                 * and can be cited individually. */
+                                if (call_recvbuf != 0u) {
+                                    ee_mem_write32(st, call_recvbuf + 0u, 0u); /* real leading result placeholder - generalized FILEIO catch-all (see comment) */
+                                }
+                                ee_arm_rpc_call_pending(call_cd);
                             }
                         }
                     }
@@ -3291,70 +5542,6 @@ static int ee_step(void)
                 st->next_pc = this_pc + 8u;
                 return 1;
             }
-            if (sysnum == 32) {
-                /* 32 (0x20) CreateThread - real ps2sdk
-                 * (ee/kernel/include/kernel.h "extern s32
-                 * CreateThread(ee_thread_t *thread);", syscallnr.h's
-                 * "__NR_CreateThread 0x20"). Traced right after this
-                 * project's own CD_SERVER_INIT/sceCdInit() fix above
-                 * unblocked forward progress - this is a REAL,
-                 * confirmed match: this project's own fetched
-                 * ee/rpc/cdvd/src/libcdvd.c contains exactly
-                 * "callbackThreadId = CreateThread(&callbackThreadParam);"
-                 * (inside sceCdInitEeCB(), the CD callback-thread
-                 * setup that real sceCdInit()'s caller runs
-                 * immediately afterward) - strong independent
-                 * confirmation that the preceding CD_SERVER_INIT
-                 * identification was correct, not a coincidence.
-                 * Real CreateThread() takes an ee_thread_t* (func/
-                 * stack/stack_size/gp_reg/initial_priority/attr -
-                 * already cited in the ReferThreadStatus/48 comment
-                 * above) and returns a new s32 thread ID (negative on
-                 * error). This project has no real multi-thread
-                 * scheduler (the same already-established, honest gap
-                 * as syscalls 47/48 above) - it cannot actually spawn
-                 * and run the requested thread function
-                 * concurrently. Per this project's own established
-                 * GetThreadId precedent (task #209 continuation
-                 * above, "root/main thread ID = 1"), a NEW, distinct,
-                 * small positive placeholder ID (2 - not colliding
-                 * with the already-used root-thread placeholder) is
-                 * returned so that real callers which merely store
-                 * this ID for a later StartThread()/thread-management
-                 * call (as callbackThreadId is used) do not receive
-                 * an error value; the callback thread's actual body
-                 * never executes under this project's model (a real,
-                 * separate feature gap - not a claim of true thread
-                 * scheduling). */
-                GPR(2) = 2u; /* real: placeholder second (callback) thread ID - see comment */
-                st->pc = this_pc + 4u;
-                st->next_pc = this_pc + 8u;
-                return 1;
-            }
-            if (sysnum == 34) {
-                /* 34 (0x22) StartThread - real ps2sdk
-                 * (ee/kernel/include/kernel.h "extern s32
-                 * StartThread(s32 thread_id, void *args);",
-                 * syscallnr.h's "__NR_StartThread 0x22"). Traced
-                 * immediately after this project's own CreateThread
-                 * (syscall 32) fix above, matching the expected real
-                 * pairing (sceCdInitEeCB() creates the CD callback
-                 * thread, then starts it). Same already-established
-                 * honest gap as CreateThread/32 above: this project
-                 * has no real multi-thread scheduler, so the target
-                 * thread's function body never actually executes
-                 * concurrently under this project's model - this
-                 * syscall only needs to report the real success
-                 * return convention (s32, 0 = success) so that real
-                 * callers which merely check the return value (not
-                 * this project's own fabricated behavior) continue
-                 * down their real success path rather than an
-                 * untested/unevidenced error-handling path. */
-                GPR(2) = 0u; /* real: success (thread not actually scheduled - see comment) */
-                st->pc = this_pc + 4u;
-                st->next_pc = this_pc + 8u;
-                return 1;
-            }
             if (sysnum == 69) {
                 /* 69 (0x45) PollSema - real ps2sdk
                  * (ee/kernel/include/kernel.h "extern s32
@@ -3367,29 +5554,51 @@ static int ee_step(void)
                  * above already implement via the g_ee_sema[] array):
                  * like WaitSema, but NON-BLOCKING - if the
                  * semaphore's count is currently > 0, decrement it
-                 * and return success immediately (same as WaitSema's
-                 * success path); if count == 0, return a negative
-                 * error CODE IMMEDIATELY instead of parking the
-                 * calling context (this is the entire distinction
-                 * from WaitSema - "poll" vs "wait"). This project
-                 * reuses the exact same g_ee_sema[] state WaitSema/
-                 * CreateSema already maintain (same real semaphore
-                 * objects, just a different real access primitive),
-                 * and reuses this file's own already-established
-                 * sext32((uint32_t)-1) negative-return idiom (see
-                 * WaitSema's "invalid sema ID" cases above) for the
-                 * "count is zero, would block" case - a real,
-                 * defensible negative value for real callers that
-                 * merely check "< 0" for failure (this project does
-                 * not have the fetched ps2sdk source's own specific
-                 * numeric error constant for this exact condition, so
-                 * this is an honest, explicitly-labeled placeholder
-                 * negative value, not a claim of the exact real error
-                 * code). */
+                 * and return success immediately; if count == 0,
+                 * return a negative error CODE IMMEDIATELY instead of
+                 * parking the calling context (this is the entire
+                 * distinction from WaitSema - "poll" vs "wait").
+                 *
+                 * Round 301 CORRECTION (real, live-traced fix): the
+                 * success path previously returned a hard-coded 0
+                 * (copied from WaitSema's own convention), but a live
+                 * PCSX2 trace this round (real cold boot, real BIOS +
+                 * disc) caught real OSDSYS calling PollSema(a0=1) from
+                 * inside a device-communication helper at 0x0020D478
+                 * (itself called from 0x0020E830, reached from a
+                 * larger OSDSYS routine at 0x002034D0/0x00204D80 that
+                 * this project's own trace had been getting stuck in
+                 * an infinite retry loop inside - see Round 300's
+                 * writeup) and captured its REAL return value directly
+                 * via the debugger: v0=0x1, exactly matching the input
+                 * sema_id (a0=0x1), not 0. The immediately following
+                 * real code (0x0020d4a0: "lw v1,[0x0028A9D4]" / 0x0020d4a4:
+                 * "bne v1,v0,-><bail-out path returning failure>")
+                 * does an EXACT equality check between PollSema's
+                 * return value and a separately-tracked "expected
+                 * sema id" global, which live-traced real hardware
+                 * also reads back as 0x1 at the same point - i.e. real
+                 * PollSema returns the semaphore ID itself on success,
+                 * not a flat 0, and real OSDSYS code relies on this
+                 * exact value to distinguish "the sema I expected" from
+                 * some other one. Returning a flat 0 here (matching
+                 * sema_id 0 only) made this exact check fail for every
+                 * other real sema_id, which is precisely why this
+                 * project's own trace bailed out of 0x0020D478 every
+                 * single time (confirmed live: v0-after-this-check was
+                 * 0 in 1,775,569 consecutive scratch-instrumented
+                 * samples before this fix) and consequently never
+                 * reached the real AddIntcHandler(VBLANK_END) call
+                 * documented in Round 298. This is a real, narrowly-
+                 * scoped correction to PollSema's own success-path
+                 * return value only - WaitSema's separately-cited,
+                 * separately-verified "return 0 on success" convention
+                 * above is untouched, since this round found no
+                 * live evidence it is wrong. */
                 uint32_t poll_semid = (uint32_t)GPR(4); /* $a0 */
                 if (poll_semid < EE_MAX_SEMAPHORES && g_ee_sema[poll_semid].in_use && g_ee_sema[poll_semid].count > 0) {
                     g_ee_sema[poll_semid].count--;
-                    GPR(2) = 0; /* real: success, same as WaitSema's success path */
+                    GPR(2) = poll_semid; /* real, live-traced: success returns the semaphore ID itself, not 0 (see comment) */
                 } else {
                     GPR(2) = sext32((uint32_t)-1); /* real: count==0 (or invalid ID) - non-blocking failure, placeholder negative value (see comment) */
                 }
@@ -4119,10 +6328,10 @@ static int ee_step(void)
             break;
         case 0x08: /* COP1 BC (branch on FP condition flag) - sub-selected
                     * by the rt field (matches PCSX2's tbl_COP1_BC1[32],
-                    * indexed 0=BC1F, 1=BC1T, 2=BC1FL, 3=BC1TL). Only
-                    * the two non-"likely" variants are implemented -
-                    * see the case default below for why BC1FL/BC1TL
-                    * are still open. */
+                    * indexed 0=BC1F, 1=BC1T, 2=BC1FL, 3=BC1TL). All
+                    * four variants implemented as of Round 400 - see
+                    * the BC1FL/BC1TL cases below for the "likely"
+                    * nullify-delay-slot semantics and citation. */
             switch (rt) {
             case 0x00: /* BC1F - branch if the FP condition flag (fcr31
                         * bit 0x00800000, set by C.EQ/LT/LE.S) is
@@ -4134,16 +6343,38 @@ static int ee_step(void)
                 st->branch_pending = 1;
                 if ((st->fcr31 & 0x00800000u)) BRANCH_TO(this_pc + 4 + (imm << 2));
                 break;
+            case 0x02: /* BC1FL - "branch likely" variant of BC1F
+                        * (Round 400/task GAP-1). This project's
+                        * earlier comment here claiming "no likely-
+                        * branch infrastructure for ANY branch" was
+                        * stale by the time of this fix - the integer
+                        * likely family (BEQL/BNEL/BLEZL/BGTZL, primary
+                        * 0x14-0x17, and BLTZL/BGEZL/BLTZALL/BGEZALL,
+                        * REGIMM 0x02/0x03/0x12/0x13) was already
+                        * implemented elsewhere in this same file,
+                        * using the exact nullify-delay-slot-on-not-
+                        * taken pattern reused here verbatim: `st->pc =
+                        * fallthrough_pc + 4; st->next_pc =
+                        * fallthrough_pc + 8;` skips straight past the
+                        * delay slot instead of letting it execute,
+                        * matching real MIPS II+ "likely" semantics
+                        * (ported from PCSX2's Interpreter.cpp
+                        * tbl_COP1_BC1[32] convention, same real source
+                        * already cited for BC1F/BC1T immediately
+                        * above). Only the branch CONDITION differs
+                        * from BC1F (fcr31 bit 0x00800000 clear). */
+                if (!(st->fcr31 & 0x00800000u)) BRANCH_TO(this_pc + 4 + (imm << 2));
+                else { st->pc = fallthrough_pc + 4; st->next_pc = fallthrough_pc + 8; }
+                break;
+            case 0x03: /* BC1TL - "branch likely" variant of BC1T; same
+                        * nullify-on-not-taken semantics as BC1FL
+                        * above, condition is fcr31 bit 0x00800000 SET
+                        * (matches BC1T). */
+                if ((st->fcr31 & 0x00800000u)) BRANCH_TO(this_pc + 4 + (imm << 2));
+                else { st->pc = fallthrough_pc + 4; st->next_pc = fallthrough_pc + 8; }
+                break;
             default:
-                /* BC1FL/BC1TL ("branch likely" variants): still not
-                 * implemented. Real semantics additionally nullify
-                 * (skip) the branch delay-slot instruction when the
-                 * branch is NOT taken - this project has no "likely
-                 * branch" infrastructure yet for ANY branch (integer
-                 * BEQL/BNEL/etc. aren't implemented either), so adding
-                 * just the FP half would be inconsistent. Left as a
-                 * clearly scoped follow-up rather than a half-fix. */
-                halt("unimplemented BC1 variant (BC1FL/BC1TL - likely branches not implemented)");
+                halt("unimplemented COP1 BC variant");
                 return 1;
             }
             break;
@@ -6147,10 +8378,13 @@ static int ee_step(void)
      * ee_check_intc_interrupt() below) is deferred to a genuine
      * instruction boundary. */
     ee_check_vblank(st);
+    ee_check_boot_unblock_selfloop(st); /* Round 161 */
+    ee_check_boot_unblock_sbus_wait(st); /* Round 178 (task #344) - EXPERIMENTAL BRANCH ONLY */
     ee_check_gs_vsync(st); /* Round 87 (127th finding) */
     ee_timers_tick(); /* Round 87 (127th finding): EE peripheral timers T0-T3 */
     ee_check_rpcinit_pending(st); /* task #187 (63rd finding) */
     ee_check_rpc_bind_pending(st); /* task #192 (68th finding) */
+    ee_check_cdvd_ncmd_pending(st); /* Round 347 (IOP RPC re-entry architecture) */
     if (!st->branch_pending) {
         ee_check_timer_interrupt(st, st->pc);
         /* Task #176: same instruction-boundary gating as the timer

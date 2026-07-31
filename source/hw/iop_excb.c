@@ -101,3 +101,169 @@ void iop_excb_sys_deq_int_rp(iop_state_t *st, uint32_t priority, uint32_t struc)
      * result - see the header comment for the full rationale. */
     g_excb.deq_bug_noop_count++;
 }
+
+/* ------------------------------------------------------------------
+ * Round 168: real-ExCB-chain interrupt dispatch fallback.
+ * See include/core/hw/iop_excb.h's "ROUND 168 UPDATE" comment for the
+ * full design rationale, citations, and an honest flag of which parts
+ * are directly psx-spx-cited vs. this project's own conservative
+ * architectural inference (cross-node/cross-priority continuation).
+ * ------------------------------------------------------------------ */
+#include "core/hw/iop_intc.h"
+
+typedef struct {
+    int active;            /* a dispatch sequence is in flight */
+    int trying_second;     /* currently on the CURRENT node's "second" function */
+    uint32_t priority;     /* current priority chain index, 0-3 */
+    uint32_t node;          /* current node address (as stored in RAM - may carry a KSEG0 prefix, same convention iop_mem_read32/write32 already handle transparently elsewhere in this file) */
+    uint32_t dispatched_irq;
+    uint32_t saved_epc;
+} iop_excb_dispatch_t;
+
+static iop_excb_dispatch_t g_excb_dispatch;
+
+/* Finds the first non-empty chain at priority >= start_priority.
+ * Returns 1 and fills *out_priority and *out_node if found, 0 otherwise. */
+static int find_next_chain(iop_state_t *st, uint32_t start_priority, uint32_t *out_priority, uint32_t *out_node)
+{
+    for (uint32_t p = start_priority; p < IOP_EXCB_NUM_PRIO; p++) {
+        uint32_t head = iop_mem_read32(st, chain_head_addr(st, p));
+        if (head != 0u) {
+            *out_priority = p;
+            *out_node = head;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Jumps into a node's "first" (trying_second=0) or "second"
+ * (trying_second=1) function - real, cited node layout: 08h=first
+ * function, 04h=second function (iop_excb.h header comment). No real,
+ * cited argument-register convention exists for these callbacks (the
+ * header's own citation only documents the pointer layout and the
+ * r2-based first/second handoff, not an ABI for arguments), so this
+ * project deliberately does NOT fabricate one - registers other than
+ * $ra/$pc/$next_pc are left exactly as the interrupted code left
+ * them, same conservative choice already made elsewhere in this
+ * project when no citable ABI exists. */
+static void enter_node_function(iop_state_t *st, uint32_t node, int second)
+{
+    uint32_t func = iop_mem_read32(st, node + (second ? 0x04u : 0x08u));
+    g_excb_dispatch.trying_second = second;
+    st->gpr[31] = IOP_EXCB_DISPATCH_RETURN_TRAMPOLINE;
+    st->pc = func;
+    st->next_pc = func + 4u;
+}
+
+/* Advances the dispatch state machine to the next candidate (this
+ * node's second function, or the next node, or the next priority's
+ * head) and jumps into it. Returns 1 if a next candidate was found
+ * and entered, 0 if every chain/node is exhausted. */
+static int advance_and_enter(iop_state_t *st)
+{
+    if (!g_excb_dispatch.trying_second) {
+        uint32_t second_func = iop_mem_read32(st, g_excb_dispatch.node + 0x04u);
+        if (second_func != 0u) {
+            enter_node_function(st, g_excb_dispatch.node, 1);
+            return 1;
+        }
+    }
+
+    /* This node is done (either the second function also declined, or
+     * there was no second function to try) - move to the next node in
+     * the same chain (real, cited: 00h = next-pointer, 0 = end). */
+    uint32_t next_node = iop_mem_read32(st, g_excb_dispatch.node + 0x00u);
+    if (next_node != 0u) {
+        g_excb_dispatch.node = next_node;
+        enter_node_function(st, next_node, 0);
+        return 1;
+    }
+
+    /* Chain exhausted at this priority - try the next priority level. */
+    uint32_t next_priority, next_head;
+    if (find_next_chain(st, g_excb_dispatch.priority + 1u, &next_priority, &next_head)) {
+        g_excb_dispatch.priority = next_priority;
+        g_excb_dispatch.node = next_head;
+        enter_node_function(st, next_head, 0);
+        return 1;
+    }
+
+    return 0; /* every chain, every node, exhausted */
+}
+
+/* Real MIPS/R3000A Status.BEV-selected general exception vector - same
+ * formula this project's own iop_check_hw_interrupt() already uses at
+ * its default-vector fallback (source/core/iop/iop_core.c). Duplicated
+ * here (rather than shared) because by the time this project reaches
+ * "every ExCB candidate declined", control is no longer at that
+ * function's own call site - it's inside this file's return
+ * trampoline, reached one or more real guest instructions later. */
+static void vector_to_default(iop_state_t *st)
+{
+    uint32_t vector = (st->cop0[12] & 0x400000u) ? 0xBFC00180u : 0x80000080u;
+    st->pc = vector;
+    st->next_pc = vector + 4u;
+}
+
+int iop_excb_dispatch_interrupt(iop_state_t *st, uint32_t irq)
+{
+    uint32_t priority, node;
+    if (!find_next_chain(st, 0u, &priority, &node))
+        return 0; /* every priority chain is empty - caller falls back to its own default vectoring, unchanged */
+
+    g_excb.dispatch_attempts++;
+
+    g_excb_dispatch.active = 1;
+    g_excb_dispatch.priority = priority;
+    g_excb_dispatch.node = node;
+    g_excb_dispatch.dispatched_irq = irq;
+    g_excb_dispatch.saved_epc = st->cop0[14]; /* EPC, already written by the caller before calling this */
+
+    enter_node_function(st, node, 0); /* always try the "first" function first, real cited order */
+    return 1;
+}
+
+int iop_excb_try_handle(iop_state_t *st, uint32_t pc)
+{
+    if (pc != IOP_EXCB_DISPATCH_RETURN_TRAMPOLINE || !g_excb_dispatch.active)
+        return 0;
+
+    uint32_t r2 = st->gpr[2];
+    if (r2 == 0u) {
+        /* Real, cited convention: r2==0 means this function claimed
+         * the interrupt/exception. Finish exactly like a real RFE
+         * would - same formula iop_hle_intr.c's own return trampoline
+         * already uses. */
+        iop_intc_state_t *intc = iop_intc_get_state();
+        uint32_t irq = g_excb_dispatch.dispatched_irq;
+        if (irq < 32u)
+            intc->istat &= ~(1u << irq);
+        else
+            intc->istat_hi &= ~(1u << (irq - 32u));
+        st->cop0[12] = (st->cop0[12] & ~0x0Fu) | ((st->cop0[12] >> 2) & 0x0Fu); /* Status stack pop, real RFE formula */
+        st->pc = g_excb_dispatch.saved_epc;
+        st->next_pc = g_excb_dispatch.saved_epc + 4u;
+        g_excb_dispatch.active = 0;
+        g_excb.dispatch_claimed++;
+        return 1;
+    }
+
+    /* r2 != 0: this function declined - try the next candidate. */
+    if (advance_and_enter(st))
+        return 1;
+
+    /* Everything declined - fall through to this project's existing
+     * default-vector behavior, one level later than usual (see
+     * vector_to_default()'s comment). Note: unlike the claimed case,
+     * this does NOT pop the Status stack or ack the irq - matching
+     * exactly what the caller's own pre-existing default-vector path
+     * already did before this round (it never touched Status/irq
+     * either; only the actual guest exception handler that eventually
+     * runs at the vector is responsible for that, same as real
+     * hardware). */
+    vector_to_default(st);
+    g_excb_dispatch.active = 0;
+    g_excb.dispatch_exhausted++;
+    return 1;
+}

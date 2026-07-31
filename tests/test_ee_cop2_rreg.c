@@ -97,8 +97,8 @@ int main(void)
     uint8_t *prog = bios.data;
     int i = 0;
 
-    /* r4 = 0x1000 (RAM base pointer) */
-    wle32(prog + (i++)*4, enc_lui(4, 0x0000));
+    /* r4 = 0x80001000 (RAM base pointer, Round 363: KSEG0 direct-mapped, not raw KUSEG) */
+    wle32(prog + (i++)*4, enc_lui(4, 0x8000));
     wle32(prog + (i++)*4, enc_ori(4, 4, 0x1000));
 
     /* LQ r5 <- RAM[0x1000] (VF1: raw bit patterns, X lane = seed) */

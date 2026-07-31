@@ -89,6 +89,51 @@
  * after a failed attempt return 0 immediately without re-scanning. */
 int iop_module_loader_boot(iop_state_t *st);
 
+/* Round 374 (task #212 continuation, user-shared source:
+ * https://www.psdevwiki.com/ps3/PS2_Emulation, "BIOS/Contents"
+ * section): independent, real corroboration of this function's
+ * IOPBTCONF-preferred/IOPBTCON2-fallback lookup order above.
+ *
+ * That page documents the complete real ROMDIR/EXTINFO file table of
+ * a real, dumped PS2 BIOS (Sony's own PS3-embedded "Development
+ * v2.20" dev BIOS, sourced from a public gist -
+ * https://gist.github.com/uyjulian/25291080f083987d3f3c134f593483c5),
+ * with a one-line real description for every one of its ~90 named
+ * ROMDIR entries. Two entries directly resolve an ambiguity Round
+ * 372/373's ps2tek/ps2sdk citations (see sif.h) left implicit:
+ *
+ *   IOPBTCONF: "Boot configuration file for the IOP, during the
+ *   FINAL phase of the IOP reset. If no UDNL module is specified,
+ *   the IOP will only have a SINGLE IOP reset in the reboot process,
+ *   with the modules listed in IOPBTCONF."
+ *
+ *   IOPBTCON2: "Boot configuration file for the IOP, for the FIRST
+ *   phase of the IOP reset (before UDNL is loaded)."
+ *
+ * This means IOPBTCONF and IOPBTCON2 are not interchangeable/
+ * fallback-equivalent lists on real hardware in general - they serve
+ * two genuinely different phases of a two-phase (UDNL-mediated)
+ * reboot. But for the ONE scenario this project's own
+ * iop_module_loader_boot() models (a single, cold-power-on IOP reset,
+ * no UDNL/reboot-image involved at all), the same source explicitly
+ * states real hardware uses IOPBTCONF - exactly matching this
+ * function's own existing `romdir_find("IOPBTCONF")` first, falling
+ * back to `IOPBTCON2` only if absent. This project's existing
+ * behavior for its actual, single-phase cold-boot use case is
+ * therefore independently confirmed correct by a second, real,
+ * differently-sourced reference (this page cites a real dumped BIOS
+ * table; Round 372/373 cited ps2tek's prose description and ps2sdk's
+ * own real SifIopRebootBuffer()/generateIOPBTCONF_img() source) - not
+ * a change, a corroboration.
+ *
+ * The same page's table also independently confirms the real
+ * one-line roles of REBOOT ("Receives IOP reset packets from the EE,
+ * from across the SIF"), MODLOAD ("IOP module loader"), and LOADCORE
+ * ("The core of IOP module loading... Also handles the startup of the
+ * IOP") exactly matching Round 372/373's ps2tek-sourced understanding
+ * of the same three modules - independent, second-source agreement,
+ * not a new finding. No source-behavior change made this round. */
+
 /* Checked at the very top of iop_step(), before instruction fetch -
  * mirrors iop_hle_bios_try_handle()'s existing calling convention
  * exactly. Returns 1 (and has already updated st->pc/st->next_pc, and

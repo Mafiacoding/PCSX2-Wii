@@ -15,6 +15,23 @@ typedef struct {
     uint32_t default_exc_handler_addr;
     iop_hle_intr_stats_t stats;
 
+    /* Round 347 (IOP RPC re-entry architecture): per-IRQ completion
+     * counter, incremented every time a real registered handler
+     * dispatched via iop_hle_intr_dispatch_interrupt() finishes (hits
+     * the IOP_HLE_INTR_HANDLER_RETURN_TRAMPOLINE below) for that
+     * specific irq. This is the one clean, generic hook this project
+     * needs to let EE-side code (ee_core.c) know "the real, registered
+     * IOP handler for irq N has now genuinely finished running" -
+     * without iop_hle_intr.c needing to know anything about WHY any
+     * particular caller cares (kept fully generic, same spirit as
+     * this struct's own existing iop_hle_intr_stats_t counters).
+     * Callers poll-and-diff this counter (see ee_core.c's
+     * ee_check_cdvd_ncmd_pending()) rather than being pushed a
+     * callback - avoids a new cross-module callback-registration
+     * mechanism for what is, in this project's own single-process
+     * design, a simple "did this monotonic counter change" check. */
+    uint32_t handler_completion_count[IOP_HLE_INTR_NUM_IRQ];
+
     /* Round-trip state for iop_hle_intr_dispatch_interrupt(): saved
      * so the return trampoline (IOP_HLE_INTR_HANDLER_RETURN_TRAMPOLINE)
      * knows which IRQ to acknowledge and where to resume, mirroring
@@ -25,6 +42,27 @@ typedef struct {
     uint32_t dispatched_irq;
     uint32_t saved_epc;
     uint32_t in_dispatch;
+    /* Round 423 (docs/STATUS.md Round 422): the real $ra the
+     * interrupted code itself owned at the moment of dispatch, saved
+     * here so it can be restored below. Real MIPS hardware interrupts
+     * never touch $ra at all (delivery is EPC/Cause/Status-based, not
+     * a JAL-style call), but this project's own HLE dispatch
+     * mechanism clobbers $ra to build a synthetic "return gate" back
+     * to the trampoline below (see iop_hle_intr_dispatch_interrupt())
+     * - without saving/restoring the interrupted code's own real
+     * $ra across that, the interrupted code's own later `jr $ra`
+     * (once resumed) jumps into this trampoline instead of its own
+     * real caller, freezing forever at this trampoline's own address
+     * with no further forward motion. Live-traced and confirmed
+     * (Round 422): after the second real handler dispatch this
+     * project ever reached (once Round 417/421's fixes let IOP
+     * survive that deep), `in_dispatch` correctly reset to 0 on the
+     * legitimate return, but the interrupted code's own next `jr $ra`
+     * - still holding the stale trampoline address - immediately
+     * re-entered the trampoline with `in_dispatch` already 0, which
+     * had no `else` branch and so silently left `st->pc` completely
+     * unchanged - i.e. stuck at this exact address forever. */
+    uint32_t saved_ra;
 } iop_hle_intr_globals_t;
 
 static iop_hle_intr_globals_t g;
@@ -49,6 +87,13 @@ uint32_t iop_hle_intr_get_exc_handler(int exc)
 {
     if (exc < 0 || exc >= IOP_HLE_INTR_NUM_EXC) return 0;
     return g.exc_handler_addr[exc];
+}
+
+/* Round 347: see handler_completion_count's own comment above. */
+uint32_t iop_hle_intr_get_handler_completion_count(int irq)
+{
+    if (irq < 0 || irq >= IOP_HLE_INTR_NUM_IRQ) return 0;
+    return g.handler_completion_count[irq];
 }
 
 uint32_t iop_hle_intr_sentinel_for_import(const char *module_name, uint32_t ordinal)
@@ -293,9 +338,41 @@ int iop_hle_intr_try_handle(iop_state_t *st, uint32_t pc)
             else
                 intc->istat_hi &= ~(1u << (g.dispatched_irq - 32u));
             st->cop0[12] = (st->cop0[12] & ~0x0Fu) | ((st->cop0[12] >> 2) & 0x0Fu); /* Status stack pop, real RFE formula */
+            st->gpr[31] = g.saved_ra; /* Round 423: restore the interrupted code's own real $ra, clobbered above to build this trampoline's own return gate - see the struct field's comment */
             st->pc = g.saved_epc;
             st->next_pc = g.saved_epc + 4u;
+            /* Round 347: the real, registered handler for
+             * g.dispatched_irq has now genuinely finished - bump its
+             * completion counter BEFORE clearing dispatched_irq/
+             * in_dispatch, so a poller reading this counter right
+             * after this trampoline fires can tell real completion
+             * apart from "never dispatched at all" (both would
+             * otherwise read as counter==0 forever). */
+            if (g.dispatched_irq < IOP_HLE_INTR_NUM_IRQ)
+                g.handler_completion_count[g.dispatched_irq]++;
             g.in_dispatch = 0;
+            /* Round 427 (task #169): a real, registered handler has
+             * now genuinely finished servicing this interrupt (the
+             * RFE-equivalent Status/pc restore already happened just
+             * above) - the interrupt is fully resolved, matching the
+             * same "async event now fully handled" bookkeeping this
+             * codebase already uses elsewhere for exactly this signal
+             * (e.g. iop_module_loader.c's own idle-transition/panic-
+             * bypass completion paths, which explicitly document a
+             * three-part "done" convention: idle=1, IEc=1,
+             * exception_pending=0). This trampoline was the one
+             * remaining place that dispatches through
+             * exception_pending without ever clearing it again -
+             * live wake-event tracing (Round 426/427) confirmed this
+             * left exception_pending permanently latched at 1 after
+             * the very first real interrupt dispatch, which silently
+             * defeated iop_core_step()'s idle-wake edge detector
+             * (`!pending_before && exception_pending`) for the rest
+             * of every run: pending_before could never be false
+             * again, so no second real interrupt could ever register
+             * as a fresh wake event, regardless of Round 426's own
+             * fix to iop_module_loader.c. */
+            st->exception_pending = 0;
         }
         return 1;
     }
@@ -312,6 +389,7 @@ int iop_hle_intr_dispatch_interrupt(iop_state_t *st, uint32_t irq)
     g.dispatched_irq = irq;
     g.saved_epc = st->cop0[14]; /* EPC, already written by the caller before calling this */
     g.in_dispatch = 1;
+    g.saved_ra = st->gpr[31]; /* Round 423: the interrupted code's own real $ra - see this struct field's own comment for why this must be restored, not discarded */
 
     st->gpr[4] = g.intr_handler_arg[irq]; /* $a0 = arg, real RegisterIntrHandler ABI */
     st->gpr[31] = IOP_HLE_INTR_HANDLER_RETURN_TRAMPOLINE; /* $ra = our own return gate */

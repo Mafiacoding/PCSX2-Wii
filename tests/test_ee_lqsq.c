@@ -75,7 +75,7 @@ int main(void) {
      * 128-bit pattern directly in RAM via memcpy (below) at r4+0x20,
      * LQ it into r5, then SQ r5 back out to r4+0x40, then BREAK. */
     int i = 0;
-    wle32(prog + (i++)*4, enc_lui(4, 0x0000));
+    wle32(prog + (i++)*4, enc_lui(4, 0x8000));
     wle32(prog + (i++)*4, enc_ori(4, 4, 0x1000));        /* r4 = 0x1000 (base) */
     wle32(prog + (i++)*4, enc_lq(5, 4, 0x20));           /* r5 = *(qword*)(r4+0x20), should mask to 16-byte align already */
     wle32(prog + (i++)*4, enc_sq(5, 4, 0x43));           /* SQ with an UNALIGNED offset (0x43) - must mask down to 0x40 */

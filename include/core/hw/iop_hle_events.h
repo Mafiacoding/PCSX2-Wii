@@ -103,4 +103,20 @@ void iop_hle_event_enable(iop_state_t *st);
 void iop_hle_event_disable(iop_state_t *st);
 void iop_hle_event_undeliver(iop_state_t *st);
 
+/* Round 148 (task #301): a plain-C entry point for hardware models
+ * (e.g. iop_cdrom_legacy.c) to deliver a real event directly, without
+ * needing to fake up a gpr-based B0h call. Same real hashing/delivery
+ * semantics as iop_hle_event_deliver() above - this is the mechanism
+ * this project's real hardware interrupt sources use to perform the
+ * job that, on real hardware, the "totally bugged" (nocash's own
+ * words) DefaultInterruptHandler chain performs automatically for
+ * every hardware IRQ 0-10 (psx-spx kernelbios.md, directly quoted:
+ * "The totally bugged DefaultInterruptHandlers is always installed
+ * (and cannot be removed), so it does randomly trigger Events") -
+ * this project models the INTENDED, non-buggy behavior (deliver the
+ * real, cited class/spec pair when the corresponding real hardware
+ * condition occurs), not nocash's documented "randomly" quirk, which
+ * is out of scope (a hardware timing bug, not a testable contract). */
+void iop_hle_event_deliver_raw(uint32_t class_code, uint32_t spec_mask);
+
 #endif

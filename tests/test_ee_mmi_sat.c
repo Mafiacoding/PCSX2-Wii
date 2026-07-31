@@ -74,7 +74,7 @@ static void wle32(uint8_t *p, uint32_t v) { p[0]=v&0xFF;p[1]=(v>>8)&0xFF;p[2]=(v
 
 static void build_mmi_prog(uint8_t *prog, int sa, int funct) {
     int pc = 0;
-    wle32(prog + pc, enc_lui(4, 0x0000)); pc += 4;
+    wle32(prog + pc, enc_lui(4, 0x8000)); pc += 4;
     wle32(prog + pc, enc_ori(4, 4, 0x1000)); pc += 4;
     wle32(prog + pc, enc_lq(1, 4, 0x00)); pc += 4;   /* gpr1 = rs operand */
     wle32(prog + pc, enc_lq(2, 4, 0x10)); pc += 4;   /* gpr2 = rt operand */

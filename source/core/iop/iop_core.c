@@ -51,15 +51,19 @@
 #include "core/hw/iop_spu2.h" /* SPU2 register scaffold - task #95 */
 #include "core/hw/iop_cdvd.h" /* CDVD register scaffold, no-disc boot case - ROADMAP section 7 */
 #include "core/hw/iop_cdrom_legacy.h" /* Round 133 (173rd finding): PS1-legacy CD-ROM Index/Status Register - see header for full trace/citation */
+#include "core/hw/iop_asyncio.h" /* Round 153 (task #307): real async I/O queue - see header for full trace/citation */
 #include "core/hw/iop_sio2.h" /* Round 135 (175th finding): SIO2 controller/memory-card serial interface - see header for full trace/citation */
 #include "core/hw/iop_spu_legacy.h" /* Round 136 (177th finding): PS1-legacy SPU register block - see header for full trace/citation */
 #include "core/hw/iop_hle_bios.h"
 #include "core/hw/iop_hle_events.h"
 #include "core/hw/iop_hle_modules.h"
 #include "core/hw/iop_hle_intr.h"
+#include "core/hw/iop_hle_thread.h" /* Round 389: real THREADMAN thread scheduler/semaphore HLE */
+#include "core/hw/iop_hle_heap.h" /* Round 421: real SYSMEM heap-export sentinel gates */
 #include "core/hw/iop_module_loader.h" /* real IOP module/IRX loader - task #92 */
 #include "core/hw/iop_excb.h" /* real exception-handler priority chains at RAM[0x100] - Round 22 */
 #include "core/hw/iop_icfg.h" /* real ICFG register / EE INTC_SBUS raise - task #214, 85th finding */
+#include "core/hw/iop_heap.h" /* Round 401: real SYSMEM free-list heap allocator port */
 #include "core/hw/iop_elf.h" /* real ELF32/MIPS IOP loader - reused for device-table embedded images, task #221/#245 */
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,6 +71,32 @@
 #include <malloc.h>
 
 #define IOP_RAM_SIZE (2 * 1024 * 1024)
+/* Round 417 (task #152): real LOADCORE init code (disassembly-
+ * confirmed, docs/STATUS.md Round 417) computes its OWN kernel stack
+ * pointer directly from boot_info's real RAM_MB field:
+ * `sp = (RAM_MB) << 20` - a genuine, deliberate real MIPS-kernel
+ * convention (megabytes-to-bytes shift), not a bug, and not
+ * something this project's own dispatcher-assigned INITIAL_SP (see
+ * iop_module_loader.c) has any influence over, since LOADCORE
+ * unconditionally overwrites $sp with this computed value the moment
+ * its own entry code runs. With this project's honestly-reported
+ * `BOOT_INFO_RAM_MB=2`, that computation is exactly 0x00200000 -
+ * this project's own modeled RAM's exact top boundary, leaving real,
+ * disassembly-confirmed kernel code (this specific registration-list
+ * function's own nested stack frame) zero headroom to work with.
+ * Rather than under-report guest-visible RAM (which would be
+ * observable/incorrect for any other real code path that legitimately
+ * queries total memory), this project's own BACKING allocation is
+ * widened by a small, guest-invisible guard region - the reported
+ * "2MB total memory" boundary guest code sees via boot_info/SYSMEM's
+ * $a0 is unchanged, but this project's own `st->ram`/`st->ram_size`
+ * now provide real backing bytes slightly past that boundary, so a
+ * real kernel stack computed to sit exactly at the reported top of
+ * RAM (as real LOADCORE's own code legitimately does) doesn't
+ * silently fail on every read/write the instant it needs any stack
+ * space at all. */
+#define IOP_RAM_GUARD_SIZE 0x00004000u
+#define IOP_RAM_BACKING_SIZE (IOP_RAM_SIZE + IOP_RAM_GUARD_SIZE)
 #define IOP_RESET_VECTOR 0xBFC00000u
 
 static iop_state_t g_iop;
@@ -321,20 +351,25 @@ int iop_core_init(const bios_image_t *bios)
     iop_spu2_init(); /* SPU2 register scaffold - task #95, see core/hw/iop_spu2.h */
     iop_cdvd_init(); /* CDVD register scaffold, no-disc boot case - see core/hw/iop_cdvd.h */
     iop_cdrom_legacy_init(); /* PS1-legacy CD-ROM Index/Status Register - Round 133, see core/hw/iop_cdrom_legacy.h */
+    iop_asyncio_init(); /* Round 153: real async I/O queue/channel dispatch - see core/hw/iop_asyncio.h */
     iop_sio2_init(); /* SIO2 controller/memory-card interface - Round 135, see core/hw/iop_sio2.h */
     iop_spu_legacy_init(); /* PS1-legacy SPU register block - Round 136, see core/hw/iop_spu_legacy.h */
     iop_hle_bios_init(); /* IOP BIOS syscall trap (A0/B0/C0) - see core/hw/iop_hle_bios.h */
     iop_hle_events_init(); /* Round 142: real B0-table Event subsystem - see core/hw/iop_hle_events.h */
     iop_hle_modules_init(); /* IOP module registry scaffold - see core/hw/iop_hle_modules.h */
     iop_hle_intr_init(); /* Round 109: clean-room RegisterIntrHandler/RegisterExceptionHandler HLE table - see core/hw/iop_hle_intr.h */
+    iop_hle_thread_init(); /* Round 389: real THREADMAN thread scheduler/semaphore HLE - see core/hw/iop_hle_thread.h */
     iop_module_loader_reset(); /* real module/IRX boot sequencer - see core/hw/iop_module_loader.h */
     iop_icfg_init(); /* real ICFG register - task #214, 85th finding */
+    iop_heap_init(); /* Round 401: real SYSMEM free-list heap allocator port - see core/hw/iop_heap.h */
 
-    g_iop.ram = memalign(32, IOP_RAM_SIZE);
+    g_iop.ram = memalign(32, IOP_RAM_BACKING_SIZE);
     if (!g_iop.ram)
         return -1;
-    memset(g_iop.ram, 0, IOP_RAM_SIZE);
-    g_iop.ram_size = IOP_RAM_SIZE;
+    memset(g_iop.ram, 0, IOP_RAM_BACKING_SIZE);
+    g_iop.ram_size = IOP_RAM_BACKING_SIZE; /* Round 417 - see IOP_RAM_BACKING_SIZE's comment above; guest-visible reported size (BOOT_INFO_RAM_MB, SYSMEM_ENTRY_TOP_OF_MEMORY) is unchanged */
+
+    iop_dma_bind_iop_ram(g_iop.ram, g_iop.ram_size); /* Round 199: lets the SIF0 CHCR-kick path read real IOP RAM source bytes - see core/hw/iop_dma.h */
 
     g_iop.bios = bios;
     g_iop.pc = IOP_RESET_VECTOR;
@@ -405,13 +440,91 @@ int iop_core_init(const bios_image_t *bios)
      * allocated (iop_excb_init() writes through iop_mem_write32()). */
     iop_excb_init(&g_iop);
 
+    /* Round 172 (task #337, 212th finding): EAGERLY invoke the real
+     * IOP module/IRX loader (core/hw/iop_module_loader.h, task #92)
+     * here, unconditionally, instead of relying solely on
+     * iop_step()'s lazy "PC escaped to unfetchable memory" fallback
+     * trigger (still present below, unchanged, as a safety net for
+     * synthetic/test BIOS images that don't have a valid ROMDIR).
+     *
+     * WHY: host-native diagnostic this round (scan_state.c/
+     * eager_boot.c, not committed - see STATUS.md's 212th finding)
+     * conclusively confirmed the Round 59/91st-finding comment two
+     * screens above is exactly right and still true today - with a
+     * real SCPH-10000 BIOS + real Tekken Tag Tournament (Europe)
+     * (Demo) disc, running system_run_interleaved() from a freshly-
+     * inited state for 45,000,000+ IOP instructions NEVER once
+     * triggers the lazy fallback (modules_attempted stayed 0 the
+     * entire time) - the interpreted real ROM bootstrap code always
+     * settles into already-resident, real, fetchable RAM content
+     * (the long-documented 0x00032C58-0x00032D50 poll region) without
+     * its PC ever actually escaping to unmapped memory, because
+     * whatever real mechanism the ROM uses to copy each module's
+     * bytes into RAM in the first place isn't modeled by this
+     * project's interpreted-ROM-bootstrap path. The SAME diagnostic
+     * showed that calling iop_module_loader_boot() eagerly, before
+     * any ROM bootstrap instruction ever executes, successfully
+     * loads all 29 real ROMDIR/IOPBTCONF modules (355/355 imports
+     * resolved, 0 unresolved - identical, already-tested machinery
+     * to task #92, just invoked earlier), and that running forward
+     * from there reaches Status.IEc=1 for the very first time ever
+     * in this trajectory (CpuEnableIntr, task #217's 88th finding,
+     * finally gets called for real by real, genuinely-loaded module
+     * code) and a brand-new IOP halt wall (unimplemented primary
+     * opcode 0x3F at pc=0x8000041C) further than the old lazy-only
+     * path has ever reached.
+     *
+     * HONEST SCOPE NOTE (shortcut, not exact hardware emulation):
+     * this skips interpreting whatever real ROM hardware-bring-up
+     * instructions normally execute between the reset vector and the
+     * ROM's own module-loading phase (this project doesn't currently
+     * model the real bytes-into-RAM copy mechanism that phase relies
+     * on anyway, so those instructions were never doing anything
+     * beyond driving this project's own already-known-incomplete
+     * memory/MMIO model). This mirrors the same, already-established
+     * project convention as Round 171's EE game-ELF-entry shortcut
+     * and iso_loader.c's mount_iso() - jump straight to a REAL,
+     * genuinely-verified-correct state (real modules, real ELF
+     * loading/relocation/import resolution, real entry-point
+     * execution) rather than waiting on a not-yet-modeled exact
+     * mechanism. iop_module_loader_boot() itself is unchanged,
+     * already-tested code (task #92); only the call site/timing is
+     * new. Safe for synthetic/test BIOS images: iop_module_loader_
+     * boot() returns 0 immediately (leaving st->pc/next_pc untouched)
+     * whenever ROMDIR/IOPBTCONF/the first listed module can't be
+     * found, exactly as its existing header comment documents - the
+     * four existing tests that manage this loader's one-shot state
+     * explicitly (test_iop_module_loader_bootinfo.c,
+     * test_iop_loadcore_panic_bypass.c,
+     * test_iop_registration_walk_panic_bypass.c,
+     * test_iop_trap_stub_bypass.c) already call iop_module_loader_
+     * reset() themselves immediately after iop_core_init(), which
+     * clears the one-shot "attempted" flag this eager call sets, so
+     * their own explicit iop_module_loader_boot() calls are
+     * unaffected. */
+    iop_module_loader_boot(&g_iop);
+
     return 0;
 }
 
 static void halt(const char *reason)
 {
     g_iop.halted = 1;
+    /* Round 340 (incidental, found while rebuilding for the interrupt-
+     * priority fix above): same real category of fix as Round 332's
+     * iop_module_loader.c one - strncpy's own semantics can't
+     * statically prove null-termination when the source string might
+     * be exactly (or longer than) the destination size, which is
+     * exactly what triggered a real -Wstringop-truncation warning
+     * here. Unlike Round 332's case there was no separate explicit
+     * terminating write already guaranteeing safety, so this is a
+     * genuine (if low-probability in practice, since call sites pass
+     * short fixed string literals) latent non-termination risk, not
+     * just a cosmetic warning - fixed properly by explicitly writing
+     * the terminator after a bounded copy, rather than just silencing
+     * the warning. */
     strncpy(g_iop.halt_reason, reason, sizeof(g_iop.halt_reason) - 1);
+    g_iop.halt_reason[sizeof(g_iop.halt_reason) - 1] = '\0';
 }
 
 /* Real IOP hardware-interrupt bit position, per the public psx-spx
@@ -546,33 +659,138 @@ static void iop_check_hw_interrupt(iop_state_t *st, uint32_t next_pc)
      * respectively). Falls through to the unmodified default
      * (fixed-vector) behavior below when nothing is registered for
      * that bit - per the 135th finding's own explicit design
-     * requirement, point (b). */
+     * requirement, point (b).
+     *
+     * Round 174 (task #339, 214th finding): live host-native tracing
+     * against the real Round 172/173 boot trajectory found a genuine,
+     * previously-hidden gap in this priority scheme, not a missing
+     * handler. iop_dma_signal_channel_done() (iop_dma.c, Round 113/
+     * 114) already raises BOTH the shared real hardware line
+     * (iop_intc_raise(3) - the one real IOP_IRQ_DMA master line, bit
+     * 3) AND the corresponding per-channel soft line (Round 112's
+     * istat_hi/imask_hi range - here bit 42, IOP_IRQ_DMA_SIF0) for
+     * the exact same real completion event - see iop_intc.h's own
+     * citation that this split is "purely about HOW the source is
+     * identified/multiplexed, not whether it drives the same
+     * physical Cause.IP2 line". A live trace confirmed no module ever
+     * calls RegisterIntrHandler(3, ...)/registers an ExCB chain for
+     * the raw shared line (plausibly because real INTRMAN keeps that
+     * master-line demux internal to its own un-executed real C code,
+     * per this project's clean-room scope), so every dispatch for
+     * irq=3 fell through to the fixed default vector - and, because
+     * the old code only ever consulted the soft range in an `else`
+     * branch (reached only when the LOW range had nothing pending at
+     * all), the already-real, already-registered handler at
+     * `intr_handler_addr[42]` (confirmed nonzero, =0x00117cb4, in the
+     * same trace) was never given a chance, even though it was
+     * simultaneously pending. Over thousands of these missed
+     * dispatches the module loader's own "no more real code to
+     * resume" bypass (is_unconditional_trap_stub(), iop_module_
+     * loader.c) kept re-matching stale bytes sitting at the shared
+     * default-vector address and re-entering its "module boot
+     * sequence complete" path every cycle, which is what actually
+     * produced the freeze/crawl pattern this round's own earlier
+     * diagnostic mis-attributed to a THREADMAN thread-context/TCB
+     * gap (213th finding) - a real, honest correction, not a
+     * fabricated new mechanism: the underlying data (THREADMAN's
+     * irq=16 Timer5 handler dispatching cleanly) was real, but the
+     * NEW wall immediately afterward has a different, now-identified
+     * cause. Fix: after a low-range irq's dispatch attempts both
+     * fail, also try the soft range if it is independently pending,
+     * before falling through to the default vector - same "give a
+     * real registered handler a chance first" precedent already
+     * applied to the low range above, just no longer gated on the
+     * low range being completely empty. */
     {
+        /* Round 340 (task #423 continuation, direct extension of the
+         * already-shipped Round 174 precedent): host-native tracing
+         * against the restored real BIOS/disc scratch driver (Round
+         * 335-339's investigation chain) caught a genuine, previously
+         * hidden priority-starvation gap, one level deeper than the
+         * low-range-vs-soft-range boundary Round 174 already fixed.
+         * The OLD code below only ever computed the SINGLE lowest
+         * pending+unmasked low-range bit and, if BOTH real dispatch
+         * mechanisms (RegisterIntrHandler table, then the older ExCB
+         * chain) failed to find a real handler for that one bit, gave
+         * up on the entire low range and fell straight through to the
+         * soft range / fixed-vector default - even when a DIFFERENT,
+         * higher-numbered low-range bit (lower real priority, but
+         * still pending+unmasked) already had a real, ready,
+         * previously-registered handler.
+         *
+         * Directly observed: CDVDMAN's own real IRQ2 handler
+         * (registered via a real RegisterIntrHandler(2,...) call
+         * during CDVDMAN's own one-time real init - see Round 338)
+         * sat ready and non-zero for the entire remainder of a
+         * 90-million-instruction fine-grained trace, while VBLANK_START
+         * (bit 0, real, always the numerically-lowest pending bit
+         * whenever a VBLANK is pending, which this project's own
+         * already-correct iop_check_vblank() raises unconditionally
+         * every real frame - see this file's own IOP_INTC_IRQ_VBLANK_
+         * START citation above) had NO real handler registered yet at
+         * this point in the trace and kept re-falling-through to the
+         * generic fixed-vector default stub every single pass, which
+         * (correctly, per its own Round 129/131 design) resumes
+         * execution at EPC without ever touching intc->istat - so the
+         * same VBLANK_START bit simply stays pending forever, and the
+         * OLD code's "only try the single lowest bit" logic meant
+         * IRQ2's already-ready handler was never even attempted,
+         * confirmed via direct instrumentation (0 dispatches to
+         * 0x00120d60 across the entire trace despite a real,
+         * correctly-set-up handler sitting there).
+         *
+         * Fix: mirror Round 174's own already-shipped, already-proven
+         * "give the next candidate its own independent chance rather
+         * than blocking on an earlier one's failure" design, applied
+         * one level deeper - try EVERY pending+unmasked low-range bit,
+         * in ascending (real-hardware priority) order, until one
+         * actually dispatches via either real mechanism, rather than
+         * stopping after the first (numerically lowest) bit's
+         * dispatch attempt fails. This changes nothing about real
+         * priority ORDER (a lower-numbered bit with a real handler
+         * still always wins over a higher-numbered one, exactly as
+         * before) - it only stops a real, ready handler for a
+         * higher-numbered bit from being starved forever by a lower-
+         * numbered bit that has no real handler at all yet. */
         uint32_t pending = intc->istat & intc->imask;
-        if (pending) {
+        while (pending) {
+            uint32_t lowest_bit = pending & (~pending + 1u); /* isolate lowest set bit */
             uint32_t irq = 0;
-            while (!(pending & 1u)) { pending >>= 1; irq++; }
+            uint32_t probe = lowest_bit;
+            while (!(probe & 1u)) { probe >>= 1; irq++; }
             if (iop_hle_intr_dispatch_interrupt(st, irq))
                 return;
-        } else {
-            /* Round 112: the real 0-31 hardware range takes priority
-             * (numerically lower irq numbers are serviced first on
-             * real MIPS/R3000A hardware - same convention already
-             * relied on above), so the soft 32-63 range is only
-             * consulted when nothing is pending in the hardware
-             * range. Nothing in this project raises into istat_hi
-             * yet (no DMA-completion hardware model exists - see
-             * iop_intc.h), so this is presently dead code in
-             * practice, exactly like iop_intc_raise_soft() itself -
-             * it exists so the dispatch SIDE of this mechanism is no
-             * longer artificially capped at 32 irqs, closing the gap
-             * the 152nd finding documented, ready for whichever
-             * future hardware model raises the first real soft irq. */
+            /* Round 168 (see core/hw/iop_excb.h's "ROUND 168 UPDATE"
+             * comment for the full citation trail): real module code
+             * can register a handler via the OLDER SysEnqIntRP/ExCB
+             * mechanism instead of the newer RegisterIntrHandler API
+             * just checked above - both are real, coexisting IOP
+             * kernel APIs. A live, host-native trace (208th finding)
+             * proved this project's own CD-ROM driver does exactly
+             * that (3 real SysEnqIntRP calls, zero RegisterIntrHandler
+             * calls, for the entire boot) - so this second fallback is
+             * not speculative, it fixes an observed, real gap. */
+            if (iop_excb_dispatch_interrupt(st, irq))
+                return;
+            pending &= ~lowest_bit; /* Round 340: this bit had no real handler either way - try the next-lowest pending bit instead of giving up on the whole low range */
+        }
+        /* Round 112 (soft-range consultation) + Round 174 (no longer
+         * gated on `!pending` - see this block's own doc comment
+         * above for the full citation trail): the real 0-31 hardware
+         * range still takes numeric priority when it actually
+         * resolves to a real handler (unchanged - the early `return`
+         * above still wins whenever the low range dispatches
+         * successfully), but a low-range irq that fails BOTH
+         * dispatch mechanisms no longer blocks the soft range from
+         * getting its own, independent chance at the same tick. */
+        {
             uint32_t soft_pending = intc->istat_hi & intc->imask_hi;
             if (soft_pending) {
                 uint32_t bit = 0;
                 while (!(soft_pending & 1u)) { soft_pending >>= 1; bit++; }
                 if (iop_hle_intr_dispatch_interrupt(st, 32u + bit))
+                    return;
+                if (iop_excb_dispatch_interrupt(st, 32u + bit)) /* Round 168 - see above */
                     return;
             }
         }
@@ -606,6 +824,42 @@ static int iop_step(void)
      * the full design. Checked in the same "intercept before fetch"
      * spot as the A0/B0/C0 table just above. */
     if (iop_hle_intr_try_handle(st, pc)) {
+        st->instructions_executed++;
+        return 0;
+    }
+
+    /* Round 389: real THREADMAN thread scheduler/semaphore HLE - see
+     * core/hw/iop_hle_thread.h. Same "intercept before fetch" spot as
+     * every other HLE table above; this one can also perform a full
+     * context switch (a plain register-file struct copy - see that
+     * file's own header comment) before returning, so st->pc may end
+     * up pointing at a completely different thread's own resumed
+     * code, not just the syscall's own $ra. */
+    if (iop_hle_thread_try_handle(st, pc)) {
+        st->instructions_executed++;
+        return 0;
+    }
+
+    /* Round 421 (task #160, docs/STATUS.md Round 420 root cause):
+     * real SYSMEM heap-management export gates (AllocSysMemory/
+     * FreeSysMemory/QueryMemSize/QueryMaxFreeMemSize/
+     * QueryTotalFreeMemSize) - see core/hw/iop_hle_heap.h. Same
+     * "intercept before fetch" spot as every other HLE table above;
+     * redirects real module heap calls to this project's own
+     * already-tested synthetic heap model (iop_heap.c) instead of
+     * real, un-coordinated SYSMEM ROM code whose heap arena collides
+     * with this project's own separate module-loading bump_alloc()
+     * arena. */
+    if (iop_hle_heap_try_handle(st, pc)) {
+        st->instructions_executed++;
+        return 0;
+    }
+
+    /* Round 168: real ExCB-chain dispatch return trampoline - see
+     * core/hw/iop_excb.h's "ROUND 168 UPDATE" comment. Same
+     * "intercept before fetch" spot as the RegisterIntrHandler
+     * trampoline just above. */
+    if (iop_excb_try_handle(st, pc)) {
         st->instructions_executed++;
         return 0;
     }
@@ -678,12 +932,16 @@ static int iop_step(void)
         st->cop0[12] = (st->cop0[12] & ~0x0Fu) | ((st->cop0[12] & 0x3Cu) >> 2); /* RFE-equivalent Status stack pop */
         st->exception_pending = 0;
         uint32_t epc = st->cop0[14];
-        if (exc_code == 0x08u || exc_code == 0x09u || exc_code == 0x0Du) {
-            /* Syscall / Breakpoint / Trap - synchronous, non-
+        if (exc_code == 0x08u || exc_code == 0x09u || exc_code == 0x0Du || exc_code == 0x0Au) {
+            /* Syscall / Breakpoint / Trap / Reserved Instruction
+             * (Round 175, task #340) - all synchronous, non-
              * restartable: skip past the triggering instruction and
              * return the same generic "unimplemented, default value"
              * result this project already uses for every other
-             * unclaimed BIOS/syscall call site. */
+             * unclaimed BIOS/syscall call site. Reserved Instruction
+             * joins this list for the identical reason Syscall/BP/
+             * Trap already do - re-running the same instruction would
+             * refire the identical exception forever. */
             st->gpr[2] = 0; /* $v0 = 0 */
             st->pc = epc + 4u;
             st->next_pc = epc + 8u;
@@ -754,6 +1012,76 @@ static int iop_step(void)
                      (unsigned long)pc);
             halt(msg);
             return 1;
+        }
+    }
+
+    /* Round 173 (task #338, 213th finding): a second, narrower class
+     * of "PC wandered into memory this project never populates" -
+     * distinct from Round 14's guard above (which only catches
+     * addresses genuinely OUTSIDE modeled RAM/ROM). This one catches
+     * addresses INSIDE modeled IOP RAM that are nonetheless never
+     * populated by this project's current boot model: real IOP RAM
+     * below 0x00100000 (iop_module_loader.c's own BUMP_BASE - every
+     * real module this project ever loads is placed at or above this
+     * address, by construction) is genuine, real "kernel reserved
+     * workspace" on actual hardware (low kernel data, including the
+     * real Thread Control Block table THREADMAN's own real scheduler
+     * uses for context switches - see ps2sdk's iop/system/threadman
+     * sources) - but since Round 172 made real module code (and,
+     * transitively, real IOP interrupt delivery) reachable for the
+     * first time, THREADMAN's real Timer5 scheduler-tick ISR
+     * (RegisterIntrHandler+EnableIntr(16), confirmed via host-native
+     * tracing this round - see docs/STATUS.md's 213th finding) now
+     * genuinely runs, correctly, thousands of times in a row (a real,
+     * positive validation of Round 172's fix) - until it eventually
+     * performs what is very likely a genuine thread-context load,
+     * reading this project's never-populated (all-zero) low-memory
+     * TCB-equivalent area as if it were valid data. This project has
+     * no real multi-threading/TCB model (out of scope for a single
+     * round - a substantial undertaking), so PC free-running through
+     * that all-zero region (executing each zero word as a literal
+     * NOP, exactly as Round 14's own header comment already
+     * describes for the analogous out-of-range case) is the honest,
+     * unavoidable result. Detecting the escape immediately - instead
+     * of letting it execute dozens of incidental NOPs before
+     * coincidentally hitting non-zero bytes and halting on a
+     * confusing, unrelated-looking "unimplemented opcode" message
+     * (exactly Round 14's own precedent for why an immediate,
+     * clearly-labeled halt beats silent wandering) - is a small,
+     * strictly-diagnostic-only change: it does not alter behavior on
+     * any currently-succeeding path (real module code always runs at
+     * pc >= BUMP_BASE; the handful of already-modeled low sentinel/
+     * trampoline addresses below BUMP_BASE are excluded below), only
+     * the clarity of an already-terminal failure. */
+    {
+        static uint64_t s_zero_run = 0;
+        /* Must compare the KSEG-masked PHYSICAL address, not the raw
+         * pc - real IOP code (like this same low-memory crawl) is
+         * routinely reached via KSEG0 (0x80000000-based) or KSEG1
+         * addresses, never bare physical ones. Same masking
+         * convention as this function's own pc_is_fetchable check
+         * immediately above (`phys = pc & 0x1FFFFFFFu`). */
+        uint32_t phys_pc = pc & 0x1FFFFFFFu;
+        int in_modeled_low_region =
+            (phys_pc < 0x00000100u) ||                    /* project HLE trap/trampoline sentinels (A0/B0/C0, 0xE4/0xE8/0xEC/0xF0 - see iop_hle_bios.h/iop_hle_intr.h/iop_excb.h) */
+            (phys_pc >= 0x0000E000u && phys_pc < 0x00010000u);  /* IOP_EXCB_ARRAY_ADDR / real "Kernel Memory" region - see iop_excb.h */
+        if (phys_pc < 0x00100000u && !in_modeled_low_region) {
+            uint32_t word = iop_mem_read32(st, pc);
+            if (word == 0u) {
+                s_zero_run++;
+                if (s_zero_run >= 8u) {
+                    static char msg2[160];
+                    snprintf(msg2, sizeof(msg2),
+                             "PC wandered into unpopulated low IOP kernel memory 0x%08lX (real thread-context gap - STATUS.md round 173)",
+                             (unsigned long)pc);
+                    halt(msg2);
+                    return 1;
+                }
+            } else {
+                s_zero_run = 0;
+            }
+        } else {
+            s_zero_run = 0;
         }
     }
 
@@ -1128,13 +1456,44 @@ static int iop_step(void)
             }
             break;
         default:
-        {
-            char buf[96];
-            snprintf(buf, sizeof(buf), "unimplemented SPECIAL funct 0x%02X (pc=0x%08X)",
-                     (unsigned int)funct, (unsigned int)this_pc);
-            halt(buf);
-            return 1;
-        }
+            /* Round 175 (task #340, 215th finding): real R3000A/MIPS
+             * I hardware does not halt when it decodes an undefined
+             * SPECIAL funct - it raises a genuine Reserved
+             * Instruction exception (ExcCode 0x0A, a universal, publicly
+             * documented base MIPS I architecture feature - System V
+             * ABI MIPS Processor Supplement / any public R3000A
+             * reference - not specific to any BIOS content). Delivery
+             * mirrors this file's own existing SYSCALL/TRAP exception
+             * paths exactly (same EPC/vector/Status-stack-push
+             * mechanism, already implemented and tested above) - the
+             * only difference is the ExcCode value and trigger
+             * condition. Reached via real, genuinely-executing module
+             * code after Round 174's interrupt-dispatch fix let
+             * execution reach further than ever before (pc=0x00117CC4,
+             * per docs/STATUS.md's 215th finding) - rather than assume
+             * what SHOULD be at this address (which would require
+             * transcribing/guessing at real BIOS content, against this
+             * project's standing clean-room convention), this project
+             * now does what real hardware actually does: delivers a
+             * real exception and lets whatever real handler chain is
+             * already installed (or this project's own already-
+             * existing default-vector fallback, extended below to
+             * treat ExcCode 0x0A as synchronous/non-restartable, same
+             * as SYSCALL/BREAK/Trap) decide what happens next. This
+             * replaces an immediate, uninformative halt with the
+             * architecturally-correct real behavior, and may reveal
+             * further genuine progress or a cleaner subsequent wall
+             * instead of guessing opcode-by-opcode. */
+            st->cop0[13] = (st->cop0[13] & ~0x7Fu) | 0x28u; /* Cause.ExcCode = 10 (Reserved Instruction) */
+            st->cop0[14] = this_pc; /* EPC */
+            {
+                uint32_t vector = (st->cop0[12] & 0x400000u) ? 0xBFC00180u : 0x80000080u; /* Status.BEV */
+                st->pc = vector;
+                st->next_pc = vector + 4;
+            }
+            st->cop0[12] = (st->cop0[12] & ~0x3Fu) | ((st->cop0[12] & 0x0Fu) << 2); /* Status stack push */
+            st->exception_pending = 1; /* task #156 - see iop_core.h's field comment */
+            break;
         }
         break;
 
@@ -1145,13 +1504,20 @@ static int iop_step(void)
         case 0x10: /* BLTZAL */ LINK(31); if ((int32_t)GPR(rs) < 0)  BRANCH_TO(this_pc + 4 + (imm << 2)); break;
         case 0x11: /* BGEZAL */ LINK(31); if ((int32_t)GPR(rs) >= 0) BRANCH_TO(this_pc + 4 + (imm << 2)); break;
         default:
-        {
-            char buf[96];
-            snprintf(buf, sizeof(buf), "unimplemented REGIMM opcode 0x%02X (pc=0x%08X)",
-                     (unsigned int)rt, (unsigned int)this_pc);
-            halt(buf);
-            return 1;
-        }
+            /* Round 175 (task #340, 215th finding) - same real
+             * Reserved Instruction exception (ExcCode 0x0A) as the
+             * SPECIAL default case above; see that case's own comment
+             * for the full citation trail. */
+            st->cop0[13] = (st->cop0[13] & ~0x7Fu) | 0x28u; /* Cause.ExcCode = 10 (Reserved Instruction) */
+            st->cop0[14] = this_pc; /* EPC */
+            {
+                uint32_t vector = (st->cop0[12] & 0x400000u) ? 0xBFC00180u : 0x80000080u; /* Status.BEV */
+                st->pc = vector;
+                st->next_pc = vector + 4;
+            }
+            st->cop0[12] = (st->cop0[12] & ~0x3Fu) | ((st->cop0[12] & 0x0Fu) << 2); /* Status stack push */
+            st->exception_pending = 1; /* task #156 - see iop_core.h's field comment */
+            break;
         }
         break;
 
@@ -1229,23 +1595,45 @@ static int iop_step(void)
                 st->exception_pending = 0;
                 break;
             default:
-            {
-                char buf[96];
-                snprintf(buf, sizeof(buf), "unimplemented COP0 CO-format op (funct=0x%02X, pc=0x%08X)",
-                         (unsigned int)funct, (unsigned int)this_pc);
-                halt(buf);
-                return 1;
-            }
+                /* Round 175 (task #340, 215th finding) - same real
+                 * Reserved Instruction exception (ExcCode 0x0A) as
+                 * the SPECIAL/REGIMM/primary-opcode default cases
+                 * elsewhere in this function; see the SPECIAL default
+                 * case's own comment for the full citation trail.
+                 * Only RFE (funct=0x10) is real R3000A CO-format
+                 * architecture (no TLB on the IOP, unlike the EE) -
+                 * any other funct value here is genuinely undefined
+                 * encoding space, the same class of gap as an
+                 * unimplemented SPECIAL/REGIMM funct. */
+                st->cop0[13] = (st->cop0[13] & ~0x7Fu) | 0x28u; /* Cause.ExcCode = 10 (Reserved Instruction) */
+                st->cop0[14] = this_pc; /* EPC */
+                {
+                    uint32_t vector = (st->cop0[12] & 0x400000u) ? 0xBFC00180u : 0x80000080u; /* Status.BEV */
+                    st->pc = vector;
+                    st->next_pc = vector + 4;
+                }
+                st->cop0[12] = (st->cop0[12] & ~0x3Fu) | ((st->cop0[12] & 0x0Fu) << 2); /* Status stack push */
+                st->exception_pending = 1; /* task #156 - see iop_core.h's field comment */
+                break;
             }
             break;
         default:
-        {
-            char buf[96];
-            snprintf(buf, sizeof(buf), "unimplemented COP0 sub-opcode (rs=0x%02X, pc=0x%08X)",
-                     (unsigned int)rs, (unsigned int)this_pc);
-            halt(buf);
-            return 1;
-        }
+            /* Round 175 (task #340, 215th finding) - same real
+             * Reserved Instruction exception; see the SPECIAL default
+             * case's own comment for the full citation trail. Real
+             * COP0 only defines rs=0x00 (MFC0), 0x04 (MTC0), and
+             * 0x10 (CO-format) on the R3000A - any other rs value is
+             * genuinely undefined encoding space. */
+            st->cop0[13] = (st->cop0[13] & ~0x7Fu) | 0x28u; /* Cause.ExcCode = 10 (Reserved Instruction) */
+            st->cop0[14] = this_pc; /* EPC */
+            {
+                uint32_t vector = (st->cop0[12] & 0x400000u) ? 0xBFC00180u : 0x80000080u; /* Status.BEV */
+                st->pc = vector;
+                st->next_pc = vector + 4;
+            }
+            st->cop0[12] = (st->cop0[12] & ~0x3Fu) | ((st->cop0[12] & 0x0Fu) << 2); /* Status stack push */
+            st->exception_pending = 1; /* task #156 - see iop_core.h's field comment */
+            break;
         }
         break;
 
@@ -1301,13 +1689,20 @@ static int iop_step(void)
     case 0x2F: /* CACHE */ break;
 
     default:
-    {
-        char buf[96];
-        snprintf(buf, sizeof(buf), "unimplemented primary opcode 0x%02X (pc=0x%08X)",
-                 (unsigned int)op, (unsigned int)this_pc);
-        halt(buf);
-        return 1;
-    }
+        /* Round 175 (task #340, 215th finding) - same real Reserved
+         * Instruction exception (ExcCode 0x0A) as the SPECIAL/REGIMM
+         * default cases above; see the SPECIAL default case's own
+         * comment for the full citation trail. */
+        st->cop0[13] = (st->cop0[13] & ~0x7Fu) | 0x28u; /* Cause.ExcCode = 10 (Reserved Instruction) */
+        st->cop0[14] = this_pc; /* EPC */
+        {
+            uint32_t vector = (st->cop0[12] & 0x400000u) ? 0xBFC00180u : 0x80000080u; /* Status.BEV */
+            st->pc = vector;
+            st->next_pc = vector + 4;
+        }
+        st->cop0[12] = (st->cop0[12] & ~0x3Fu) | ((st->cop0[12] & 0x0Fu) << 2); /* Status stack push */
+        st->exception_pending = 1; /* task #156 - see iop_core.h's field comment */
+        break;
     }
 
 #undef GPR
@@ -1348,6 +1743,25 @@ int iop_core_step(void)
      * extensive citation trail for the full real-hardware grounding
      * and this project's honestly-scoped-down subset of it. */
     iop_timers_tick();
+
+    /* Round 389: real THREADMAN scheduler tick - wakes any thread
+     * whose DelayThread() deadline has passed and, if a newly-woken
+     * thread now outranks whatever is currently running, performs a
+     * real pre-emptive context switch. Same unconditional-even-while-
+     * idle rationale as iop_timers_tick() above (a real periodic
+     * timer tick is exactly the mechanism real hardware's own
+     * scheduler uses for this). No-op until the first real thread
+     * primitive call has run (see iop_hle_thread.c's ensure_root_
+     * thread()). */
+    iop_hle_thread_tick(&g_iop);
+
+    /* Round 153 (task #307): service the real async I/O queue once
+     * per scheduler tick, same unconditional-even-while-idle
+     * rationale as iop_timers_tick() above - a queued completion
+     * (e.g. the CD-ROM boot-unblock request) must still fire even
+     * while the CPU itself is parked in the real B0h/TestEvent poll
+     * loop, exactly like a real timer-tick interrupt would. */
+    iop_asyncio_service();
 
     /* Task #216 continuation: real IOP VBLANK, same unconditional-
      * even-while-idle rationale as iop_timers_tick() above - see

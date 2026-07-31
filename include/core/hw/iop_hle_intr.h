@@ -235,6 +235,18 @@ const iop_hle_intr_stats_t *iop_hle_intr_get_stats(void);
 uint32_t iop_hle_intr_get_intr_handler(int irq);
 uint32_t iop_hle_intr_get_exc_handler(int exc);
 
+/* Round 347 (IOP RPC re-entry architecture): returns the number of
+ * times the real, registered handler for `irq` has genuinely
+ * finished running (hit the real return trampoline) since boot. A
+ * simple, generic, poll-and-diff counter - see iop_hle_intr.c's own
+ * handler_completion_count field comment for the full design
+ * rationale (this is the one hook ee_core.c's ee_check_cdvd_ncmd_
+ * pending() needs to know "the real CDVDMAN interrupt handler this
+ * project already dispatches via iop_check_hw_interrupt() has now
+ * actually finished", without iop_hle_intr.c needing any CDVD-
+ * specific knowledge at all). */
+uint32_t iop_hle_intr_get_handler_completion_count(int irq);
+
 /* Import matching helper used by iop_module_loader.c's
  * link_imports_one(). Real IOP IRX import tables identify a callee
  * by (LIBRARY name, ordinal) - NOT by a per-function name string;

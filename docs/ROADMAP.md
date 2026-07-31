@@ -5639,3 +5639,25 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
   unexplored - disassemble it to find what real condition it's now
   waiting on, continuing the push toward the splash screen from this
   new, further-forward position.
+- **Round 431** (investigation, docs-only): characterized the new
+  wall Round 430's fix exposed. The new resting loop
+  (0x000820D0-0x000820E8) is inside a generic "wait for one caller-
+  specified SIF_SMFLAG bit, then consume/clear it" primitive
+  (0x000820C0-0x000820F8) - real, standard one-shot event-wait idiom,
+  not a bug itself. It's called twice for the SAME bit
+  (SIF_STAT_BOOTEND, 0x40000): once early (already satisfied,
+  consumed immediately), once ~29M instructions later (after the
+  OSOPEN/OSCLOCK/OSBROWS/OSFONTM/OSFONTS resource-load sequence and a
+  real GS/display one-time-init routine at 0x00083B88+) - and nothing
+  re-asserts BOOTEND between those two calls, so the second wait spins
+  forever. No fix implemented: unlike SIFINIT/CMDINIT/BOOTEND's
+  original one-time real semantics (a genuine "IOP boot done" signal),
+  there's no current evidence for what real IOP-side event should
+  re-trigger this specific bit a second time outside the already-
+  modeled _LoadExecPS2-reset case (which doesn't apply here) -
+  implementing an unconditional re-set would repeat the Round 279/280
+  mistake (unevidenced speculative fix that actively harmed progress).
+- **Next**: find real evidence for what the second BOOTEND-style wait
+  represents - either real ps2sdk/BIOS documentation of a second real
+  handshake, or forward-disassembling 0x00084218+ far enough to
+  identify the specific real completion it's gating.

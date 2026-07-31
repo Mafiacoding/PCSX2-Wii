@@ -5661,3 +5661,60 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
   represents - either real ps2sdk/BIOS documentation of a second real
   handshake, or forward-disassembling 0x00084218+ far enough to
   identify the specific real completion it's gating.
+
+## Round 432 (investigation, docs-only): user-provided SIF/RPC docs cross-referenced against real eesync.c/loadcore.h - narrows but does not resolve Round 431's open question
+
+- User-provided real SIF register documentation confirms this
+  project's SIF_SMFLAG model is correct (bit meanings, write-1-to-
+  clear semantics, 0x40000/BOOTEND "sent by EESYNC").
+- Read real eesync.c (uploads): EESYNC's start() does NOT send
+  BOOTEND directly - it registers a LOADCORE callback
+  (loadcore_call20_registerFunc(SyncEE, 2, NULL)) that sends it later.
+- Read real loadcore.h (uploads): its own per-function caller
+  cross-reference shows registerFunc is called by module 28 (EESYNC)
+  ONLY, out of the whole real static-boot-list archive - real
+  negative evidence against a "generic recurring per-dynamic-module-
+  load hook" interpretation of the callback's "type 2" parameter.
+- Ruled out this project's existing _LoadExecPS2 re-signal path
+  (g_ee_loadexecps2_seen, Round 251) as the explanation for the
+  second wait: that path only fires post-game-launch syscall, but the
+  second wait happens during early resource loading, well before any
+  ELF-launch decision - a timing mismatch, confirmed against Round
+  431's own trace.
+- Still no real evidence for what triggers the second BOOTEND wait.
+  No fix implemented (same Round 279/280 discipline as Round 431).
+- **Next**: find a real loadcore.c implementation (not just the
+  header) or another real module's use of an equivalent callback
+  mechanism to pin down registerFunc's actual invocation timing; or
+  forward-disassemble past 0x00084218/0x00083B88 far enough to
+  confirm/refute whether the second wait call site is really checking
+  the same BOOTEND semantic this project has assumed.
+
+## Round 432 continued (same round): real ps2sdk loadcore.c CONCLUSIVELY proves BOOTEND cannot legitimately re-fire without a full reboot - reframes the real bug
+
+- Found real ps2sdk loadcore.c (ps2sdk-master.zip, already partially
+  cited Round 375) implements the exact registerFunc mechanism as
+  `AddRebootNotifyHandler(func, priority, stat)`.
+- Its real dispatch logic: callbacks registered during the static
+  boot-time module-load loop are queued and drained EXACTLY ONCE,
+  right when the loop exits (module list exhausted), grouped by
+  priority (0-3), in one single pass. Callbacks registered AFTER
+  that loop has already exited run immediately/synchronously instead.
+- EESYNC and THREADMAN both register priority 2 - both fire together
+  in that single one-shot drain. No code path re-invokes a priority-2
+  callback a second time without a full reboot (module list re-run
+  from scratch).
+- **Conclusive**: SIF_STAT_BOOTEND cannot legitimately re-fire
+  organically. A "just re-signal it" fix would be actively wrong per
+  real source, not just unevidenced - correctly NOT implemented.
+- **Reframed real bug**: since real firmware never re-enters this
+  wait, this project's own trace showing the EE calling the same
+  wait-then-consume primitive twice on BOOTEND means either (a) the
+  second call site's real target was misread (needs re-verification,
+  not yet done), or (b) this project's own control flow wrongly
+  re-enters a path real code wouldn't - an earlier branch/return bug,
+  not a missing-signal bug.
+- **Next**: re-verify task #187 (is the second wait really BOOTEND?)
+  with fresh scrutiny; if confirmed, trace backward from the second
+  wait's own caller/return address to find the real upstream branch
+  divergence, rather than looking for any signal to add.

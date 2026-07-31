@@ -5760,3 +5760,34 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
   both kernel call sites to identify the real interrupt cause/
   registration context, directly continuing this project's own
   long-running AddIntcHandler/VBLANK dispatch thread.
+
+## Round 432 continued (same round): DECISIVE - 0x80001460 is a real kernel interrupt-dispatch trampoline; OSDSYS's 0x00082008 is a genuine registered interrupt handler firing twice by design - not a bug. Closes task #186.
+
+- Manually decoded raw instruction words at both kernel call sites
+  against known-real MIPS/EE encodings (not the project's partial
+  disassembler): `mtc0 $v0,$14` (write EPC) / `sync` / `jal
+  0x80001460` / [nop] / **DI** (0x42000039) / **ERET** (0x42000018) -
+  a textbook real kernel exception-return epilogue.
+- $ra=0x80005184 at OSDSYS's 0x00082008 entry is exactly
+  `0x8000517C+8` (the instruction after that `jal`) - proving
+  0x80001460 JUMPED into 0x00082008 without returning normally,
+  leaving $ra pointing back at the kernel's own DI+ERET code. This is
+  the real shape of dispatching to a *registered* interrupt handler,
+  not a normal subroutine call.
+- **Conclusion**: 0x80001460 is this project's own already-documented
+  real AddIntcHandler dispatch mechanism. 0x00082008 genuinely is a
+  registered interrupt handler (plausibly VBLANK). Firing twice is
+  real, correct, expected behavior - retires the "re-entry bug"
+  framing entirely.
+- **Sharpened next question**: does real OSDSYS's handler body
+  distinguish first-call-full-init (with the one-time BOOTEND wait)
+  from subsequent-call-fast-path via a guard this project's
+  disassembly hasn't found yet, or does this project deliver the
+  interrupt at the wrong cadence/cause so the second call wrongly
+  retraces the init path? No fix implemented - still two live
+  hypotheses, not yet distinguished.
+- **Next**: examine 0x00082008-0x0008209C more closely for a missed
+  guard/flag check, and/or confirm the real interrupt cause number
+  and compare this project's delivery cadence against real hardware -
+  continuing the project's own pre-existing VBLANK/AddIntcHandler
+  thread rather than opening a new one.

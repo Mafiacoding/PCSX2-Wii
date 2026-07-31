@@ -20112,3 +20112,31 @@ Directly continuing task #187 (re-verify the second wait call site with fresh sc
 **No fix implemented.** This round's own new evidence (real, distinct kernel call sites, real shared trampoline, real prior project history strongly suggesting a registered-handler pattern) makes clear that ANY fix attempted without first confirming the real cause/registration context would risk exactly the same category of mistake Round 279/280 already proved costly.
 
 **Verification**: docs-only round, no source changes - confirmed via `git diff --stat`. All instrumentation lives in `/tmp/driver432_*.c` scratch drivers, never committed, pushed, or rsynced. No BIOS ROM bytes or disc image data touched the tracked repo or outputs mirror at any point.
+
+## Round 432 continued (same round): decisive finding - 0x80001460 is the real EE kernel interrupt-handler dispatch trampoline; OSDSYS's 0x00082008 routine is a genuine registered interrupt handler firing twice by design, not a re-entry bug - closes task #186, sharpens the final open question
+
+Directly continuing task #186 (disassemble the shared trampoline at `0x80001460` and both kernel call sites). Dumped and manually decoded the raw instruction words at both locations against real, well-documented MIPS/EE COP0 encodings (not the project's own partial disassembler, which only labels these generically as "cop0" - decoded by hand against known-real encodings to avoid trusting an admittedly incomplete decoder for a load-bearing conclusion).
+
+**Both kernel call sites (`0x80005174`-`0x80005194`, `0x8000579C`-`0x800057B4`) share the identical real pattern, decisively identified:**
+```
+mtc0  $v0, $14      ; COP0 register 14 = EPC (Exception Program Counter, real/standard)
+sync                 ; raw 0x0000040F = real MIPS SYNC (standard post-mtc0 idiom)
+jal   0x80001460     ; call the shared trampoline, $ra set to point HERE+8
+nop
+<ra>: di             ; raw 0x42000039 = real EE COP0 extension "DI" (Disable Interrupts)
+      eret            ; raw 0x42000018 = real MIPS "ERET" (Exception RETurn)
+      ld $ra, ...(restore saved $ra)
+      jr $ra
+```
+
+This is a textbook, unambiguous real kernel exception/interrupt-return epilogue: set EPC, sync, call a register-restore trampoline, then disable interrupts and ERET back to the interrupted program. `EI`/`DI`/`ERET`/EPC are standard, well-documented EE/MIPS architecture facts (not speculative reads) - `DI` = COP0 funct `0x39`, `ERET` = COP0 Co-bit-set funct `0x18`, both real EE-side encodings independent of anything project-specific.
+
+**The decisive part: this project's own live trace shows `$ra=0x80005184` (i.e. exactly `0x8000517C+8`, the address right after `jal 0x80001460`) at the moment PC reaches OSDSYS's `0x00082008` - meaning the LAST real `jal` executed before reaching `0x00082008` was that exact trampoline call, and `0x80001460` did NOT return normally to its own caller. Instead, it jumped directly into OSDSYS's `0x00082008`, while leaving `$ra` untouched (still pointing at the kernel's own DI+ERET epilogue).** This is precisely the real, standard shape of a kernel interrupt dispatcher invoking a *registered handler* via jump-not-call, so that when the handler itself finishes and does `jr $ra`, control returns cleanly to the kernel's own exception-return code - not back into the dispatcher.
+
+**Conclusion, now decisive rather than speculative**: `0x80001460` is (or is functionally equivalent to) this project's own already-and-extensively-documented real `AddIntcHandler` dispatch mechanism (the `Cause`-indexed table/`0x80001798`-family machinery cited across dozens of earlier findings in this file). `0x00082008` genuinely is a real, correctly-registered interrupt handler - most plausibly VBLANK, matching this project's own long-running VBLANK investigation (Rounds 298, 427, 428). **Being invoked twice is therefore real, expected, correct interrupt-handler behavior - not a bug, not a wrong re-entry, and not something a "guard flag" fix should prevent at the dispatch level.** This fully retires the last remaining "is this a re-entry bug" framing from Round 431/432.
+
+**Final, sharpened open question for next round**: since the handler running twice is legitimate, the real remaining mystery is narrower: does real OSDSYS's own handler body distinguish "first invocation: full init (including the real, one-time BOOTEND wait)" from "subsequent invocations: lightweight per-interrupt work that should NOT re-check BOOTEND at all" via some flag/counter this project's disassembly hasn't yet located (the dump from `0x00082008` through the clear-loop and into `0x00082220` shows no such branch in the portion examined so far) - or does this project's own interrupt delivery fire this handler at the wrong cadence/cause relative to real hardware (e.g. delivering it as a duplicate "first-time" event rather than a genuine periodic one), making the SECOND call incorrectly retrace the one-time-init path when real hardware's second call would not. Answering this requires either (a) locating a real "already initialized" guard check this project's disassembly has missed (would need to examine the code between `0x00082008` and `0x0008209C` more carefully, and check whether any of the values used in the sq-clear-loop's bounds - loaded via `lui/addiu` at `0x82008`-`0x82014` - are themselves state that changes between the two calls), or (b) confirming the real interrupt cause number and comparing this project's own delivery cadence/masking for that cause against real hardware expectations (continuing the project's own pre-existing VBLANK/AddIntcHandler thread).
+
+**No fix implemented.** This is architecture-level understanding, not yet a located bug - implementing anything now would still be guessing at which of the two explanations above is correct.
+
+**Verification**: docs-only round, no source changes - confirmed via `git diff --stat`. All instrumentation in `/tmp/driver432_*.c` scratch, never committed. No BIOS ROM bytes or disc image data touched the tracked repo or outputs mirror.

@@ -5819,3 +5819,27 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
 - **Next**: disassemble those sub-calls looking for a state-check/
   early-return pattern consistent with a real "already initialized,
   skip full init" guard.
+
+## Round 434 (task #194): corrects the "missing guard" premise - both handler invocations are internally identical; RemoveIntcHandler is never called; narrows the search to the kernel's own registration/count semantics
+
+- Found a branch that looked like the hoped-for guard (slti $s2,2 /
+  bne -> skip straight to the wait call) but live-verified $s2=0 on
+  BOTH invocations - identical path taken both times, not a guard
+  that differs.
+- Correction: the resource-table loop this branch can skip is NOT
+  the same loop that loads OSOPEN/OSCLOCK/OSBROWS/OSFONTM/OSFONTS
+  (Round 430) - neither real invocation in this trace ever enters it.
+  Future rounds should not assume that association.
+- Scanned all 1035 real syscalls executed in the ~28M-instruction gap
+  between the two invocations for AddIntcHandler(16)/
+  RemoveIntcHandler(17) - zero hits. The handler never deregisters
+  itself.
+- **Narrowed conclusion**: since the handler's own code is identical
+  both times and never deregisters, the real answer must be in the
+  EE kernel's own per-cause registration/count semantics (the
+  0x80001798-family table Round 432 cited), not in OSDSYS's own code.
+- No fix implemented.
+- **Next**: investigate whether real AddIntcHandler's registration
+  lets a handler's own return value signal "don't call me again", or
+  whether the real count field is meant to be decremented by some
+  other real mechanism this project hasn't modeled.

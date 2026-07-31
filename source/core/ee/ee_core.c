@@ -5429,19 +5429,113 @@ static int ee_step(void)
                                 ee_fio_rom_fd_close(close_fd);
                                 ee_mem_write32(st, call_recvbuf + 0u, 0u); /* real result: 0 = success */
                                 ee_arm_rpc_call_pending(call_cd);
+                            } else if (call_sid == SIF_SID_FILEIO && rpc_number == 4u && call_recvbuf != 0u) {
+                                /* Round 430 (real, evidenced fix): real
+                                 * FIO_F_LSEEK (fno=4, same cited
+                                 * fileio-common.h enum as OPEN/READ/
+                                 * CLOSE above). Real ee/kernel/src/
+                                 * fileio.c's fioLseek() sends `struct
+                                 * fio_lseek_arg {int fd; int offset;
+                                 * int whence;}` - same three-field-at
+                                 * -offsets-0/4/8 payload shape this
+                                 * project's own FIO_F_READ handler
+                                 * above already uses for its own
+                                 * three-field {fd,ptr,size} arg, and
+                                 * returns the real resulting file
+                                 * position as a single int (same
+                                 * one-int-recvbuf shape FIO_F_OPEN/
+                                 * CLOSE already use).
+                                 *
+                                 * Root cause this fixes (Round 430,
+                                 * live-traced): before this fix, LSEEK
+                                 * fell into the generic catch-all
+                                 * below, which always wrote a neutral
+                                 * 0 regardless of real whence/offset.
+                                 * Real OSDSYS callers use the
+                                 * classic real "SEEK_END then
+                                 * SEEK_SET" idiom to discover a real
+                                 * rom0: file's size before reading it
+                                 * (live-captured for real
+                                 * "rom0:OSOPEN": OPEN, LSEEK, LSEEK,
+                                 * READ, CLOSE, in that order) - with
+                                 * SEEK_END always answering 0, the
+                                 * real caller's own subsequent
+                                 * fioRead() request size (computed
+                                 * from that real SEEK_END result)
+                                 * collapsed to 0 bytes, leaving the
+                                 * real caller's destination buffer as
+                                 * untouched stack memory. That is the
+                                 * real, live-confirmed origin of
+                                 * Round 351/352's NULL-pointer TLB
+                                 * fault (a strchr()-style scan over
+                                 * that never-populated stack buffer
+                                 * genuinely finds no 0x0A) - not a
+                                 * missing newline in the real ROM
+                                 * content itself (this round's own
+                                 * romdir_lookup()-based dump of real
+                                 * rom0:OSOPEN content is "100\nMOPEN\n
+                                 * 00500000\n", three real newlines
+                                 * present).
+                                 *
+                                 * whence: 0=SEEK_SET (offset is
+                                 * absolute), 1=SEEK_CUR (relative to
+                                 * fdrec->cursor), 2=SEEK_END (relative
+                                 * to fdrec->rom_size) - standard,
+                                 * universal lseek() whence values,
+                                 * clamped to [0, rom_size] (an honest
+                                 * bound - this project's own fdrec
+                                 * table has no real concept of
+                                 * seeking past real EOF any more than
+                                 * FIO_F_READ above fabricates bytes
+                                 * past it). An unrecognized/unopened
+                                 * fd is a genuine gap, not silently
+                                 * papered over - falls through to the
+                                 * neutral 0 catch-all below exactly
+                                 * like every other not-yet-modeled
+                                 * FILEIO fno. */
+                                int32_t seek_fd = 0;
+                                int32_t seek_offset = 0;
+                                int32_t seek_whence = 0;
+                                if (i >= 1u) {
+                                    uint32_t seek_payload_base = dmat_ptr + (i - 1u) * 16u;
+                                    uint32_t seek_payload_src = ee_mem_read32(st, seek_payload_base + 0u);
+                                    if (seek_payload_src != 0u) {
+                                        seek_fd = (int32_t)ee_mem_read32(st, seek_payload_src + 0u);
+                                        seek_offset = (int32_t)ee_mem_read32(st, seek_payload_src + 4u);
+                                        seek_whence = (int32_t)ee_mem_read32(st, seek_payload_src + 8u);
+                                    }
+                                }
+                                ee_fio_rom_fd_t *seek_fdrec = ee_fio_rom_fd_get(seek_fd);
+                                if (seek_fdrec) {
+                                    int64_t base;
+                                    if (seek_whence == 1) base = (int64_t)seek_fdrec->cursor;
+                                    else if (seek_whence == 2) base = (int64_t)seek_fdrec->rom_size;
+                                    else base = 0; /* SEEK_SET (whence==0) and any other value - absolute */
+                                    int64_t new_pos = base + (int64_t)seek_offset;
+                                    if (new_pos < 0) new_pos = 0;
+                                    if (new_pos > (int64_t)seek_fdrec->rom_size) new_pos = (int64_t)seek_fdrec->rom_size;
+                                    seek_fdrec->cursor = (uint32_t)new_pos;
+                                    ee_mem_write32(st, call_recvbuf + 0u, (uint32_t)new_pos); /* real resulting file position */
+                                } else {
+                                    ee_mem_write32(st, call_recvbuf + 0u, 0u); /* unknown fd - honest neutral fallback, same as other not-yet-modeled fnos */
+                                }
+                                ee_arm_rpc_call_pending(call_cd);
                             } else if (call_sid == SIF_SID_FILEIO) {
                                 /* Round 303 generalized catch-all for
                                  * any other real FILEIO fno this
                                  * project's trace has not yet
                                  * individually observed/cited (e.g.
-                                 * FIO_F_LSEEK/IOCTL/etc. - Round 346
-                                 * added dedicated real handling for
+                                 * IOCTL/etc. - Round 346 added
+                                 * dedicated real handling for
                                  * OPEN/READ/CLOSE specifically, per
                                  * Round 345's own captured real
                                  * evidence of what OSDSYS actually
-                                 * calls) - neutral 0 ("success"/"no-op")
-                                 * placeholder, matching this project's
-                                 * own established fallback convention
+                                 * calls; Round 430 added dedicated
+                                 * real handling for LSEEK, see its own
+                                 * comment above) - neutral 0
+                                 * ("success"/"no-op") placeholder,
+                                 * matching this project's own
+                                 * established fallback convention
                                  * (see SIF_SID_SPU2DRV's and
                                  * SIF_SID_CDVD_NCMD's own generalized
                                  * catch-alls above) until a real

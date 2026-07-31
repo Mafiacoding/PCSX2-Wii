@@ -5609,3 +5609,33 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
   determine whether the Round 352 NULL-buffer-content thread was ever
   resolved/superseded, before attempting any further fix - avoid
   re-deriving or re-fixing already-settled ground.
+- **Round 430** (real fix, shipped): root-caused and fixed the Round
+  351/352 NULL-pointer TLB fault. Live-traced the real cause: real
+  OSDSYS callers use the standard `lseek(SEEK_END)` -> `lseek(SEEK_SET)`
+  -> `read()` idiom to size-then-read real `rom0:` resource files
+  (OSOPEN/OSCLOCK/OSBROWS/OSFONTM/OSFONTS); `FIO_F_LSEEK` was
+  previously unimplemented (fell into a neutral-0 catch-all), so the
+  real caller's `SEEK_END` size query always answered 0, collapsing
+  the subsequent read to 0 bytes and leaving the destination stack
+  buffer genuinely empty - `strchr()` correctly found no newline in
+  it. NOT a missing newline in the real BIOS content itself (that
+  hypothesis is now fully retired - the real ROMDIR content, read
+  correctly, contains real newlines). Fix: implemented real
+  `fioLseek()` semantics (SEEK_SET/CUR/END, real cursor update, real
+  returned position) in `ee_core.c`. Verified end-to-end: the fault
+  no longer occurs across a 20-call live trace spanning 5 real
+  resource-descriptor reads; the EE now genuinely executes OSDSYS's
+  own loaded ELF code (0x00200000+) instead of parking statically at
+  the old baseline for the full 20M-cycle run, settling into a new
+  stable resting loop (0x000820D0-0x000820E8) after the resource-load
+  sequence completes. Full regression suite (128/128) and Wii
+  cross-build both clean.
+- **Round 430 note**: mid-round sandbox reset (recurring, documented
+  environmental limitation) wiped the in-progress working clone;
+  recovered from the outputs mirror + this session's own preserved
+  reasoning, re-verified byte-for-byte identical to the pre-reset
+  result before committing.
+- **Next**: the new resting loop (0x000820D0-0x000820E8) is
+  unexplored - disassemble it to find what real condition it's now
+  waiting on, continuing the push toward the splash screen from this
+  new, further-forward position.

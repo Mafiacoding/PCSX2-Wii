@@ -5863,3 +5863,36 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
 - Sandbox reset mid-round (recovered cleanly via the established
   procedure - outputs mirror was already fully current, no data
   lost).
+
+## Round 436 (task #196): corrects Round 435's "task #247 still open" mistake (resolved Round 91); traces $s2 to its root with no divergence found; recommends live-hardware/live-PCSX2 comparison as the next tool
+
+- Correction: task #247's original 0x0000F230 busy-wait was resolved
+  Round 91 (SIF_STAT_SIFINIT fix, still present in
+  iop_module_loader.c) - retracting Round 435's "resume task #247"
+  recommendation. 0x8000C0B8 is shared, already-working early boot
+  init code, not a live shared blocker.
+- Found 0x00083070 is a real "run-once" init guard (flag at
+  0x0008C228, tail-jumps to 0x00082FD0 the first time) - looked
+  promising but is unrelated to $s2's value.
+- Traced $s2 to its root: 0x0008222C is `daddu $s2,$a0,$zero`
+  (moves the function's own argument into $s2); the argument is
+  *(0x0008BE00), the same global Round 432/433 already measured as
+  0 on both invocations. Confirms, doesn't newly explain, the
+  identical branching.
+- **Honest assessment**: 6 rounds (431-436) of static/live disassembly
+  have proven every traceable input to the handler's branching is
+  byte-identical between the two real invocations, while also proving
+  BOOTEND can't legitimately be true both times - a real contradiction
+  this project's current toolset can't resolve further without new
+  information (most likely the real per-cause interrupt registration/
+  count table's actual live structure, never directly observed, only
+  inferred from citations with uncertain/varying stride across this
+  file's own history).
+- **Recommendation**: live-hardware or live-PCSX2 comparison (this
+  project's own established fallback when static disassembly
+  plateaus) - specifically, directly observe on real hardware/PCSX2
+  whether 0x00082008-equivalent code is genuinely invoked twice with
+  BOOTEND waited on both times, to confirm or refute this project's
+  entire premise from an independent source.
+- No fix implemented. Sandbox reset again this round - recovered
+  cleanly, no data lost (outputs mirror was fully current).

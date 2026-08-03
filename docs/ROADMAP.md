@@ -5843,3 +5843,23 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
   lets a handler's own return value signal "don't call me again", or
   whether the real count field is meant to be decremented by some
   other real mechanism this project hasn't modeled.
+
+## Round 435 (task #195): converges with this project's own much older task #247 (Status.EXL-clearing) investigation - recommend resuming that pre-existing thread
+
+- Traced one level up from Round 432's two kernel call sites: call1's
+  $ra=0x800010B8 leads to real COP0 Status/Config restoration code
+  (0x80001040-0x800010B8) that calls into 0x8000C0B8.
+- 0x8000C0B8 is not new - it's the exact address this project's own
+  much older task #247 (Round 87, Status.EXL-never-clears) already
+  named as its own concrete next step ("trace forward from
+  0x8000C0B8...").
+- Strong convergent evidence the BOOTEND-wait thread (Rounds 431-435)
+  and task #247 are the same real underlying kernel mechanism.
+- **Recommendation**: resume task #247's own pre-existing, already-
+  scoped next steps (trace forward from 0x8000C0B8; separately check
+  what writes the real busy-wait target 0x0000F230) rather than
+  opening a new sub-thread under a different name.
+- No fix implemented - this is a convergence/redirection finding.
+- Sandbox reset mid-round (recovered cleanly via the established
+  procedure - outputs mirror was already fully current, no data
+  lost).

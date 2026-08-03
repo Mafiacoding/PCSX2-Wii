@@ -5896,3 +5896,39 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
   entire premise from an independent source.
 - No fix implemented. Sandbox reset again this round - recovered
   cleanly, no data lost (outputs mirror was fully current).
+
+## Round 437 (task #197, LANDMARK): live real-PCSX2 verification via DebugServer bridge - confirms this project's model is register-exact for both invocations, and that real hardware does NOT hang on the second one
+
+- Connected live to the user's actual running PCSX2 (DebugServer
+  patch, `pcsx2-mcp` tool bridge) against the real BIOS + real
+  Tekken Tag Tournament (Demo) disc - first live-hardware access
+  actually available and used in this project's history.
+- First real invocation of 0x00082008: ra=0x80005184, sp=0x80015C30,
+  a0=0, global 0x0008BE00=0 - EXACT match to this project's own
+  Round 432 model.
+- Second real invocation: ra=0x800057AC, sp=0x80015B70, a0=0 - EXACT
+  match to this project's own model. Real gameplay (FPS ticking,
+  memory card autosave) was directly observed running normally
+  around this point - real hardware does NOT hang here.
+- Set a breakpoint at 0x00082408 (the real `jal 0x000820C0` wait-call
+  site, confirmed via live disassembly to be the real, write-1-to-
+  clear SIF_SMFLAG/BOOTEND check this project's docs already
+  identified) immediately after the second invocation and let real
+  execution run freely for an extended window - **it never fired**,
+  while PC visibly advanced through multiple distinct real game-code
+  addresses, confirming normal, unimpeded execution.
+- **Conclusion**: real hardware's second invocation does not re-enter
+  the blocking wait - proving Round 433's "hypothesis (a)" (a missing
+  first-vs-subsequent guard this project's static disassembly hasn't
+  yet located) over "hypothesis (b)", now with direct live-hardware
+  confirmation rather than inference. The exact guard instruction/
+  mechanism is still not located - next round's concrete task.
+- No fix implemented yet (guard mechanism not yet pinpointed - per
+  Round 279/280 discipline, no speculative fix without exact
+  evidence). This directly reopens and reframes the thread Round 436
+  had marked as plateaued.
+- Tooling note: `pcsx2_status`/`pcsx2_read_registers` were unreliable/
+  stale on this DebugServer build; `pcsx2_evaluate("pc"/"<reg>")` and
+  `pcsx2_step` were the reliable live-state primitives. The PCSX2 Qt
+  debugger UI's own Run button (via computer-use) was the reliable
+  way to resume execution when `pcsx2_continue` stalled.

@@ -21510,3 +21510,108 @@ and a fully genuine BIOS syscall dispatch - even though it does not
 yet reach a splash screen or any new visible GS output. See
 `docs/ROADMAP.md` for the full instruction-level trace excerpts and
 the concrete Round 467 plan.
+
+## Round 467 (tasks #366-370): fully decoded the ERET-glue chain - 0x00081FE0 is a fixed, generic kernel thread-start trampoline; the real per-call entry point travels through $v1, not $a0
+
+Continued directly from Round 466's open question: why does the
+post-SetupThread thread-resume jump land at `0x00203BE0` (zero-filled
+BSS) instead of continuing the game's real crt0? Disassembled the
+real BIOS glue at `0x80002840-0x80002878` (the JALR/EPC-write/ERET
+site captured live by Round 461's instrumentation) directly from a
+Round 466 checkpoint's EE RAM contents, using this project's own
+Round 350 MIPS decoder.
+
+**The glue function itself** (`0x80002840`) is a small, generic,
+real primitive:
+```
+lui  $k0,0x8001; sw $ra,...($k0)   ; save $ra to a fixed slot
+lui  $k0,0x8001; sw $sp,...($k0)   ; save $sp to a fixed slot
+mtc0 $a0,$14                        ; EPC = $a0 (jump target)
+sync
+daddu $v1,$a1,$zero                 ; v1 = a1  (args shift down by one)
+daddu $a0,$a2,$zero                 ; a0 = a2
+daddu $a1,$a3,$zero                 ; a1 = a3
+daddu $a2,$t0,$zero                 ; a2 = t0
+mfc0 $k0,$12; ori $k0,$k0,0x12; mtc0 $k0,$12; sync   ; STATUS bits
+eret
+```
+This is a generic "jump to `$a0` via `eret`, shifting `$a1..$t0` down
+into `$a0..$a2` for the callee" mechanism - not something specific to
+our game's boot at all.
+
+**The caller** (`0x80001630`, reached via `0x800016F4-0x80001704`)
+walks a real kernel table at base `0x80015C60` (computed via
+`mult $s3,$v0` where `$s3` is a "slot/priority" argument passed into
+`0x80001630`), reading four fields from the indexed entry: `+8`
+(becomes the glue's `$a1` -> ultimately `$v1`), `+12` (loaded directly
+into `$gp`), `+16` (becomes `$a3` -> ultimately `$a2`), and `+20`
+(checked `==2`, a type/kind discriminator gating this whole dispatch
+path). Crucially, `$a0` passed to the glue is **not** read from this
+table at all - it's read from a separate fixed global at `0x800124E4`.
+
+**The key discovery**: instrumented every write to `0x800124E4`
+across a full fresh-boot run (initially found zero hits due to a
+scratch-instrumentation brace-nesting bug - fixed, not a tracked-
+source issue - then confirmed real writes once corrected). Exactly
+**one** write occurs in the entire run, at `instr≈29,931,092` (deep in
+the pre-trampoline organic-boot phase, tens of millions of
+instructions before our own syscall-7 ever fires) - a tiny real
+kernel setter function (`0x80001578: lui $at,0x8001; sw $a0,...;
+jr $ra`) called from real one-time kernel-init code at `0x80001060-
+0x800010B8`, with the value passed as a **literal hardcoded constant**
+(`lui $a0,0x0008; ori $a0,$a0,0x1FE0` -> `$a0=0x00081FE0`) - not
+anything computed from thread/TCB state. This means `0x800124E4`
+holds the same fixed value for the entire run regardless of which
+thread or syscall is active - it is a genuine, static real-kernel
+"default dispatch target" constant, not something our trampoline
+could have corrupted.
+
+**Disassembled `0x00081FE0` itself** (the EPC/`$a0` target) and found
+it is exactly the real, generic **thread-start trampoline** every PS2
+kernel thread launch goes through:
+```
+0x80081FE0: lui   $sp, 0x0008
+0x80081FE4: jalr  $ra, $v1        ; call through $v1 - the REAL entry point
+0x80081FE8: addiu $sp, $sp, 8128  ; (delay slot) sp = 0x00081FC0
+0x80081FEC: addiu $v1, $zero, -5
+0x80081FF0: syscall                ; cleanup syscall if the thread body returns
+```
+
+**This resolves the actual mechanism precisely**: the real per-call
+entry point is not `$a0` (the constant `0x81FE0` we chased in Round
+466 - that's just the generic trampoline's own address) but **`$v1`**,
+which the `0x80002840` glue sets from the *caller's* `$a1`, which in
+turn is `table[0x80015C60 + s3*stride].field+8` - a genuine, real
+per-slot kernel table entry, not `TCB.entry` (a different structure,
+different base address, different field offset - `TCB.entry` is at
+offset `0x0C`/12 within the 76-byte `p_TCBs` array at `0x80017400`,
+already tracked since Round 461; this new table is a completely
+separate 20+-byte-stride structure at a different base). In our
+traced run, that field evaluated to `0x00203BE0` - the actual, precise
+value this project needs to trace the real writer of, not a vague
+"wrong jump" as characterized in Round 466.
+
+**Reframing of Round 466's finding**: the `0x00203BE0` jump was never
+really about `$a0`/EPC being wrong - `0x00081FE0` is working exactly
+as real hardware intends (a shared, generic thread-launch trampoline).
+The actual, now precisely-located open question is narrower and more
+tractable: what real kernel table lives at `0x80015C60`, what does
+slot `s3` mean, and why does that specific slot's `field+8` hold
+`0x00203BE0` instead of a value that would continue our game's real
+crt0 execution. Live PCSX2 (still connected, `Tekken Tag Tournament
+[Demo]`, paused at `pc=0x003993b8`, `cycles=2,501,038,456` - unchanged
+from prior rounds) was checked but no new breakpoint was set this
+round; a live-hardware comparison of this specific table is a strong
+Round 468 candidate once the table's real identity is narrowed further
+offline.
+
+No tracked source changed this round - all disassembly was done
+offline against a Round 466 checkpoint's EE RAM contents, and the one
+scratch-instrumentation bug found (a watch print accidentally nested
+inside an unrelated `if` block, meaning two Round 462 debug prints -
+`R462-THREADSTATUS-WRITE`/`R462-THREADID-WRITE` - have been
+unreachable dead code since they were added) exists only in scratch
+`ee_core_r46*.c` copies, never in tracked `ee_core.c` (confirmed via
+direct grep - those print statements don't exist in tracked source at
+all). Docs-only round: regression suite and Wii rebuild correctly
+skipped.

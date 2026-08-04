@@ -8256,3 +8256,191 @@ already documented). All work this round was scratch-only
 checkpoints `/tmp/r466_chain*.ckpt`). No tracked source files were
 modified. No regression suite or Wii rebuild required for a docs-only
 investigation round, matching the precedent set by Rounds 463-465.
+
+## Round 467: decoded the real ERET-glue chain - entry point travels through $v1 via a real per-slot kernel table, not through the $a0/EPC constant
+
+### Method
+
+Started directly from Round 466's open question ("why does the post-
+SetupThread thread-resume jump land at `0x00203BE0`?"). Rather than
+re-running the emulator, disassembled the relevant BIOS code regions
+directly from a Round 466 checkpoint's saved EE RAM contents (block 2
+of the checkpoint format: 8-byte-length-prefixed raw dump, order
+data-segment/EE-RAM/IOP-RAM/IOP-heap - see driver source comments),
+using this project's own Round 350 MIPS-I/EE decoder
+(`/tmp/mips_disasm.py`). Checkpoint RAM reflects real, already-
+executed BIOS code faithfully since KSEG0 addresses in this project's
+model are unmapped/direct (`phys = addr & 0x1FFFFFFF`, confirmed via
+direct `ee_core.c` source read) and the real boot ROM copies its own
+kernel code into low RAM early in boot - so disassembling checkpoint
+RAM at a fixed kernel code address is exactly as reliable as
+disassembling the ROM image itself, and lets this round work entirely
+offline without re-running the 15M-slice organic boot each time.
+
+### The glue function (0x80002840) - fully decoded
+
+```
+0x80002840: lui   $k0, 0x8001
+0x80002844: sw    $ra, 28608($k0)       ; save $ra (fixed slot)
+0x80002848: lui   $k0, 0x8001
+0x8000284C: sw    $sp, 28624($k0)       ; save $sp (fixed slot)
+0x80002850: mtc0  $a0, $14              ; EPC = $a0
+0x80002854: sync
+0x80002858: daddu $v1, $a1, $zero       ; v1 = a1
+0x8000285C: daddu $a0, $a2, $zero       ; a0 = a2
+0x80002860: daddu $a1, $a3, $zero       ; a1 = a3
+0x80002864: daddu $a2, $t0, $zero       ; a2 = t0
+0x80002868: mfc0  $k0, $12
+0x8000286C: ori   $k0, $k0, 0x0012
+0x80002870: mtc0  $k0, $12
+0x80002874: sync
+0x80002878: eret
+```
+
+This is a generic "jump to `$a0` via `eret`, shifting the remaining
+args (`$a1..$t0`) down by one register position for the callee (now
+`$a0..$a2`, with the original `$a1` promoted to `$v1`)" primitive -
+not anything specific to game boot or `_ExecPS2`.
+
+### The caller (0x80001630) - a real per-slot kernel table walk
+
+```
+0x800016A4: lui  $v1, 0x8001; addiu $v1, $v1, 23648   ; table base = 0x80015C60
+0x800016AC: mult $s3, $v0                              ; slot index computation
+0x800016B0: addu $a0, $v0, $v1                          ; a0 = &table[slot]
+0x800016B4: lui  $s0, 0x8001; addu $s0, $s0, $v0
+0x800016BC: lw   $s0, 23644($s0)                        ; s0 = table[slot] pointer/entry
+...
+0x800016D8: lw   $v0, 20($s0)                           ; entry+20 = type field
+0x800016DC: bne  $v0, $s5, ...                          ; branch unless type == 2 ($s5=2)
+0x800016E4: daddu $s1, $gp, $zero                       ; save caller's gp
+0x800016E8: lw   $v0, 12($s0); daddu $gp, $v0, $zero    ; gp = entry+12
+0x800016F0: mfc0 $t0, $14                                ; t0 = current EPC
+0x800016F4: lui  $a0, 0x8001; lw $a0, 9444($a0)         ; a0 = *(0x800124E4) - see below
+0x800016FC: daddu $a2, $s3, $zero                        ; a2 = slot index
+0x80001700: lw   $a1, 8($s0)                             ; a1 = entry+8  <-- REAL ENTRY POINT
+0x80001704: jal  0x80002840                              ; call the glue
+0x80001708: lw   $a3, 16($s0)                            ; a3 = entry+16
+```
+
+This walks a real kernel table at base `0x80015C60`, indexed by
+`$s3` (a "slot" argument), reading a 4-field real kernel structure
+(`+8`, `+12`=`gp`, `+16`, `+20`=type/kind, gated to `==2` entries
+only) - a genuine, different structure from the already-tracked
+76-byte-stride `p_TCBs` array at `0x80017400` (whose own `entry`
+field is at offset `0x0C`/12, not `+8` - confirmed via this project's
+existing Round 461 `R461-TCB-ENTRY-WRITE` watch, still a distinct,
+separately-verified structure).
+
+### 0x800124E4: a fixed, hardcoded kernel constant, not thread-specific state
+
+Instrumented every write to `0x800124E4` (and its KUSEG/KSEG1 physical
+aliases, `phys & 0x1FFFFFFF` in `[0x124D0,0x124F8]`) across a full
+fresh-boot run. First attempt found zero hits - traced to a real
+scratch-instrumentation bug (not tracked source): the watch code was
+accidentally nested inside an unrelated `if (addr in TCB range && ...)`
+block due to a pre-existing brace-placement quirk in the Round 461/462
+scratch copy, meaning two earlier debug prints
+(`R462-THREADSTATUS-WRITE`, `R462-THREADID-WRITE`) had been dead code
+since they were added - confirmed this doesn't exist in tracked
+`ee_core.c` at all (`grep` returns no matches), so no tracked-source
+fix is needed, just a scratch-copy fix. After fixing the nesting,
+found **exactly one** write in the entire run:
+
+```
+[R467-WATCH-124E4] addr=0x800124e4 phys=0x000124e4 val=0x00081fe0
+    pc=0x80001580 ra=0x8000108c instr=29931092
+```
+
+Disassembling the writer (`0x80001578-0x80001580`) and its caller
+(`0x80001060-0x800010B8`):
+```
+0x8000107C: lui  $a0, 0x0008
+0x80001080: ori  $a0, $a0, 0x1FE0    ; a0 = 0x00081FE0 (LITERAL CONSTANT)
+0x80001084: jal  0x80001578          ; call the setter
+...
+0x80001578: lui  $at, 0x8001
+0x8000157C: sw   $a0, 9444($at)      ; MEM[0x800124E4] = a0
+0x80001580: jr   $ra
+```
+
+`instr≈29,931,092` is deep in the pre-trampoline organic-boot phase
+(tens of millions of instructions before our own syscall-7 ever
+fires, roughly slice ~3.7M of the ~15M-slice organic-boot window this
+project has run since Round 139), and the caller context
+(`0x80001060-0x800010B8`, which also calls `0x8000C0B8`, `0x80006198`,
+sets `COP0` register 16/Config, and calls two more small setter
+functions) reads as one-time, linear kernel-init code, not an
+interrupt or exception handler entry - consistent with `0x800124E4`
+being initialized exactly once, early in boot, to a fixed value that
+never changes for the rest of execution.
+
+**This means `0x00081FE0` is not "the wrong value our trampoline
+should have set correctly" - it's a real, generic, always-the-same
+kernel constant, untouched by anything our own syscall-7 dispatch
+does.**
+
+### 0x00081FE0 disassembled: the real generic thread-start trampoline
+
+```
+0x80081FE0: lui   $sp, 0x0008
+0x80081FE4: jalr  $ra, $v1        ; call through $v1 - the REAL per-call entry point
+0x80081FE8: addiu $sp, $sp, 8128  ; (delay slot) sp = 0x00081FC0
+0x80081FEC: addiu $v1, $zero, -5
+0x80081FF0: syscall                ; cleanup syscall (real ExitThread-class) if body returns
+```
+
+This is exactly what a generic real "start a thread" trampoline should
+look like: set up a stack pointer, then `jalr` into the thread's real
+body via a register (`$v1`) - with a fallback cleanup syscall if the
+body ever returns. Given `0x80002840`'s glue sets `$v1` = the
+*original caller's* `$a1` = `table[0x80015C60+slot].field+8`, the
+REAL per-call entry point in this whole chain has never been `$a0`/EPC
+at all - it travels through `$v1`, sourced from a genuine per-slot
+kernel table entry.
+
+### Where Round 466's finding was reframed
+
+Round 466 characterized the post-SetupThread jump as landing at a
+"wrong" address (`0x00203BE0`) via `$a0`. This round shows that
+characterization conflated two different things: `$a0`/EPC
+(`0x00081FE0`) is a fixed, correct, generic kernel trampoline address
+that real hardware also always uses here - not a bug. The actual
+value this project needs to trace is `$v1` = `table[0x80015C60 +
+s3*stride].field+8`, which evaluated to `0x00203BE0` in this trace.
+This is a substantially more precise, tractable question than Round
+466 left it: identify the real table at `0x80015C60` (what indexes
+it, what its 20-byte-ish per-entry layout really represents - a
+strong candidate given the `type==2` gate and `gp`-at-`+12` field is
+some kind of **ready-queue or priority-bucket entry, distinct from
+the full TCB**), and find what real code writes slot `s3`'s `field+8`
+to `0x00203BE0` instead of a value that would resume the game's real
+crt0 continuation.
+
+### Task classification and next step (Round 468)
+
+No fix implemented - the real writer of the specific table slot has
+not yet been located, and this project's standing discipline against
+guessing at unevidenced fixes applies here as much as anywhere. The
+concrete next step: watch writes to `0x80015C60 + s3*stride` (once
+`s3`'s actual value and the table's per-entry stride are confirmed via
+a quick re-run) to find the real writer, and separately investigate
+what `s3` itself represents (a hypothesis worth testing: `s3` was the
+original `$a0` argument to the *outer* `0x80001630` function, called
+from deep within the SetupThread-syscall dispatch chain traced in
+Round 466 - tracing that argument's own origin is the natural next
+step). Live PCSX2 (still connected this round, `Tekken Tag Tournament
+[Demo]`, paused at `pc=0x003993b8`, unchanged cycle count) is a strong
+candidate for a real-hardware cross-check of this table once it's
+better characterized offline.
+
+### Verification
+
+All work this round was disassembly against existing Round 466
+checkpoints plus one new instrumented run
+(`/tmp/ee_core_r467.c`, `/tmp/driver_r467`, checkpoints
+`/tmp/r467_test*.ckpt`). No tracked source files were modified -
+`ee_core.c`'s real syscall 6/7 exception-raising behavior needed no
+change, and the scratch-instrumentation brace bug found and fixed
+this round exists only in untracked `/tmp/ee_core_r46*.c` copies.
+Docs-only round: no regression suite or Wii rebuild required.

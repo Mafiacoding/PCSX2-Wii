@@ -37,6 +37,31 @@ static int g_iop_boot_completed_once;
  * grounding of why this flag exists and what real gap it closes. */
 static int g_ee_loadexecps2_seen;
 
+/* Round 441 (task #212): delayed BOOTEND/SIFINIT/CMDINIT reassertion
+ * state - see the full grounding in sif_mmio_write32()'s SIF_SMFLAG
+ * case below and sif_ee_tick()'s own comment. Modeled as a simple
+ * countdown (ticked once per real EE instruction, same convention as
+ * ee_timers_tick()/ee_check_rpcinit_pending() etc. - see ee_core.c's
+ * two call sites) rather than an absolute due-instruction-count, so
+ * this file does not need to depend on ee_core.h/ee_state_t at all -
+ * consistent with this file's existing, deliberately narrow surface
+ * (see sif.h's own header comment on scope). */
+static int g_bootend_reassert_pending;
+static int g_bootend_reassert_ticks_left;
+
+/* Explicit, honestly-labeled approximation (not a claim of real SIF
+ * cross-processor handshake latency, which is not cited/known) - see
+ * sif_mmio_write32()'s SIF_SMFLAG case for the full reasoning. Chosen
+ * to be clearly non-zero (so the EE kernel's own 0x8000CDF8 recheck,
+ * which re-reads SMFLAG only a handful of instructions after its own
+ * clearing write, reliably observes a genuine all-clear window) while
+ * staying a small fraction of a real video frame's worth of EE
+ * instructions (~4.9M at 60Hz/294MHz), so OSDSYS's own tight
+ * 0x000820D0-0x000820E8 busy-wait (live-observed at ~8-10 instructions
+ * per iteration) resolves within a handful of real iterations, not an
+ * unbounded hang. */
+#define SIF_BOOTEND_REASSERT_DELAY_TICKS 64
+
 void sif_init(void)
 {
     memset(&g_sif, 0, sizeof(g_sif));
@@ -105,35 +130,57 @@ int sif_mmio_write32(uint32_t addr, uint32_t value)
              * handshake) immediately, rather than leaving OSDSYS
              * parked forever on a flag this project's own model is
              * fully entitled to consider still true. */
-            if ((value & 0x00040000u) && g_iop_boot_completed_once
-                                          && g_ee_loadexecps2_seen) {
-                /* Round 251 (task #411, 291st finding): added the
-                 * g_ee_loadexecps2_seen guard. Host-native
-                 * instrumentation (exact, per-instruction hit
-                 * counters, not sampling - see STATUS.md) proved this
-                 * re-signal was ALSO firing on a much earlier, entirely
-                 * normal SIF_SMFLAG debounce-and-consume cycle inside
-                 * OSDSYS's own boot-completion polling loop
-                 * (0x8000CDF8, disassembled this round), long before
-                 * _LoadExecPS2 (EE syscall 6) is ever invoked - the
-                 * original task #212 citation (see sif.h) explicitly
-                 * grounds this re-signal in "AFTER this project's own
-                 * newly-implemented _LoadExecPS2 ... let real BIOS ROM
-                 * code run its own re-initialization sequence", i.e.
-                 * the fix was always meant to apply only to that
-                 * later, post-_LoadExecPS2 scenario. Without this
-                 * guard, the unconditional re-signal meant
-                 * SIF_SMFLAG's SIFINIT/CMDINIT/BOOTEND bits could never
-                 * actually read back as cleared to the EE, so
-                 * OSDSYS's own poll loop (which debounces SMFLAG,
-                 * masks it with 0x3FFFFFFF, and only escapes its
-                 * self-re-entry when the masked result is zero) could
-                 * never see success and looped forever - the real,
-                 * root-cause explanation for the long-standing
-                 * "0x8000CC68 wall" (Round 179/345/346/362). */
-                g_sif.smflag |= 0x00010000u /* SIF_STAT_SIFINIT */
-                              |  0x00020000u /* SIF_STAT_CMDINIT */
-                              |  0x00040000u /* SIF_STAT_BOOTEND */;
+            if ((value & 0x00040000u) && g_iop_boot_completed_once) {
+                /* Round 251 (task #411, 291st finding) ORIGINALLY
+                 * added a `g_ee_loadexecps2_seen` guard here, because
+                 * an unconditional, SYNCHRONOUS re-signal (performed
+                 * inline, in the same write call that just cleared
+                 * the flag) made SIF_SMFLAG's SIFINIT/CMDINIT/BOOTEND
+                 * bits unobservably-cleared to a much earlier, entirely
+                 * normal debounce-and-consume poll inside the EE
+                 * kernel itself (0x8000CDF8: masks SMFLAG with
+                 * 0x3FFFFFFF and only escapes once the masked result
+                 * reads zero) - see the "0x8000CC68 wall"
+                 * (Round 179/345/346/362) that guard fixed.
+                 *
+                 * Round 441 (task #212, live-verified Rounds 437-440):
+                 * that guard over-corrected. It also permanently
+                 * blocks the real, necessary re-signal OSDSYS's own
+                 * LATER, REPEATING dispatcher needs every time it
+                 * re-enters its BOOTEND wait (`0x00082220`'s
+                 * unconditional call into the real poll at
+                 * `0x000820C0`) - live-captured via real PCSX2:
+                 * `SIF_SMFLAG` genuinely reads 0 at the exact entry to
+                 * a confirmed-recurring invocation (`ra=0x800057ac`,
+                 * 2.26 billion real cycles into a normally-rendering
+                 * boot), meaning real hardware relies on BOOTEND being
+                 * re-set again and again, indefinitely - not just once,
+                 * post-_LoadExecPS2.
+                 *
+                 * The real, minimal distinction the original guard
+                 * needed was never "has _LoadExecPS2 run" (an
+                 * unrelated, much-later event) - it was "give the
+                 * clearing side's own immediate re-check a genuine
+                 * chance to observe zero before the flag comes back",
+                 * i.e. a real, non-zero CROSS-PROCESSOR HANDSHAKE
+                 * DELAY, not a same-instant same-call write. Real
+                 * hardware's IOP is a physically separate processor
+                 * that cannot possibly re-signal SIF_SMFLAG within the
+                 * same EE bus cycle that just cleared it - modeling
+                 * the re-signal as synchronous was the actual bug, not
+                 * the fact that it fires at all. Deferring it by a
+                 * short, explicit real-instruction-count delay (see
+                 * `sif_ee_tick()` below) restores that real timing gap
+                 * for 0x8000CDF8's own single-shot recheck (which
+                 * reads SMFLAG again only a handful of instructions
+                 * after its own clearing write, well inside this
+                 * delay window) while still resolving OSDSYS's own
+                 * tight busy-wait loop (`0x000820D0`-`0x000820E8`,
+                 * live-observed spinning at ~8-10 instructions per
+                 * iteration) within a small, bounded number of real
+                 * iterations - not an indefinite hang. */
+                g_bootend_reassert_pending = 1;
+                g_bootend_reassert_ticks_left = SIF_BOOTEND_REASSERT_DELAY_TICKS;
             }
             return 1;
         case SIF_CTRL:
@@ -355,6 +402,29 @@ int sif_ee_loadexecps2_seen(void)
     return g_ee_loadexecps2_seen;
 }
 
+/* Round 441 (task #212): fires the BOOTEND/SIFINIT/CMDINIT reassertion
+ * scheduled by sif_mmio_write32()'s SIF_SMFLAG case, after a real,
+ * explicit delay (SIF_BOOTEND_REASSERT_DELAY_TICKS) rather than
+ * synchronously in the same write call - see that case's own comment
+ * for the full reasoning. Must be called once per real EE instruction
+ * step, same established convention as ee_timers_tick()/
+ * ee_check_rpcinit_pending()/ee_check_rpc_bind_pending() etc. - see
+ * ee_core.c's two call sites (both existing per-instruction epilogue
+ * points, matching this project's own precedent for this class of
+ * "must still fire even mid-branch-delay-slot, real hardware doesn't
+ * skip a beat" tick function). */
+void sif_ee_tick(void)
+{
+    if (!g_bootend_reassert_pending)
+        return;
+    if (--g_bootend_reassert_ticks_left > 0)
+        return;
+    g_bootend_reassert_pending = 0;
+    g_sif.smflag |= 0x00010000u /* SIF_STAT_SIFINIT */
+                  |  0x00020000u /* SIF_STAT_CMDINIT */
+                  |  0x00040000u /* SIF_STAT_BOOTEND */;
+}
+
 void sif_cmd_iop_init(void)
 {
     uint32_t i;
@@ -369,6 +439,8 @@ void sif_cmd_iop_init(void)
     g_bind_sid_table_next = 0;
     g_iop_boot_completed_once = 0;
     g_ee_loadexecps2_seen = 0;
+    g_bootend_reassert_pending = 0;
+    g_bootend_reassert_ticks_left = 0;
 }
 
 void sif_cmd_iop_handle_init_cmd(uint32_t ee_recvbuf_addr)

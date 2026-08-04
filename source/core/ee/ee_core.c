@@ -2873,6 +2873,7 @@ static int ee_step(void)
                         ee_check_boot_unblock_sbus_wait(st); /* Round 178 (task #344) - EXPERIMENTAL BRANCH ONLY */
                         ee_check_gs_vsync(st); /* Round 87 (127th finding) */
                         ee_timers_tick(); /* Round 87 (127th finding): EE peripheral timers T0-T3 */
+                        sif_ee_tick(); /* Round 441 (task #212): delayed BOOTEND/SIFINIT/CMDINIT reassertion */
                         ee_check_rpcinit_pending(st);
                         ee_check_rpc_bind_pending(st);
                         ee_check_cdvd_ncmd_pending(st); /* Round 347 */
@@ -8476,6 +8477,7 @@ static int ee_step(void)
     ee_check_boot_unblock_sbus_wait(st); /* Round 178 (task #344) - EXPERIMENTAL BRANCH ONLY */
     ee_check_gs_vsync(st); /* Round 87 (127th finding) */
     ee_timers_tick(); /* Round 87 (127th finding): EE peripheral timers T0-T3 */
+    sif_ee_tick(); /* Round 441 (task #212): delayed BOOTEND/SIFINIT/CMDINIT reassertion */
     ee_check_rpcinit_pending(st); /* task #187 (63rd finding) */
     ee_check_rpc_bind_pending(st); /* task #192 (68th finding) */
     ee_check_cdvd_ncmd_pending(st); /* Round 347 (IOP RPC re-entry architecture) */

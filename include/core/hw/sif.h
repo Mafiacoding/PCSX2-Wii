@@ -373,6 +373,17 @@ int sif_iop_boot_completed_once(void);
 void sif_note_ee_loadexecps2_seen(void);
 int sif_ee_loadexecps2_seen(void);
 
+/* Round 441 (task #212): must be called once per real EE instruction
+ * step (same convention as ee_timers_tick()) - fires the delayed
+ * BOOTEND/SIFINIT/CMDINIT reassertion scheduled by
+ * sif_mmio_write32()'s SIF_SMFLAG case. See sif.c's own comment on
+ * that case and on sif_ee_tick() itself for the full grounding: this
+ * replaces the old synchronous re-signal (Round 251) with a short,
+ * explicit real-instruction-count delay, modeling the real fact that
+ * the IOP is a physically separate processor and cannot re-signal
+ * SIF_SMFLAG within the same EE bus cycle that just cleared it. */
+void sif_ee_tick(void);
+
 /* Returns how many times sif_cmd_iop_handle_init_cmd() has been
  * called so far (0 if never). Used by ee_core.c to decide when to
  * synthesize the IOP's SIF_CMD_SET_SREG(RPCINIT,1) response - see the

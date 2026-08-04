@@ -6093,3 +6093,26 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
   watchpoints on 0x1000F230 failed to register a confirmed real write
   - breakpoints + reads-while-paused remain the only fully reliable
   primitives on this bridge.
+
+## Round 441: FIX SHIPPED - delayed BOOTEND reassertion breaks the SIF_SMFLAG wall; boot advances to a new, further, previously-known resting point (0x002113E0-0x002113F8)
+
+- Replaced sif.c's synchronous, g_ee_loadexecps2_seen-gated BOOTEND/
+  SIFINIT/CMDINIT reassertion with a delayed one (64-EE-instruction-
+  tick countdown, gated only on g_iop_boot_completed_once). New
+  sif_ee_tick(), called from ee_core.c's two existing per-instruction
+  tick sites (same convention as ee_timers_tick()).
+- Host-native repro (same driver_r313/BIOS/disc as Round 439's
+  baseline): boot no longer parks in the BOOTEND poll
+  (0x820D4-0x820E8) - now rests at 0x2113E0-0x2113F8, RPC balanced at
+  319/319 (up from 113/113), no crash. This resting point matches
+  Round 308-312's own already-documented "VBLANK-wait/RPC steady
+  state" region - independent corroboration of real forward progress.
+- Full regression suite: 128/128 test files pass, 0 failures.
+- Wii cross-build: not physically executable (no devkitPPC in this
+  sandbox, same pre-existing environment limitation as prior rounds).
+  Host compile of both changed files clean, 0 warnings; both files
+  are shared/portable, not devkitPPC-specific.
+- Closes task #212. Task #202 substantially advanced (guard found AND
+  fixed). Next: characterize the new 0x2113E0-0x2113F8 resting point
+  and find/fix whatever blocks progress from there toward the splash
+  screen.

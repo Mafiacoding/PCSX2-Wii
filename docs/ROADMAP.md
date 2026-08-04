@@ -6164,3 +6164,28 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
   this fix does not itself reach the splash screen, it removes a
   real blocking bug and opens a new frontier (VU0/COP2 datapath,
   currently unimplemented) for the next round.
+
+## Round 444 (continued): LQC2/SQC2 implemented and shipped
+- Surveyed the full COP2/VU0 CO-format dispatch in ee_core.c:
+  discovered the real VU0 arithmetic the matrix-multiply halt site
+  needs (VMULAx/VMADDAy/VMADDAz-shaped ACC-writing ops, funct 0x3C-
+  0x3F SPECIAL2 idx dispatch) was ALREADY implemented. The real gap
+  was narrower: primary opcodes 0x36 (LQC2) and 0x3E (SQC2) - the
+  VU0<->RAM memory-transfer instructions - had no case at all in the
+  primary opcode switch.
+- Fix: implemented case 0x36 (LQC2) and case 0x3E (SQC2), ported from
+  real PCSX2 R5900OpcodeImpl.cpp semantics, reusing existing
+  vu0_vf_read_lane/write_lane + ee_mem_read32/write32 helpers.
+- Host-native verified: 83,665,427 instructions (+4.9M over the
+  Round 443 baseline), runs straight through the VU0 matrix-multiply
+  code, reaches a NEW halt at pc=0x00518128: real EE syscall 2
+  ("SYSCALL (no BIOS syscall table implemented)") - real ps2sdk
+  syscall 2 is SetGsCrt(), the BIOS call that configures the GS CRT/
+  display mode. Strong, directly-evidenced lead toward the splash
+  screen for next round.
+- 128/128 regression suite pass. Wii cross-build clean, 0 warnings.
+- GS state at new halt: still pmode=0/dispfb1=0/display1=0 - honest
+  negative result on reaching the splash screen this round, but
+  clear forward progress toward it.
+- Next: implement EE BIOS syscall 2 (SetGsCrt) with real ps2sdk/
+  PCSX2 citation.

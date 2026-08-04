@@ -8416,6 +8416,39 @@ static int ee_step(void)
         if (rt) GPR(rt) = (GPR(rt) & LDR_MASK[shift]) | (mem >> LDR_SHIFT[shift]);
     } break;
 
+    case 0x36: /* LQC2 - Load Quadword Coprocessor 2 (round 444, task
+                * #228). This is the memory-transfer half of the VU0
+                * macro-mode datapath: the CO-format arithmetic ops
+                * (VADD/VSUB/VMUL/VMADD/VMADDA-broadcast-row/VOPMSUB/
+                * etc, all already implemented above under case 0x12)
+                * operate purely on vu0_vf[]/vu0_acc[] register state
+                * and never touch EE main memory themselves - LQC2/
+                * SQC2 are what actually move VU0 vector registers to
+                * and from RAM, exactly like LWC1/SWC1 do for the FPU.
+                * Real encoding is the same I-type layout as LWC1/LQ:
+                * opcode(6) base=rs(5) ft=rt(5) offset=16 - so this
+                * decoder's existing rs32/rt/imm extraction (shared
+                * with every other I-type case in this switch) applies
+                * unchanged; "rt" here names the VU0 vf register index,
+                * not a GPR. Ported from PCSX2's R5900OpcodeImpl.cpp
+                * LQC2(): reads 4 consecutive 32-bit words starting at
+                * GPR[rs]+imm (UNALIGNED - unlike LQ/SQ, real hardware
+                * does NOT mask the low 4 bits for LQC2/SQC2, confirmed
+                * against PCSX2's own implementation which calls plain
+                * memRead32 at +0/+4/+8/+12 with no address masking),
+                * into VF[rt].xyzw in order. Skipped entirely when
+                * rt==0 (VF00 is a read-only hardwired (0,0,0,1)
+                * constant on real hardware, matching this project's
+                * own vu0_vf_write_lane's existing reg==0 discard and
+                * PCSX2's own "if ( _Ft_ )" guard). */
+        if (rt) {
+            uint32_t addr = rs32 + imm;
+            vu0_vf_write_lane(st, rt, 0, ee_mem_read32(st, addr));
+            vu0_vf_write_lane(st, rt, 1, ee_mem_read32(st, addr + 4));
+            vu0_vf_write_lane(st, rt, 2, ee_mem_read32(st, addr + 8));
+            vu0_vf_write_lane(st, rt, 3, ee_mem_read32(st, addr + 12));
+        }
+        break;
     case 0x1E: /* LQ - 128-bit load, ported from PCSX2's R5900OpcodeImpl.cpp.
                 * Address is masked to 16-byte alignment (real hardware
                 * ignores the low 4 bits rather than faulting on
@@ -8441,6 +8474,38 @@ static int ee_step(void)
         uint32_t addr = (rs32 + imm) & ~0xFu;
         ee_mem_write64(st, addr,     GPR(rt));
         ee_mem_write64(st, addr + 8, GPR1(rt));
+    } break;
+
+    case 0x3E: /* SQC2 - Store Quadword Coprocessor 2 (round 444, task
+                * #228). The store-side mirror of LQC2 (case 0x36
+                * above) - writes VF[rt].xyzw (4 consecutive 32-bit
+                * words) to EE memory at GPR[rs]+imm, UNALIGNED (no
+                * 16-byte masking, same real-hardware distinction from
+                * LQ/SQ as LQC2 has). Ported from PCSX2's
+                * R5900OpcodeImpl.cpp SQC2(): unlike LQC2, there is no
+                * rt==0 guard - VF00 always reads back its hardwired
+                * (0,0,0,1.0) constant (vu0_vf_read_lane already
+                * special-cases reg==0 for exactly this), so "sqc2
+                * $vf0,addr" is a well-defined real op that stores
+                * (0,0,0,1.0), not a no-op. This is the exact opcode
+                * this project's Round-443 host-native boot trace
+                * first reached and halted on
+                * (pc=0x0050DD8C/0x0050DD90, inside a real VU0 4x4
+                * matrix_multiply()-shaped routine confirmed against
+                * ps2sdk's ee/math3d/src/math3d.c in Round 444) -
+                * closing this gap, together with LQC2 above, is the
+                * complete fix: every arithmetic op that routine uses
+                * (vmulax/vmadday/vmaddaz - the ACC-writing broadcast
+                * row - and the final vmaddw reading ACC - VMADD funct
+                * 0x29) was already implemented in the COP2 CO-format
+                * dispatch; only the memory-transfer opcodes themselves
+                * were missing. */
+    {
+        uint32_t addr = rs32 + imm;
+        ee_mem_write32(st, addr,      vu0_vf_read_lane(st, rt, 0));
+        ee_mem_write32(st, addr + 4,  vu0_vf_read_lane(st, rt, 1));
+        ee_mem_write32(st, addr + 8,  vu0_vf_read_lane(st, rt, 2));
+        ee_mem_write32(st, addr + 12, vu0_vf_read_lane(st, rt, 3));
     } break;
 
     default:

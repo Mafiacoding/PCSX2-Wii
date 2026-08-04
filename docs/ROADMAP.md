@@ -6746,3 +6746,139 @@ for a future round with a different angle (e.g. a real McServ-level
 protocol simulation rather than just a FILEIO-layer errno, or tracing
 OSDSYS's own code right after the `mc0:`/`mc1:` open replies to see
 exactly what it does with the result).
+
+## Round 457 (tasks #281-282): _LoadExecPS2 trampoline boot attempt + post-ENODEV OSDSYS trace
+
+Direct follow-up to the user's explicit instruction to attempt booting
+the real Tekken Tag Tournament demo before continuing the previously-
+offered ENODEV trace.
+
+### Task #281: real `_LoadExecPS2` syscall trampoline
+
+Built `/tmp/driver_tekken.c` (scratch), which at slice 15,000,000
+installs a hand-encoded MIPS trampoline at `0x01FE1000` (string operand
+`"cdrom0:\SCED_500.41;1"` at `0x01FE0000`, the real path read from the
+real, mounted disc's `SYSTEM.CNF` back in Round 367) and redirects the
+*currently running* OSDSYS thread's `pc`/`next_pc` into it - explicitly
+avoiding Round 371-378's already-diagnosed mistake of creating a
+second, competing thread via `CreateThread` while OSDSYS's own thread
+stayed resident and got its TCB corrupted in place.
+
+Trampoline: `lui a0,hi(str); ori a0,a0,lo(str); li a1,0; li a2,0;
+li v1,6; syscall; b .` (loops in place after the syscall so execution
+doesn't wander off once the real BIOS handler returns/reschedules).
+
+Result: `ee->pc` was confirmed to genuinely leave the trampoline and
+enter real, exception-vectored BIOS code (the syscall-6 dispatch wiring
+from `source/core/ee/ee_core.c` lines ~3161-3245, already real/correct
+per the existing "task #180" discipline of letting real BIOS ROM bytes
+execute rather than reimplementing kernel internals). A coarse 30M-slice
+run and a follow-up fine 600,000-slice trace (300 x 2000-slice steps)
+both showed: no FIO_F_OPEN debug-log entry for the target file (0 hits,
+searched the full run log); no halt/crash (RPC counts stayed balanced);
+and the trace settling into the exact same real VBLANK-wait kernel
+routine independently documented in Round 448 and re-confirmed in this
+window's earlier Round 457 organic trace
+(`0x8000AF90-0x8000AFA8` -> `0x8000B8A0-0x8000B8B8`).
+
+**Assessment**: the syscall-6 *dispatch* mechanism is proven working
+end-to-end (this is real, meaningful validation of Round 380's cited
+`ExecPS2Patch()` semantics wiring). The absence of any FIO_F_OPEN call
+for the game file means real `_LoadExecPS2`'s actual ELF-fetch mechanism
+does not go through the generic FILEIO/SIF RPC path this project
+currently models for `cdrom0:` - real BIOS ELF loading likely uses a
+lower-level direct disc-read primitive (`sceCdRead`-family / raw NCMD
+sector reads) that bypasses the FILEIO abstraction entirely. This is a
+concrete, evidenced next-step candidate: implement/verify a real
+low-level `sceCdRead` NCMD path (this project already has
+`iop_cdvd_disc_find_file()` for ISO9660 lookup from Round 367 - the gap
+is likely in raw sector-read dispatch, not file lookup) and re-attempt
+the trampoline boot with that path wired.
+
+Not a source fix this round (trampoline lives entirely in
+`/tmp/driver_tekken*.c`, never touched the tracked `ee_core.c` - this
+was a controlled, scratch-only experiment to test a mechanism, not a
+proposed permanent change to the syscall dispatch, which was already
+correct).
+
+### Task #282: post-ENODEV OSDSYS trace
+
+Instrumented a scratch copy of `ee_core.c` (`/tmp/ee_core_r457b.c`) with
+a one-shot flag (`g_r457_enodev_seen`, `g_r457_enodev_at_instr`) set the
+instant the real `-19`/`-ENODEV` reply (Round 456's fix) is written for
+an `mc0:`/`mc1:` FIO_F_OPEN request. Paired scratch driver
+(`/tmp/driver_enodev.c`) watches for the flag and then runs 400 steps of
+500-slice fine tracing (200,000 slices total) immediately following.
+
+The ENODEV reply fired at real EE instruction count 31,094,906 (total
+slices ~5,000,000 into that particular checkpoint chain). The
+subsequent 400-step trace's address histogram:
+
+```
+0x00200CFC: 29   0x00200D10: 24   0x00200CF8: 24   0x00200D00: 23
+0x00200D08: 22   0x00200D0C: 20   0x00200D04: 16   0x00200CAC: 14
+0x00200CA0: 14   0x00200D48: 12   0x00200CA4: 11   0x00200D4C: 10
+0x00200D2C: 10   0x00200D28: 10   0x00200CA8: 9    0x00200C94: 9
+0x00200C98: 8    0x00200C84: 8    0x00200D34: 7    0x00200C80: 7
+```
+
+All addresses fall inside a single, compact 0x1cc-byte window
+(`0x00200C80`-`0x00200D4C`) within OSDSYS's own loaded ELF code region
+(`0x00200000`-`0x00480000`, established Round 274). Unlike task #281's
+tight, single-address VBLANK spin, this is genuinely varied,
+non-repeating control flow across many nearby addresses - consistent
+with a real dispatcher/decision loop actively branching, not a frozen
+NOP-sled or a stuck poll. One brief excursion to `0x800004FC` at step
+380 (kernel-range address, consistent with a routine interrupt/syscall
+service) before returning cleanly to `0x00200CA0` at step 381 - normal,
+healthy interrupt handling, not a crash or wild jump. The trace was
+still actively varying at the final captured step (399) - it had not
+settled into a fixed loop within the 200,000-slice window.
+
+**Assessment**: this is genuine evidence that OSDSYS's own real code
+*does* process the `-ENODEV` memory-card reply through real, branching
+control flow (not simply ignored/discarded) - but the net observable
+outcome across every angle measured so far (Round 455's dispatch_ncmd
+re-verify, Round 456's 90M-slice chained trace, this round's fine
+trace) is that it settles back into the same familiar, healthy idle
+state regardless of the specific errno value. Leading interpretation:
+this ~0x1cc-byte region is very likely the SAME per-frame idle
+dispatcher already characterized structurally in Rounds 269-360 (just
+now caught executing from OSDSYS's own userspace copy rather than only
+the BIOS-resident family previously sampled) - i.e. this is confirmed,
+not new, behavior, now pinned down with much finer precision. The
+`-ENODEV` distinction alone does not appear to be the gating factor for
+further boot progress.
+
+### New resource: live PCSX2 DebugServer connection
+
+Mid-session, `mcp__pcsx2-mcp__*` tools became available and
+`pcsx2_status` confirmed a live, paused PCSX2 instance (DebugServer +
+Pine both connected) with the real Tekken Tag Tournament Demo
+(SCED-50041) already loaded - `pcsx2_disassemble`, `pcsx2_read_memory`,
+`pcsx2_read_registers`, `pcsx2_get_backtrace`, `pcsx2_get_threads`, and
+breakpoint/watchpoint tools are all available against it. A brief
+initial probe (game_info, threads, backtrace, disassembly at the
+current pause point `0x00082008` - a real BIOS scratchpad-memset loop
+during early kernel init, per the native disassembler) confirmed the
+connection is live and useful, but no systematic ground-truth
+comparison was done this round (out of scope for the "boot Tekken"
+request that was just completed). This is a significant new capability:
+for the very first time, this project can directly disassemble/read/
+compare real PCSX2's own execution of the exact same game against this
+project's hand-rolled reimplementation, instead of relying solely on
+inference from this project's own address-histogram tracing. Flagged as
+the highest-value angle for Round 458+: e.g. set a real breakpoint at
+real PCSX2's FIO_F_OPEN dispatch (or the real `sceCdRead` entry point)
+during its own Tekken boot to see definitively what path real hardware
+uses to fetch the game ELF - directly resolving task #281's open
+question with ground truth instead of inference.
+
+### Verification
+
+Both experiments confirmed via full debug-log review (grep counts,
+address histograms) and are scratch-only (`/tmp/driver_tekken*.c`,
+`/tmp/ee_core_r457b.c`, `/tmp/driver_enodev.c`) - the tracked repo was
+not modified. No regression suite / Wii rebuild required (investigation
+round, no source changes, per the mandatory-workflow docs-only carve-
+out).

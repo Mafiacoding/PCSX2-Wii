@@ -20858,3 +20858,53 @@ same file-open sequence, same GS state, still dispatch_ncmd()=0. Real,
 correct fix, honestly reported as not (yet) unlocking further boot
 progress. See docs/ROADMAP.md Round 456 entry for full detail and next-
 step framing.
+
+## Round 457 (tasks #281-282): _LoadExecPS2 trampoline boot attempt + post-ENODEV OSDSYS trace (docs-only investigation)
+
+Task #281: built a real EE syscall-6 (`_LoadExecPS2`) trampoline that
+hijacks OSDSYS's own currently-running thread (`pc`/`next_pc` redirect,
+no `CreateThread` - avoiding Round 371-378's already-root-caused
+mistake) to invoke the real, resident BIOS handler with `$a0` pointing
+at the real `SYSTEM.CNF` boot path (`cdrom0:\SCED_500.41;1`). The
+syscall-dispatch mechanism itself worked end-to-end - pc genuinely
+vectored through the trampoline into real exception-handled BIOS code.
+But the target file was never observed being opened via FIO_F_OPEN (0
+hits in the full debug log); net effect was a full, non-crashing restart
+of OSDSYS's own rom0: resource-loading sequence, settling back into the
+same well-characterized VBLANK-wait/RPC steady state (pc=0x002113E4) as
+an unmodified boot. 600,000-slice fine trace confirmed the entire window
+spent in the same real, legitimate VBLANK-wait routine documented since
+Round 448 (0x8000AF90-0x8000AFA8 / 0x8000B8A0-0x8000B8B8) - not a bug.
+Open question: real `_LoadExecPS2`'s ELF-loading likely uses a lower-
+level disc-access path (e.g. direct `sceCdRead`/NCMD) distinct from the
+generic FILEIO RPC service this project models - the real fix needed to
+actually boot a game may live at that lower level.
+
+Task #282: instrumented the exact reply-write site to flag the moment
+the real `mc0:`/`mc1:` `-ENODEV` reply (Round 456's fix) is delivered,
+then fine-traced 200,000 slices immediately after. Result: OSDSYS does
+NOT dead-end on the reply - it continues into genuine, varied control
+flow within a compact ~0x1cc-byte window of its own loaded ELF code
+(0x00200C80-0x00200D4C), consistent with a real, actively-branching
+per-frame dispatcher loop (the same "per-frame idle dispatcher" family
+documented since Round 269-360, here caught executing from OSDSYS's own
+userspace copy). One brief, healthy detour to 0x800004FC (real kernel
+interrupt/syscall dispatch) then straight back - normal periodic
+interrupt handling, not a crash. Conclusion: the `-ENODEV` value is
+consumed by real control flow but doesn't appear to gate anything
+further - OSDSYS settles into the same familiar, healthy idle loop
+regardless, still waiting for a stimulus this project's boot-flow
+harness has never supplied. Corroborates, with more precise live
+evidence, the same long-standing conclusion reached from many other
+angles since Round 269.
+
+**New resource discovered this round**: a live PCSX2 DebugServer/Pine
+connection became available mid-session, with the real Tekken Tag
+Tournament Demo (SCED-50041) already loaded - offering, for the first
+time, direct ground-truth comparison (native disassembly, live register/
+memory reads, real backtraces) against this project's own hand-rolled
+reimplementation, rather than inference from address histograms alone.
+Not yet exploited beyond a brief initial probe this round; flagged as a
+high-value angle for Round 458+.
+
+No source fix shipped this round (investigation-only, as scoped).

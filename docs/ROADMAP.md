@@ -8655,3 +8655,62 @@ All work this round was in `/tmp/driver_r469.c` (built against
 (`/tmp/r469_test.ckpt`, `/tmp/r469_run1.log`). No tracked source files
 were modified. Docs-only round: no regression suite or Wii rebuild
 required.
+
+## Round 470: pivot back to organic BIOS boot per user redirect - fresh re-verification, no fix shipped, one new incremental fact
+
+### User redirect (verbatim intent)
+
+"see how far the bios boots go and do only 4 or 5 rounds it think 10
+is too much, and also the game boot will be much more complicated
+then just a bios or splash screen and we already have picture." This
+supersedes the prior "always create ~10 tasks" standing convention
+(now 4-5 per batch) and pivots focus away from the Round 457-469
+synthetic game-injection trampoline experiment back to the plain
+organic (non-hijacked) BIOS/OSDSYS boot path.
+
+### What this round did
+
+Re-verified the organic boot's resting state fresh, using a clean
+driver (`driver_r470.c`, based on `driver_r461.c` with the Round 457
+trampoline-install block explicitly disabled) compiled directly
+against the current tracked source tree - no scratch instrumentation
+on the executed code path. Ran a 120,000,000-slice chained survey
+(3 legs, checkpoint-resumed). Result: unchanged from the Round
+456/464 baseline - `pmode=0x66`, circuit 2 active, sprite count
+growing (343->514), lines/points frozen (4888/333), no triangles,
+`dispatch_ncmd()=0`. Dumped a fresh framebuffer PNG confirming the
+still-rendering boot animation is the "picture" the user referenced.
+
+Re-derived Round 386's WaitSema/DeleteSema stub decode directly from
+this round's own checkpoint (byte-identical, confirms no regression
+across 14 rounds including the entire Round 457-469 trampoline arc).
+Took Round 366's own stated next step - scanned OSDSYS's full loaded
+code range for a direct `JAL` to the CDDASTREAM-issuing function
+(`0x00213600`) and found none, meaning the real caller uses an
+indirect `JALR`/table-based call, consistent with this project's
+established dispatch-table idioms elsewhere (ERET-glue trampoline,
+AddIntcHandler table). This narrows, but does not yet answer, what
+backward-trace technique is needed next.
+
+### Task classification
+
+No fix implemented, none evidenced - this round reconfirms two
+already-settled findings and adds one narrow new fact (indirect, not
+direct, CDDASTREAM caller). Consistent with the project's no-guessing
+discipline.
+
+### Verification
+
+`driver_r470.c`/`driver_r470b` (adds a single-line `dispatch_ncmd()`
+entry print via scratch `iop_cdvd_r470.c`), checkpoint files, and the
+framebuffer raw/PNG dumps all live under `/tmp`, never committed.
+`git status`/`git diff --stat` confirm only `docs/STATUS.md`/
+`docs/ROADMAP.md` changed. Docs-only round: regression suite and Wii
+rebuild correctly skipped.
+
+### Next step
+
+Locate the indirect call site reaching the CDDASTREAM-issuing
+function (likely `JALR $reg` with a table- or pointer-computed
+target) and trace backward from there toward the real OSDSYS decision
+point that chooses to probe CDDASTREAM at all.

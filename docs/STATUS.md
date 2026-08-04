@@ -21199,3 +21199,82 @@ verify what filename/argv this project's Round 457 trampoline actually
 passes, and whether constructing a real SYSTEM.CNF-derived BOOT2-style
 call (instead of a synthetic placeholder) changes the outcome. See
 docs/ROADMAP.md for full detail.
+
+## Round 464 (tasks #343-344, #347-348, #351): filename-argument loss pinpointed to before the first sub-call - no safe fix yet, organic boot re-verified unchanged (honest negative result)
+
+Direct continuation of Round 463, attempting to act on its leading
+hypothesis: that the trampoline's synthetic `argc=0`/`argv=NULL` call
+was why `p_ExecPS2` ends up targeting OSDSYS's own code instead of the
+game. Disassembled `p_ExecPS2` itself (`0x800057E8-0x800058E4`) for the
+first time and found it's much simpler than expected: it saves its own
+`$a0` (filename), `$a1` (argc), `$a2` (argv) into callee-saved
+registers, optionally copies `argc` argv strings into a real ArgsBuffer
+(skipped when `argc<=0`, confirming Round 462's dead ArgsBuffer
+observation), then **writes its own `$a0` (filename pointer) directly
+into `TCB[currentThreadID].entry`** - real ELF-loading/entry-point
+resolution is not done here; the filename pointer itself becomes the
+new "entry", presumably interpreted later at thread-scheduling time.
+
+Instrumented `p_ExecPS2`'s entry directly and captured the real
+arguments it received: `a0=0x00200008` (OSDSYS's own ELF entry
+address, not our trampoline's string buffer at `0x01FE0000`),
+`a1=0`, `a2=1`. The string at `0x00200008` isn't text - it's OSDSYS's
+own code. This confirms Round 463's TCB.entry writes (`0x00210d68`/
+`0x00210e78`) trace back to this substituted filename, not a separate
+issue - and explains the repeated `FIO_F_OPEN` pattern for OSDSYS's own
+OSBROWS/OSFONTM/MOPEN/etc. resources both before AND after `p_ExecPS2`
+fires: it's OSDSYS's own startup sequence running twice, not the game.
+
+To find where the substitution happens, added `$a0` snapshots at every
+real sub-call already instrumented (`CancelWakeupThread`,
+`ChangeThreadPriority`, the `TerminateThread`/`DeleteThread` loop,
+`InitSemaphores`, `InitPgifHandler2`, `InitializeGS`, `InitializeFPU`,
+`InitializeScratchPad`). Result: **our trampoline's filename pointer is
+already gone by the very first sub-call** (`CancelWakeupThread`, where
+`$a0=3`, the thread ID) - `$a0` is legitimately reused as a scratch/
+argument register by every one of these real subroutines for their own
+purposes throughout the whole chain, exactly as MIPS calling convention
+allows for a caller-saved register. This is not a preservation bug in
+any of the callees - it means the real top-level dispatcher (the
+function that calls `CancelWakeupThread` first, immediately after the
+exception vector) must itself save the filename into its own
+callee-saved register before making any of these calls, and by the
+time it finally invokes `p_ExecPS2` at the end, that saved value is
+already `0x00200008` - not our string.
+
+**This function - the actual top-level `_LoadExecPS2`/`ExecPS2Patch`-
+equivalent dispatcher that receives the syscall and orchestrates the
+whole sequence - has never been disassembled in this project's own
+investigation.** Everything traced since Round 459 has been its
+*callees*. Finding out whether it substitutes the filename due to a
+real, evidenced validation failure (most likely: our synthetic
+trampoline never performs whatever pre-flight file-open/validate step
+a real OSDSYS caller would do before reaching this syscall) or due to
+a genuine emulation gap requires disassembling that function directly
+- not yet done, and not a small task given its address is still
+unknown.
+
+**No safe fix implemented.** This is not a case of "we found the bug
+but didn't get to it" - the actual root cause is still one level
+removed from anything this investigation has directly observed.
+Implementing a fix without disassembling that dispatcher first would
+be exactly the kind of unevidenced guess this project's discipline
+(task #180) rules out.
+
+Re-verified the organic (non-trampoline) boot path is unchanged: a
+fresh 35M-slice run shows the same real BIOS intro-animation content
+(0 triangles, 375 sprites, 4888 lines - matching Round 452's already-
+documented stable state) and all GS display registers still zero.
+Cross-checked against the live PCSX2 reference session (still
+connected, real Tekken Tag Tournament Demo paused mid-game-code at
+`pc=0x003993b8` since Round 458): its GS registers are *also* entirely
+zero at this exact paused point, meaning even accurate, real hardware
+emulation hasn't configured a display path yet this early in real game
+code either - reassuring context, not a new finding.
+
+**No new visual milestone this round.** The current best rendered
+frame remains the Round 450 intro-animation capture (640x448,
+lines/sprites/points, no triangles) - re-dumped this round for
+reference, unchanged pixel-for-pixel from Round 452's characterization.
+See docs/ROADMAP.md for the full Round 464 write-up and the concrete
+Round 465 next step (disassemble the real top-level dispatcher).

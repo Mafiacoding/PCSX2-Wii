@@ -7679,3 +7679,151 @@ host-native driver builds/executions (16.5M-slice and 26M-slice) to
 capture the landmark and register-read instrumentation quoted above.
 No regression suite or Wii rebuild required for a docs-only
 investigation round, consistent with the standing workflow rule.
+
+## Round 464: p_ExecPS2 disassembled directly - filename substitution traced back before the very first sub-call, real top-level dispatcher still unknown (tasks #343-344, #347-348, #351)
+
+### Tasks #343-344: disassembled p_ExecPS2 itself for the first time
+
+Round 463 left `p_ExecPS2` (0x800057E8) confirmed-reached but
+undisassembled. This round disassembled its full body
+(`0x800057E8-0x800058E4`, ~90 instructions). Structure:
+
+1. Prologue saves `$a0`(filename)->`$s4`, `$a1`(argc)->`$s5`,
+   `$a2`(argv)->`$s3`, `$a3`->`$s1`.
+2. `blez $s3, 0x80005858` - if `argc<=0`, skip straight past the argv
+   copy loop. With argc>0, the loop calls the real `eestrcpy` helper
+   (`0x80005560`, confirmed in Round 462) once per argv entry into a
+   real ArgsBuffer-style destination.
+3. Reads the real current-ThreadID global (`0x800125EC`, Round 462)
+   into `$v0`, computes `$a0 = TCB_BASE + $v0*76 + 0x0C` - i.e. the
+   address of `TCB[currentThreadID].entry` (the `$s2` register was
+   pre-loaded with `TCB_BASE+0x0C` back at function entry, folding the
+   offset into the base pointer).
+4. `sw $s4, 0($a0)` - **writes the ORIGINAL FILENAME ARGUMENT directly
+   into `TCB[tid].entry`.** No file open, no ELF header parse, no
+   EntryPoint computation happens inside `p_ExecPS2` itself. The
+   filename pointer *becomes* the TCB's entry value, presumably
+   resolved/loaded lazily whenever that TCB is next scheduled by a
+   different piece of kernel code not yet found.
+
+This directly explains Round 463's TCB.entry writes: they were never a
+real code address at all, they were **the filename argument itself**
+being installed via `sw`, which is why they always looked like
+plausible-but-slightly-off addresses.
+
+### Task #347: p_ExecPS2 entry instrumented directly - confirmed WHICH filename it actually receives
+
+Added direct instrumentation on `p_ExecPS2`'s entry (printing `$a0`/
+`$a1`/`$a2` and attempting a string read at `$a0`) plus its return
+point. Result, unchanged across a 26M-slice re-run:
+
+```
+[R464-PEXECPS2-ENTRY] call#1 a0(filename_ptr)=0x00200008 a1(argc)=0x00000000 a2(argv)=0x00000001
+[R464-PEXECPS2-FNSTR] ")"
+[R464-PEXECPS2-RETURN] instr=137698176
+```
+
+`p_ExecPS2` is called exactly once. `a0=0x00200008` is OSDSYS's own
+real ELF entry point (the same value Round 461 found written to TCB
+slot 1 as "OSDSYS's own restart address") - not our trampoline's
+filename buffer (`0x01FE0000`, holding `"cdrom0:\SCED_500.41;1"`). The
+byte at that address doesn't decode as text (it's executable code, not
+a string), confirming this categorically isn't our filename.
+
+This also fully explains a pattern that's been visible since Round
+463 without an explanation: the exact same `FIO_F_OPEN` sequence
+(`rom0:OSOPEN`, `rom0:OSCLOCK`, `rom0:OSBROWS`, `mc0:/mc1:.../OSBROWS`,
+`rom0:OSFONTM/OSFONTS`, `rom0:MOPEN/MCLOCK/MBROWS/FONTM/FONTS`) occurs
+**twice** - once during the trace's normal cold-boot startup, and once
+again immediately after `p_ExecPS2` fires. `TCB[3].entry` being set to
+OSDSYS's own entry address means the calling thread, once rescheduled,
+just re-runs OSDSYS's entire startup sequence from scratch. This is a
+real, internally-consistent "warm reboot back to the menu" - not a
+crash or hang, just not our game.
+
+### Bisecting where the filename gets lost
+
+Added `$a0` snapshots at every already-instrumented real sub-call
+landmark (`CancelWakeupThread`, `ChangeThreadPriority`, the
+`TerminateThread`/`DeleteThread` loop iterations, `InitSemaphores`,
+`InitPgifHandler2`, `InitializeGS`, `InitializeFPU`,
+`InitializeScratchPad`) to find exactly when `$a0` stops being our
+filename pointer. Full captured sequence:
+
+```
+pc=0x80004970 a0=0x00000003   <- CancelWakeupThread (thread ID, not filename)
+pc=0x80004288 a0=0x00000003   <- ChangeThreadPriority
+pc=0x80003e00 a0=0x00000001   <- TerminateThread loop, slot 1
+...  (a0 cycles 1..9, one per terminated thread slot)
+pc=0x80004e68 a0=0x80016fe8   <- InitSemaphores (a semaphore table pointer)
+pc=0x800021b0 a0=0xffffffff   <- InitPgifHandler2
+pc=0x8000aa60 a0=0x1000f000   <- InitializeGS (real GS MMIO base)
+pc=0x8000b7a8 a0=0x0000000a   <- InitializeFPU
+pc=0x8000b840 a0=0x0000000a   <- InitializeScratchPad
+```
+
+Our filename pointer (`0x01FE0000`) is **already gone by the very
+first sub-call** - `$a0` there holds the thread ID (3), not our
+string. This is not a preservation bug in any of these callees: `$a0`
+is a caller-saved register under standard MIPS calling convention, and
+every one of these real subroutines legitimately reuses it for its own
+first argument, exactly as real code should. The real top-level
+dispatcher - whatever function receives the syscall and calls
+`CancelWakeupThread` first - must itself hold the filename in one of
+*its own* callee-saved registers (`$s0-$s7`) across this entire call
+chain, the same pattern `p_ExecPS2` itself uses internally with `$s4`.
+By the time that dispatcher finally calls `p_ExecPS2`, its saved copy
+is already `0x00200008`, not our string.
+
+**This function has never been disassembled in this project's
+investigation.** Every round since 459 has disassembled its *callees*
+(`CancelWakeupThread`, `ChangeThreadPriority`, `InitSemaphores`,
+`InitPgifHandler2`, the `SoftPeripheralEEReset` sub-calls, and now
+`p_ExecPS2`), but never the function that calls all of them in
+sequence - its address isn't yet known. Finding it (likely by
+disassembling backward from `CancelWakeupThread`'s first call site, or
+forward from the real exception vector at `0x80000180`) is the
+concrete next step (Round 465) - only there can this project determine
+whether the filename substitution reflects a real, evidenced kernel
+validation failure (most likely explanation: the real caller normally
+does its own file-open/validate before ever reaching this syscall, a
+step our synthetic trampoline skips) or an actual gap.
+
+### Task #348 (classify/fix): no fix implemented - root cause not yet reached
+
+Consistent with Rounds 459-463's discipline: no source change is
+implemented without direct evidence of what's wrong and why. The
+actual root cause - whatever logic decides to substitute the filename
+- lives in a function this project hasn't located or disassembled yet.
+Implementing a "fix" now would mean guessing at that function's
+behavior, which task #180's standing rule rules out.
+
+### Task #351: organic (non-trampoline) boot re-verified unchanged
+
+Ran a fresh 35M-slice organic boot (no synthetic trampoline) to check
+for any regression or incidental progress. Result: identical to Round
+452's already-documented state - `triangles=0 sprites=375 lines=4888
+points=333`, all GS display registers (`PMODE`/`DISPFB1`/`DISPLAY1`/
+etc.) still zero, no new `FIO_F_OPEN` activity within this shallower
+window (Round 455 needed 120M+ slices to reach the memory-card layer,
+and nothing in tracked source has changed since Round 456's real
+errno fix). Cross-checked against the live PCSX2 reference session
+(still connected and paused mid-real-game-code since Round 458): its
+GS registers are also entirely zero at that exact point, meaning
+accurate hardware emulation hasn't configured a display path that
+early in real game code either - useful context, not evidence of a
+bug on either side.
+
+Re-dumped the current best framebuffer (640x448, matching Round 450's
+capture pixel-for-pixel) for reference; no new visual milestone was
+reached this round.
+
+### Verification
+
+All work this round was scratch-only (`/tmp/ee_core_r464.c`,
+`/tmp/ee_core_r464b.c`, `/tmp/driver_r464.c`, checkpoints
+`/tmp/r464_ckpt.bin`/`/tmp/r464b_ckpt.bin`) plus one fresh organic-boot
+run via the existing tracked-source-linked `driver_unified` binary (no
+tracked source changes, so this was a re-verification run, not a new
+build). No regression suite or Wii rebuild required for a docs-only
+investigation round.

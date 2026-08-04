@@ -2170,6 +2170,12 @@ int ee_core_init(const bios_image_t *bios)
     dma_set_sink(DMA_CHANNEL_VIF0, vif0_process_quadwords); /* VIF0/VIF1 DMA transfers now walk real VIFcode streams - see vif.h */
     dma_set_sink(DMA_CHANNEL_VIF1, vif1_process_quadwords);
 
+    /* (Round 449 note: the three dma_set_sink() calls above register
+     * HOST C FUNCTION POINTERS into dma.c's static g_sinks[] table -
+     * see ee_core_rebind_dma_sinks() below for why a checkpoint-
+     * restore-safe re-registration entry point is needed for this
+     * exact same table.) */
+
     g_state.bios = bios;
     g_state.pc = BIOS_RESET_VECTOR;
     g_state.next_pc = BIOS_RESET_VECTOR + 4;
@@ -2210,6 +2216,42 @@ int ee_core_init(const bios_image_t *bios)
     g_state.cop0[12] = 0x70400004u;
 
     return 0;
+}
+
+/* Round 449 (task #247 final root cause, part 3): re-register the DMA
+ * channel sink callbacks (GIF/VIF0/VIF1) without re-initializing any
+ * other state. dma.c's static g_sinks[DMA_CHANNEL_COUNT] array holds
+ * HOST C FUNCTION POINTERS (gif_process_quadwords/vif0_process_
+ * quadwords/vif1_process_quadwords) set once by the dma_set_sink()
+ * calls inside ee_core_init() above - since g_sinks[] is itself a
+ * static global, it lives inside the raw [__data_start,_end) block a
+ * checkpoint dump/restore covers, and the raw restore just overwrote
+ * it with the CHECKPOINT-WRITING process's function-pointer values,
+ * which are only valid in THAT process's address space under PIE/
+ * ASLR - exactly the same bug class already fixed for g_ee_iop_ctx/
+ * g_ee_iop_write8 (system_rebind_iop_bridge()) and ee->bios/iop->bios
+ * above, just one function pointer table further out. This was the
+ * true final cause of the "only crashes after several chained
+ * resumes" SIGSEGV that survived every earlier fix in this arc:
+ * proven via a diagnostic build that read the faulting RIP straight
+ * out of the signal ucontext (bypassing backtrace(), which itself
+ * double-faulted trying to unwind from a totally unmapped PC) -
+ * RIP exactly equaled the FIRST ("run"-mode) process's own load
+ * address for this same crash, confirming a function pointer had
+ * been carried forward, completely stale, through every single
+ * checkpoint generation since the very first cold boot. The actual
+ * call site is dma.c's dma_process(): "g_sinks[channel](channel, p,
+ * qwc);" - fired the first time a real EE GIF/VIF DMA kick occurs
+ * after enough resumed execution, which is why this was reproducible
+ * but only after real GS/display-adjacent activity, matching the
+ * pmode=0x66 DISPLAY MILESTONE seen at the same total-slice mark in
+ * this round's continuous-run control test. See docs/STATUS.md
+ * Round 449. */
+void ee_core_rebind_dma_sinks(void)
+{
+    dma_set_sink(DMA_CHANNEL_GIF, gif_process_quadwords);
+    dma_set_sink(DMA_CHANNEL_VIF0, vif0_process_quadwords);
+    dma_set_sink(DMA_CHANNEL_VIF1, vif1_process_quadwords);
 }
 
 static void halt(const char *reason)

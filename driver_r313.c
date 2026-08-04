@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 /*
  * driver_lean_r310b.c - Round 310 lean boot-trace driver with a
  * TARGETED checkpoint/resume mechanism, built directly against the
@@ -60,12 +61,27 @@ static void r313_safe_printf(const char *fmt, ...)
     }
 }
 
+static char r313_altstack[65536];
+
+#include <ucontext.h>
 static void r313_segv(int sig, siginfo_t *si, void *uc)
 {
-    (void)sig; (void)uc;
-    char buf[128];
+    (void)sig;
+    char buf[160];
     int n = snprintf(buf, sizeof(buf), "[R313-SIGSEGV] fault at addr=%p\n", si->si_addr);
     ssize_t w = write(2, buf, (size_t)n); (void)w;
+    /* Round 449: print RIP too (cheap, pure read of the ucontext,
+     * no allocation) - if RIP==fault addr, it was a jump/call/ret to
+     * a bad target (stale host function pointer), not a data-pointer
+     * dereference. Kept as a permanent diagnostic since it already
+     * proved decisive once (see docs/STATUS.md Round 449 - the
+     * g_sinks[] DMA-callback-table bug). */
+    ucontext_t *ctx = (ucontext_t *)uc;
+#if defined(__x86_64__)
+    unsigned long long rip = (unsigned long long)ctx->uc_mcontext.gregs[REG_RIP];
+    n = snprintf(buf, sizeof(buf), "[R313-SIGSEGV] RIP=0x%llx\n", rip);
+    w = write(2, buf, (size_t)n); (void)w;
+#endif
     void *bt[64];
     int nframes = backtrace(bt, 64);
     write(2, "[R313-BACKTRACE]\n", 18);
@@ -169,8 +185,75 @@ static int load_checkpoint(const char *path)
     iop->ram_size = iop_ram_size;
     bios.data = fresh_bios_data;
     bios.size = bios_size;
+    /* Round 449 (task #247 final root cause): re-bind ee_state_t.bios
+     * and iop_state_t.bios - both are `const bios_image_t *` fields
+     * inside g_state/g_iop (themselves static globals, so THIS
+     * pointer FIELD lives inside the raw [__data_start,_end) block
+     * dumped/restored above). ee_core_init()/iop_core_init() set it
+     * once, at the top of main(), to &bios - the driver's OWN global
+     * bios_image_t struct - which is itself at a stable, checkpoint-
+     * restorable address (same reasoning as the "g_state.bios must
+     * point at a STABLE... address" comment on that global's
+     * declaration above). But the raw block restore just overwrote
+     * that pointer FIELD with the WRITING process's absolute address
+     * for ITS OWN &bios (a different address under PIE/ASLR, even
+     * though both processes run the identical binary) - so
+     * st->bios->size / st->bios->data in ee_mem_ptr()/iop_mem_ptr()
+     * dereferenced a garbage address in the resuming process,
+     * producing a SIGSEGV deep inside ee_mem_ptr() (ee_core.c:1054)
+     * the very first time execution actually read a BIOS ROM byte
+     * post-resume - which only happens once PC wanders into BIOS
+     * code again, explaining why this crash was reproducible but
+     * only appeared after a consistent, non-trivial number of
+     * post-resume slices, not immediately. Exactly the same bug
+     * class/fix pattern as g_ee_iop_ctx above and g_alloclist in
+     * iop_heap.c - see docs/STATUS.md Round 449. */
+    ee->bios = &bios;
+    iop->bios = &bios;
+    /* Round 449 (task #247 final root cause, part 2): re-open the
+     * mounted disc image fresh in THIS process - iop_cdvd.c's g_disc
+     * and iop_cdrom_legacy.c's g.disc both hold a `FILE *fp` field
+     * (iso_image_t.fp) inside a static global struct, so it too lives
+     * inside the raw [__data_start,_end) block just restored above,
+     * and was just clobbered with the WRITING process's stale FILE*
+     * value (a heap-allocated glibc FILE struct address, invalid in
+     * this process under PIE/ASLR) - exactly the class of bug fixed
+     * for ee->bios/iop->bios moments ago, just one level further out
+     * (a pointer INSIDE a pointed-to struct's own heap-allocated
+     * resource, not the struct pointer itself). This was the real,
+     * final cause of the chained-resume-only SIGSEGV that survived
+     * the ee->bios/iop->bios fix - confirmed via a control test: a
+     * single continuous 12,000,000-slice run never crashes, but 5
+     * chained 2,000,000-slice resumes covering the same total slice
+     * count crash consistently around slice ~520,000-540,000 into
+     * the 5th resume, right as OSDSYS's real disc-access code path
+     * is reached (matching the DISPLAY MILESTONE pmode=0x66 seen at
+     * the same total-slice mark in the continuous-run control) - see
+     * docs/STATUS.md Round 449. */
+    iop_cdvd_rebind_iso("/tmp/round238_diag/disc.iso");
+    iop_cdrom_legacy_rebind_iso("/tmp/round238_diag/disc.iso");
+    /* Round 449 (task #247 final root cause, part 3): re-register the
+     * GIF/VIF0/VIF1 DMA sink callbacks - see ee_core.h's citation on
+     * ee_core_rebind_dma_sinks() for the full rationale. This was the
+     * bug that survived every earlier fix in this arc (bios pointers,
+     * SIF bridge, IOP heap chain, disc FILE*) because it only fires
+     * once a real GIF/VIF DMA kick happens post-resume, which needs
+     * enough resumed execution to reach - a single continuous run
+     * never hits it because ee_core_init() (which sets these sinks
+     * correctly) only ever runs once, at true cold boot, matching
+     * this process's own address space throughout. */
+    ee_core_rebind_dma_sinks();
     dma_bind_ee_ram(ee->ram, ee->ram_size);
     iop_dma_bind_iop_ram(iop->ram, iop->ram_size);
+    /* Round 448 (task #247 continued): re-bind the EE->IOP SIF DMA-
+     * copy write bridge (see system.h's citation on
+     * system_rebind_iop_bridge() for full rationale) - the raw block
+     * restore above just clobbered g_ee_iop_ctx/g_ee_iop_write8 in
+     * ee_core.c with the writing process's stale absolute addresses,
+     * exactly the same class of bug as ee->ram/iop->ram, just for a
+     * pointer-to-static-struct and a function pointer instead of a
+     * heap buffer. */
+    system_rebind_iop_bridge();
     rc |= read_block_into(f, ee->ram, ee_ram_size);
     rc |= read_block_into(f, iop->ram, iop_ram_size);
     /* Round 448 (task #247): rebuild the IOP heap chain from its
@@ -207,7 +290,8 @@ int main(int argc, char **argv)
     const char *ckpt_path = argv[2];
     uint64_t slices_to_run = strtoull(argv[3], NULL, 10);
 
-    { struct sigaction sa; memset(&sa,0,sizeof(sa)); sa.sa_sigaction=r313_segv; sa.sa_flags=SA_SIGINFO; sigaction(SIGSEGV,&sa,NULL); }
+    { stack_t ss; ss.ss_sp = r313_altstack; ss.ss_size = sizeof(r313_altstack); ss.ss_flags = 0; sigaltstack(&ss, NULL); }
+    { struct sigaction sa; memset(&sa,0,sizeof(sa)); sa.sa_sigaction=r313_segv; sa.sa_flags=SA_SIGINFO|SA_ONSTACK; sigaction(SIGSEGV,&sa,NULL); }
 
     memset(&bios, 0, sizeof(bios));
     if (bios_load("/tmp/round238_diag/bios.bin", &bios) != 0) { r313_safe_printf("[!] bios_load failed\n"); return 1; }

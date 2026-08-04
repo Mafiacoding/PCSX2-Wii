@@ -240,6 +240,19 @@ void iop_cdrom_legacy_unmount_iso(void)
     if (g.disc_mounted) { iso_close(&g.disc); g.disc_mounted = 0; }
 }
 
+/* Round 449 (task #247 final root cause, part 2): see the identically-
+ * shaped iop_cdvd_rebind_iso() in iop_cdvd.c for the full citation -
+ * same stale-FILE*-after-checkpoint-restore issue, same fix (reopen
+ * via iso_open() directly, bypassing the unsafe post-restore
+ * iso_close() call inside iop_cdrom_legacy_mount_iso()). */
+int iop_cdrom_legacy_rebind_iso(const char *path)
+{
+    if (iso_open(path, &g.disc) != 0) { g.disc_mounted = 0; return -1; }
+    g.disc_mounted = 1;
+    g.stat |= IOP_CDROM_STAT_MOTOR;
+    return 0;
+}
+
 static void do_read(int mode_s)
 {
     if (!have_disc()) { respond_no_disc(); return; }

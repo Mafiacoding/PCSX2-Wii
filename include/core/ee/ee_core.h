@@ -215,6 +215,7 @@ typedef struct {
 
 int  ee_core_init(const bios_image_t *bios);
 void ee_core_run(const bios_image_t *bios);
+void ee_core_rebind_dma_sinks(void); /* Round 449 - checkpoint-resume-safe DMA sink re-registration, see .c citation */
 
 /* Single-step entry point, for the interleaved EE/IOP scheduler
  * in core/system.h. See its definition in ee_core.c for details. */

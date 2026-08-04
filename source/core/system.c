@@ -9,6 +9,43 @@
 #include "core/ee/ee_core.h"
 #include "core/iop/iop_core.h"
 #include <stdio.h>
+#include <stdarg.h>
+#include <unistd.h>
+
+/* Round 448 (task #247 continued): real, confirmed root cause of the
+ * checkpoint/resume SIGSEGV that iop_heap.c's fix and the SIF-bridge
+ * re-bind did not resolve on their own. Bisected via a host-native
+ * backtrace (driver_r313.c's own crash handler, once its earlier
+ * secondary-fault issue was worked around by testing smaller slice
+ * counts): the fault is INSIDE __printf_chk, called from this file's
+ * plain printf() calls below - confirming driver_r313.c's own long-
+ * standing, previously-unexplained comment ("stdio reliably crashes
+ * on any call made after this checkpoint format's raw restore, for
+ * reasons not fully root-caused" - see driver_r313.c's r313_safe_
+ * printf()) applies here too. r313_safe_printf() already worked
+ * around this in the test driver by formatting via vsnprintf() into
+ * a stack buffer and writing it with a raw write() syscall, entirely
+ * bypassing FILE-stream/PLT-mediated stdio machinery - this is the
+ * exact same technique, ported into system.c itself since
+ * system_run_interleaved() is real, shared source (used by main.c on
+ * the actual Wii/Dolphin target too, not just the test driver) and
+ * its diagnostic prints are worth keeping working everywhere, not
+ * just deleting them. This does not change any real Wii/Dolphin
+ * behavior - the printed bytes are identical, only the mechanism
+ * that emits them changed. */
+static void system_safe_printf(const char *fmt, ...)
+{
+    char buf[256];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n > 0) {
+        if (n > (int)sizeof(buf)) n = sizeof(buf);
+        ssize_t w = write(1, buf, (size_t)n);
+        (void)w;
+    }
+}
 
 /* Real EE clock (~294.912 MHz) vs real IOP clock (~36.864 MHz) is
  * roughly 8:1 - already documented as this project's target ratio in
@@ -46,6 +83,13 @@ int system_init(const bios_image_t *ee_bios, const bios_image_t *iop_bios)
     return 0;
 }
 
+/* Round 448 (task #247 continued): see system.h's citation on why
+ * this exists separately from system_init(). */
+void system_rebind_iop_bridge(void)
+{
+    ee_core_set_iop_write8_bridge(iop_core_get_state(), system_iop_write8_adapter);
+}
+
 int system_run_interleaved(uint64_t max_slices)
 {
     ee_state_t  *ee  = ee_core_get_state();
@@ -61,12 +105,12 @@ int system_run_interleaved(uint64_t max_slices)
             iop_core_step();
 
         if (ee->halted && iop->halted) {
-            printf("\n[+] system_run_interleaved: both cores halted after %llu slice(s)\n",
+            system_safe_printf("\n[+] system_run_interleaved: both cores halted after %llu slice(s)\n",
                    (unsigned long long)slice);
-            printf("    EE  halted at pc=0x%08lX after %llu instructions: %s\n",
+            system_safe_printf("    EE  halted at pc=0x%08lX after %llu instructions: %s\n",
                    (unsigned long)ee->pc, (unsigned long long)ee->instructions_executed,
                    ee->halt_reason[0] ? ee->halt_reason : "(unknown)");
-            printf("    IOP halted at pc=0x%08lX after %llu instructions: %s\n",
+            system_safe_printf("    IOP halted at pc=0x%08lX after %llu instructions: %s\n",
                    (unsigned long)iop->pc, (unsigned long long)iop->instructions_executed,
                    iop->halt_reason[0] ? iop->halt_reason : "(unknown)");
             return 1;
@@ -74,10 +118,10 @@ int system_run_interleaved(uint64_t max_slices)
 
         slice++;
         if (max_slices != 0 && slice >= max_slices) {
-            printf("\n[!] system_run_interleaved: hit slice cap (%llu) before both cores halted\n",
+            system_safe_printf("\n[!] system_run_interleaved: hit slice cap (%llu) before both cores halted\n",
                    (unsigned long long)max_slices);
-            printf("    EE  halted=%d pc=0x%08lX\n", ee->halted, (unsigned long)ee->pc);
-            printf("    IOP halted=%d pc=0x%08lX\n", iop->halted, (unsigned long)iop->pc);
+            system_safe_printf("    EE  halted=%d pc=0x%08lX\n", ee->halted, (unsigned long)ee->pc);
+            system_safe_printf("    IOP halted=%d pc=0x%08lX\n", iop->halted, (unsigned long)iop->pc);
             return 0;
         }
     }

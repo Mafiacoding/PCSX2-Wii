@@ -116,6 +116,27 @@ void iop_cdvd_unmount_iso(void)
     if (g_disc_mounted) { iso_close(&g_disc); g_disc_mounted = 0; }
 }
 
+/* Round 449 (task #247 final root cause, part 2): re-open the disc
+ * image fresh in THIS process, WITHOUT touching the existing g_disc
+ * first - see docs/STATUS.md Round 449 for the full citation. After
+ * a checkpoint's raw [__data_start,_end) block restore, g_disc.fp is
+ * a stale FILE* (a heap-allocated glibc FILE struct address) from
+ * whichever process wrote the checkpoint - calling iso_close() on it
+ * (as iop_cdvd_mount_iso() does before reopening) would itself
+ * dereference/fclose() that invalid pointer and crash. iso_open()
+ * unconditionally memset()s the whole out-struct before filling it
+ * in, so it is always safe to call directly regardless of whatever
+ * stale bytes g_disc held going in - this bypasses iop_cdvd_mount_iso()'s
+ * unsafe-post-restore iso_close() call entirely. Exactly the same
+ * "re-point to THIS process's own freshly-opened/allocated resource"
+ * pattern already used for ee->ram/iop->ram/bios.data/g_alloclist. */
+int iop_cdvd_rebind_iso(const char *path)
+{
+    if (iso_open(path, &g_disc) != 0) { g_disc_mounted = 0; return -1; }
+    g_disc_mounted = 1;
+    return 0;
+}
+
 /* Round 367 (real, evidenced gap found via a fresh look at real
  * PS2 conventions: SYSTEM.CNF and game data are read through the
  * generic SIF_SID_FILEIO service via cdrom0:/cdrom1: paths - e.g.

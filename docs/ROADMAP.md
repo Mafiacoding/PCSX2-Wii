@@ -6300,3 +6300,81 @@ simple stale pointer. Not resolved this round - left as an open item.
 Task #247 partially complete (real fix shipped, full resume not yet
 working). Next: get a symbolized backtrace for the second fault before
 attempting another fix.
+
+## Round 449 (2026-08-04, task #247): checkpoint/resume - fully fixed (3 more stale-pointer bugs found and fixed); GS DISPFB2 now holds a real 640px framebuffer config by ~15M slices
+
+Closes out task #247, open since Round 448. Three more instances of the
+same root-cause pattern (a host pointer living inside the raw
+`[__data_start,_end)` block that a checkpoint restore blindly overwrites
+with the WRITING process's absolute address, invalid in the RESUMING
+process under PIE/ASLR) were found and fixed, on top of Round 448's
+`g_alloclist` fix and this session's earlier `g_ee_iop_ctx`/`g_ee_iop_write8`
+SIF-bridge fix:
+
+1. **`ee_state_t.bios` / `iop_state_t.bios`** - both point at
+   `driver_r313.c`'s own global `bios_image_t bios`, set once by
+   `ee_core_init()`/`iop_core_init()` inside `system_init()`. Fixed by
+   re-assigning `ee->bios = &bios; iop->bios = &bios;` in
+   `load_checkpoint()` right after the raw restore. This was the crash
+   that survived Round 448's fix: `ee_mem_ptr()` (ee_core.c:1054)
+   dereferencing `st->bios->size` through the stale pointer, reached only
+   once execution reads a BIOS ROM byte post-resume (explaining why it
+   was reproducible but not immediate).
+
+2. **`iop_cdvd.c`'s `g_disc.fp` / `iop_cdrom_legacy.c`'s `g.disc.fp`** -
+   both hold a `FILE *` (`iso_image_t.fp`) inside a static global struct,
+   set once by `iop_cdvd_mount_iso()`/`iop_cdrom_legacy_mount_iso()` at
+   the top of `main()`. Fixed by adding `iop_cdvd_rebind_iso()` /
+   `iop_cdrom_legacy_rebind_iso()` - reopen the disc image fresh via
+   `iso_open()` directly, deliberately bypassing the existing mount
+   functions' `iso_close()` call (which would itself `fclose()` the
+   stale pointer and crash); `iso_open()` already unconditionally
+   `memset()`s its whole output struct, so calling it directly on stale
+   state is safe.
+
+3. **`dma.c`'s `g_sinks[DMA_CHANNEL_COUNT]`** - a HOST FUNCTION POINTER
+   table (`gif_process_quadwords`/`vif0_process_quadwords`/
+   `vif1_process_quadwords`), registered once via `dma_set_sink()` calls
+   inside `ee_core_init()`. This was the real final cause of a crash that
+   survived fixes #1 and #2: only manifested after several CHAINED
+   resumes (a single continuous run to the same total slice count never
+   hit it, since `ee_core_init()` only runs once per process and always
+   matches that process's own address space) - a wild jump/call, not a
+   data dereference. Root-caused by reading the faulting RIP straight out
+   of the SIGSEGV handler's `ucontext_t` (bypassing `backtrace()`, which
+   itself double-faulted trying to unwind from a totally unmapped PC):
+   the crash RIP exactly equaled the FIRST ("run"-mode) process's own
+   load address for `gif_process_quadwords`, proving the function pointer
+   had been carried forward, completely stale, through every checkpoint
+   generation since the very first cold boot. Fixed by adding
+   `ee_core_rebind_dma_sinks()`, called from `load_checkpoint()`.
+
+Also added a permanent `sigaltstack()`/`SA_ONSTACK` handler improvement to
+`driver_r313.c` so the SIGSEGV handler can still print `RIP`/backtrace
+info even when the fault itself has corrupted stack state - this is what
+made bug #3's diagnosis possible at all (the default handler kept
+double-faulting on its own `backtrace()` call).
+
+**Verification**: 20 chained 2,000,000-slice resumes (42,000,000 total
+slices) all completed cleanly (previously crashed by the 5th). Single-shot
+resumes up to 5,000,000 slices verified clean. Full 128/128 host-native
+regression suite passes (including `test_iop_cdvd.c`,
+`test_iop_cdrom_legacy.c`, `test_iso_loader.c` - all touched by fix #2).
+Wii cross-build clean, zero new warnings.
+
+**Bonus finding while verifying (answers the "can we display anything yet"
+question)**: a fresh cold-boot survey to 15,000,000 slices shows
+`PMODE=0x66` (circuit 2 active, matching Round 321/445) with
+**`DISPFB2` now holding a real, structured, non-zero value** - decoded:
+FBP=70 (word offset), FBW=10 -> 640 pixels, a genuine PS2 display width
+(previously DISPFB2 stayed at its power-on-zero state through every prior
+round's traced boot window). `source/main.c`'s real-hardware presentation
+path (`run_real_boot_flow()`, wired since Round 212/366 to prefer circuit
+2 over circuit 1 when EN2 is set) already reads exactly this register and
+would attempt a real `gs_blit_psmct32_to_xfb()` blit into the Wii's XFB
+the moment boot reaches this point on real hardware or in Dolphin. Whether
+that blit shows a *meaningful* picture (vs. blank/uninitialized GS memory
+at that framebuffer address) depends on whether real GIF/VIF draw
+primitives have actually written pixel data there yet by that point in
+boot - not yet confirmed, and a natural next investigation (task #248, GS
+DISPFB2 large-budget survey, is already queued for exactly this).

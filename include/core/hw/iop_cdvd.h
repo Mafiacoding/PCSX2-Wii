@@ -303,6 +303,7 @@ void iop_cdvd_set_disc_present(uint8_t disc_type);
  * iop_dma_sif0_try_transfer() simplification elsewhere. */
 int iop_cdvd_mount_iso(const char *path);
 void iop_cdvd_unmount_iso(void);
+int iop_cdvd_rebind_iso(const char *path); /* Round 449 - checkpoint-resume-safe reopen, see .c citation */
 
 /* Round 367: real cdrom0:/cdrom1: FILEIO lookup/read support - thin
  * pass-through to the already-mounted, already-parsed g_disc (see

@@ -146,6 +146,7 @@ void iop_cdrom_legacy_init(void);
  * failure (matches iso_open()'s own convention). */
 int iop_cdrom_legacy_mount_iso(const char *path);
 void iop_cdrom_legacy_unmount_iso(void);
+int iop_cdrom_legacy_rebind_iso(const char *path); /* Round 449 - checkpoint-resume-safe reopen, see .c citation */
 
 /* Same convention as every other *_mmio_read8/write8 helper in this
  * project: returns 1 and fills *out if addr falls in the modeled

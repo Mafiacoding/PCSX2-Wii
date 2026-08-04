@@ -20702,3 +20702,42 @@ working backtrace for the second fault (try compiling with
 instrumentation around `system_run_interleaved()` calls specifically) to
 identify what's actually corrupting the stack/return address during
 resumed execution.
+
+## Round 449 (task #247): checkpoint/resume fully fixed; GS DISPFB2 milestone
+
+Task #247 (checkpoint/resume SIGSEGV) is now **fully resolved**, closing out
+the item left open at the end of Round 448. Three more instances of the
+same root-cause class were found on top of Round 448's `g_alloclist` fix:
+`ee_state_t.bios`/`iop_state_t.bios` (stale pointer to `driver_r313.c`'s
+own global `bios_image_t`), `iop_cdvd.c`'s `g_disc.fp`/`iop_cdrom_legacy.c`'s
+`g.disc.fp` (stale `FILE *` handles), and `dma.c`'s `g_sinks[]` (stale HOST
+FUNCTION POINTERS for the GIF/VIF0/VIF1 DMA callbacks - the one that
+survived every earlier fix, since it only crashes after several CHAINED
+resumes reach a real GIF/VIF DMA kick, not on a single continuous run).
+All fixed via the same pattern already established in Round 448: re-bind
+the pointer to THIS process's own valid resource right after
+`load_checkpoint()`'s raw block restore, rather than trusting the
+restored value. See docs/ROADMAP.md's Round 449 entry for the full
+per-bug technical writeup, including the RIP-in-ucontext debugging
+technique that finally cracked the DMA-sink bug (backtrace() itself was
+double-faulting on the corrupted-looking crash, so the fix was to read
+the raw ucontext registers directly instead).
+
+Verified via 20 chained 2,000,000-slice resumes (42,000,000 total slices,
+previously crashed by the 5th) all completing cleanly, plus single-shot
+resumes up to 5,000,000 slices. Full 128/128 regression suite passes.
+Wii cross-build clean.
+
+While verifying, also answered the user's "can we display anything on real
+Wii/Dolphin yet" question with real data: a fresh cold-boot survey to
+15,000,000 slices now shows `PMODE=0x66` (circuit 2, matching Round
+321/445) with `DISPFB2` holding a real, structured, non-zero value -
+FBP=70, FBW=10 -> 640px, a genuine PS2 display width (previously DISPFB2
+stayed zero through every prior round's traced window). `source/main.c`'s
+real-hardware presentation path already reads exactly this register
+(fixed to prefer circuit 2 since Round 212/366) and would attempt a real
+`gs_blit_psmct32_to_xfb()` blit into the Wii's XFB once boot reaches this
+point on real hardware or in Dolphin. Whether the blit shows a meaningful
+picture (vs. still-uninitialized GS local memory at that framebuffer
+address) is not yet confirmed - that's task #248 (already queued: re-run
+the DISPFB2 survey at a larger budget).

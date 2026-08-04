@@ -7427,48 +7427,80 @@ static int ee_step(void)
                 default:   r = a | b; break;              /* VIOR  */
                 }
                 vu0_vi_write(st, fd, r);
-            } else if (funct == 0x20) {
-                /* VADDq - Round 446 (task #242 follow-up), TEST FIX:
-                 * this project's real host-native boot trace halted at
-                 * pc=0x0050DB34 on this exact funct value (raw instr
-                 * 0x4B000160: fs=0/VF0, ft=0/unused, fd=5,
-                 * destmask=0x8/X-lane-only) right after the Round 445
-                 * SetGsCrt fix let real GS PMODE get configured for
-                 * the first time. Real, cited (fetched this round,
-                 * PCSX2's own pcsx2/VUops.cpp): _vuADDq is a real,
-                 * existing PCSX2 function - "static __fi void
-                 * _vuADDq(VURegs* VU) { vuADDbc(VU, VU->VI[REG_Q].UL);
-                 * }" - i.e. FD[lane] = FS[lane] + Q (the SAME real Q
-                 * broadcast register, cop2_ctrl[22], already used by
-                 * this file's own existing VMULq at funct 0x1C), per
-                 * destmask lane. This is the natural "second
-                 * immediate-broadcast row" sitting immediately after
-                 * the already-implemented funct<=0x1F broadcast row
-                 * (ADDq/MADDq/ADDi/MADDi/SUBq/MSUBq/SUBi/MSUBi at
-                 * 0x20-0x27, paralleling that row's own structure) -
-                 * this file's own existing VDIV/VSQRT/VRSQRT comment
-                 * (funct 0x38-0x3A via the idx dispatch) already
-                 * anticipated this exact op ("cop2_ctrl[22] - this
-                 * project's single source of truth for Q (already
-                 * read by VMULq/VADDq/etc above)"), before it was
-                 * actually implemented. ONLY funct==0x20 is added
-                 * here (not the full sibling row, 0x21-0x27) since
-                 * only this exact value was directly observed in the
-                 * real halt-site disassembly - the remaining siblings
-                 * are a scoped future gap, not guessed at. Shipped as
-                 * an empirically-tested fix: verified via the 128-
-                 * test host-native regression suite plus a fresh
-                 * cold-boot forward-progress check against the Round
-                 * 445 baseline (93,508,707 instructions, halt at
-                 * pc=0x0050DB34) before being kept. */
+            } else if (funct >= 0x20 && funct <= 0x27) {
+                /* VADDq/VMADDq/VADDi/VMADDi/VSUBq/VMSUBq/VSUBi/VMSUBi
+                 * (funct 0x20-0x27) - Round 446 (task #242) originally
+                 * added ONLY funct==0x20 (VADDq) as an empirically-
+                 * tested fix for a real observed halt; task #249
+                 * (Round 455) completes the full row, since this
+                 * file's own Round 446 comment already correctly
+                 * identified and named all 8 real siblings but left
+                 * 7 of them unimplemented as a "scoped future gap,
+                 * not guessed at". Round 455 closes that gap using
+                 * real, directly-fetched PCSX2 source (pcsx2/
+                 * VUops.cpp, fetched this round from the live GitHub
+                 * repo, not guessed): each sibling is a thin wrapper
+                 * calling the SAME applyBinaryMACOpBroadcast/
+                 * applyTernaryMACOpBroadcast templates this file's
+                 * own funct<=0x1F row already ports from (see that
+                 * row's own comment) - real, cited definitions:
+                 *   static __fi void _vuADDq(VURegs* VU)   { vuADDbc(VU, VU->VI[REG_Q].UL); }
+                 *   static __fi void _vuMADDq(VURegs* VU)  { vuMADDbc(VU, VU->VI[REG_Q].UL); }
+                 *   static __fi void _vuADDi(VURegs* VU)   { vuADDbc_addsubhack(VU, VU->VI[REG_I].UL); }
+                 *   static __fi void _vuMADDi(VURegs* VU)  { vuMADDbc(VU, VU->VI[REG_I].UL); }
+                 *   static __fi void _vuSUBq(VURegs* VU)   { vuSUBbc(VU, VU->VI[REG_Q].UL); }
+                 *   static __fi void _vuMSUBq(VURegs* VU)  { vuMSUBbc(VU, VU->VI[REG_Q].UL); }
+                 *   static __fi void _vuSUBi(VURegs* VU)   { vuSUBbc(VU, VU->VI[REG_I].UL); }
+                 *   static __fi void _vuMSUBi(VURegs* VU)  { vuMSUBbc(VU, VU->VI[REG_I].UL); }
+                 * where vuADDbc/vuSUBbc = applyBinaryMACOpBroadcast
+                 * (dst=FD, FD[lane]=FS[lane] OP bc) and vuMADDbc/
+                 * vuMSUBbc = applyTernaryMACOpBroadcast (dst=FD,
+                 * FD[lane]=ACC[lane] OP FS[lane]*bc) - i.e. the MADD/
+                 * MSUB variants here write FD, reading ACC as a THIRD
+                 * operand (st->vu0_acc[4], the same accumulator array
+                 * this file's own funct<=0x1F VMADDx/y/z/w block
+                 * already uses) - never writing back into ACC itself
+                 * (that's the separate VMADDA/VMSUBA family, same
+                 * asymmetry this file's own existing ACC-family
+                 * comment already documents for the non-broadcast
+                 * VMADD/VMSUB at funct 0x29/0x2D below). _vuADDi uses
+                 * "vuADDbc_addsubhack" in real PCSX2 (a TriAce-games
+                 * float-rounding compatibility hack, CHECK_VUADDSUBHACK-
+                 * gated) - not ported here, matching this project's
+                 * existing, already-stated policy of not modeling
+                 * per-game compatibility hacks; the un-hacked path
+                 * (plain float add) is what CHECK_VUADDSUBHACK's own
+                 * disabled branch already falls back to, so this is a
+                 * faithful "hack disabled" real-hardware-equivalent
+                 * implementation, not an approximation. REG_Q=22,
+                 * REG_I=21 (PCSX2's VU.h, same mapping this file's
+                 * own funct<=0x1F Q/I-row already uses). Untested
+                 * against a NEW real halt-site disassembly (unlike
+                 * 0x20 itself, which was) - these 7 siblings are
+                 * implemented from the real, cited PCSX2 semantics on
+                 * the well-evidenced expectation (same opcode row,
+                 * same operand shape, real hardware/PCSX2-confirmed
+                 * ordering) that they'll be needed next; verified via
+                 * the full host-native regression suite before being
+                 * kept, and confirmed to introduce no regression
+                 * against the Round 446 EE-progress baseline. */
+                uint32_t op_idx = funct - 0x20u; /* 0=ADDq,1=MADDq,2=ADDi,3=MADDi,4=SUBq,5=MSUBq,6=SUBi,7=MSUBi */
+                int is_i = (op_idx & 0x2u) != 0;      /* 2,3,6,7 use I; 0,1,4,5 use Q */
+                int is_mac = (op_idx & 0x1u) != 0;    /* 1,3,5,7 are MADD/MSUB (read ACC) */
+                int is_sub = (op_idx & 0x4u) != 0;    /* 4,5,6,7 are SUB-family */
+                uint32_t ubc = vu0_vi_read(st, is_i ? 21u : 22u);
+                float bc; memcpy(&bc, &ubc, 4);
                 for (int lane = 0; lane < 4; lane++) {
                     if (!(destmask & (0x8u >> lane))) continue;
                     uint32_t ua = vu0_vf_read_lane(st, fs, (uint32_t)lane);
-                    uint32_t uq = vu0_vi_read(st, 22);
-                    float a, q, r; uint32_t ur;
+                    float a, r; uint32_t ur;
                     memcpy(&a, &ua, 4);
-                    memcpy(&q, &uq, 4);
-                    r = a + q;
+                    if (is_mac) {
+                        uint32_t uacc = st->vu0_acc[lane]; float acc; memcpy(&acc, &uacc, 4);
+                        r = is_sub ? (acc - a * bc) : (acc + a * bc);
+                    } else {
+                        r = is_sub ? (a - bc) : (a + bc);
+                    }
                     memcpy(&ur, &r, 4);
                     vu0_vf_write_lane(st, fd, (uint32_t)lane, ur);
                 }

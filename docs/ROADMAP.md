@@ -6595,3 +6595,50 @@ re-running the existing `-DEE_FILEIO_DEBUG`-style disc-read instrumentation
 (Round 380's own already-shipped methodology) against the current 185M+
 slice trace is the single most concrete, well-evidenced next step, and is
 a natural target for a future round.
+
+## Round 455 (task #249): completed the VADDq-sibling VU0 opcode row (funct 0x21-0x27)
+
+Real source fix, not investigation-only. Round 446 (task #242) implemented
+ONLY funct==0x20 (VADDq) as an empirically-tested fix for a real observed
+halt, explicitly leaving the other 7 siblings in the same opcode row
+(funct 0x21-0x27: VMADDq/VADDi/VMADDi/VSUBq/VMSUBq/VSUBi/VMSUBi) as a
+"scoped future gap, not guessed at" - this was tracked as task #249 and
+left open since Round 448.
+
+Closed it properly this round using REAL, directly-fetched source (not
+guessed): fetched PCSX2's own `pcsx2/VUops.cpp` from the live GitHub repo
+and confirmed the exact real semantics of each sibling - `_vuADDq`/
+`_vuMADDq`/`_vuADDi`/`_vuMADDi`/`_vuSUBq`/`_vuMSUBq`/`_vuSUBi`/`_vuMSUBi`
+are all thin wrappers around the SAME `applyBinaryMACOpBroadcast`/
+`applyTernaryMACOpBroadcast` templates this project's own funct<=0x1F row
+(implemented back in Round 29) already ports from. The MADD/MSUB variants
+read the VU0 macro-mode accumulator (`st->vu0_acc[4]`, the same array the
+existing funct<=0x1F VMADDx/y/z/w block already uses) as a third operand
+and write FD (never writing back into ACC itself - that's the separate
+VMADDA/VMSUBA family, per this file's own already-documented real
+hardware/PCSX2 asymmetry). REG_Q=cop2_ctrl[22], REG_I=cop2_ctrl[21],
+matching this file's existing Q/I-row mapping exactly.
+
+One deliberate scope decision: real PCSX2's `_vuADDi` calls a TriAce-games
+float-rounding compatibility hack (`vuADDbc_addsubhack`, gated by
+`CHECK_VUADDSUBHACK`) - not ported here, consistent with this project's
+already-stated policy (see this file's own existing MADD.S/MSUB.S/ACC
+comments) of not modeling per-game compatibility hacks; the implementation
+here is the un-hacked path, which is exactly what real hardware/PCSX2 does
+with the hack disabled (the default) - a faithful, not approximate,
+implementation.
+
+**Verification**: full 128-test host-native regression suite passes.
+Wii cross-build (devkitPPC/libogc) succeeds cleanly, produces
+`pcsx2-wii-git.dol` (488608 bytes), no new warnings. Fresh 30,000,000-slice
+cold-boot forward-progress check shows no regression - same GS state
+(pmode=0x66), same resting behavior, gif counters consistent with Round
+452's already-documented pattern. No NEW halt was reached in this window
+(expected: none of the currently-traced boot code appears to use funct
+0x21-0x27 yet), but the gap is now genuinely closed rather than deferred,
+so any future boot-progress advance that does reach one of these opcodes
+will work correctly on the first try rather than requiring another
+one-off "test fix" cycle like Round 446's.
+
+Task #249 closed - the last item carried over from Round 448's original
+~10-task batch.

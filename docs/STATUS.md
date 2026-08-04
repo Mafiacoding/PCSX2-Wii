@@ -20821,3 +20821,13 @@ project's Round 441-448 fixes and the current trace runs in code
 needs re-verification at current boot depth before being trusted as the
 active blocker. See docs/ROADMAP.md's Round 454 entries for full detail
 and citations.
+
+## Round 455 (task #249): VADDq-sibling VU0 opcode row completed (real source fix)
+
+Implemented the 7 remaining VU0 CO-format opcodes in the same funct
+0x20-0x27 row as Round 446's VADDq (VMADDq/VADDi/VMADDi/VSUBq/VMSUBq/
+VSUBi/VMSUBi, funct 0x21-0x27), using real semantics fetched directly
+from PCSX2's own VUops.cpp. Closes task #249, open since Round 448.
+128/128 regression tests pass, Wii cross-build clean, 30M-slice
+forward-progress check shows no regression. See docs/ROADMAP.md for
+full citation and implementation detail.

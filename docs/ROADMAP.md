@@ -8934,3 +8934,23 @@ calls any of these newly-completed functions. The real remaining gap
 is still what stimulus would make OSDSYS's disc-browser escalate past
 its idle animation and actually initiate a real CDVDFSV negotiation
 sequence - not yet identified.
+
+## Round 476: researched OSDMenu/FreeMcBoot as an alternative to the stalled real-OSDSYS escalation investigation (docs-only, user-provided links)
+
+OSDMenu/FMCB replace the real Sony OSDSYS entirely via the real
+"memory card system update" boot mechanism, rather than trying to
+make the real OSDSYS's disc-browser escalate. Cross-referenced against
+Round 456: this project's MCSERV currently reports "-ENODEV, no
+memory card present" for all mc0:/mc1: access - real memory-card
+CONTENT modeling has never been built. Pursuing this path is viable
+but substantial (comparable in scope to Round 389's IOP-threading
+build), not a narrow fix. No source change this round.
+
+### Next steps
+
+Awaiting the user's decision on whether to commit to this new
+direction. If yes: (1) research/confirm the real EE kernel's
+system-update-check logic, (2) implement real MCSERV read/directory
+content modeling against a synthetic memory-card image, (3) place an
+OSDMenu-equivalent ELF at the correct real path and test whether this
+project's own EE/IOP core can run it to a working menu/game-launch.

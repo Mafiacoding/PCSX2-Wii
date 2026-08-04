@@ -5993,3 +5993,25 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
   hasn't yet compared live between invocations.
 - Task #197 remains in_progress pending next round. No fix
   implemented (guard still not found, per Round 279/280 discipline).
+
+## Round 437 continued: MAJOR CORRECTION - live first invocation has a0/s2=2 (not 0), overturning Round 434; new hypothesis that invocation 2+ may never even reach 0x00082220
+
+- Live-captured real first invocation entry to 0x00082220 (verified
+  via ra=0x000820A4): a0=2, not 0. Retracts Round 434's "s2=0 both
+  times" claim (was based on host-native tracing, not real hardware).
+- With s2=2, the slti/bnez branch is NOT taken - first invocation
+  takes the long body path (OSOPEN/OSCLOCK/etc, Round 430's resource
+  loop), not a shortcut - consistent with it legitimately reaching
+  the wait call as observed.
+- Second invocation's a0/s2 not yet captured: a breakpoint at
+  0x00082220 did not refire during an extended free-run window even
+  though 0x00082008 (its caller) fires at least 3 times. New
+  hypothesis: invocation 2+ may never actually complete the call into
+  0x00082220 at all (possibly due to the interrupt-preemption
+  mechanism caught earlier this round hitting exactly at the jal
+  boundary) - would mean Rounds 431-436's search for an internal
+  guard was in the wrong place.
+- Concrete next-round task: arm 0x00082008 + 0x00082220 together,
+  count hits on each precisely across a fresh reset, to settle
+  whether invocation 2+ ever lands inside 0x00082220.
+- No fix yet. Task #197 remains in_progress.

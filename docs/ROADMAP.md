@@ -6116,3 +6116,25 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
   fixed). Next: characterize the new 0x2113E0-0x2113F8 resting point
   and find/fix whatever blocks progress from there toward the splash
   screen.
+
+## Round 442
+- Characterized the new 0x2113E0-0x2113F8 resting point Round 441's
+  fix advanced the boot to. Docs-only round, no source change.
+- Fine-grained (per-instruction, not sampled) instrumentation proves
+  the VBLANK-wait loop is healthy: 106 entries / 105 exits over
+  259,953,498 instructions, ~2,452,000-instruction period (matches
+  half EE_CYCLES_PER_FRAME_NTSC), single stable caller $ra=0x2054B8.
+  Corrects the earlier "reinforcing a large gap" reading, which was a
+  5,000,000-slice sampling-resolution artifact.
+- Decoded the top real-work hot spot (0x00218000, 235,872 instr):
+  it's an EE SQ-opcode (0x1F) memset/bzero routine, not a poll.
+  Corrects Round 298's 140-round-old mislabel of the same byte-
+  identical loop as "a tight, long-sustained polling loop" (Round
+  298 predates this project's own MIPS-I/EE decoder).
+- RPC channel confirmed healthy and growing (301/301 balanced).
+- Honest negative result: no bug found this round. GS still fully
+  zero after 319,997,791 instructions. Next: examine remaining
+  unexamined per-cycle hot spots (0x00205D00, 0x00216600-0x00217000,
+  EE kernel dispatch 0x80000000-0x80004000 range) or pivot to
+  cross-referencing this project's own SIF/IOP-RPC implementation
+  for a protocol-level gap (Round 18361's still-open strategic fork).

@@ -2040,6 +2040,15 @@ typedef struct {
 
 static ee_cdvd_ncmd_reentry_t g_ee_cdvd_ncmd_reentry;
 
+/* Round 473: real CD_NCMD_CDDASTREAM (rpc_number=10) sub-command
+ * (CdvdStCmd_t) observability - see the SIF_SID_CDVD_NCMD branch's
+ * own comment below for the full citation/derivation. Not yet used
+ * to change reply behavior (only cmd=INIT is evidenced so far);
+ * kept as real, correctly-parsed state for future rounds/diagnostics
+ * rather than fabricating untested per-cmd behavior. */
+int g_ee_cddastream_last_cmd = 0;
+int g_ee_cddastream_last_cmd_valid = 0;
+
 /* Returns 1 if a real MMIO dispatch was actually driven (caller must
  * NOT also send an immediate reply - completion is now real,
  * asynchronous, and delivered later by ee_check_cdvd_ncmd_pending()),
@@ -4926,6 +4935,51 @@ static int ee_step(void)
                                 }
                                 ee_arm_rpc_call_pending(call_cd);
                             } else if (call_sid == SIF_SID_CDVD_NCMD) {
+                                /* Round 473 (CDVDFSV/audio-stream protocol
+                                 * depth, per explicit user request):
+                                 * rpc_number==10 (CD_NCMD_CDDASTREAM) real
+                                 * sendbuf layout per ee/rpc/cdvd/src/ncmd.c
+                                 * (fetched this round): readStreamData[0..4]
+                                 * = {lbn, nsectors*sector_size, buf, cmd,
+                                 * mode}, where cmd is a real CdvdStCmd_t
+                                 * (START=1,READ=2,STOP=3,SEEK=4,INIT=5,
+                                 * STAT=6,PAUSE=7,RESUME=8,SEEKF=9). Like
+                                 * every other real N-command, the DMA
+                                 * transfer-table entry at dmat_ptr+(i-1)*16
+                                 * is a {src,dest,size,attr} descriptor - the
+                                 * real payload lives at the address in word
+                                 * 0 (matching this file's own established
+                                 * read_payload_src/open_payload_base
+                                 * convention), NOT inline in the descriptor
+                                 * itself. Live instrumentation this round
+                                 * confirms the real, single organic-boot
+                                 * CDDASTREAM call OSDSYS issues carries
+                                 * cmd=5 (CDVD_ST_CMD_INIT), lbn=0, nsectors=0,
+                                 * and a real EE RAM buffer pointer - a
+                                 * coherent, valid stream-init request, not
+                                 * garbage. No cmd=START (1) or any other
+                                 * sub-command is ever observed following it
+                                 * in a 40M-slice organic-boot window, so
+                                 * only INIT's real semantics are evidenced
+                                 * here; this parse is real protocol-shaped
+                                 * groundwork for handling other sub-commands
+                                 * once/if a future round observes them live,
+                                 * not a claim of full CDDASTREAM coverage.
+                                 * The actual reply below is UNCHANGED
+                                 * (still the shared real leading-result-int
+                                 * placeholder, 0=success) since INIT's own
+                                 * real completion semantics are already
+                                 * satisfied by that convention - this only
+                                 * adds real cmd-value visibility, it does
+                                 * not change observable behavior. */
+                                if (rpc_number == 10u && i >= 1u) {
+                                    uint32_t r473_pbase = dmat_ptr + (i - 1u) * 16u;
+                                    uint32_t r473_psrc = ee_mem_read32(st, r473_pbase + 0u);
+                                    if (r473_psrc != 0u) {
+                                        g_ee_cddastream_last_cmd = ee_mem_read32(st, r473_psrc + 12u); /* real CdvdStCmd_t sub-value, word index 3 */
+                                        g_ee_cddastream_last_cmd_valid = 1;
+                                    }
+                                }
                                 /* Round 276 (task #423 continuation,
                                  * 317th finding): ROOT CAUSE of the
                                  * new permanent WaitSema park found

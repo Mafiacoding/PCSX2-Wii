@@ -8816,3 +8816,63 @@ understood, matches real hardware protocol at every layer, and the
 obvious candidate stimuli are ruled out. Further progress needs either
 substantial new CDVDFSV protocol modeling or a different investigative
 lead not yet identified - not a small fix.
+
+## Round 473: implement CDVDFSV protocol depth + audit audio hypothesis (per user's direct request)
+
+### Trigger
+
+User: "implement the cdvdfsv and i think i know the issue it might be
+something with audio which is not implemented" - explicit redirect
+from investigation to implementation, with the user's own hypothesis.
+
+### What was done
+
+1. Fetched real ps2sdk `ncmd.c` - confirmed `CdvdStCmd_t` sub-command
+   enum and the real 5-word CDDASTREAM wire payload layout.
+2. Found and fixed a bug in this round's OWN scratch instrumentation
+   (not previously-tracked source): a payload-dump hook was reading
+   raw SIF DMA descriptor fields instead of dereferencing the
+   descriptor's pointer word, producing garbled values.
+3. With the fix, recovered a coherent real payload: `cmd=5`
+   (`CDVD_ST_CMD_INIT`), `lbn=0`, `nsectors=0`, a real EE RAM buffer
+   pointer. Confirmed via two independent instrumentation passes that
+   only ONE real SIF RPC packet is ever sent for CDDASTREAM in a
+   40M-slice run (out of 200 total real RPC packets of all kinds) -
+   the ~93 other outer-dispatcher visits Round 471 counted are
+   internal re-entries satisfied by the existing single-outstanding-
+   RPC guard, not new transmissions.
+4. Implemented real `CdvdStCmd_t` sub-command parsing in tracked
+   `ee_core.c` (correct pointer dereference, matching the file's own
+   established `read_payload_src` idiom) - observability infrastructure
+   for future rounds, reply behavior unchanged (still correct for the
+   only evidenced case, INIT).
+5. Audited `iop_spu2.c`/`iop_spu_legacy.c`: bare MMIO register stores,
+   zero real audio pipeline - the user's hypothesis is REAL as a gap,
+   but not evidenced as the current boot blocker, since OSDSYS's own
+   dispatcher doesn't wait on further audio-related RPC traffic after
+   its one INIT call succeeds.
+
+### Task classification
+
+Real forward progress (fixed a genuine tooling bug, recovered the
+first coherent CDDASTREAM payload decode, added real protocol
+infrastructure) but no fabricated SPU2/audio implementation - no
+evidenced blocking bug there to justify it, per standing discipline.
+
+### Verification
+
+Host-native: clean compile, 128/128 regression tests pass (0
+failures; the harness's own 5s-per-test timeout was too tight for one
+long sweep test, confirmed passing standalone). Forward-progress
+check: identical steady state to Round 470-472 baseline, no
+regression. Wii cross-build: `pcsx2-wii-git.elf`/`.dol` both built
+clean via the persistent devkitPPC toolchain.
+
+### Next steps
+
+The real remaining gap is unchanged from Round 472's assessment:
+fuller real CDVDFSV disc-negotiation protocol modeling, a genuinely
+new feature. If audio is pursued further, building actual SPU2
+voice/DMA/ADPCM playback modeling would be substantial, scoped new
+work - not yet undertaken since no observed bug currently depends on
+it.

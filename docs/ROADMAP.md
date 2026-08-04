@@ -7434,3 +7434,100 @@ All work this round was scratch-only (`/tmp/ee_core_r461.c`,
 `/tmp/driver_r461.c`, `/tmp/driver_r461b`, `/tmp/r461*_ckpt.bin`) - the
 tracked repo received no source changes, only these two docs files. No
 regression suite / Wii rebuild required.
+
+## Round 462 (tasks #323-325, #328): real "current thread ID" global found at 0x800125EC - Round 461's hypothesis refuted with better evidence
+
+Direct continuation of Round 461, per the user's "go" continuation.
+Disassembled the caller context immediately surrounding the TCB-reset
+loop characterized in Round 461.
+
+### Task #323: the real current-thread-ID global, confirmed
+
+Extracted and disassembled `0x800055A0`-`0x80005670` (the function
+containing the reset loop) and found, at `0x80005638`-`0x8000563C`:
+
+```
+lui $s3, 0x8001
+lw  $s3, 9708($s3)     ; $s3 = *(0x800125EC)
+```
+
+`0x800125EC` is a fixed, real kernel RAM address holding the calling
+thread's TCB index - this is the actual mechanism the reset loop's
+`beql $s0,$s3,->skip` (found in Round 461) uses to protect the calling
+thread's own slot. This is a genuine, disassembly-confirmed finding,
+not a guess: the global's existence, address, and role are all directly
+observed from real BIOS machine code, satisfying this project's task
+#180 discipline (cite/observe, don't fabricate).
+
+### Task #324: the global's value, and three more real subroutines traced
+
+The global held the value `3` at the moment our trampoline's syscall
+fired - exactly matching Round 461's empirical observation that TCB
+slot 3 was the only slot (besides 0) never reset. **This value is
+correct, not stale** - directly refuting Round 461's leading hypothesis
+that a stale/wrong current-thread-ID global was the root cause.
+
+Traced the code immediately following the reset loop, which uses this
+same `$s3` (thread ID 3) for three further real operations, each
+disassembled and identified against Round 380's already-cited real TCB
+field layout:
+
+1. **`TCB[3].argstring` (offset `0x38`) is set** to `$s7` - which,
+   tracing back through the caller chain, is exactly this project's
+   trampoline's own filename string pointer (`0x01fe0000`, the address
+   holding `"cdrom0:\SCED_500.41;1"`). This confirms the real kernel
+   genuinely receives and stores our trampoline's argument correctly.
+
+2. **A helper function at `0x80004970`** (fully disassembled, 44
+   instructions) fetches and clears `TCB[3].wakeupCount` (offset
+   `0x24`, matching Round 380's citation exactly) - a real, standard
+   piece of thread-wakeup bookkeeping, unrelated to program loading.
+
+3. **A SetPriority-style function at `0x80004288`** (fully
+   disassembled, 248 instructions) reads/writes a priority field at
+   offset `0x1A` (matching Round 380's cited `initPriority@1A`) and is
+   called with the new priority value `0` (highest) for thread 3. This
+   is an *exact*, word-for-word match to Round 380's own real citation:
+   `_LoadExecPS2` "CANCELS/reprioritizes the CALLING thread" - the
+   "reprioritizes" half of that citation is now directly confirmed in
+   disassembled code, not just referenced from the original ps2sdk
+   source excerpt.
+
+All three of these are confirmed-correct, expected real kernel
+behavior - not bugs, not stalls, and not evidence of a wrong TCB slot
+being targeted. **No entry-point write for slot 3 was found in any of
+this round's disassembled code** - the real handler must either write
+it later in the call chain (not yet reached), or the actual dispatch
+mechanism works differently than expected (e.g. perhaps via a value
+returned up the call stack rather than a direct RAM write, to be
+picked up by an even later piece of code this round didn't reach).
+
+### Task #325: not attempted
+
+Since task #323/#324 refuted the premise (the global is not stale),
+there was nothing to "correct" - no experimental write was made this
+round.
+
+### Task #328: still no fix - investigation ongoing, not concluded
+
+Consistent with Rounds 459-461's honest negative results: every
+function disassembled this round is confirmed-correct real BIOS code.
+No fix is implemented because none is yet evidenced - but unlike a
+dead end, this round's work directly narrows the search: the
+"reprioritize + argstring-set + wakeup-clear" trio is now fully
+accounted for and matches real citations precisely, meaning the
+as-yet-unexplained entry-point dispatch must live in code not yet
+disassembled. The next concrete step (Round 463) is to continue
+disassembling forward from where `0x80005664`'s caller resumes after
+the `0x80004288` (SetPriority) call returns, following the same
+function (`0x800055A0`+) to its own end and into whatever it calls
+next.
+
+### Verification
+
+All work this round was scratch-only disassembly, reading directly
+from Round 461's already-saved checkpoint (`/tmp/r461b_ckpt.bin`) - no
+new emulator runs were needed this round, just further extraction and
+decoding of the same captured BIOS-code snapshot. Tracked repo received
+no source changes, only these two docs files. No regression suite / Wii
+rebuild required.

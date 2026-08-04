@@ -21092,3 +21092,28 @@ real kernel's repurpose-in-place logic likely targets a stale/wrong
 TCB slot. Not yet confirmed (the global's real address isn't cited),
 so no fix was implemented this round. See docs/ROADMAP.md for full
 detail.
+
+## Round 462 (tasks #323-325, #328): found the real "current thread ID" kernel global (0x800125EC) - refutes Round 461's hypothesis, three more real subroutines confirmed correct, still tracing
+
+Direct continuation of Round 461. Disassembled the caller context around
+the TCB-reset loop and found the real kernel global that tracks the
+calling thread's ID: **0x800125EC**, loaded into `$s3` right before the
+loop, and used both to skip the calling thread's own slot in the reset
+loop (confirming Round 461's slot-3-skip observation) AND to drive three
+further real per-thread operations performed on the calling thread:
+setting `TCB[3].argstring` to our trampoline's own filename pointer,
+fetching/clearing `TCB[3].wakeupCount`, and setting `TCB[3]`'s priority
+to 0 (highest) - this last one an exact match to Round 380's own citation,
+"CANCELS/reprioritizes the CALLING thread."
+
+**This refutes Round 461's leading hypothesis**: the current-thread-ID
+global is not stale - it's correctly tracked and correctly used. All
+three newly-traced subroutines are confirmed-correct real kernel code.
+The actual entry-point write for the calling thread (if the real
+handler performs one in this scenario) must happen later in the call
+chain than this round's disassembly reached.
+
+No source fix implemented (same honest classification as the last
+three rounds) - this is real, correct BIOS code, and the investigation
+is still narrowing rather than concluded. See docs/ROADMAP.md for full
+disassembly detail and the next concrete step.

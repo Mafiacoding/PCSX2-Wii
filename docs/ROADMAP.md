@@ -8714,3 +8714,62 @@ Locate the indirect call site reaching the CDDASTREAM-issuing
 function (likely `JALR $reg` with a table- or pointer-computed
 target) and trace backward from there toward the real OSDSYS decision
 point that chooses to probe CDDASTREAM at all.
+
+## Round 471: CLOSES the Round 335-471 CDDASTREAM/dispatch_ncmd() arc - full end-to-end mechanism now understood, no bug found, real gap is missing input stimulus
+
+### What this round found
+
+Traced one level further up the call stack from Round 470's `0x002134A8`
+CD-command dispatcher: found its own caller, `0x0021477C` (also reached
+indirectly, no static `JAL`), by live-instrumenting entry to that PC and
+running a fresh organic-boot trace. After an initial real init-time burst
+of distinct command calls (varying `$a1` values `0x5001`/`0x5006`/`0x500C`/
+etc.), the trace settles permanently into ONE repeating call: constant
+`a1=0x500D`, with `a3` as a real, monotonically-increasing per-tick
+counter (+86 roughly every 4.9M instructions - very likely the same
+counter driving the already-documented sprite-count growth).
+
+Disassembled `0x0021477C` far enough to confirm `a1=0x500D` reaches a
+default-fallthrough case that calls `0x002134A8` with `$a2=1`, which
+(per Round 385's already-decoded gating) takes the immediate-issue path
+- the exact same real `CD_NCMD_CDDASTREAM` ("audio subsystem alive?")
+probe this project's entire Round 335-470 investigation has examined
+from the opposite direction.
+
+### Conclusion
+
+The organic boot's steady state is a real, correctly-modeled idle
+heartbeat - OSDSYS re-probing CDDASTREAM once per animation tick while
+showing its intro screen - not a stuck retry or missing-signal bug.
+Every layer of this chain (RPC dispatch, semaphore lifecycle, reply
+convention, the deliberate real-vs-placeholder dispatch_ncmd() scoping)
+has already been independently confirmed correct against real, cited
+protocol sources across Rounds 347/386-388. The actual reason the boot
+never progresses is that the test fixture doesn't supply whatever
+further real stimulus (richer pad input, fuller real CDVDFSV disc
+negotiation) OSDSYS's own logic is waiting on - a fixture/scope gap,
+not an emulator bug.
+
+### Task classification
+
+No fix implemented, none warranted - this is a genuine closure/
+understanding round, not a bug-fix round. Consistent with the project's
+no-guessing discipline: nothing here was fixed because nothing here is
+broken.
+
+### Verification
+
+`driver_r471.c` (organic driver + `g_r471_trace_on` toggle) and
+`ee_core_r471.c` (single-PC entry hook, scratch-only) live under `/tmp`,
+never committed. `git status`/`git diff --stat` confirm only
+`docs/STATUS.md`/`docs/ROADMAP.md` changed. Docs-only round: regression
+suite and Wii rebuild correctly skipped.
+
+### Next step
+
+The one remaining untested, evidenced lever: real pad-input richness.
+Round 270-272's single one-shot button press predates this level of
+understanding of the real command dispatcher (`0x0021477C`) and its
+known command-ID family. Worth revisiting with a repeated/held or
+multi-button real input sequence to see if a different `a1` command
+value (beyond `0x500D`'s idle heartbeat) ever fires.

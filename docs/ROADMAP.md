@@ -6058,3 +6058,38 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
   source/hw/iop_module_loader.c's BOOTEND-reassertion logic.
 - No source changes, docs-only round. Feeds directly into task #210
   (long-body per-invocation trace) and #202 (locate exact guard).
+
+## Round 440: root cause narrowed to sif.c's g_ee_loadexecps2_seen-gated BOOTEND reassertion; live-confirmed SIF_SMFLAG=0 at invocation 2 entry; fix needs to be time-delayed, not synchronous
+
+- Full static disassembly of 0x00082220's long body confirms every path
+  (short-circuit and long) unconditionally reaches the 0x00082408 wait
+  call - no branch skips it. Divergence is entirely inside 0x000820C0's
+  poll, not the caller.
+- Re-disassembled 0x000820C0-0x000820FC: confirms real write-1-to-clear
+  ack (sw of 0x00040000 to 0x1000F230) in the exit delay slot, matching
+  sif.c's existing model.
+- Live: fresh invocation-2 entry (ra=0x800057ac, same signature as
+  Rounds 437-439) caught via breakpoint after a real free-run (2.26B
+  cycles elapsed - this is OSDSYS's steady-state recurring dispatch,
+  not a rare one-off). SIF_SMFLAG read = 0x00000000 at that exact
+  moment - BOOTEND genuinely not set, confirming the wait is real, not
+  skipped.
+- Root cause candidate: sif.c's SIF_SMFLAG write handler only
+  reasserts BOOTEND if g_ee_loadexecps2_seen (set only by EE syscall 6,
+  _LoadExecPS2 - happens only after a game is actually launched, far
+  downstream of the splash screen). Naively dropping this guard would
+  reproduce the ORIGINAL Round 251 regression (0x8000CDF8's masked-
+  zero poll needs a real all-clear window this guard was added to
+  protect). Real fix is very likely a time-delayed reassertion (real
+  IOP-EE cross-processor delay), not a synchronous one - not yet
+  implemented.
+- No source changes this round (docs-only). Task #202 substantively
+  informed, not closed. New task #212: implement + host-native-verify
+  a delayed reassertion fix against BOTH poll sites before running the
+  full mandatory workflow.
+- Tooling: pcsx2_gs_registers/read_memory unreliable while emulator is
+  running (not paused) - visually contradicted by real on-screen
+  gameplay. Always check pcsx2_status's Paused:true first. Data
+  watchpoints on 0x1000F230 failed to register a confirmed real write
+  - breakpoints + reads-while-paused remain the only fully reliable
+  primitives on this bridge.

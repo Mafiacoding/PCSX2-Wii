@@ -6642,3 +6642,61 @@ one-off "test fix" cycle like Round 446's.
 
 Task #249 closed - the last item carried over from Round 448's original
 ~10-task batch.
+
+## Round 455 (task #274): dispatch_ncmd()=0 re-verified at current boot depth - AND a new, more precise blocker candidate found: unmodeled memory card FILEIO
+
+Direct follow-up to Round 454's flagged caveat: the long-standing
+`dispatch_ncmd()=0` finding (Rounds 269-380) was measured entirely before
+this project's Round 441-448 fixes, on code that no longer even runs in
+the current trace. This round re-verifies it properly.
+
+Built a scratch-instrumented copy of `iop_cdvd.c` (never committed) that
+counts real `dispatch_ncmd()` calls, combined with this project's own
+already-shipped `EE_FILEIO_DEBUG` macro (real FIO_F_OPEN name logging).
+Chained 4 checkpoint resumes (30M slices each) from the current
+post-Round-448 boot state out to 120,000,000 total slices (~960 million
+EE instructions - well past the depth needed to reach the now-current
+0x0050xxxx/0x0051xxxx resting loop).
+
+**Result 1 - the old finding genuinely still holds**: `dispatch_ncmd()`
+call count is 0 across the entire 120M-slice window. OSDSYS still never
+issues a real N-command (READCD/READDVD/etc) even after all of Round
+441's BOOTEND fix, Round 444's VU0/COP2, Round 445's SetGsCrt, Round
+446/455's VADDq-row, and Round 448's checkpoint/resume work. This is a
+genuine re-verification, not an assumption carried over from stale data.
+
+**Result 2 - new, more precise evidence never previously documented**:
+the FIO_F_OPEN trace shows OSDSYS organically attempting real memory-card
+file opens - `mc0:/BIEXEC-SYSTEM/OSBROWS` and `mc1:/BIEXEC-SYSTEM/OSBROWS`
+- immediately after its usual `rom0:` resource-loading sequence
+(OSOPEN/OSFONTS/OSFONTM/OSCLOCK/OSBROWS/MOPEN/MCLOCK/MBROWS/FONTS/FONTM).
+This is NEW: none of Rounds 269-380's original characterization (all
+predating the display/VU0/SetGsCrt fixes) ever observed OSDSYS reach
+memory-card enumeration - the trace never got this far before.
+
+These `mc0:`/`mc1:` opens return `-4` ("not found"), because this
+project's own FILEIO handler (source/core/ee/ee_core.c's FIO_F_OPEN
+branch, ~line 5325) only implements `rom0:` (BIOS ROMDIR) and
+`cdrom0:`/`cdrom1:` (mounted-disc ISO9660) - memory cards are explicitly,
+honestly left unmodeled (Round 367's own comment: "Any other prefix
+(mc0:/mc1:/host:/etc.) ... keeps the existing, still-correct -4 'not
+found' reply ... memory cards/host FS are still honestly unmodeled").
+
+**Why this matters**: this reframes the real current blocker with much
+more precision than the old "waiting on a stimulus we haven't supplied"
+framing. OSDSYS's real Browser screen needs to resolve its memory-card
+icon/save-data state (present, absent, or some specific error) as part of
+its own real init sequence before it would plausibly move on to a
+disc-selection or auto-boot decision - the SAME decision that would
+eventually call `dispatch_ncmd()`. A blanket `-4` for every memory-card
+request may not be the real, correct "no card inserted" signal OSDSYS's
+own init code expects (real memory-card absence is reported through a
+different real protocol/error code family than the generic FILEIO
+"file not found" reply used here) - this is a well-evidenced, concrete
+candidate for the next investigative round, not a new guess: implement
+(or explicitly, correctly model "no memory card present" for) the real
+McServ/memory-card device protocol and see whether OSDSYS's browser
+logic advances past its current resting point.
+
+Not implemented this round (kept as investigation-only, matching this
+round's scope) - a natural target for Round 456+.

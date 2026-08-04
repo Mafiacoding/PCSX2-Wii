@@ -20831,3 +20831,18 @@ from PCSX2's own VUops.cpp. Closes task #249, open since Round 448.
 128/128 regression tests pass, Wii cross-build clean, 30M-slice
 forward-progress check shows no regression. See docs/ROADMAP.md for
 full citation and implementation detail.
+
+## Round 455 (task #274): dispatch_ncmd()=0 re-verified (still true) + new memory-card FILEIO lead found
+
+Re-instrumented and re-ran the disc-read/FILEIO trace at the current,
+much-more-advanced boot depth (120M slices, ~960M EE instructions).
+dispatch_ncmd() is still never called - the old finding holds. But newly
+observed: OSDSYS now organically attempts mc0:/mc1: memory-card opens
+(BIEXEC-SYSTEM/OSBROWS) that were never reached in any prior
+characterization. These return -4 because memory cards are honestly
+unmodeled in this project's FILEIO handler. This is a much more precise
+candidate for the real remaining blocker than before - OSDSYS's browser
+likely needs a resolved memory-card state before proceeding to any
+disc-selection logic. See docs/ROADMAP.md's Round 455 task #274 entry
+for full detail and the concrete next-step framing (real McServ/memory-
+card protocol implementation).

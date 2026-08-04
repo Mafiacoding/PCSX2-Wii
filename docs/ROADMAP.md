@@ -5969,3 +5969,27 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
 - Task #199/#200 effectively resolved (ruled out, not found-guard).
   Task #197 remains in_progress - next round should disassemble
   0x00083900 and/or the kernel dispatcher context.
+
+## Round 437 continued: 0x00083900 is a real syscall stub table (not a function), closes out Round 433's entire candidate list with no guard found there
+
+- 0x00083900 disassembled live: a table of 4-instruction real BIOS
+  syscall stubs (li v1,<ordinal>/syscall/jr ra/nop), ordinals ~100-109
+  observed - same pattern as Round 386's CreateSema/WaitSema stubs.
+  Not a function with branches - ruled out by structure.
+- This closes Round 433's full original candidate list (0x00083900,
+  0x00083070, 0x00082FD0, 0x00083028, 0x0008305C) - none contain the
+  guard.
+- Round 437 summary: first-ever live real-hardware verification in
+  this project's history. Confirmed register-exact match to this
+  project's model on 2 direct + 1 nested invocation; confirmed real
+  hardware never hangs; confirmed the handler is genuinely re-entrant;
+  ruled out all of Round 433's proposed guard candidates with live
+  evidence.
+- Two honest remaining candidates for next round: (1) un-swept
+  branches inside 0x00082220-0x00082410 beyond the already-checked $s2
+  branch, checked live per-invocation rather than just statically; (2)
+  the real kernel dispatcher (0x80001460) and its two call sites
+  (0x8000517C/0x800057A4) - may pass differing context this project
+  hasn't yet compared live between invocations.
+- Task #197 remains in_progress pending next round. No fix
+  implemented (guard still not found, per Round 279/280 discipline).

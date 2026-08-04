@@ -8773,3 +8773,46 @@ understanding of the real command dispatcher (`0x0021477C`) and its
 known command-ID family. Worth revisiting with a repeated/held or
 multi-button real input sequence to see if a different `a1` command
 value (beyond `0x500D`'s idle heartbeat) ever fires.
+
+## Round 472: tested pad-input richness (START added to CROSS toggle) - clean negative result, rules out pad input as the missing stimulus
+
+### What this round tested
+
+Round 471's one remaining open lever: whether adding `IOP_PAD_BTN_START`
+(real "confirm" button) to the existing repeated CROSS press/release
+toggle (Round 312's convention) would unstick OSDSYS's disc-browser
+past its `a1=0x500D` idle-heartbeat steady state.
+
+### Result
+
+Byte-for-byte identical outcome to the CROSS-only run: same final PC,
+same instruction count, same GS state, same GIF counts, same full set
+of dispatcher `a1` command values observed. Adding START changed
+nothing.
+
+### Conclusion
+
+Pad input (CROSS, START, held or toggled) is conclusively not the
+missing stimulus. Combined with Round 471's finding that the entire
+CDDASTREAM dispatch chain matches real hardware protocol, the most
+likely remaining path forward is modeling more of the real CDVDFSV
+disc-negotiation protocol - a genuinely new feature, not a quick fix.
+
+### Task classification
+
+No fix - clean negative result, rules out one candidate hypothesis.
+
+### Verification
+
+`driver_r472.c` under `/tmp`, never committed. `git status`/`git diff
+--stat` confirm only docs changed. Docs-only round: regression suite
+and Wii rebuild correctly skipped.
+
+### Assessment
+
+Rounds 335-472 (~60 rounds) have now exhaustively characterized the
+organic boot's intro-animation steady state: mechanically fully
+understood, matches real hardware protocol at every layer, and the
+obvious candidate stimuli are ruled out. Further progress needs either
+substantial new CDVDFSV protocol modeling or a different investigative
+lead not yet identified - not a small fix.

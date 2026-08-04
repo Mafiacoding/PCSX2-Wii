@@ -6700,3 +6700,49 @@ logic advances past its current resting point.
 
 Not implemented this round (kept as investigation-only, matching this
 round's scope) - a natural target for Round 456+.
+
+## Round 456 (tasks #275-278): real errno correction for FILEIO replies - correct fix shipped, no boot-progress change observed (honest negative result)
+
+Direct follow-up to Round 455's memory-card lead. Researched real PS2SDK
+source (fetched this round from the live ps2dev/ps2sdk GitHub repo):
+
+- `common/include/errno.h`: real, standard POSIX-style error codes -
+  `ENOENT=2` ("No such file or directory"), `ENODEV=19` ("No such
+  device"), `ENXIO=6` ("No such device or address").
+- `ee/kernel/src/fileio.c`: confirmed `fioOpen()` genuinely routes EVERY
+  device prefix (`rom0:`, `cdrom0:`/`cdrom1:`, `mc0:`/`mc1:`, `host:`,
+  etc.) through the exact SAME generic `FIO_F_OPEN` SIF RPC call - the
+  real IOP-side dispatch-by-prefix happens downstream of this project's
+  own already-correct single-handler architecture, validating the
+  existing design rather than finding an architectural gap.
+
+**The finding**: this project's blanket `-4` reply (in place since Round
+303, always honestly labeled a placeholder) is real `-EINTR`
+("Interrupted system call") - semantically nonsensical for "file/device
+not found", and not derived from any real citation. Fixed:
+- Genuine `rom0:`/`cdrom0:`/`cdrom1:` misses now correctly return
+  `-ENOENT` (-2).
+- `mc0:`/`mc1:` opens (Round 455's newly-discovered lead - OSDSYS
+  organically requests `BIEXEC-SYSTEM/OSBROWS` from both memory-card
+  slots) now return the distinct, correct `-ENODEV` (-19) - "no memory
+  card device", rather than being lumped in with genuine file-not-found.
+
+**Verification**: 128/128 regression tests pass. Wii cross-build clean
+(`pcsx2-wii-git.dol`, 488640 bytes). Chained 3 checkpoint resumes to
+90,000,000 total slices with the fix applied.
+
+**Honest result: no behavioral change observed.** OSDSYS's `rom0:`/
+`mc0:`/`mc1:` open sequence, GS state (`pmode=0x66`), and resting `pc`
+range are all identical to Round 455's pre-fix baseline across the full
+90M-slice window - still zero `dispatch_ncmd()` calls. Either OSDSYS's
+real browser-init logic doesn't branch on this specific negative value
+(many real init sequences just check `< 0` and treat any failure
+identically), or the real remaining blocker is unrelated to this errno
+distinction. This is a genuine, real-citation-backed correctness fix
+worth keeping (semantically correct is better than semantically wrong
+even when it doesn't change observed behavior), but it does NOT resolve
+the "why doesn't OSDSYS ever read the disc" question - that remains open
+for a future round with a different angle (e.g. a real McServ-level
+protocol simulation rather than just a FILEIO-layer errno, or tracing
+OSDSYS's own code right after the `mc0:`/`mc1:` open replies to see
+exactly what it does with the result).

@@ -20846,3 +20846,15 @@ likely needs a resolved memory-card state before proceeding to any
 disc-selection logic. See docs/ROADMAP.md's Round 455 task #274 entry
 for full detail and the concrete next-step framing (real McServ/memory-
 card protocol implementation).
+
+## Round 456 (tasks #275-278): real errno fix shipped (rom0:/cdrom -ENOENT, mc0:/mc1: -ENODEV) - no boot-progress change (honest negative result)
+
+Fetched real ps2sdk errno.h + fileio.c. Found this project's blanket "-4"
+FILEIO reply was real -EINTR (semantically wrong) since Round 303. Fixed:
+rom0:/cdrom0:/cdrom1: misses now -ENOENT(-2); mc0:/mc1: opens now the
+distinct, correct -ENODEV(-19). 128/128 tests pass, Wii build clean. BUT:
+90M-slice chained trace shows IDENTICAL OSDSYS behavior before/after -
+same file-open sequence, same GS state, still dispatch_ncmd()=0. Real,
+correct fix, honestly reported as not (yet) unlocking further boot
+progress. See docs/ROADMAP.md Round 456 entry for full detail and next-
+step framing.

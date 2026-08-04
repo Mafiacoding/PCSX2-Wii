@@ -5329,7 +5329,19 @@ static int ee_step(void)
                                  * citation - memory cards/host FS are
                                  * still honestly unmodeled). */
                                 char open_name[64];
-                                int32_t open_reply = (int32_t)-4;
+/* Round 456 (task #276): real, cited errno correction. This
+                                 * blanket reply was -4 since Round 303 - an
+                                 * honestly-labeled placeholder, but -4 is
+                                 * real EINTR ("Interrupted system call",
+                                 * ps2sdk's own common/include/errno.h,
+                                 * fetched this round from the live ps2dev/
+                                 * ps2sdk GitHub repo) - semantically
+                                 * nonsensical for "file/device not found".
+                                 * The real, correct value for a genuine
+                                 * file-not-found (rom0:/cdrom0:/cdrom1:
+                                 * miss) is -ENOENT (errno.h: "#define
+                                 * ENOENT 2", i.e. -2), used below. */
+                                int32_t open_reply = (int32_t)-2; /* -ENOENT, real ps2sdk errno.h value (was -4/-EINTR, a Round 303 placeholder) */
                                 open_name[0] = 0;
                                 if (i >= 1u) {
                                     uint32_t open_payload_base = dmat_ptr + (i - 1u) * 16u;
@@ -5396,8 +5408,36 @@ static int ee_step(void)
                                             }
                                             if (found) {
                                                 int fd = ee_fio_disc_fd_open(disc_lba, disc_size);
-                                                if (fd >= 0) open_reply = (int32_t)fd; /* real fd - table full is the only way this stays -4 for a genuine ISO9660 hit */
+                                                if (fd >= 0) open_reply = (int32_t)fd; /* real fd - table full is the only way this stays -ENOENT for a genuine ISO9660 hit */
                                             }
+                                        } else if (strncmp(open_name, "mc0:", 4) == 0 || strncmp(open_name, "mc1:", 4) == 0) {
+                                            /* Round 456 (task #276): Round 455 discovered OSDSYS
+                                             * organically attempts real mc0:/mc1: opens
+                                             * (BIEXEC-SYSTEM/OSBROWS) that this project's FILEIO
+                                             * handler previously answered with the SAME blanket
+                                             * -4 "not found" reply as every other unmodeled
+                                             * prefix - honestly correct in spirit (memory cards
+                                             * really are unmodeled, per Round 367's own citation)
+                                             * but semantically wrong in VALUE: -4 is real EINTR,
+                                             * and even a corrected -ENOENT would tell OSDSYS "the
+                                             * memory card device exists but this specific file is
+                                             * missing", which is not what's true here - this
+                                             * project has NO memory card device at all. The real,
+                                             * correct errno for that condition (ps2sdk's own
+                                             * common/include/errno.h, fetched this round: "#define
+                                             * ENODEV 19", "No such device") is -ENODEV (-19), used
+                                             * here. This gives OSDSYS's real browser logic a
+                                             * genuinely distinct, semantically-correct signal for
+                                             * "no memory card present" versus "file not found on a
+                                             * present device/disc" (rom0:/cdrom0:/cdrom1: misses,
+                                             * -ENOENT above) - real memory-card CONTENT is still
+                                             * honestly not modeled (this is an evidenced errno
+                                             * correction, not a claim of real memory-card
+                                             * emulation), but the distinct, correct signal itself
+                                             * may be what OSDSYS's own init sequence is actually
+                                             * waiting to observe before proceeding past its
+                                             * current resting point. */
+                                            open_reply = (int32_t)-19; /* -ENODEV, real ps2sdk errno.h value - "no memory card device" */
                                         }
                                     }
                                 }

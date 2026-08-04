@@ -21615,3 +21615,110 @@ unreachable dead code since they were added) exists only in scratch
 direct grep - those print statements don't exist in tracked source at
 all). Docs-only round: regression suite and Wii rebuild correctly
 skipped.
+
+## Round 468 (tasks #376-382): ROOT CAUSE FOUND - the 0x00203BE0 dead end is a stale OSDSYS VBLANK-interrupt-handler registration, orphaned by our trampoline's ELF load, not an emulator bug
+
+Continued directly from Round 467's precisely-scoped question (what
+writes `table[0x80015C60+slot].field+8`, and what does `slot`
+represent). Fully closes out the Round 466-468 investigation arc with
+a complete, evidenced causal chain.
+
+**`s3` (the table "slot" argument) = 3, and 3 is the real EE INTC
+interrupt cause number for VBLANK-END.** Disassembled the real
+generic EE interrupt dispatcher (`0x800003E0-0x80000434`, reached via
+this project's own already-established Cause-register/MMI leading-
+zero-count decode): it computes a cause number, acknowledges it in
+real hardware (`sw` to `0xB000F000`, the KSEG1-uncached mirror of real
+`INTC_STAT=0x1000F000` - confirmed against this project's own
+`ee_intc.h` citation of real PCSX2's `HwWrite.cpp`/`Hw.cpp`), looks up
+a real per-cause handler-chain-head table at `0x80012400`
+(`table[cause*4]`), and calls it via `jalr`. For our trace, cause=3,
+matching `ee_intc.h`'s own documented real cause ordering ("GS, SBUS,
+VBLANK start/end, VIF0/1, VU0/1, IPU, Timers 0-3, SFIFO, VU0
+watchdog") - cause 3 is VBLANK-END. **`0x80001630` (the function this
+project chased since Round 466) is simply this project's own
+correctly-modeled real EE kernel's registered-handler-chain dispatcher
+for VBLANK-END - it has nothing to do with `_ExecPS2`/`SetupThread`
+at all; it was already running as ordinary, periodic background kernel
+activity, and just happened to be interleaved with our own syscall-7
+sequence in the trace.**
+
+**Found the real writer of the handler's `field+8` (function pointer)
+via a value-based memory watch** (watching for any 32-bit write of
+exactly `0x00203BE0`, anywhere in EE RAM, across a full fresh-boot
+run): exactly one write, at `instr≈76,490,796` - deep in the
+pre-trampoline organic-boot phase (our syscall-7 doesn't fire until
+~120M instructions in), called from `pc=0x8000191c`. Disassembling
+that site (`0x800018C0-0x800019B4`) identifies it precisely as the
+**real `AddIntcHandler()`-class kernel primitive**: it allocates a
+small fixed-size struct (via a pool allocator at `0x800015A0`), then
+fills `struct+8 = handler_function_pointer` (from the caller's real
+`$a1` argument), `struct+12 = caller's own $gp` (exactly matching the
+dispatcher's own `lw $v0,12($s0); daddu $gp,$v0` restore seen in
+Round 467 - the real kernel correctly preserves the *registering*
+code's `$gp`, not the interrupted thread's, for later dispatch),
+`struct+16` and `struct+20` (a "next"/link value and the `type==2`
+tag the dispatcher gates on). **This is OSDSYS's own, real, entirely
+legitimate `AddIntcHandler(VBLANK_END, 0x00203BE0, ...)` call**,
+happening as part of its normal early startup - and `0x00203BE0` was
+a completely valid OSDSYS code address at the time (within OSDSYS's
+own loaded ELF range, `0x200000-0x480000`, per Round 274's finding).
+
+**The actual root cause**: Round 466's corrected trampoline calls
+`ee_elf_load()` to load the new game's PT_LOAD segments - including a
+full zero-fill of `PT_LOAD1` (`0x200000-0x340000`, confirmed correct
+per Round 466's direct source read), which is exactly the memory range
+containing OSDSYS's real, still-registered VBLANK handler code. The
+trampoline never calls anything equivalent to real `RemoveIntcHandler`
+to un-register that handler first. The very next real VBLANK-END
+interrupt - an entirely ordinary, periodic, unrelated hardware event -
+fires exactly as real hardware would, and the real kernel's real
+dispatch mechanism (also fully decoded this round) faithfully calls
+the still-registered handler, which is now zeroed memory - producing
+the NOP-slide and eventual fall-back-to-OSDSYS-resting-loop documented
+in Round 466.
+
+**Confirmed this is not a gap in this project's own real syscall 6/7
+modeling**: instrumented every write to `INTC_MASK` (`0x1000F010`)
+across the full run and found **zero** - only repeated `INTC_STAT`
+acknowledgements (`0x1000F000`, write-1-to-clear, bits for VBLANK-
+start/end) ever occur. `INTC_MASK` is never touched anywhere in this
+trace, meaning whatever enable state OSDSYS itself set for VBLANK
+persists completely unchanged through our own syscall-7 dispatch. A
+live PCSX2 check this round (still connected, `Tekken Tag Tournament
+[Demo]`, `pc=0x003993b8`) read real `INTC_MASK=0x00000000` (all
+sources masked) at that already-well-into-the-game pause point -
+consistent with real games disabling interrupts themselves once
+running, not with `_ExecPS2`/`InitializeINTC` clearing the mask as
+part of the boot transition itself (real `ExecPS2Patch`'s
+`p_InitializeINTC(0xdffd)` call, quoted in Round 466/467, would need
+to write `INTC_MASK` with a value whose XORed bits actually include
+VBLANK's to change its state, and OSDSYS's original enable state may
+survive that specific mask value unchanged - consistent with what
+this project's own trace shows).
+
+**Conclusion**: the whole Round 466-468 "dead end" is a real,
+well-understood limitation of the *test trampoline methodology*
+itself, not a bug in `ee_core.c`'s actual, already-correct real
+syscall 6/7 exception-raising behavior. The trampoline hijacks the
+currently-running thread's PC directly, bypassing OSDSYS's own real
+"user selected a game, clean up, call `_LoadExecPS2`" code path
+entirely - a path that on real hardware (or in a fuller OSDSYS
+emulation) would very plausibly include the game's own real interrupt-
+handler cleanup before ever reaching `_ExecPS2`. No tracked source
+changed this round - `ee_core.c`'s real syscall dispatch, `ee_intc.c`'s
+real INTC_STAT/MASK semantics, and `ee_elf_loader.c`'s zero-fill
+behavior are all confirmed correct and unchanged.
+
+**Path forward for a future round**: either (a) have the scratch test
+trampoline explicitly clear/disable INTC_MASK's VBLANK bits before
+firing syscall 7 (simulating what real OSDSYS's own pre-boot cleanup
+would do), to see if the game's crt0 then proceeds further
+uninterrupted, or (b) accept this as a known test-methodology
+limitation and treat Round 466's "real crt0 executes, correct BSS-
+clear, correct SetupThread dispatch" as the actual milestone, with
+the VBLANK collision understood as an artifact of the synthetic test
+rather than a genuine boot blocker.
+
+Docs-only round: no tracked source changed, regression suite and Wii
+rebuild correctly skipped.

@@ -6015,3 +6015,29 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
   count hits on each precisely across a fresh reset, to settle
   whether invocation 2+ ever lands inside 0x00082220.
 - No fix yet. Task #197 remains in_progress.
+
+## Round 438: hit-counting refutes "invocation 2+ never reaches 0x00082220"; 0x0008BE00 confirmed a real incrementing table (2, then 3); tooling race condition found and resolved
+
+- Precise breakpoint hit-count across a fresh reset (0x00082008 +
+  0x00082220 + 0x00082408 armed together): HIT1=outer/1st,
+  HIT2=inner/1st, HIT3=outer/2nd, HIT4=inner/2nd (a0=3, ra=0x820a4).
+- Directly refutes Round 437's end-of-round hypothesis - invocation 2
+  DOES complete its call into 0x00082220. The earlier non-refire was
+  a free-run timing artifact, not a structural skip.
+- 0x0008BE00 (source of a0/s2) read live: 0x00000003 + 3 address-like
+  trailing words - a real, evolving table (count + pointers), not a
+  static constant. Value legitimately grows 2 -> 3 between
+  invocations. Both values are >=2, so the slti/bnez branch outcome
+  is identical both times - divergence is NOT this branch.
+- Tooling caveat found + resolved: evaluate("pc") read immediately
+  after a Run click can race and return a stale value once; a
+  Step-Into before/after delta (0x82008 -> 0x8200c, exactly +4)
+  proved the connection is sound at single-step granularity. Treat
+  any post-Run-click single read as unverified until double-checked.
+- Debugger's own Breakpoints panel shows 0 rows all session despite
+  breakpoints demonstrably firing - likely a UI-refresh gap in the
+  external DebugServer bridge, not a real absence. Noted for future
+  rounds.
+- Next: task #221 (was #209, now answered) - live-trace inside the
+  long body (0x00082274-0x00082408) per-invocation, since the
+  divergence must be there, not at the entry branch. No fix yet.

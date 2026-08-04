@@ -5877,6 +5877,63 @@ static int ee_step(void)
                 ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
                 break;
             }
+            if (sysnum == 2) {
+                /* SetGsCrt - Round 445, direct continuation of Round
+                 * 444's syscall-2 halt at pc=0x00518128 (found right
+                 * after the LQC2/SQC2 fix unblocked the real VU0
+                 * matrix-multiply code). Real, cited signature (ps2sdk
+                 * ee/kernel/include/kernel.h, fetched this round):
+                 * "extern void SetGsCrt(s16 interlace, s16 pal_ntsc,
+                 * s16 field)" - a real EE KERNEL SYSCALL (its actual
+                 * implementation is BIOS-resident machine code, NOT
+                 * ps2sdk userspace source - ps2sdk only supplies the
+                 * calling convention/prototype). Real usage confirmed
+                 * via ps2sdk's own ee/libgs/src/libgs.c GsResetGraph():
+                 * "SetGsCrt(interlace&1, omode&0xFF, ffmode&1)" -
+                 * configures the GS CRT/display timing registers for
+                 * the requested interlace/NTSC-PAL/field mode.
+                 *
+                 * Critically, that same GsResetGraph() shows PMODE is
+                 * NOT written by SetGsCrt itself - it's set separately,
+                 * immediately afterward, by GsSetCRTCSettings() via a
+                 * direct MMIO store ("*((vu64*)gs_p_pmode) = ..."). So
+                 * SetGsCrt's own real register writes are most likely
+                 * limited to the CRT-timing set (SMODE1/SMODE2/SYNCH1/
+                 * SYNCH2/SYNCV/DISPLAY1/DISPLAY2 and similar) - but the
+                 * REAL BIOS-resident handler code is the only authoritative
+                 * source for the exact set, and this project cannot
+                 * read/cite BIOS machine code as if it were documented
+                 * source.
+                 *
+                 * Per this project's own established, repeatedly-
+                 * applied task #180 lesson (already used for sysnum
+                 * 6/7/16/17/18/19/32-57/124 above: do NOT guess at a
+                 * real, BIOS-resident kernel routine's internal
+                 * behavior - let it vector as a genuine MIPS Syscall
+                 * exception so the real, already-resident BIOS kernel
+                 * code runs verbatim), this is handled identically:
+                 * raise a real exception rather than hand-implementing
+                 * guessed register semantics. This is expected to work
+                 * correctly with zero additional modeling, because
+                 * source/hw/gs.c's gs_mmio_write64()/reg_for_addr()
+                 * ALREADY generically covers the entire real GS
+                 * privileged-register address range (0x12000000-
+                 * 0x12001FFF: PMODE/SMODE1/SMODE2/SRFSH/SYNCH1/SYNCH2/
+                 * SYNCV/DISPFB1/DISPLAY1/DISPFB2/DISPLAY2/EXTBUF/
+                 * EXTDATA/EXTWRITE/BGCOLOR/CSR/IMR/BUSDIR/SIGLBLID) -
+                 * whatever real stores the real BIOS handler performs
+                 * will be captured correctly and automatically via the
+                 * same generic MMIO path already used by every other
+                 * GS register write in this project, with no per-
+                 * register guessing needed. Previously this syscall
+                 * fell through to the unconditional halt() below,
+                 * which - since this is exactly the syscall real
+                 * OSDSYS issues right after the VU0 matrix-multiply
+                 * code (Round 444) - was actively blocking the single
+                 * most direct known path toward the splash screen. */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
+            }
             halt("SYSCALL (no BIOS syscall table implemented)");
             return 1;
         }

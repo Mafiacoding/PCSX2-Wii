@@ -6189,3 +6189,26 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
   clear forward progress toward it.
 - Next: implement EE BIOS syscall 2 (SetGsCrt) with real ps2sdk/
   PCSX2 citation.
+
+## Round 445: SPLASH-SCREEN-ADJACENT MILESTONE - GS PMODE configured for the first time
+- Fetched real ps2sdk ee/libgs/src/libgs.c + kernel.h: SetGsCrt (EE
+  syscall 2) is a real BIOS-resident kernel syscall (not ps2sdk
+  userspace source). GsResetGraph() shows PMODE is set separately
+  (direct MMIO write via GsSetCRTCSettings), not by SetGsCrt itself.
+- Fix: added sysnum==2 to the existing "vector as real MIPS Syscall
+  exception" family (same established pattern as AddIntcHandler/
+  thread-mgmt syscalls) - real BIOS handler code executes, its real
+  register writes land automatically via gs.c's already-generic GS
+  MMIO path. No guessed register semantics needed.
+- 128/128 regression suite pass. Wii cross-build clean, 0 warnings.
+- REAL MILESTONE: fresh cold boot now sets pmode=0x66 (EN2=circuit-2
+  enabled - matches Round 321's live-hardware finding) at
+  ee_total_instr=93,508,707. Circuit-2 registers dispfb2/display2/
+  smode1/smode2 all genuinely populated with real-looking values.
+  dispfb1/display1 (circuit 1) still 0, consistent with circuit 2
+  being the real active path.
+- New halt: pc=0x0050DB34, unimplemented COP2 CO-format funct=0x20
+  (fs=ft=VF0, fd=5, destmask=X-lane-only) - a new, distinct VU0
+  opcode gap, not yet identified against real source.
+- Next: cite real PCSX2 R5900OpcodeTables.cpp/VUops.cpp for funct
+  0x20's real semantics before implementing.

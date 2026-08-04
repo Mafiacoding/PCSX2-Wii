@@ -20414,4 +20414,26 @@ Scratch memory-dump instrumentation reverted from `driver_r313.c` before this en
 
 **Wii cross-build**: clean, 0 warnings, `pcsx2-wii-git.elf`/`.dol` produced via the documented devkitPPC/libogc toolchain (`docs/RECOVERY.md` section 2).
 
-**Next round's concrete target**: implement EE BIOS syscall 2 (`SetGsCrt`) in `ee_core.c`'s syscall dispatch, following this project's own established real-hardware-citation discipline (cross-reference ps2sdk `kernel.h`/real PCSX2 `Hle.cpp` or equivalent for the exact GS register writes `SetGsCrt` performs) - this is the most direct, evidenced path toward finally configuring GS `PMODE`/`DISPFB1`/`DISPLAY1` and reaching the splash screen.
+
+
+## Round 445: SPLASH-SCREEN-ADJACENT MILESTONE - real GS PMODE configured for the first time (SetGsCrt implemented via real-exception vectoring)
+
+**Context**: direct continuation of Round 444's syscall-2 (`SetGsCrt`) lead, per the user's request to fetch `ps2sdk/ee/libgs/src/libgs.c`.
+
+**Research** (fetched real ps2sdk `ee/libgs/src/libgs.c` and `ee/kernel/include/kernel.h`): confirmed `SetGsCrt(s16 interlace, s16 pal_ntsc, s16 field)` is a real EE KERNEL SYSCALL - its actual implementation is BIOS-resident machine code, not ps2sdk userspace source (ps2sdk only supplies the calling convention). Real usage, from `GsResetGraph()`: `SetGsCrt(interlace&1, omode&0xFF, ffmode&1)`. Critically, the SAME function shows `GsSetCRTCSettings()` writes `PMODE` SEPARATELY, immediately after `SetGsCrt()` returns, via a direct MMIO store (`*((vu64*)gs_p_pmode) = ...`) - i.e. `SetGsCrt` itself does NOT write `PMODE`, only CRT/display-timing registers.
+
+**Approach decision**: rather than hand-guess `SetGsCrt`'s exact internal register writes (unknowable without the real BIOS-resident machine code, which is not part of any citable source), applied this project's own established, repeatedly-proven task #180 pattern (already used for `AddIntcHandler`/thread-management/DMAC-handler syscalls): let syscall 2 **vector as a genuine MIPS Syscall exception**, so the real, already-resident BIOS kernel handler code executes verbatim. This works with zero additional modeling because `source/hw/gs.c`'s `gs_mmio_write64()`/`reg_for_addr()` already generically covers the ENTIRE real GS privileged-register address range (`0x12000000`-`0x12001FFF`: PMODE/SMODE1/SMODE2/SRFSH/SYNCH1/SYNCH2/SYNCV/DISPFB1/DISPLAY1/DISPFB2/DISPLAY2/EXTBUF/EXTDATA/EXTWRITE/BGCOLOR/CSR/IMR/BUSDIR/SIGLBLID) - whatever real stores the real handler performs land correctly, automatically.
+
+**Fix**: added `sysnum == 2` to the existing "vector as real exception" family in `ee_core.c`'s syscall dispatch.
+
+**Regression suite**: 128/128 test files pass, 0 failures, 0 compiler warnings.
+
+**Host-native verification - REAL DISPLAY MILESTONE**: fresh 40,000,000-slice cold boot (real BIOS + real disc). At `total_slices=15,000,000` / `ee_total_instr=93,508,707` (up from Round 444's 83,665,427), the driver's own display-milestone check fired for the first time in this project's history: **`pmode=0x66`** (previously always exactly `0`). Decoded: bit1 (EN2, circuit-2 enable) = 1, matching **Round 321's own earlier live-hardware finding that real OSDSYS uses GS circuit 2 (DISPFB2/DISPLAY2), not circuit 1** - independent confirmation, two rounds apart, of the same real-hardware behavior. A follow-up scratch read (reverted before commit) of the circuit-2 registers confirmed they are ALSO genuinely populated: `dispfb2=0x1446`, `display2=0x1bf9ff0183227c`, `smode1=0x740814504`, `smode2=0x3` - real, non-zero, plausible-looking GS display configuration, not a fabricated or coincidental value. `dispfb1`/`display1` (circuit 1) remain 0, consistent with circuit 2 being the real active path.
+
+**New halt reached immediately after**: `pc=0x0050DB34`, `halt_reason="unimplemented COP2 CO-format sub-opcode (VU0 vector datapath not implemented)"`. Scratch diagnostic (reverted before commit) decoded the raw instruction (`0x4B000160` at `pc=0x0050DB30`): CO-format COP2, `destmask=0x8` (X lane only), `fs=0`/`ft=0` (both VF0, the hardwired `(0,0,0,1)` constant), `fd=5`, `funct=0x20` - a funct value not covered by any currently-implemented range (broadcast row is `<=0x1F`, VADD-family is `0x28`-`0x2F`, VIADD-family is `0x30`-`0x35`, ACC-writing family is SPECIAL2 `0x3C`-`0x3F`). Both operands being VF0 suggests this may be a unary/constant-generating op. Not implemented this round - needs a real citation (PCSX2 `R5900OpcodeTables.cpp` or equivalent) before guessing at semantics, per this project's own established discipline.
+
+**Wii cross-build**: clean, 0 warnings, `pcsx2-wii-git.elf`/`.dol` produced.
+
+**Honest scope**: this is the strongest forward-progress signal this project has produced to date - real GS CRT/display registers are now genuinely configured, matching known real-hardware behavior (GS circuit 2) rather than staying at all-zero. It is NOT yet a rendered splash screen (no frame buffer contents have been verified, and the boot halts shortly after on a new, unrelated VU0 opcode gap) - but the single biggest structural blocker (an entirely unconfigured GS) is now resolved.
+
+**Next round's concrete target**: identify the real VU0 CO-format opcode for `funct=0x20` (cross-reference PCSX2's `R5900OpcodeTables.cpp`/`VUops.cpp` or equivalent real source - do not guess) and implement it, continuing the direct march through OSDSYS's real VU0/geometry code now that GS display registers are genuinely configured.

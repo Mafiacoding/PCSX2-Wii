@@ -20780,3 +20780,15 @@ slices) without visibly changing the framebuffer - an open, minor loose
 end, not a blocker. See docs/ROADMAP.md's Round 451 entry for the full
 bisection and next-step framing (pushing boot further to see if OSDSYS
 eventually issues real triangles once/if it hands off to its main menu).
+
+## Round 452 (tasks #265-266): sprite-growth/frozen-framebuffer discrepancy resolved
+
+Single continuous-run test (not two separate scratch drivers) confirms: the
+640x448 DISPFB2 framebuffer is genuinely byte-identical at 15M and 35M
+slices (cmp-verified), even though sprites_drawn grows 343->375 in that
+window. Root cause: those later sprite draws all resolve to a degenerate,
+zero-height scissor-clamped bbox (sy1=-1937 < sy0=0), so their pixel loops
+execute zero iterations and write nothing. Not a bug requiring a fix - this
+is a real, geometrically-empty draw call, consistent with an off-screen
+idle/keep-alive sprite pair. See docs/ROADMAP.md's Round 452 entry for full
+detail (fbp alternation, next-step framing).

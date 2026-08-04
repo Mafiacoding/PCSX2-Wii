@@ -6464,3 +6464,41 @@ the actual OSDSYS menu/logo) is the natural next question - would need
 pushing boot progress further past the current VBLANK-wait park, which
 is a real boot-progress question (task #248's territory), not a
 rendering-code question.
+
+## Round 452 (tasks #265-266): sprite-growth-vs-frozen-pixels discrepancy fully resolved
+
+Direct follow-up to Round 451's open loose end (sprites_drawn growing 343->375
+between 15M-35M slices while the framebuffer appeared frozen, measured across
+two SEPARATE scratch-driver runs, leaving open whether that was a real finding
+or a cross-run comparability artifact).
+
+Built a single unified driver (/tmp/driver_unified.c, scratch-only) that dumps
+both the full 640x448 DISPFB2 framebuffer AND gif.c's draw counters at slice
+15,000,000 and again at the final slice count (35,000,000), all within ONE
+continuous process/checkpoint chain - eliminating any cross-run ambiguity.
+
+Result: `cmp` confirms the two framebuffer dumps are BYTE-IDENTICAL
+(145160/286720 non-zero pixels, both), while sprites_drawn genuinely grew
+343 -> 375 in that exact same window. This is real, not a measurement
+artifact.
+
+Root cause (found via targeted instrumentation of gif.c's rasterize_sprite(),
+scratch-only, never committed): every one of these later sprite draws
+resolves, after scissor clamping, to a degenerate/empty bounding box -
+`bbox=(0,0)-(640,-1937)` - where sy1 (-1937) is less than sy0 (0). The
+rasterizer's pixel loop (`for (yy = sy0; yy < sy1; yy++)`) therefore executes
+zero iterations on every one of these draws, gs_finish_pixel() is never
+called, and zero pixels are written - fully and simply explaining why the
+visible framebuffer never changes despite the counter climbing. The
+destination fbp alternates strictly between 0 and 70 (70 matches DISPFB2's
+own real fbp/2048=70; 0 is some other buffer) - consistent with a repeating,
+deliberate idle "keep-alive" sprite pair (e.g. a blink/heartbeat cycle) that
+happens to be geometrically positioned off-screen while in this idle phase,
+rather than random garbage state.
+
+Not pursued further this round (flagged as a minor, non-blocking loose end):
+WHY the Y-coordinate resolves to -1937 specifically. It doesn't change the
+core finding (zero visible impact either way) and isn't currently worth the
+investigative budget relative to the higher-value next step (pushing boot
+progress further to see if real triangles eventually get issued - see the
+already-queued Round 452 task #267).

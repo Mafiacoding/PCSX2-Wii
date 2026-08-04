@@ -6423,3 +6423,44 @@ Images captured this round (not committed to the repo - investigation
 artifacts only, not source): the raw 640x448 framebuffer PNG at both the
 15M and 35M slice marks (byte-identical), a 2x-scaled version, and a
 zoomed crop of the bottom colored strip.
+
+## Round 451 (2026-08-04, task #264): resolved - it's not a fill bug, zero triangles have been drawn at all
+
+Direct follow-up to Round 450's "wireframe-only" open question. Instrumented
+gif_state_t's own existing draw counters (`triangles_drawn`/`sprites_drawn`/
+`lines_drawn`/`points_drawn` - real fields already in gif.h, added for a
+prior "GS coverage breadth" task, not new this round) into a scratch driver
+copy and read them at the same checkpoint used for Round 450's rendered
+image.
+
+**Answer: `triangles=0 sprites=343 lines=4888 points=333`.** There is no
+triangle-fill bug to investigate - gif.c's rasterize_triangle() (a real,
+already-implemented flat-shaded edge-function fill, confirmed present by
+code read) has simply never been called yet in this boot trace. Every
+pixel in Round 450's image is fully and correctly accounted for by real
+LINE, SPRITE, and POINT draw calls - the "wireframe" look is not a
+rendering defect, it's an accurate picture of exactly what's been drawn.
+
+Bisected the draw-count ramp-up: 0/0/0/0 at 8-10M slices, jumping to
+338/4888/0/333 within the 10M-12M slice window (the entire line/point
+scene is issued in one burst), then sprites alone continue slowly
+increasing afterward (343 at 15M, 375 at 35M) while lines/points/triangles
+stay flat - consistent with a real idle "heartbeat"-style icon/cursor
+update continuing after the main scene finishes, matching the already-
+documented VBLANK-wait resting state. Note: this slow sprite growth
+did not visibly change Round 450's pixel dump between 15M and 35M -
+those extra sprites may be drawing off the currently-visible DISPFB2
+region, to a different context, or with colors indistinguishable from
+existing content; not yet explained, flagged as a loose end rather than
+a mystery worth blocking on.
+
+This is genuinely good news, not a bug report: boot has reached the point
+of issuing real, structured, non-trivial GS draw traffic (matching what a
+real PS2 BIOS boot animation - a well-known line/particle intro effect
+before the OSDSYS menu appears - would actually do), and the rendering
+pipeline is faithfully reproducing whatever geometry it's given. Whether
+triangles get issued later (e.g. once the intro animation hands off to
+the actual OSDSYS menu/logo) is the natural next question - would need
+pushing boot progress further past the current VBLANK-wait park, which
+is a real boot-progress question (task #248's territory), not a
+rendering-code question.

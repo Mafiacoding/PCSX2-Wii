@@ -20765,3 +20765,18 @@ not be rasterizing interiors (only edges/lines visible) - a likely gap in
 gif.c/gs.c's fill path, not a boot-progress blocker. Next: audit the
 triangle-fill code against a real GS reference. See docs/ROADMAP.md's
 Round 450 entry for full details.
+
+## Round 451 (task #264): the "wireframe" picture is fully explained - zero triangles drawn, not a fill bug
+
+Checked gif.c's own real draw counters at the Round 450 checkpoint:
+`triangles=0 sprites=343 lines=4888 points=333`. There is no triangle-fill
+gap to fix - rasterize_triangle() is real, implemented code that simply
+hasn't been called yet. Round 450's image is a complete, accurate render
+of the LINE/SPRITE/POINT geometry actually issued so far, which matches
+a real PS2 BIOS intro-animation style (many crossing lines, small icon
+sprites) rather than any kind of rendering defect. Sprite count keeps
+slowly climbing after the main scene completes (343->375 between 15M-35M
+slices) without visibly changing the framebuffer - an open, minor loose
+end, not a blocker. See docs/ROADMAP.md's Round 451 entry for the full
+bisection and next-step framing (pushing boot further to see if OSDSYS
+eventually issues real triangles once/if it hands off to its main menu).

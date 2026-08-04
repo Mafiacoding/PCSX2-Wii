@@ -8876,3 +8876,32 @@ new feature. If audio is pursued further, building actual SPU2
 voice/DMA/ADPCM playback modeling would be substantial, scoped new
 work - not yet undertaken since no observed bug currently depends on
 it.
+
+## Round 474: real CD_SCMD_GETDISKTYPE reply-shape fix (CDVDFSV protocol depth, direct continuation of Round 473)
+
+Fetched real ps2sdk `scmd.c`/`libcdvd.h`/`libcdvd-common.h`. Found
+`sceCdGetDiskType()`'s real reply is a single word read directly as
+the disc-type value (not the generic status+value pair most other
+S-commands use). This project's existing generic `SIF_SID_CDVD_SCMD`
+catch-all writes a hardcoded `1`, which for GETDISKTYPE decodes as
+`SCECdDETCT` ("still detecting") rather than a valid result - a real,
+evidenced protocol bug. Live instrumentation across a 40M-slice
+organic-boot run found zero real calls to GETDISKTYPE, ruling it out
+as the current boot blocker but confirming it as live and dormant.
+Implemented a specific `rpc_number==3` branch replying the real
+`SCECdPS2CD` (0x12) constant, matching this project's own disc loader
+scope (flat ISO9660, no CDDA-track modeling) and the actual CD-sized
+(~667MB) test disc image.
+
+Host-native: clean compile, 128/128 regression tests pass. Forward-
+progress check: identical steady state to Round 470-473 baseline, no
+regression (expected, since GETDISKTYPE is never reached on this
+path). Wii cross-build: `pcsx2-wii-git.elf`/`.dol` both built clean.
+
+### Next steps
+
+The real remaining gap is unchanged: fuller real CDVDFSV disc-
+negotiation protocol modeling remains the substantive open item.
+GETDISKTYPE is now correctly handled if/when a future round's work
+makes it reachable. SPU2 voice/DMA/ADPCM playback modeling (Round
+473's audio audit) remains real, scoped, but undertaken work.

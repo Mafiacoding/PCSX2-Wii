@@ -5152,6 +5152,71 @@ static int ee_step(void)
                                     }
                                     ee_arm_rpc_call_pending(call_cd);
                                 }
+                            } else if (call_sid == SIF_SID_CDVD_SCMD && rpc_number == 3u) {
+                                /* Round 474 (CDVDFSV protocol depth,
+                                 * direct continuation of Round 473's
+                                 * "implement the cdvdfsv" work):
+                                 * CD_SCMD_GETDISKTYPE, real
+                                 * "sceCdGetDiskType(void)" (ee/rpc/cdvd/
+                                 * src/scmd.c, fetched this round).
+                                 * UNLIKE every other real S-command
+                                 * (which reply a generic leading
+                                 * status/result int plus a separate
+                                 * secondary output word), GetDiskType's
+                                 * own real source reads its SINGLE
+                                 * reply word directly as the disc-type
+                                 * value itself: "result = *(int *)
+                                 * UNCACHED_SEG(sCmdRecvBuff); return
+                                 * result;" - there is no separate
+                                 * status/value split for this command.
+                                 * This project's existing generalized
+                                 * SIF_SID_CDVD_SCMD catch-all (Round
+                                 * 302/303, below) writes a hardcoded
+                                 * leading `1` for any rpc_number it
+                                 * does not specifically recognize -
+                                 * correct for the ~30 other real
+                                 * S-commands sharing that generic
+                                 * "nonzero success" shape, but WRONG
+                                 * here: per the real enum SCECdvdMediaType
+                                 * (common/include/libcdvd-common.h,
+                                 * fetched this round), value 1 is
+                                 * SCECdDETCT ("detecting disc type,
+                                 * try again"), not a valid completed
+                                 * disc-type result. If any real caller
+                                 * ever invokes GetDiskType against this
+                                 * project's existing catch-all, it
+                                 * would be told "still detecting"
+                                 * forever - a genuine, evidenced
+                                 * protocol bug, independent of whether
+                                 * the current organic-boot trace
+                                 * happens to reach this call site
+                                 * (live-instrumented this round across
+                                 * a ~35,000,000-instruction run
+                                 * covering the already-characterized
+                                 * Round 471 init burst window: zero
+                                 * hits observed, so this is real,
+                                 * evidenced protocol-completeness work,
+                                 * not a claimed fix for the current
+                                 * resting point). This project's own
+                                 * disc loader (core/iso_loader.c,
+                                 * iop_cdvd.c's own citation) normalizes
+                                 * every mounted image to flat
+                                 * 2048-byte-sector ISO9660 access and
+                                 * does not track or model CDDA audio
+                                 * tracks, so the only defensible real
+                                 * value (not a guess - directly read
+                                 * off the real enum) is SCECdPS2CD
+                                 * (0x12, "PS2 CD with no CDDA tracks")
+                                 * - the correct value for a real
+                                 * PS2-format CD image with no modeled
+                                 * audio-track content, and the same
+                                 * disc-format family (~667MB, CD-sized,
+                                 * not DVD-sized) as this project's own
+                                 * mounted test disc. */
+                                if (call_recvbuf != 0u) {
+                                    ee_mem_write32(st, call_recvbuf + 0u, 0x12u); /* real SCECdPS2CD - see comment */
+                                }
+                                ee_arm_rpc_call_pending(call_cd);
                             } else if (call_sid == SIF_SID_CDVD_SCMD && rpc_number == 0x18u) {
                                 /* Round 302 (direct follow-up to Round
                                  * 301's PollSema fix): real, live-

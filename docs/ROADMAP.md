@@ -5932,3 +5932,40 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
   `pcsx2_step` were the reliable live-state primitives. The PCSX2 Qt
   debugger UI's own Run button (via computer-use) was the reliable
   way to resume execution when `pcsx2_continue` stalled.
+
+## Round 437 continued: live single-stepping catches a third, nested invocation via real interrupt preemption - also skips the wait call, strengthening the landmark finding
+
+- Single-stepping the second invocation from 0x0008209C (jal
+  0x00082220, confirmed correct via live disassembly) landed at
+  0x00082008 instead - a real hardware interrupt preempted execution
+  and re-dispatched into the same handler mid-flight (ra unchanged at
+  0x800057AC, confirming interrupt dispatch not a call).
+- Proves the handler is genuinely re-entrant on real hardware.
+- This third, nested invocation was let run freely and also returned
+  to real game code without ever hitting the 0x00082408 wait-call
+  breakpoint - a third consecutive non-first invocation observed to
+  skip the wait.
+- Naive single-stepping is noisy for this handler (wall-clock delay
+  per step lets real interrupts nest) - next round should walk the
+  remaining un-disassembled sub-calls statically instead, or use
+  conditional/counted breakpoints if available.
+- No fix yet - guard mechanism still not pinpointed. Task #197 left
+  in_progress; tasks #198-202 remain the concrete next steps.
+
+## Round 437 continued: rules out 0x00082FD0/0x00083028/0x0008305C (all one function, a no-op fast-return given a0=0) and re-confirms 0x00083070 (Round 436's run-once guard, unrelated) - narrows remaining candidates to 0x00083900 and kernel dispatcher context
+
+- Live-disassembled and live-stepped 0x00082FD0: loads global
+  0x0008D9E8 into a0 (live-verified =0 on the real first invocation,
+  matching its later steady-state value), branches straight to its
+  own epilogue at 0x0008305C - architecturally a no-op given this
+  boot's global state. 0x00083028 is a label inside the same
+  function, not a separate call.
+- 0x00083070 (Round 436's run-once guard) is the real caller of this
+  function via tail-jump - re-confirmed live, still unrelated to the
+  first-vs-subsequent branching.
+- Net: both remaining Round 433 candidates from this cluster are
+  ruled out. Only 0x00083900 and the kernel dispatcher context
+  (0x80001460 + callers) remain as live candidates.
+- Task #199/#200 effectively resolved (ruled out, not found-guard).
+  Task #197 remains in_progress - next round should disassemble
+  0x00083900 and/or the kernel dispatcher context.

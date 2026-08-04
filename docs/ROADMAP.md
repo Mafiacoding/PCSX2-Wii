@@ -6882,3 +6882,170 @@ address histograms) and are scratch-only (`/tmp/driver_tekken*.c`,
 not modified. No regression suite / Wii rebuild required (investigation
 round, no source changes, per the mandatory-workflow docs-only carve-
 out).
+
+## Round 458 (tasks #283-286, #290, #292): live PCSX2 ground truth - real boot confirmed, decompression loop identified, sceCdRead hypothesis revised
+
+Direct follow-up to Round 457's two open threads, now using the live
+PCSX2 DebugServer/Pine connection that appeared mid-session (Round
+457's writeup flagged it as unexploited). Per explicit user request,
+also double-checked the project's history for prior PAL-region
+recognition of this disc before doing any new work.
+
+### Region recognition re-check (not new)
+
+Confirmed via `grep` over `docs/STATUS.md`/`docs/ROADMAP.md`: Round 367
+(task #94) already read the real, mounted Tekken Tag Tournament demo
+disc's actual `SYSTEM.CNF` through this project's own real ISO9660
+parser and got back genuine content: `BOOT2 = cdrom0:\SCED_500.41;1`,
+`VER = 1.00`, `VMODE = PAL`. This is the exact real path string Round
+457's trampoline used. No gap here - this was already correctly derived
+from real disc data, not guessed or hardcoded, and needed no rework.
+
+### Task #283/#284: live trace, breakpoint cleanup, real boot confirmed
+
+`pcsx2_status` showed a live, paused DebugServer+Pine session with
+Tekken Tag Tournament Demo (SCED-50041) already loaded. Initial probing
+found the session pinned at very early boot (`pc=0x00082008`, all
+GPRs zero, `sp=0x80015B70` - a fresh-reset kernel stack) with no
+`SCED_500` string anywhere in EE RAM 0x00100000-0x02000000
+(`pcsx2_find_pattern`, zero hits) - i.e. genuinely pre-SYSTEM.CNF-read.
+
+Two `continue`+`pause` cycles (3s, then 20s, then 40s of real time) all
+showed `pc` bouncing between exactly `0x00082008` and `0x00082220` -
+the *exact* address pair this project's own hand-rolled reimplementation
+already characterized and fixed in Round 431-441 (tasks #179-182,
+#193-212, "delayed BOOTEND reassertion fix"). `pcsx2_list_breakpoints`
+revealed why: 3 active breakpoints were still set from that exact
+investigation (`0x00082008`/`0x00082220`/`0x00082408`, with their
+original Round 431-439 descriptions still attached) - every `continue`
+was immediately re-trapping. Cleared with `pcsx2_clear_all_breakpoints`.
+
+After clearing, a single 25-second `continue` window let the real
+session run all the way to `pc=0x003993b8` - confirmed via
+`pcsx2_find_pattern` that `"SCED_500"` is now resident at `0x01fc600c`
+(`pcsx2_read_string` confirms the full `"SCED_500.41;1"`), and
+`pcsx2_get_backtrace` showed a genuine 3-frame call stack
+(`0x003993a8 -> 0x00357800 -> 0x0035733c`) with `sp=0x07fffd30` - a
+real high-address user-mode stack, not the earlier kernel stack. This
+directly, empirically confirms real `_LoadExecPS2`/BOOT2 genuinely
+transfers control into the real game's own code on accurate hardware
+emulation - the exact transition this project's own Round 457
+trampoline exercised the dispatch mechanism for but did not complete.
+
+`pcsx2_gs_registers` at this point showed every real GS register
+(PMODE/SMODE1/DISPFB1/DISPLAY1/etc.) still reading zero - the game
+has not configured a display path yet at this stage of its own real
+init. This is useful negative information: it confirms display setup
+is a later step in the *game's own* init sequence, not something that
+happens immediately upon entering game code - so this project's own
+still-all-zero GS state after any future successful game-code
+transition should not, by itself, be read as a failure.
+
+### Task #290: real disassembly of the 0x00200C80-0x00200D4C region
+
+Round 457's task #282 characterized this region only via an address
+histogram ("varied control flow ... consistent with a real, actively-
+branching per-frame dispatcher loop"). This round pulled the actual
+bytes out of a saved Round 457 checkpoint
+(`/tmp/r457e_ckpt.bin`, EE RAM block located via the checkpoint's own
+`write_block()`/`read_block()` framing - size-prefixed blocks: data
+segment, then EE RAM, then IOP RAM, then IOP heap snapshot) and
+disassembled them with this project's own Round-350 MIPS-I/EE decoder
+(`/tmp/mips_disasm.py`, still present in the sandbox). Full 52-
+instruction disassembly obtained. Real structure identified:
+
+- `0x00200C94`-`0x00200CC8`: bit/byte unpacking into a shift-and-mask
+  token (`lbu`+`sll`+`or`+`and` building up a multi-byte value, masked
+  against a control byte in `$s5`).
+- `0x00200CF8`-`0x00200D10`: a tight overlapping back-reference copy
+  loop - `subu $a1,$s0,$a0` computes a source pointer as
+  `output_pos - distance`, then `lbu`/`sb` copies byte-by-byte while
+  decrementing a length counter (`addiu $a0,$a0,-1`) and looping via
+  `bne $a0,$zero,->0x00200CF8`.
+- `0x00200D1C`: a literal-byte-copy fallback path (`sb $a2,0($s0)`).
+- `0x00200D28`-`0x00200D3C`: exit-condition check comparing output
+  position (`$s0`) against a target length (`$s2`), with an early-out
+  via `sltu`.
+- `0x00200D48`: unconditional `beq $zero,$zero,->0x00200C80` - loops
+  the entire block back to its own top.
+
+This is a textbook LZ/run-length-style decompression inner loop, not a
+generic "dispatcher". **No instruction anywhere in this block reads or
+branches on the `mc0:`/`mc1:` `-ENODEV` reply value from Round 456's
+fix.** Corrected conclusion: OSDSYS is just running its own, unrelated,
+generic resource-decompression routine (most likely unpacking a
+compressed font/icon/graphic asset) that happened to be next in its own
+real program flow - not "processing" the memory-card reply in any
+meaningful way. This refines (and partially corrects the speculative
+framing of) Round 457's task #282 writeup with hard, disassembled
+evidence rather than address-histogram inference.
+
+### Task #285: revised `_LoadExecPS2` disc-access hypothesis
+
+Round 457 hypothesized real `_LoadExecPS2`'s ELF-fetch bypasses the
+generic FILEIO/SIF RPC service entirely, using a lower-level
+`sceCdRead`/NCMD path instead - based on the trampoline test's 600,000-
+slice window never showing a `FIO_F_OPEN` call. Re-examined this
+against citations this project already has on file:
+
+- Round 374-375 (psdevwiki BIOS ROMDIR table, real ps2sdk
+  `loadcore.c`): real disc-ELF loading for a program switch is
+  performed by EELOAD, a genuine loader module - not by the syscall-6
+  BIOS handler doing raw sector reads itself.
+- Round 456 (real ps2sdk `ee/kernel/src/fileio.c`, fetched live from
+  ps2dev/ps2sdk GitHub): `fioOpen()` genuinely routes *every* device
+  prefix (`rom0:`, `cdrom0:`/`cdrom1:`, `mc0:`/`mc1:`, `host:`) through
+  the exact same generic `FIO_F_OPEN` SIF RPC call - there is no
+  separate, lower-level userspace disc-read API in the real SDK that
+  EELOAD would plausibly use instead.
+
+**Revised conclusion**: EELOAD itself almost certainly still uses the
+standard `fioOpen`/`fioRead`/`fioClose` calls this project already
+models - the "bypasses FILEIO" hypothesis from Round 457 is likely
+wrong. The much more probable explanation, consistent with this
+project's own already-cited real IOP-reboot mechanism (Round 372-373,
+`SifIopRebootBuffer.c` - real `_LoadExecPS2` for a program switch
+triggers a genuine IOP module-reload/reboot cycle before the new
+program's own modules, including EELOAD's dependencies, are usable
+again) is that Round 457's 600,000-slice observation window was simply
+too short to reach the point where EELOAD would call `fioOpen` - not
+that the mechanism is architecturally different. Weak supporting
+evidence from this round: the live PCSX2 session was caught at a
+genuinely fresh EE reset state (all-zero GPRs) very early in its own
+boot, consistent with a real IOP-reboot-driven EE reset happening
+around this stage on real hardware too.
+
+### Task #286: no fix, concrete next step identified
+
+No source change this round (investigation-only, as scoped). Next
+step: re-run Round 457's trampoline experiment
+(`/tmp/driver_tekken.c`/`driver_tekken2`) with a much longer post-
+install observation window (several million slices instead of 600,000)
+to directly test task #285's revised hypothesis against this project's
+own emulator - does `FIO_F_OPEN` for the target file eventually fire if
+given enough time for a full IOP-reboot cycle to complete?
+
+### Task #292: live-PCSX2 methodology assessment
+
+The live connection was concretely useful three separate times this
+round: it let us discover and clear 3 silently-persisting stale
+breakpoints from Round 431-439 (which had made the session falsely
+appear "stuck"), it gave direct, empirical confirmation that real BOOT2
+genuinely completes (rather than continuing to infer this from address
+histograms), and it prompted the disassembly work that corrected task
+#282's speculative framing. Recommendation: use it whenever connected,
+but don't assume persistence across sessions, and always check
+`pcsx2_list_breakpoints`/`pcsx2_list_watchpoints` first before trusting
+`continue`/`pause` behavior at face value.
+
+### Verification
+
+All work this round was read-only against the live PCSX2 session
+(status/threads/backtrace/registers/disassemble/find_pattern/read_string,
+plus one `clear_all_breakpoints` + two `continue`/`pause` cycles) and
+offline checkpoint analysis (`/tmp/r457e_ckpt.bin`, already scratch-only
+from Round 457, not re-saved or modified). The tracked repo received no
+source changes - only `docs/STATUS.md`/`docs/ROADMAP.md`. No regression
+suite / Wii rebuild required (docs-only carve-out, no source changes).
+The live PCSX2 session was left paused (not running unattended) at
+session end.

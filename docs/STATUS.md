@@ -20908,3 +20908,80 @@ Not yet exploited beyond a brief initial probe this round; flagged as a
 high-value angle for Round 458+.
 
 No source fix shipped this round (investigation-only, as scoped).
+
+## Round 458 (tasks #283-286, #290, #292): live PCSX2 confirms real game boot succeeds; decompression-loop disassembly corrects Round 457's task #282 read; sceCdRead hypothesis revised (docs-only investigation)
+
+Direct follow-up to Round 457, using the live PCSX2 DebugServer/Pine
+connection discovered mid-session (Tekken Tag Tournament Demo already
+loaded). Also re-confirmed, per user request: Round 367 already
+correctly identified this disc as the real PAL demo (`VMODE = PAL` read
+straight from the real, mounted `SYSTEM.CNF`) - not a new finding, no
+gap there.
+
+**Task #283/#284 - live boot trace**: found and cleared 3 stale
+breakpoints left over from this project's own Round 431-439
+investigation (`0x00082008`/`0x00082220`/`0x00082408`), which had been
+silently causing every `continue` to immediately re-trap in that old
+loop. Once cleared, the real session ran forward on its own and reached
+`pc=0x003993b8`, deep inside real game code, with the real
+`SYSTEM.CNF`-derived string `"SCED_500.41;1"` resident in EE RAM
+(`0x01fc600c`), a genuine 3-frame call stack, and a real high-address
+user stack (`sp=0x07fffd30`, vs. the fresh-reset kernel stack seen
+earlier). **This is direct, concrete confirmation that real `_LoadExecPS2`
+genuinely transfers control into the game's own code on accurate
+hardware emulation** - something this project's own Round 457
+trampoline reproduced the dispatch mechanism for, but did not yet
+complete. GS display registers (PMODE/DISPFB1/DISPLAY1/etc.) were still
+all zero at this point - confirms display setup happens later in the
+game's own real init, not immediately after BOOT2, so this is expected,
+not a red flag.
+
+**Task #290 - decompression-loop disassembly**: pulled the exact bytes
+at `0x00200C80`-`0x00200D4C` out of a saved Round 457 checkpoint and
+disassembled them with this project's own Round-350 MIPS decoder. This
+REFINES the earlier, more speculative "per-frame dispatcher" read from
+Round 457's task #282: the real code here is a genuine LZ/run-length-
+style decompression inner loop (bit/byte unpacking, an overlapping
+back-reference byte-copy loop, a literal-byte fallback branch, and an
+unconditional loop-back to the top). No instruction in the block reads
+or branches on the `mc0:`/`mc1:` `-ENODEV` reply value - this is
+OSDSYS's own generic resource-decompression routine (most likely
+font/icon/graphic asset data) that was already next in its own program
+flow, just coincidentally sampled right after the ENODEV reply.
+
+**Task #285 - revised disc-access hypothesis**: re-examined Round 457's
+"`_LoadExecPS2` uses a lower-level `sceCdRead`/NCMD path, bypassing
+FILEIO" hypothesis against this project's own already-fetched real
+citations (Round 374-375's psdevwiki/ps2sdk loadcore.c material, Round
+456's `fileio.c` confirmation that `fioOpen()` uniformly routes every
+device prefix through the same `FIO_F_OPEN` RPC). Real `_LoadExecPS2`
+hands off to EELOAD, a genuine loader module that itself uses the
+standard `fioOpen`/`fioRead`/`fioClose` calls - the same FILEIO path
+this project already models. **Revised conclusion: the "bypasses
+FILEIO" hypothesis is likely wrong.** More likely, consistent with this
+project's own already-cited real IOP-reboot mechanism (Round 372-373):
+`_LoadExecPS2` triggers a genuine IOP module-reload/reboot cycle before
+EELOAD can run and call `fioOpen` - Round 457's 600,000-slice trampoline
+window was very likely too short to reach that point. Supporting
+observation: this round's live session was caught at a genuinely
+fresh EE reset state (all-zero GPRs) early on, consistent with a real
+reboot cycle around that point in boot.
+
+**Task #286**: no source fix this round (investigation-only). Concrete
+next step: re-run the Round 457 trampoline test with a much longer
+observation window (millions of slices, not 600,000) to check whether
+FIO_F_OPEN eventually fires - this would directly test task #285's
+revised hypothesis against this project's own emulator.
+
+**Task #292 - methodology note**: the live PCSX2 connection proved
+genuinely valuable this round (found/cleared stale breakpoints,
+confirmed real boot succeeds, reframed a hypothesis with hard evidence
+instead of inference). Recommend treating it as a standing part of the
+workflow whenever connected, but its availability/persistence across
+sessions is not guaranteed - always check `pcsx2_list_breakpoints`/
+`pcsx2_list_watchpoints` before trusting `continue`/`pause` behavior,
+since old debug state can silently persist across many rounds (as it
+did here, since Round 431-439).
+
+Tasks #287-289 (regression/build/verify) are N/A this round - no source
+change was made, so nothing to test or rebuild.

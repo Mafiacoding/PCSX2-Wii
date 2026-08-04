@@ -20737,7 +20737,14 @@ stayed zero through every prior round's traced window). `source/main.c`'s
 real-hardware presentation path already reads exactly this register
 (fixed to prefer circuit 2 since Round 212/366) and would attempt a real
 `gs_blit_psmct32_to_xfb()` blit into the Wii's XFB once boot reaches this
-point on real hardware or in Dolphin. Whether the blit shows a meaningful
-picture (vs. still-uninitialized GS local memory at that framebuffer
-address) is not yet confirmed - that's task #248 (already queued: re-run
-the DISPFB2 survey at a larger budget).
+point on real hardware or in Dolphin. **Follow-up confirmation (same
+round)**: sampling GS local memory directly at the decoded DISPFB2
+framebuffer address (320 pixels sampled across a 16-row strip) at the
+same 15,000,000-slice mark shows 150/320 (47%) NON-ZERO pixel values -
+real color data has actually been written there, not just zeros. This
+means a real Wii/Dolphin run of the current build reaching this point in
+boot would very likely show visible, non-blank content on screen right
+now, not just a configured-but-empty display. Exactly what that content
+looks like (a real, meaningful image vs. partial/garbled draw output) is
+still open - that's task #248 (already queued: re-run the DISPFB2 survey
+at a larger budget).

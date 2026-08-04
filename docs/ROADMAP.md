@@ -6138,3 +6138,29 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
   EE kernel dispatch 0x80000000-0x80004000 range) or pivot to
   cross-referencing this project's own SIF/IOP-RPC implementation
   for a protocol-level gap (Round 18361's still-open strategic fork).
+
+## Round 443
+- IMPLEMENTED AND SHIPPED a real fix, per explicit user request to
+  "do the implementation, and make the gs setup possible".
+- Root cause: EE_FIO_ROM_FD_MAX (source/core/ee/ee_core.c) was 8 (7
+  usable rom0: FILEIO fd slots). Real OSDSYS opens exactly 7 real
+  ROMDIR files (OSOPEN/OSCLOCK/OSBROWS-the real disc-browser module
+  itself-/OSFONTM/OSFONTS/MOPEN/MCLOCK) on its first resource-load
+  pass, exhausting the table; every subsequent real re-open of the
+  SAME genuinely-present files then spuriously fails with -4 ("not
+  found"), since ee_fio_rom_fd_open()'s "-1 = table full" return is
+  not distinguished from a genuine ROMDIR miss.
+- Fix: raised EE_FIO_ROM_FD_MAX 8 -> 64.
+- Host-native verified: OSDSYS's real reload pass now succeeds,
+  reaches NEW real files never seen before (rom0:FONTM, rom0:FONTS),
+  executes 78,748,753 real instructions, then reaches a genuinely
+  NEW frontier - halts on real opcode 0x3E (SQC2, a VU0 vector-
+  coprocessor store, unimplemented) at pc=0x0050DD90. Not a
+  regression - first time this project's interpreter has reached
+  real VU0/COP2 code, consistent with genuine forward progress into
+  more advanced (graphics/geometry-adjacent) territory.
+- 128/128 regression suite pass. Wii cross-build clean, 0 warnings.
+- Honest scope: GS PMODE/DISPFB1/DISPLAY1 still all zero this run -
+  this fix does not itself reach the splash screen, it removes a
+  real blocking bug and opens a new frontier (VU0/COP2 datapath,
+  currently unimplemented) for the next round.

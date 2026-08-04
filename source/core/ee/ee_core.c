@@ -1517,7 +1517,40 @@ static int romdir_lookup(const bios_image_t *bios, const char *name, uint32_t *o
  * IOP file-descriptor numbering this project does not otherwise
  * model - avoids any real caller mistaking this project's synthetic
  * fd for that reserved real value. */
-#define EE_FIO_ROM_FD_MAX 8
+/* Round 443 (task #218, continuation of the SIF/IOP-RPC protocol-
+ * gap cross-reference): raised from 8 (7 usable slots, fd 0
+ * reserved) to 64. Direct, evidenced cause: a host-native trace with
+ * EE_FILEIO_DEBUG enabled (real BIOS + real Tekken Tag Tournament
+ * Demo disc, 40,000,000-slice cold boot) captured real OSDSYS
+ * opening exactly 7 real rom0: ROMDIR files in its own real startup
+ * sequence (rom0:OSOPEN, rom0:OSCLOCK, rom0:OSBROWS - the real disc-
+ * browser module itself - rom0:OSFONTM, rom0:OSFONTS, rom0:MOPEN,
+ * rom0:MCLOCK - all 7 real ROMDIR hits, fds 1-7, exactly filling
+ * every usable slot in the old 8-slot table) - then, on OSDSYS's own
+ * very next pass, re-opening the SAME real files (same exact real
+ * traffic, real fioOpen("rom0:OSOPEN", ...) etc. again) and getting
+ * -4 ("not found") for every single one, even though romdir_lookup()
+ * genuinely finds them (confirmed: the -4 comes from
+ * ee_fio_rom_fd_open() returning -1 for "table full", which this
+ * dispatch's own open_reply handling does not distinguish from a
+ * genuine ROMDIR miss - see that function's own comment). This
+ * project's own real FIO_F_CLOSE traffic (7 closes observed) lags
+ * behind FIO_F_OPEN traffic (17 opens observed in the same window) -
+ * real OSDSYS keeps files open across multiple real per-frame passes
+ * longer than this table could ever accommodate at 7 usable slots.
+ * The old comment's assumption ("not expected to be hit given Round
+ * 345's own observed real traffic volume") is directly falsified by
+ * this round's own fresh trace - Round 345's own observed volume was
+ * from a MUCH shorter/earlier-terminating run that never reached
+ * OSDSYS's real repeat-open behavior. 64 is a generous, cheap
+ * (sizeof(ee_fio_rom_fd_t) is small; 64 slots is a few KB) upper
+ * bound - real IOP file-descriptor tables commonly support several
+ * dozen concurrent open files; this is not a claim of the exact real
+ * IOP capacity, only a fix sized comfortably past this round's
+ * directly observed real demand (7 sustained + headroom for deeper
+ * real OSBROWS/game-loading phases this project has not yet
+ * reached). */
+#define EE_FIO_ROM_FD_MAX 64
 #define EE_FIO_FD_KIND_ROM  0  /* rom0: - real ROMDIR payload (romdir_lookup()) */
 #define EE_FIO_FD_KIND_DISC 1  /* Round 367: cdrom0:/cdrom1: - real ISO9660 file (iop_cdvd_disc_find_file()) */
 typedef struct {

@@ -7827,3 +7827,168 @@ run via the existing tracked-source-linked `driver_unified` binary (no
 tracked source changes, so this was a re-verification run, not a new
 build). No regression suite or Wii rebuild required for a docs-only
 investigation round.
+
+## Round 465: real p_ExecPS2 caller found (0x80002F80), two leading hypotheses disproven by direct PC-trace evidence, true branch point still open (tasks #353-354)
+
+### Task #353: located the real top-level dispatcher via $ra capture
+
+Fastest possible method: instrumented `CancelWakeupThread`'s entry
+(`0x80004970`) to print `$ra` directly. Result: `ra=0x80005664`,
+placing the caller inside a function starting at `0x800055A0`.
+Disassembled its full prologue and body:
+
+- Saves filename(`$a0`)->`$s6`, argc(`$a1`)->`$s2`, argv(`$a2`)->`$s0`,
+  a 4th arg(`$a3`) unused here.
+- `$s7 = 0x80012608` (the real ArgsBuffer, confirmed via the
+  `ExecPS2.c` source fetched in Round 463), `$fp = 0x80012D68` (a
+  fixed prefix-string address), `$s4 = 0x80017434` (`TCB_BASE+0x34`,
+  the real `argc` field per Round 463's TCB struct citation).
+- Two unconditional `eestrcpy` calls: first `eestrcpy(0x80012608,
+  0x80012D68)` (copies a fixed 7-byte string - confirmed via direct
+  instrumentation to leave the destination pointer at `0x8001260f`,
+  i.e. exactly 7 bytes later), then `eestrcpy(0x8001260f, $s6)` -
+  **appending our real filename right after that fixed prefix.**
+  Direct read confirmed the fixed prefix, combined with this being
+  exactly 7 bytes (6 chars + null), is almost certainly `"EELOAD\0"` -
+  finally explaining Round 459's long-unresolved "EELOAD" bytes at
+  `0x80012608` as a genuine, real, unconditional part of every
+  `_LoadExecPS2` call, unrelated to argc/argv.
+- `blez $s2, 0x80005638` - skips the argc-gated argv-copy loop when
+  `argc<=0` (our case), landing directly at the real thread-ID read +
+  `TerminateThread`/`DeleteThread` loop already traced in Rounds
+  461-463, then `CancelWakeupThread`+`ChangeThreadPriority` for the
+  calling thread (both already confirmed in Round 462).
+
+### Task #354, finding 1: the ROM-residency validation hypothesis is disproven
+
+Immediately after `ChangeThreadPriority`'s call site
+(`0x80005668-0x8000566C`), linear disassembly shows a block
+(`0x80005670-0x800056CC`) that strongly resembled a real ROMDIR
+scan-and-validate sequence: a call to `0x8000ABC0` (disassembled in
+full - a genuine ROM-table scanner comparing 16-byte-aligned records
+against a fixed magic value that decodes as `"RESE"`, i.e. Sony's real
+ROMDIR convention of starting with a `RESET` entry) followed by a call
+to `0x8000AC58` (disassembled in full - a name-string parser/comparer
+that reads its second argument byte-by-byte into a local buffer,
+consistent with comparing a target name against ROMDIR entries) with
+error-log calls on failure that print our own filename as a parameter.
+This looked like exactly the "is this a ROM-resident module" check
+that would explain rejecting a `cdrom0:` disc path.
+
+Directly tested by instrumenting both `0x8000ABC0` and `0x8000AC58`'s
+entry points and running a fresh 20M-slice trace: **zero hits for
+either function.** To find out why, added a raw PC-trace across the
+entire window between `ChangeThreadPriority`'s call and the
+`TerminateThread` loop's start (`instr 119999258-120004600`). The real
+executed sequence is: `ChangeThreadPriority`'s own body
+(`0x80004288-0x8000434C`) calls into a family of small helper
+functions (`0x80005938`, `0x80005978`, `0x80005AE8`, `0x80005B08` -
+consistent with real O(1) priority-bucket linked-list insert/remove
+primitives, i.e. `ChangeThreadPriority`'s own real internal
+implementation) and returns **directly into the `TerminateThread` loop
+at `0x800056E8`** - never touching `0x80005670-0x800056CC` at all.
+This block is real code (matches genuine ROMDIR-scan semantics) but is
+dead code on this specific call path - likely reachable only via some
+other, unidentified caller or condition. The hypothesis this round set
+out to test is disproven by direct evidence, which is itself valuable:
+it rules out an entire prior theory cleanly instead of leaving it as
+an open guess.
+
+### Task #354, finding 2: p_ExecPS2 is called from a completely different function than assumed
+
+Traced the exact PC window immediately preceding `p_ExecPS2`'s
+confirmed firing point (`instr=137696432`, from Round 464). Result:
+
+```
+...
+0x800037e0 instr=137696428
+0x800037e4 instr=137696429
+0x80002f88 instr=137696430   <- wait, corrected below
+0x800057e8 instr=137696432   <- p_ExecPS2 entry
+```
+
+(exact trace: `...0x80002f88 instr=137696431` immediately precedes
+`0x800057e8 instr=137696432`). Disassembling backward from
+`0x80002F88` found: it's `jal 0x800057E8` (p_ExecPS2), and the
+instruction immediately before it (`0x80002F80`) is `jal 0x80003680`
+with **zero instructions in between the two calls** (only a delay-slot
+nop). `0x80002F80` itself sits immediately after a real COP0-register
+get/set syscall dispatch table (`0x80002E80-0x80002F74`: sixteen
+`mfc0`/`mtc0` stub pairs for COP0 registers 14, 16, 23, 24, 25, 28, 29,
+30, each following the pattern `mfc0 $v0,$N; mtc0 $a1,$N; sync; jr
+$ra`) - meaning `0x80002F80` is very likely itself a dispatch-table
+entry, reached via an indexed/computed jump for syscall 6/7, not via
+a normal `jal` from `0x800055A0`.
+
+Disassembled `0x80003680` in full: it's a **complete register-context-
+save routine** - saves `$a0`-`$a3`, `$t0`-`$t9`, `$s0`-`$s7`, `$gp`,
+`$fp`, `$sp`, and all 32 FPRs into a fixed per-thread save area
+(computed from a kernel table at `0x80011CC0`). Since it saves rather
+than sets registers, and nothing runs between its return and
+`p_ExecPS2`'s call, **`p_ExecPS2`'s `$a0` argument is simply whatever
+the live `$a0` register organically holds at that exact instant** -
+not a value explicitly threaded through from `0x800055A0`'s `$s6`.
+Cross-referencing Round 464's own `$a0`-snapshot trace (which sampled
+`$a0` at every real sub-call landmark from `CancelWakeupThread` through
+`InitializeScratchPad`) confirms `$a0` has been legitimately reused as
+a scratch/argument register by every one of those real subroutines the
+entire time - explaining exactly why `p_ExecPS2` ends up with
+`0x00200008` (whatever the last real subroutine happened to leave
+there), with no single "bug" to point to.
+
+### A third, related dead-code finding
+
+`0x800055A0`'s own tail (`0x8000578C-0x800057B4`, positioned right
+after `InitPgifHandler2`'s call at `0x80005744`) disassembles to what
+looks like the textbook-correct ending of the real
+`SoftPeripheralEEReset()`/`ExecPS2Patch()` sequence: two genuine I/D-
+cache-flush loops (`0x80002AC0`/`0x80002A80`, both disassembled and
+confirmed as real `cache`-instruction loops, matching the documented
+"flush caches" step), followed by `mtc0 $s2,$14` (writing EPC from
+`$s2`, whose value - `0x00082000` - is the exact same address Round
+463 found as the start of the real 33MB RAM-clear loop), then `sync`,
+a call to `0x80001460`, `di`, and `eret`. This is exactly the shape a
+correct "set EPC to the new thread's entry and return via ERET" tail
+would have. But Round 461 already proved, via direct EPC-write and
+ERET-count instrumentation, that EPC is written exactly once in this
+whole trace (to our trampoline's own dead-loop address, not
+`0x00082000`) and ERET fires zero times. **This tail sequence is also
+dead code on our execution path**, just like the ROMSCAN block.
+
+### Synthesis: what this round actually establishes
+
+`0x800055A0` is confirmed to correctly receive and process our
+filename (ArgsBuffer construction, TCB.argstring, priority/wakeup
+cleanup - all previously-established real behavior), but its own two
+"obviously correct-looking" tail paths (ROM validation, cache-flush+
+ERET) are both unreached. Execution must leave `0x800055A0`'s body via
+some other mechanism between `InitPgifHandler2`'s call
+(`0x80005744`) and wherever it rejoins the completely separate
+`0x80002F80`/`0x80003680`/`p_ExecPS2` code - a transition this round
+did not locate. This reframes the entire investigation: the earlier
+assumption (Rounds 461-464) that `0x800055A0` directly, linearly leads
+to `p_ExecPS2` was incorrect. The real control-flow graph has at least
+one more branch/call this project hasn't found yet.
+
+### Task classification and next step (Round 466)
+
+No fix implemented - the actual decision point that would explain
+control leaving `0x800055A0` early has not been located, and every
+concrete hypothesis tested this round (ROM validation, direct-fallthrough-
+to-cache-flush) was disproven by direct trace evidence rather than
+confirmed. The precise next step: instrument every instruction between
+`InitPgifHandler2`'s return (`~0x80005748`) and `0x8000578C` (the
+cache-flush call) to find the actual conditional branch or call that
+diverts execution - most likely a `jal` to yet another undisassembled
+function, or a conditional branch whose condition (some real kernel
+global) determines whether the "normal" tail runs or something else
+happens instead.
+
+### Verification
+
+All work this round was scratch-only
+(`/tmp/ee_core_r465.c` through `/tmp/ee_core_r465e.c`,
+`/tmp/driver_r465.c` through `/tmp/driver_r465e`, checkpoints
+`/tmp/r465_ckpt.bin` through `/tmp/r465e_ckpt.bin`). No tracked source
+files were modified. No regression suite or Wii rebuild required for a
+docs-only investigation round.

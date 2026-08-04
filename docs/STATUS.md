@@ -21278,3 +21278,87 @@ lines/sprites/points, no triangles) - re-dumped this round for
 reference, unchanged pixel-for-pixel from Round 452's characterization.
 See docs/ROADMAP.md for the full Round 464 write-up and the concrete
 Round 465 next step (disassemble the real top-level dispatcher).
+
+## Round 465 (tasks #353-354): major structural discovery - real p_ExecPS2 caller found, two leading hypotheses both disproven as dead code, true branch point still open
+
+Direct continuation of Round 464's exact next step: locate the real
+top-level `_LoadExecPS2` dispatcher function. Found it via the fastest
+possible method - capturing `$ra` (return address) at
+`CancelWakeupThread`'s entry, which pointed straight at `0x80005664`,
+inside a real function starting at `0x800055A0`.
+
+Disassembled `0x800055A0`'s full body (~360 instructions) and confirmed
+it: saves the filename argument into `$s6`, calls the real `eestrcpy`
+helper twice (building a combined string in the real ArgsBuffer -
+finally resolving Round 459's 5-round-old "EELOAD" mystery: the buffer
+starts with a 7-byte `"EELOAD\0"` prefix from a fixed kernel string,
+with our filename appended right after it, confirmed byte-for-byte via
+direct instrumentation), then proceeds through the real
+`CancelWakeupThread`/`ChangeThreadPriority`/`TerminateThread`-loop/
+`InitSemaphores`/`InitPgifHandler2` sequence already traced in Rounds
+461-463.
+
+Two major surprises this round, both found by tracing *actual executed
+PCs* rather than trusting linear disassembly order:
+
+1. **The hypothesized ROM-residency validation block
+   (`0x80005670-0x800056CC`, containing calls to `0x8000ABC0`/
+   `0x8000AC58` that looked like a real ROMDIR scan + name-check) is
+   never executed on this path.** A full window-trace of every PC
+   visited between `ChangeThreadPriority`'s call and the
+   `TerminateThread` loop's start shows execution actually flows
+   through several small helper functions (real O(1) priority-queue
+   bucket helpers at `0x80005938`/`0x80005978`/`0x80005AE8`/
+   `0x80005B08`, presumably internal to `ChangeThreadPriority`'s own
+   real implementation) directly into the `TerminateThread` loop -
+   completely bypassing the ROMSCAN block. This round's leading
+   hypothesis from the write-up is disproven by direct evidence.
+
+2. **`p_ExecPS2` is not called from within `0x800055A0`'s own body at
+   all.** Tracing the exact PC window immediately before `p_ExecPS2`
+   fires (`instr≈137696432`) shows it's actually called from
+   `0x80002F88` - a completely different, much lower kernel address,
+   positioned immediately after a real COP0-register get/set syscall
+   dispatch table (`0x80002E80-0x80002F74`, handling individual
+   `mfc0`/`mtc0` syscalls for registers 14/16/23/24/25/28/29/30). Right
+   before `p_ExecPS2`, this code calls `0x80003680` - disassembled and
+   confirmed to be a **full register-context-save routine** (saves all
+   GPRs, `$gp`/`$fp`/`$sp`, and all FPRs into a fixed per-thread save
+   area) - with zero instructions between that call and `p_ExecPS2`.
+   This means `p_ExecPS2`'s `$a0` argument is simply whatever the live
+   `$a0` register organically holds at that exact point - and per
+   Round 464's own `$a0`-snapshot trace, that's the tail end of a long
+   chain of legitimate scratch-register reuse (thread IDs, loop
+   counters, semaphore pointers, GS/FPU/ScratchPad control values),
+   not our filename.
+
+A third finding narrows things further: `0x800055A0`'s own tail
+(`0x8000578C-0x800057B4`) contains what looks like the *real* final
+step of the documented `SoftPeripheralEEReset()`/`ExecPS2Patch()`
+sequence - two genuine I/D-cache-flush routines (confirmed via
+disassembly: `cache` instruction loops, matching the real source's
+"flush caches" step) followed by an EPC write (`mtc0 $s2,$14` with
+`$s2=0x00082000`, the exact same address as Round 463's 33MB RAM-clear
+loop's start) and an `ERET`. But Round 461 already proved ERET never
+executes in this trace and EPC is only ever written once, to our
+trampoline's own dead-loop address - meaning **this tail sequence,
+which looks like the "textbook correct" ending, is also dead code on
+our execution path.**
+
+**Conclusion**: `0x800055A0` receives our filename correctly and does
+real, legitimate setup work, but execution never reaches either of its
+two "obviously important" tail blocks (ROM validation, cache-flush+
+ERET). Something diverts control flow elsewhere between
+`InitPgifHandler2`'s call (`0x80005744`) and wherever it ultimately
+rejoins the `0x80002F80`/`p_ExecPS2` path - a transition this round
+didn't find. This is a real structural discovery (the function
+boundary and caller relationship was completely misunderstood before
+this round), not a dead end - it's a much more precisely scoped next
+step. See docs/ROADMAP.md for the full disassembly and the concrete
+Round 466 plan.
+
+No source fix implemented this round - the actual branch point that
+would explain the divergence is still unlocated, and guessing at it
+would violate this project's standing discipline against unevidenced
+fixes. Organic boot path unchanged (no new run needed this round;
+Round 464's re-verification still holds since no source changed).

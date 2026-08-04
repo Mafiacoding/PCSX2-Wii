@@ -6372,9 +6372,12 @@ round's traced boot window). `source/main.c`'s real-hardware presentation
 path (`run_real_boot_flow()`, wired since Round 212/366 to prefer circuit
 2 over circuit 1 when EN2 is set) already reads exactly this register and
 would attempt a real `gs_blit_psmct32_to_xfb()` blit into the Wii's XFB
-the moment boot reaches this point on real hardware or in Dolphin. Whether
-that blit shows a *meaningful* picture (vs. blank/uninitialized GS memory
-at that framebuffer address) depends on whether real GIF/VIF draw
-primitives have actually written pixel data there yet by that point in
-boot - not yet confirmed, and a natural next investigation (task #248, GS
-DISPFB2 large-budget survey, is already queued for exactly this).
+the moment boot reaches this point on real hardware or in Dolphin.
+**Follow-up confirmation (same round)**: sampled GS local memory directly
+at the decoded DISPFB2 address (320 pixels across a 16-row strip) at the
+same 15,000,000-slice mark - 150/320 (47%) are non-zero, i.e. real color
+data has actually been written there, not blank/zero GS memory. A real
+Wii/Dolphin run reaching this boot point right now would very likely show
+visible, non-blank content on screen - not yet confirmed to be a
+*meaningful* image (vs. partial/garbled draw output), which is task
+#248's job (already queued: GS DISPFB2 large-budget survey).

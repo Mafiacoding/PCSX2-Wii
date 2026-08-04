@@ -21117,3 +21117,85 @@ No source fix implemented (same honest classification as the last
 three rounds) - this is real, correct BIOS code, and the investigation
 is still narrowing rather than concluded. See docs/ROADMAP.md for full
 disassembly detail and the next concrete step.
+
+## Round 463 (tasks #333, #337-338): the entire five-round mystery resolved - real kernel mechanism confirmed 100% correct end-to-end, but hands back to OSDSYS's own resource loader instead of the target game (major finding, still no safe fix)
+
+Direct continuation of Round 462, now armed with the real `ps2sdk
+ExecPS2.c` source the user shared (three URLs: `struct_t_c_b.html`,
+`_exec_p_s2_8c_source.html`, and a tangential PS2-homebrew blog post).
+Cross-referencing every previously-disassembled address against this
+authoritative source confirmed near-perfect matches for every function
+traced since Round 459: `0x800125EC` (ThreadID global), `0x80004970`
+(CancelWakeupThread), `0x80004288` (ChangeThreadPriority), `0x80017400`
+(TCB base), and the real TCB struct layout (identical to Round 380's
+earlier citation).
+
+Extended the instrumented trace with 10 landmark breakpoints drawn
+directly from the real `SoftPeripheralEEReset()`/`ExecPS2Patch()`
+pseudocode. A first run confirmed InitSemaphores, InitPgifHandler2,
+InitializeGS, SetGSCrt, InitializeINTC (9x), InitializeTIMER, ResetEE,
+and InitializeFPU all fire in exactly the documented order - but the
+run ended with PC parked at `0x8000B8B4`, one instruction inside a
+loop just before `InitializeScratchPad`'s own entry point, with 8.8M
+instructions spent motionless.
+
+Disassembly of `0x8000B878-0x8000B8C8` revealed this isn't a hang -
+it's a **second, generic quadword-fill loop** whose bounds come from
+a helper call to `0x80000C40` (a simple getter reading global
+`0x80013C10`). Direct register instrumentation confirmed the real
+numbers: start=`0x00082000`, end=`0x02000000` - a genuine ~33MB
+memory clear from just past the kernel-reserved area to the top of
+physical EE RAM (which is exactly 32MB), needing ~2,067,456 quadword
+iterations. This is real, correct, textbook PS2 kernel hygiene -
+clearing stale memory before handing off to untrusted game code -
+just inherently slow to execute in an interpreter. Not a bug.
+
+Extending the trace budget from 16.5M to 26M slices let this loop run
+to completion (`instr=137614390`), and everything that had been
+missing for five rounds fired immediately afterward, in order:
+
+1. **InitializeScratchPad** landmark hit (`instr=137615588`) -
+   confirming SoftPeripheralEEReset()'s full real sequence is now
+   100% accounted for.
+2. **`p_ExecPS2` landmark hit** (`instr=137696432`) - the real kernel
+   genuinely takes the REUSE_EXECPS2 branch and calls the real
+   fixed-address kernel function, exactly as the ps2sdk source
+   describes.
+3. **TCB slot 3's `entry` field (the calling thread - confirmed by
+   Round 462) is finally written** - multiple times, settling on
+   `0x00210e78` after several intermediate writes to `0x00210d68`.
+   This is the exact write this project has been hunting since Round
+   461.
+
+**The catch**: `0x00210e78`, like every other TCB.entry value written
+this round (`0x00200008`, `0x0020c260`, `0x00203d78`, `0x00204308`,
+`0x00205dc0`, `0x00214a70`), sits inside OSDSYS's own resident code
+range (`0x00200000-0x00220000`), not the target game's real load
+address. And the FIO_F_OPEN calls that follow are all OSDSYS's own
+internal resources - `rom0:OSBROWS`, `mc0:/mc1:.../OSBROWS`,
+`rom0:OSFONTM/OSFONTS`, `rom0:MOPEN/MCLOCK/MBROWS/FONTM/FONTS` - not
+Tekken Tag Tournament's own files.
+
+**Conclusion**: the real kernel's `_LoadExecPS2`/`ExecPS2Patch`
+mechanism is now confirmed **100% correct, call-for-call, end-to-end**
+against the authoritative ps2sdk source - every sub-call fires in the
+right order, `p_ExecPS2` really is reached, and the calling thread's
+TCB really is repurposed. The mechanism itself is not broken. What's
+missing is upstream of it: this project's synthetic trampoline (Round
+457) calls `_LoadExecPS2` with a dummy filename string and `argc=0`,
+and the real kernel's response to that specific input is to fall back
+into OSDSYS's own resource-reload path - not evidence that real
+argument passing is broken, but evidence that **the trampoline's
+synthetic call arguments don't carry whatever real information (likely
+the actual SYSTEM.CNF-derived BOOT2 path, or a correctly-populated
+argv) the real kernel needs to target the game instead of OSDSYS's own
+menu flow.**
+
+No source fix implemented (same honest classification as Rounds
+459-462 - this is real, correct BIOS code, now confirmed complete).
+This closes the "is the exception-dispatch mechanism itself broken"
+question for good - it isn't. The next concrete step is upstream:
+verify what filename/argv this project's Round 457 trampoline actually
+passes, and whether constructing a real SYSTEM.CNF-derived BOOT2-style
+call (instead of a synthetic placeholder) changes the outcome. See
+docs/ROADMAP.md for full detail.

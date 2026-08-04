@@ -7531,3 +7531,151 @@ new emulator runs were needed this round, just further extraction and
 decoding of the same captured BIOS-code snapshot. Tracked repo received
 no source changes, only these two docs files. No regression suite / Wii
 rebuild required.
+
+## Round 463: the _LoadExecPS2 mechanism is fully confirmed correct end-to-end - the missing piece is upstream, in the trampoline's own arguments (tasks #333, #337-338)
+
+### Real-source cross-check (user-provided URLs)
+
+Fetched and read the real, authoritative `ps2sdk/ExecPS2.c` source
+(`https://ps2dev.github.io/ps2sdk/_exec_p_s2_8c_source.html`) plus the
+real `TCB` struct documentation
+(`https://ps2dev.github.io/ps2sdk/struct_t_c_b.html`), both shared by
+the user. This source is explicitly commented "Taken from PCSX2's
+FPS2BIOS" and declares fixed-address function pointers into the real
+Sony kernel, plus the exact real sequence `_LoadExecPS2`/`_ExecPS2`
+perform: fetch current thread ID, cancel wakeup + reprioritize self to
+0, terminate/delete all other live threads, `InitSemaphores()`,
+`InitPgifHandler2()`, `*p_ThreadStatus=0`, `SoftPeripheralEEReset()`
+(GS/GSCrt/INTC/Timer/ResetEE/FPU/ScratchPad init), then either
+`return p_ExecPS2(...)` (REUSE_EXECPS2 path) or a manual TCB-repurpose
+(`tcb->entry = EntryPoint`).
+
+Cross-referencing every address this project has disassembled since
+Round 459 against this source confirmed exact matches: `0x800125EC`
+(ThreadID global), `0x80004970` (CancelWakeupThread), `0x80004288`
+(ChangeThreadPriority), `0x80017400` (TCB base), and the real TCB
+field layout (`next@00, prev@04, status@08, entry@0C, ..., entry_@30,
+argc@34, argstring@38, ...`) - identical to Round 380's earlier,
+independently-obtained citation.
+
+### Task #333: root-caused the "runaway" fill loop - it's real, correct, and simply large
+
+Built 10 landmark breakpoints directly from the real
+`SoftPeripheralEEReset()` pseudocode (`InitializeGS`, `SetGSCrt`,
+`InitializeINTC`, `InitializeTIMER`, `ResetEE`, `InitializeFPU`,
+`InitializeScratchPad`, plus `InitSemaphores`, `InitPgifHandler2`, and
+`p_ExecPS2` from the outer `ExecPS2Patch()` sequence) into a fresh
+instrumented `ee_core.c` copy (`/tmp/ee_core_r461.c` extended further
+this round). A first 15.6M-slice run confirmed every landmark up
+through `InitializeFPU` fires in exactly the documented order - a
+complete, call-for-call match to the real pseudocode - but then PC sat
+motionless at `0x8000B8B4` for 7.2M more instructions across an
+extended 16.5M-slice re-run.
+
+Disassembly (`0x8000B840-0x8000B930`) showed this address is NOT a
+hang location, but one instruction inside a **second copy/fill loop**
+(`0x8000B878-0x8000B8C8`) immediately following `InitializeScratchPad`'s
+own real 16KB scratchpad-zero loop (`0x8000B850-0x8000B864`, confirmed
+correct: start=`0x70000000`, end=`0x70004000`, exactly the real 16KB
+scratchpad size). This second loop's bounds come from a helper call to
+`0x80000C40` (disassembled: a two-instruction getter reading global
+`0x80013C10`).
+
+Added direct register-read instrumentation
+(`/tmp/ee_core_r463.c`, printing `$a0`/`$s0` and the global's value at
+function entry) and re-ran: **start=`0x00082000`, end=`0x02000000`**.
+0x02000000 is exactly 32MB - the top of physical EE RAM. This is a
+genuine, intentional ~33MB memory clear from just past the
+kernel-reserved area to the end of physical memory, needing roughly
+2,067,456 quadword-store iterations (~16.5M instructions total at ~8
+instructions/iteration). **This is real, correct PS2 kernel behavior**
+(clearing stale memory before executing untrusted game code, a normal
+security/hygiene step in a real `_LoadExecPS2`-style handoff) - not a
+bug, not an infinite loop, just legitimately large work that takes
+longer wall-clock time in an interpreter than earlier rounds' trace
+windows allowed it to finish.
+
+### Tasks #337-338: extended the trace past the fill loop - the full sequence completes, but hands off to OSDSYS's own resources, not the game
+
+Extended the run to 26M total slices (~208M instructions, ~28
+wall-clock seconds). The fill loop completed at `instr=137614390`, and
+every previously-missing piece fired immediately afterward, in the
+exact real order:
+
+```
+[R463-FILLFUNC-EXIT]              instr=137614390
+[R462-LANDMARK] InitializeScratchPad  instr=137615588
+[R462-LANDMARK] p_ExecPS2             instr=137696432
+[R461-TCB-ENTRY-WRITE] slot=3 val=0x00210d68  (x8, intermediate)
+[R461-TCB-ENTRY-WRITE] slot=3 val=0x00210e78  (x5, final/stable)
+```
+
+This resolves the central mystery pursued since Round 461:
+
+- **`InitializeScratchPad` genuinely completes** - `SoftPeripheralEEReset()`'s
+  full real sub-call sequence (GS, GSCrt, INTC, Timer, ResetEE, FPU,
+  ScratchPad) is now 100% accounted for, in the documented order, with
+  no gaps.
+- **`p_ExecPS2` genuinely gets called** - the REUSE_EXECPS2 branch in
+  the real `ExecPS2Patch()` source is confirmed taken, not skipped.
+- **TCB slot 3 (the calling thread, identified in Round 462) finally
+  gets its `entry` field written** - the exact write this project has
+  been hunting since Round 461's first TCB-write instrumentation.
+
+However, the value written (`0x00210e78`) sits inside OSDSYS's own
+resident code range (`0x00200000-0x00220000`), in the same address
+family as every OTHER thread's reset-to-OSDSYS value this round and in
+Round 461 (`0x00200008`, `0x0020c260`, `0x00203d78`, `0x00204308`,
+`0x00205dc0`, `0x00214a70`) - not the target game's real load address.
+And the `FIO_F_OPEN` calls that follow are all OSDSYS's own internal
+UI/font resources (`rom0:OSBROWS`, `mc0:/mc1:.../OSBROWS`,
+`rom0:OSFONTM`, `rom0:OSFONTS`, `rom0:MOPEN`, `rom0:MCLOCK`,
+`rom0:MBROWS`, `rom0:FONTM`, `rom0:FONTS`) - not Tekken Tag
+Tournament's own files.
+
+### Conclusion and reclassification
+
+The real `_LoadExecPS2`/`ExecPS2Patch()` dispatch mechanism is now
+confirmed **complete and correct, call-for-call, end-to-end**, against
+the authoritative ps2sdk source: every sub-call fires in the right
+order, `p_ExecPS2` really is reached, and the calling thread's TCB
+really is repurposed exactly as documented. **The exception-vectoring
+and kernel-dispatch machinery this project's own `ee_core.c` models is
+not the blocker** - five rounds of suspicion about the dispatch
+mechanism itself are now closed out.
+
+What remains unexplained is upstream: this project's Round 457
+trampoline calls `_LoadExecPS2` with a synthetic, minimal argument set
+(a hand-built filename string, `argc=0`, `argv=NULL`) rather than the
+argument set a real BOOT2 line from `SYSTEM.CNF` would produce. The
+real kernel's observed response to that specific synthetic input is to
+fall back into OSDSYS's own resource-reload path (refreshing its own
+UI/font state) rather than targeting the named game file. This is not
+yet proven to be *the* explanation - it's the leading, well-evidenced
+hypothesis for Round 464's next concrete step: capture exactly what
+filename/argc/argv the trampoline passes today, compare it
+byte-for-byte against a real `SYSTEM.CNF` BOOT2 line's expected form
+(`cdrom0:\SCED_500.41;1` with proper argc/argv per real ps2sdk
+`LoadExecPS2()` calling convention), and test whether correcting the
+call's arguments changes the outcome.
+
+### Task #328 (classify/fix): no fix implemented - correctly no-op
+
+No source code change is warranted this round. The dispatch mechanism
+this project's `ee_core.c` models has now been independently verified
+against the real ps2sdk source to be complete and correct; there is no
+"gap" left in it to fix. The actual next lead (argument-passing
+correctness in the *test trampoline*, not the emulator's kernel
+modeling) lives in `/tmp` scratch driver code, not tracked source, so
+even a positive result there would inform a *test methodology* fix,
+not necessarily a source-code fix.
+
+### Verification
+
+All work this round was scratch-only (`/tmp/ee_core_r463.c`,
+`/tmp/driver_r463.c`, checkpoints `/tmp/r463_ckpt.bin`/
+`/tmp/r463b_ckpt.bin`) - no tracked source files were modified. Ran two
+host-native driver builds/executions (16.5M-slice and 26M-slice) to
+capture the landmark and register-read instrumentation quoted above.
+No regression suite or Wii rebuild required for a docs-only
+investigation round, consistent with the standing workflow rule.

@@ -6041,3 +6041,20 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
 - Next: task #221 (was #209, now answered) - live-trace inside the
   long body (0x00082274-0x00082408) per-invocation, since the
   divergence must be there, not at the entry branch. No fix yet.
+
+## Round 439: fresh host-native cold boot confirms SIF_SMFLAG/BOOTEND poll loop (0x000820D0-0x820E8) is the current single blocker to the splash screen
+
+- Rebuilt scratch driver_r313.c against current source/, fixed a stale
+  disc path (game.bin -> disc.iso), ran a fresh cold boot with real
+  BIOS + real disc actually mounted.
+- 45M slices / 360M EE instructions executed; final state parked in
+  0x000820D4-0x000820E8 - the exact SIF_SMFLAG/BOOTEND poll loop
+  Rounds 431-438 are live-verifying against real PCSX2.
+- GS completely untouched (pmode/dispfb1/display1 all 0) - no
+  display setup reached. RPC balanced (113/113), not an RPC deadlock.
+- Confirms via direct host-native repro (not just live-hardware
+  comparison) that this poll loop is THE current blocker. Likely fix
+  location once root-caused: source/hw/sif.c or
+  source/hw/iop_module_loader.c's BOOTEND-reassertion logic.
+- No source changes, docs-only round. Feeds directly into task #210
+  (long-body per-invocation trace) and #202 (locate exact guard).

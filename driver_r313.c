@@ -179,9 +179,9 @@ int main(int argc, char **argv)
 
     memset(&bios, 0, sizeof(bios));
     if (bios_load("/tmp/round238_diag/bios.bin", &bios) != 0) { r313_safe_printf("[!] bios_load failed\n"); return 1; }
-    if (iop_cdvd_mount_iso("/tmp/round238_diag/game.bin") != 0) r313_safe_printf("[!] iop_cdvd_mount_iso failed\n");
+    if (iop_cdvd_mount_iso("/tmp/round238_diag/disc.iso") != 0) r313_safe_printf("[!] iop_cdvd_mount_iso failed\n");
     iop_cdvd_set_disc_present(0x12);
-    if (iop_cdrom_legacy_mount_iso("/tmp/round238_diag/game.bin") != 0) r313_safe_printf("[!] iop_cdrom_legacy_mount_iso failed\n");
+    if (iop_cdrom_legacy_mount_iso("/tmp/round238_diag/disc.iso") != 0) r313_safe_printf("[!] iop_cdrom_legacy_mount_iso failed\n");
     if (system_init(&bios, &bios) != 0) { r313_safe_printf("[!] system_init failed\n"); return 1; }
     iop_sio2_pad_connect();
     iop_sio2_pad_press(IOP_PAD_BTN_CROSS);

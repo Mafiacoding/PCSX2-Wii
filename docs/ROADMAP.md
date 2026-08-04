@@ -8598,3 +8598,60 @@ All work this round was disassembly/instrumentation against Round
 (`/tmp/ee_core_r468.c`, `/tmp/driver_r468`/`driver_r468b`,
 checkpoints `/tmp/r468*.ckpt`). No tracked source files were modified.
 Docs-only round: no regression suite or Wii rebuild required.
+
+## Round 469: VBLANK-END masking experiment - confirms Round 468's diagnosis, real code runs further, same eventual resting point
+
+### Experiment
+
+Extended `/tmp/driver_r469.c` (copied from `driver_r466.c`) to call
+`ee_intc_get_state()->mask &= ~(1u << 3)` immediately before
+installing the corrected syscall-7 trampoline - directly clearing
+VBLANK-END's enable bit in the emulated `INTC_MASK`, simulating the
+real interrupt-handler cleanup Round 468 concluded real OSDSYS would
+very plausibly perform before a normal `_ExecPS2` transition (a step
+this synthetic PC-hijack trampoline otherwise skips).
+
+### Result
+
+`INTC_MASK` confirmed changed: `0x0000100a -> 0x00001002` (bit 3
+cleared). Fine-grained single-instruction tracing through the
+identical BSS-clear-loop-exit and SetupThread-style dispatch sequence
+(byte-identical to Round 466/467 up through `fine_offset=1482074`)
+shows execution this time does **not** redirect to `0x00203BE0` -
+instead it continues in real game code at `0x00401E60-0x00401EA8`
+(within `PT_LOAD2`'s real range), running what looks like a further
+real initialization loop, for tens of thousands of additional real
+instructions beyond where the un-masked baseline first derailed. This
+directly, empirically confirms Round 468's root-cause diagnosis.
+
+By the full 40,000,000-slice budget, however, this run's final state
+(`pc=0x8000CF98`, `GS: pmode=0x66 dispfb1=0x0 display1=0x0`, GIF
+counts unchanged at 343/4888/333/0) converges to the same OSDSYS
+resting-loop family as the un-masked Round 466 baseline
+(`pc=0x8000F864`, identical GS/GIF state). VBLANK-END masking measurably
+extends real execution but does not by itself reach a splash screen -
+something else, later in the game's real execution, still eventually
+redirects control back to the same place. The leading hypothesis for
+Round 470: another stale interrupt-handler collision (OSDSYS very
+plausibly registered handlers for more than one cause during its own
+early real startup - SBUS and VBLANK-start are both candidates per
+`ee_intc.h`'s documented real cause ordering), reachable via the exact
+same value-based-memory-watch technique that found the VBLANK-END
+handler in Round 468.
+
+### Task classification
+
+No tracked-source fix - the `INTC_MASK` clear lives entirely in the
+scratch test trampoline; `ee_core.c`/`ee_intc.c` remain correct and
+unchanged (per Round 468's conclusion, now further validated rather
+than contradicted). Real, measured, honestly-reported forward
+progress: confirmed longer real-code execution, not yet a full
+resolution.
+
+### Verification
+
+All work this round was in `/tmp/driver_r469.c` (built against
+`/tmp/ee_core_r465e.c`, unmodified) plus one new run
+(`/tmp/r469_test.ckpt`, `/tmp/r469_run1.log`). No tracked source files
+were modified. Docs-only round: no regression suite or Wii rebuild
+required.

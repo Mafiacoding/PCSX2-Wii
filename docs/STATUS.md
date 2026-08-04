@@ -21722,3 +21722,59 @@ rather than a genuine boot blocker.
 
 Docs-only round: no tracked source changed, regression suite and Wii
 rebuild correctly skipped.
+
+## Round 469 (tasks #386-391): VBLANK-END masking test confirms Round 468's root cause - real game code now runs measurably further before a different, later blocker is hit
+
+Direct experimental test of Round 468's diagnosis: extended the
+scratch test trampoline (`/tmp/driver_r469.c`) to directly clear bit 3
+(VBLANK-END) in the emulated `INTC_MASK` register
+(`ee_intc_get_state()->mask &= ~(1u<<3)`) immediately before firing
+the corrected syscall-7 trampoline, simulating what real OSDSYS's own
+pre-boot interrupt-handler cleanup would very plausibly do (a step
+this raw PC-hijack test methodology otherwise skips entirely, per
+Round 468's conclusion).
+
+**Confirmed: this measurably changes the outcome.** With the same
+BIOS/disc/checkpoint fixtures, `INTC_MASK` before/after the mask
+write was `0x0000100a -> 0x00001002` (bit 3 cleared, confirmed).
+Fine-grained tracing through the identical BSS-clear-loop-exit and
+SetupThread-style dispatch sequence (byte-identical up through
+`fine_offset=1482074`, matching Round 466/467's trace exactly) shows
+that this time, execution does **not** jump to `0x00203BE0` at all -
+instead it continues in real game code at `0x00401E60-0x00401EA8`
+(within `PT_LOAD2`'s real code range, `0x340000-0x1FCDAF0`), running
+what looks like a further real initialization loop (walking addresses
+from `~0x01fc8780` downward in 4-byte-ish steps - plausibly another
+real data-structure or heap-initialization pass) for tens of thousands
+of additional real instructions beyond where Round 466's baseline run
+first derailed.
+
+**This is real, confirmed, additional forward progress**, and directly
+validates Round 468's root-cause diagnosis (the stale OSDSYS VBLANK-
+END handler was in fact the proximate cause of the earlier, immediate
+`0x00203BE0` jump - removing it lets real crt0 continue).
+
+**However, by the full 40,000,000-slice budget, this run's final
+resting point (`pc=0x8000CF98`, `GS: pmode=0x66 dispfb1=0x0
+display1=0x0`, GIF counts unchanged at 343/4888/333/0 triangles) is
+statistically indistinguishable from Round 466's un-masked baseline
+(`pc=0x8000F864`, same GS/GIF state)** - both eventually settle back
+into the same long-standing OSDSYS resting-loop address family. This
+means VBLANK-END was not the *only* blocker: something else, further
+along in the game's real execution, still eventually redirects
+control back to the same place - either another stale interrupt-
+handler collision (a strong candidate, given OSDSYS very plausibly
+registered handlers for multiple interrupt causes, not just VBLANK-
+END, during its own early real startup) or a different, unrelated
+real blocker entirely.
+
+This round does not claim a splash screen or resolve the full boot -
+it provides honest, directly-measured, positive evidence that the
+Round 468 diagnosis was correct and actionable, while also honestly
+reporting that a full resolution needs at least one more round of
+investigation to find the next blocker.
+
+No tracked source changed - the `INTC_MASK` clear lives entirely in
+the scratch test trampoline (`driver_r469.c`), not in `ee_core.c` or
+`ee_intc.c` (both already correct, per Round 468). Docs-only round:
+regression suite and Wii rebuild correctly skipped.

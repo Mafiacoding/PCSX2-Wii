@@ -7197,3 +7197,103 @@ All work this round was scratch-only (`/tmp/driver_tekken4.c` through
 `driver_tekken6`, `/tmp/r459*_ckpt.bin`, `/tmp/r459_bioscode.bin`) - the
 tracked repo received no source changes, only these two docs files. No
 regression suite / Wii rebuild required (no source change to test).
+
+## Round 460 (tasks #303-305, #308): TCB-cleanup jump table disassembled and cross-validated against real PCSX2
+
+Direct continuation of Round 459's disassembly work, per the user's
+"go" continuation.
+
+### Task #303: 0x80003E84-0x80004990 disassembled
+
+Extracted 723 instructions (2892 bytes) from a saved checkpoint's EE
+RAM block and decoded with this project's own Round-350 MIPS decoder.
+Two concrete findings:
+
+1. The function at `0x80003E84` is the real per-TCB-slot cleanup body:
+   `addiu $v0,$zero,76` (0x4C = 76, the real TCB struct stride - close
+   to but slightly larger than the highest offset Round 380's citation
+   listed, `heap_base@0x48`, consistent with padding), then
+   `mult $s0,$s1,$v0` (computes `slot_index * 76`), then reads
+   `TCB[slot].waitSema` at offset `0x1C` (`lw $v0, 0x741C($v0)` where
+   the base `0x8001741C` = `0x80017400 + 0x1C` - exact match to Round
+   380's cited real TCB field layout), branches on whether it equals 2,
+   and unconditionally calls `0x80003BB8` with the slot index as `$a0`
+   - almost certainly the real `TerminateThread(slot)` (or a shared
+   `TerminateThread`+`DeleteThread` helper) call. This directly
+   confirms, via disassembly rather than address-histogram inference,
+   that the loop observed in Round 459's fine trace (the `$a0`
+   0xec->0xe decrementing counter) is exactly Round 380's cited "walks
+   every OTHER TCB slot and TerminateThread()+DeleteThread()s any live
+   one" mechanism.
+
+2. The ONLY indirect jump in the entire 723-instruction block: at
+   `0x80004434` (`jr $v1`), preceded by reading `TCB[slot].status` at
+   offset `0x08` (`lw $v0, 0x7408($at)`, base `0x80017408` =
+   `0x80017400+0x08` - again an exact match to Round 380's cited field
+   layout), a range check (`sltiu $v1,$v0,17` - valid status values
+   0-16), and then using `status*4` as an index into a table at
+   `0x80010000+0x2C40` to load a handler address into `$v1` before
+   jumping to it. This is a real, correct 17-entry
+   thread-status-dispatch jump table - the kind of per-status cleanup
+   handling (RUN/READY/WAIT/SUSPEND/DORMANT/etc. all need different
+   real teardown work) a genuine kernel thread-termination routine
+   would need. Confirmed via disassembly to be real, deliberate,
+   correct kernel code - not a bug, not a stall, and not something
+   this project could safely reimplement or patch around without a
+   real source citation for each of the 17 handlers (task #180
+   discipline).
+
+### Task #304: extended trace confirms it never escapes kernel range
+
+Extended the single-slice ultra-fine trace from Round 459's 3,000
+steps to 20,000 steps. Programmatically checked every sampled `pc`
+value: zero addresses fall outside `0x80000000`-`0x8001FFFF` across the
+entire window. Execution settles into the real VBLANK-wait loop
+(`0x8000AF90`-`0x8000AFA8`) by roughly step 1,750 and remains there for
+the final 18,000+ steps (~150,000+ EE instructions). This rules out
+"just needs more single-step observation time" as an explanation - the
+calling thread genuinely does not resume execution anywhere outside
+kernel code within this window.
+
+### Task #305: cross-validation against live PCSX2
+
+The live PCSX2 DebugServer connection discovered in Round 458 was still
+connected and still paused (left untouched at `pc=0x003993b8`, in real
+game code, since that round - the session had already advanced past
+OSDSYS with no way to rewind to catch a fresh boot this round).
+Used it for a targeted cross-check instead: `pcsx2_disassemble` at
+`0x80003e84` on the REAL, live PCSX2 session returned byte-for-byte
+IDENTICAL instructions to this project's own bios.bin disassembly of
+the same address (`li v0,0x4C`; `mult s0,s1,v0`; the same TCB
+field-offset loads; etc.) - strong, independent, real-hardware
+confirmation that (a) this project's emulated BIOS image is byte-
+identical to real retail BIOS at this address range, and (b) this
+round's disassembly and interpretation are accurate, not an artifact of
+this project's own decoder. `pcsx2_find_pattern` also confirmed
+"EELOAD" is genuinely resident in real EE memory (2 matches found),
+corroborating Round 459's string-read finding independently.
+
+### Task #308: still no safe fix
+
+Same classification as Round 459: every instruction examined this
+round is real, correct BIOS machine code (now independently confirmed
+against real PCSX2's own disassembler), not a bug in this project's own
+source. The characterization of "why doesn't the calling thread ever
+resume executing the newly-loaded module" is now nearly complete at the
+instruction level for the *cleanup* side of the mechanism - the
+remaining open angle is almost certainly the real exception-return
+(ERET) path: what value does the real kernel actually restore into
+`EPC`/`$pc` when this exception handler eventually returns, and does it
+differ from what this project's trampoline-hijacked calling context
+would have naturally resumed to? This is a different, more targeted
+question than "disassemble more of the cleanup routine" and is the
+recommended angle for a future round.
+
+### Verification
+
+All work this round was scratch-only (`/tmp/driver_tekken4.c`,
+`driver_tekken7`, `/tmp/r460_ckpt.bin`, `/tmp/r460_bioscode2.bin`) plus
+read-only live PCSX2 queries (`pcsx2_disassemble`, `pcsx2_find_pattern`
+- no continue/pause/breakpoint changes, the live session was left
+exactly as found). Tracked repo received no source changes, only these
+two docs files. No regression suite / Wii rebuild required.

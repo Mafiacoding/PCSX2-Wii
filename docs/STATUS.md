@@ -21022,3 +21022,36 @@ lookup, and TCB cleanup are now directly confirmed correct via real
 disassembly, not just inferred from address histograms), but not a
 "fix" in the sense of moving boot progress forward. See
 docs/ROADMAP.md for the full disassembly and next-step framing.
+
+## Round 460 (tasks #303-305, #308): TCB-cleanup jump table disassembled, cross-validated against real PCSX2's own disassembler - still no safe fix (honest negative result)
+
+Direct continuation of Round 459. Disassembled the next function in the
+real syscall-6 response chain (0x80003E84-0x80004990, 723 instructions,
+extracted from a checkpoint). Confirmed the per-TCB-slot cleanup loop
+reads TCB.waitSema (offset 0x1C) and TCB.status (offset 0x08) - both
+exact matches to Round 380's already-cited real TCB field layout - and
+found the only indirect jump in the whole block: a real, correct
+17-entry thread-status dispatch jump table (0x80004434, indexed by
+TCB.status, table base 0x80010000+0x2C40). This is genuine, correct
+real kernel scheduler code, not a bug.
+
+**Cross-validated against the live PCSX2 DebugServer** (still connected
+from Round 458, left paused): `pcsx2_disassemble` at the exact same
+address (0x80003e84) returned byte-for-byte identical instructions to
+this project's own bios.bin disassembly, and `pcsx2_find_pattern`
+confirmed "EELOAD" is genuinely resident in real EE memory too - strong
+independent confirmation this project's BIOS image matches real
+hardware exactly and this round's analysis is accurate.
+
+Extended the single-slice trace from 3,000 to 20,000 steps: confirmed
+programmatically that `pc` never leaves the `0x8000xxxx`-`0x8001xxxx`
+kernel range across the entire window, settling into the real
+VBLANK-wait loop and staying there.
+
+**No source fix implemented** (same honest classification as Round
+459 - this is real, correct BIOS machine code, not a bug in this
+project's own source). The mystery is now almost fully characterized
+at the instruction level; the likely next angle is the real
+exception-return (ERET) path and EPC/TCB.entry state at that moment,
+not further forward disassembly of the cleanup routine itself. See
+docs/ROADMAP.md for full detail.

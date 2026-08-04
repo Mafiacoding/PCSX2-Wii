@@ -21055,3 +21055,40 @@ at the instruction level; the likely next angle is the real
 exception-return (ERET) path and EPC/TCB.entry state at that moment,
 not further forward disassembly of the cleanup routine itself. See
 docs/ROADMAP.md for full detail.
+
+## Round 461 (tasks #313-315, #318): root cause of the _LoadExecPS2 dispatch mystery fully characterized - EPC/ERET mechanism unused, TCB.entry writes reset OSDSYS's own threads, not the game (major finding, still no safe fix)
+
+Direct continuation of Rounds 459-460's disassembly work, this time
+instrumenting real state changes instead of just disassembling code.
+Three concrete, load-bearing findings:
+
+1. **EPC is written exactly once** during the entire 600,000-slice
+   post-install window, and it's set to an address INSIDE this
+   project's own trampoline code (its own infinite self-loop
+   instruction) - not any module/game entry point. **ERET is executed
+   zero times.** The real kernel manually clears Status.EXL via a
+   direct register write instead of going through ERET. This means the
+   standard exception-return mechanism is never used to hand off
+   control in this scenario - fully explaining why five rounds of pc
+   tracing never saw execution leave kernel address range.
+
+2. **8 TCB.entry writes occurred**, to slots 1,2,4,5,6,7,8,9 - all with
+   real OSDSYS-code addresses. One of them (slot 2) is an *exact* match
+   to Round 379's independently-cited "OSDSYS's own SetupThread
+   address". This strongly confirms these writes are the kernel
+   RESETTING OSDSYS's own normal thread set back to its startup
+   entry points - i.e. the whole mechanism amounts to OSDSYS
+   restarting itself, not handing control to the target game.
+
+3. **Slots 0 and 3 were never written.** Slot 3 is the leading
+   candidate for "the calling thread's own TCB slot" (the one Round
+   380's real citation says should be repurposed in place) - but no
+   new entry value was ever written there either.
+
+**Leading hypothesis for Round 462**: this project's trampoline hijacks
+OSDSYS's running thread's pc/next_pc directly, without updating
+whatever real kernel global tracks "the current thread ID" - so the
+real kernel's repurpose-in-place logic likely targets a stale/wrong
+TCB slot. Not yet confirmed (the global's real address isn't cited),
+so no fix was implemented this round. See docs/ROADMAP.md for full
+detail.

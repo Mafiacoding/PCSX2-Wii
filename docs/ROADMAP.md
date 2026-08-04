@@ -7297,3 +7297,140 @@ read-only live PCSX2 queries (`pcsx2_disassemble`, `pcsx2_find_pattern`
 - no continue/pause/breakpoint changes, the live session was left
 exactly as found). Tracked repo received no source changes, only these
 two docs files. No regression suite / Wii rebuild required.
+
+## Round 461 (tasks #313-315, #318): EPC/ERET mechanism confirmed unused; TCB.entry writes reset OSDSYS's own threads
+
+Direct continuation of Round 460, per the user's "go" continuation.
+Where Rounds 459-460 disassembled the real code, this round
+instrumented real STATE CHANGES (COP0 register writes and TCB RAM
+writes) to directly observe what that code actually does with its
+results - a more targeted technique than further disassembly.
+
+### Task #313: EPC/ERET instrumentation
+
+Built `/tmp/ee_core_r461.c` (scratch copy of the tracked `ee_core.c`)
+with two additions:
+- In the generic MTC0 handler (the `else` branch that does
+  `st->cop0[rd] = rt32`), added a print whenever `rd==14` (EPC) or
+  `rd==12` (Status) is written, showing old/new value and the
+  instruction's own pc.
+- In the ERET case (COP0 `CO`-format funct `0x18`), added a print of
+  the computed `target` before it's applied to `st->pc`.
+
+Ran the trampoline test with this instrumentation enabled from install
+onward (600,000 slices). Result:
+
+- **`[R461-EPC-WRITE] old=0x01fe1014 new=0x01fe1018 at_pc=0x800002e4`** -
+  exactly ONE write to EPC across the whole window. `0x01fe1014` was
+  the syscall instruction's own address (the initial value
+  `ee_raise_exception()` sets `EPC` to, per its own real, correct
+  logic - `st->cop0[14] = this_pc` for a non-delay-slot exception).
+  `0x01fe1018` is `0x01fe1014+4` - the very NEXT instruction after our
+  trampoline's `syscall`, which per the trampoline's own code
+  (`/tmp/driver_tekken.c`'s `r457_install_trampoline()`) is
+  `beq $zero,$zero,->self` - an infinite loop, deliberately placed
+  there so execution wouldn't wander off if the syscall ever returned
+  normally. **This EPC write is the textbook "bump EPC past the
+  syscall instruction" convention for an ordinary syscall return** -
+  not a redirect to any new program.
+- **Zero `[R461-ERET]` lines** - the ERET instruction is never executed
+  in this window at all.
+- **`[R461-STATUS-WRITE] old=0x70030c13 new=0x70030c00 at_pc=0x800002b8`**
+  - bit 1 (`Status.EXL`) goes from 1 to 0 - i.e. the real kernel
+  manually exits "exception mode" via a direct `mtc0` to Status,
+  *not* as a side effect of executing ERET (ERET also clears EXL, but
+  we already confirmed ERET itself never runs).
+
+**Conclusion**: the real kernel handler in this scenario does not use
+the standard MIPS/EE exception-return convention (`ERET` reading `EPC`)
+to hand off control at all. It manually clears `Status.EXL` and simply
+keeps executing its own code via ordinary sequential/branch flow -
+exactly consistent with every previous round's observation that `pc`
+never leaves `0x8000xxxx`/`0x8001xxxx` kernel range. The `EPC` write
+that already happened is essentially inert bookkeeping in this path -
+it would only matter if something later executed `ERET`, which never
+happens within the observed window.
+
+### Task #314: TCB.entry instrumentation
+
+Extended `ee_mem_write32()` (the generic EE memory-write path) with a
+print whenever the write address falls within the TCB array
+(`0x80017400` + up to 50 slots x 76 bytes/slot) at offset `0x0C`
+(`TCB.entry`, per Round 380's already-cited real field layout). Result:
+8 writes, to slots 1, 2, 4, 5, 6, 7, 8, 9:
+
+```
+slot=1  0x00200008
+slot=2  0x0020c260   <- exact match to Round 379's cited
+                         "OSDSYS's own real SetupThread address"
+slot=4  0x00600000
+slot=5  0x007a0000
+slot=6  0x00204308
+slot=7  0x00203d78
+slot=8  0x00214a70
+slot=9  0x00205dc0
+```
+
+Six of the eight values fall inside OSDSYS's own already-cited ELF
+code range (`0x00200000`-`0x00480000`, Round 274). Slot 2's value being
+an *exact* match to an independent citation from Round 379 (found via
+a completely different investigation, 82 rounds earlier, using the
+original `CreateThread`-based approach rather than this round's
+trampoline) is strong, non-coincidental evidence: **these 8 writes are
+the real kernel resetting terminated threads' entry points back to
+OSDSYS's OWN normal startup thread set** - i.e. the real, observable
+effect of our syscall-6 call is that OSDSYS's kernel-level thread
+bookkeeping gets reset/reinitialized to its own cold-boot-equivalent
+state, not handed off to the target game. This is a fully consistent,
+unifying explanation for every prior round's "OSDSYS restarts its own
+resource-loading sequence" observation (first noted in Round 457).
+
+### Task #315: which slot is "the calling thread"?
+
+Of slots 0-9, only slots 0 and 3 were never written. Slot 0 is almost
+certainly the idle/kernel thread (a plausible reason to never touch
+it). Slot 3 is the leading candidate for "the calling thread's own
+slot" - Round 380's real citation specifically distinguishes
+"repurpose the CALLING thread's own TCB in place" from "terminate
+every OTHER thread" - i.e. the calling thread's slot should NOT go
+through the same generic reset-to-default-entry path the other 8 slots
+did. But critically, **no NEW entry value was ever written to slot 3
+either** - if it is indeed the calling thread's slot, the "repurpose in
+place" half of the mechanism (writing EELOAD's - or the target game's -
+real entry point there) simply never happens.
+
+**Leading hypothesis, not yet confirmed**: this project's trampoline
+hijacks OSDSYS's currently-running thread by directly setting
+`ee->pc`/`ee->next_pc`, without updating whatever real kernel global
+tracks "the current/calling thread's TCB index" (a standard piece of
+real kernel bookkeeping any thread-aware OS maintains, but not
+something this project's own C code models - it would be a value the
+real BIOS binary itself reads/writes in RAM). If that global is left at
+whatever stale value it held from OSDSYS's own last real thread
+switch, the real kernel's "figure out which TCB is the caller" logic
+would target the wrong slot (or a slot whose real state doesn't match
+what the trampoline actually did), causing it to fall back to the
+observed "just reset the other threads and stop" behavior rather than
+correctly writing the target program's entry into the RIGHT TCB slot.
+
+### Task #318: still no fix - the hypothesis needs confirmation first
+
+This hypothesis is the most specific, narrowly-scoped, actionable lead
+this five-round investigation arc (457-461) has produced. But
+implementing it would mean writing a "corrected" value into an
+unconfirmed real kernel global's address - without a citation
+confirming that global's existence/location, this would cross into
+exactly the "fabricate uncited kernel internals" territory this
+project's task #180 discipline exists to prevent. Correctly classified
+as: no fix this round; Round 462's first task should be locating and
+confirming (not guessing) that global, likely via disassembling the
+TCB-slot-selection logic that precedes the writes captured this round,
+or via a live-PCSX2 comparison of the equivalent real kernel state
+during an organic real-hardware `_LoadExecPS2` call.
+
+### Verification
+
+All work this round was scratch-only (`/tmp/ee_core_r461.c`,
+`/tmp/driver_r461.c`, `/tmp/driver_r461b`, `/tmp/r461*_ckpt.bin`) - the
+tracked repo received no source changes, only these two docs files. No
+regression suite / Wii rebuild required.

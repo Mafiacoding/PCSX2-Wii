@@ -6502,3 +6502,29 @@ core finding (zero visible impact either way) and isn't currently worth the
 investigative budget relative to the higher-value next step (pushing boot
 progress further to see if real triangles eventually get issued - see the
 already-queued Round 452 task #267).
+
+## Round 452 (task #267): extended survey - no triangles across 185M slices, OSDSYS confirmed idle-stable
+
+Chained 5 checkpoint resumes (30M slices each, using the working Round 449
+checkpoint-chain infra) from the Round 452 unified-driver checkpoint out to
+185,000,000 total slices (~1.48 billion EE instructions) - roughly 5x the
+horizon tested in Round 451.
+
+Result: triangles=0 for the ENTIRE tested range, every single sample point
+(35M, 65M, 95M, 125M, 155M, 185M). lines=4888 and points=333 never moved
+even once across that whole range - the line/point scene reached in Round
+450/451 is completely, permanently static. sprites climbed slowly
+(343 -> 571) through most of the range then also went flat in the final
+30M-slice chunk.
+
+Conclusion: OSDSYS has reached a genuinely stable VBLANK-wait idle/attract-
+mode resting state - consistent with, and now much more strongly confirming,
+the already-documented Round 448 "VBLANK-wait poll loop confirmed real"
+finding. It is not going to spontaneously draw a triangle-based menu/logo
+or advance its scene further just by running more slices; whatever would
+trigger that transition (a real menu-selection event, a longer real-world
+timescale condition, or some other still-unmodeled boot-progress gap) is a
+genuine further boot-progress question - out of scope for a rendering-
+pipeline characterization round, and a natural candidate for a future round
+(see task #273, already queued: "characterize what's still needed to reach
+the actual OSDSYS main menu").

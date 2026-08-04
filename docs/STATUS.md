@@ -20792,3 +20792,12 @@ execute zero iterations and write nothing. Not a bug requiring a fix - this
 is a real, geometrically-empty draw call, consistent with an off-screen
 idle/keep-alive sprite pair. See docs/ROADMAP.md's Round 452 entry for full
 detail (fbp alternation, next-step framing).
+
+## Round 452 (task #267): 185M-slice survey confirms OSDSYS idle-stable, zero triangles
+
+Extended the checkpoint-chained survey to 185,000,000 total slices (~1.48B
+EE instructions). triangles=0 the entire way; lines/points completely
+static; sprites plateau. OSDSYS is genuinely resting in a stable idle state,
+not a bug or missing rendering feature - advancing further requires a real
+boot-progress trigger, not more rendering-pipeline work. See ROADMAP.md's
+Round 452 task #267 entry for detail.

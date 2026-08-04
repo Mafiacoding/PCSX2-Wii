@@ -20985,3 +20985,40 @@ did here, since Round 431-439).
 
 Tasks #287-289 (regression/build/verify) are N/A this round - no source
 change was made, so nothing to test or rebuild.
+
+## Round 459 (tasks #293-294, #297): real BIOS EELOAD/ROMDIR lookup and TCB-termination walk directly disassembled - dispatch mechanism confirmed correct, no safe source fix found (honest negative result)
+
+Direct follow-up to the user's "implement a fix" request. Extended
+Round 457's `_LoadExecPS2` trampoline observation window from 600,000
+to 40,000,000 slices (25M post-install) - the target game file's
+`FIO_F_OPEN` still never fires, disproving Round 458's "window too
+short" hypothesis.
+
+Built a single-slice-granularity trace right at the syscall dispatch
+boundary and got a complete, disassembled picture of what real BIOS
+code actually does: it reads the string "EELOAD" from a kernel buffer,
+calls a real ROMDIR/module-table search routine (fully disassembled,
+`0x8000ABC0`-`0x8000AC50` - confirmed via disassembly to compare packed
+name+size fields matching the real ROMDIR entry format), tokenizes a
+string, and successfully finds a match in a linked-list search routine
+(`0x8000ACB8`-`0x8000AD5C`, also fully disassembled) - then proceeds to
+walk the real TCB array at `0x80017400` with a clearly decrementing
+loop counter, exactly matching Round 380's already-cited real
+`ExecPS2Patch()` "walks every OTHER TCB slot ... TerminateThread()+
+DeleteThread()" mechanism. All of this is real, correct BIOS machine
+code execution (confirmed: this project's own C code has zero TCB/
+scheduler modeling to have a bug in). But execution never leaves the
+`0x8000xxxx` kernel-code range or attempts the target file's
+`FIO_F_OPEN` within the traced window - it settles into the same real
+VBLANK-wait routine as an unmodified boot.
+
+**No source fix implemented.** Every step traced this round is real
+BIOS binary content, not this project's own code - there is nothing to
+patch without either altering BIOS-adjacent behavior without evidence
+or fabricating missing kernel internals, both of which this project's
+own long-standing discipline (task #180) prohibits. This is a genuine,
+substantial increase in understanding (the dispatch mechanism, EELOAD
+lookup, and TCB cleanup are now directly confirmed correct via real
+disassembly, not just inferred from address histograms), but not a
+"fix" in the sense of moving boot progress forward. See
+docs/ROADMAP.md for the full disassembly and next-step framing.

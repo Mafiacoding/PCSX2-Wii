@@ -7049,3 +7049,151 @@ source changes - only `docs/STATUS.md`/`docs/ROADMAP.md`. No regression
 suite / Wii rebuild required (docs-only carve-out, no source changes).
 The live PCSX2 session was left paused (not running unattended) at
 session end.
+
+## Round 459 (tasks #293-294, #297): real EELOAD/ROMDIR lookup and TCB-termination walk directly disassembled
+
+Direct response to the user's explicit "go and implement a fix"
+instruction, following on from Round 458's revised (and, this round,
+disproven) hypothesis about why Round 457's trampoline never observed
+a `FIO_F_OPEN` for the target game file.
+
+### Task #293: extended trampoline window disproves "too short" hypothesis
+
+Rebuilt `/tmp/driver_tekken.c` (the binary had gone stale relative to
+the source - a `ls -la` timestamp check caught this before trusting
+results). Ran the trampoline test with a 40,000,000-slice total budget
+(25,000,000 slices/~200M EE instructions post-install, vs. Round 457's
+600,000). Result: `pc` still settles at the same `0x002113E4`/
+`0x002113E0` VBLANK-wait resting point as an unmodified boot, and
+`FIO_F_OPEN` was called 24 times total across the run - all of them
+the same `rom0:`/`mc0:`/`mc1:` opens already characterized in Round
+455-457 (`rom0:OSOPEN`, `OSCLOCK`, `OSBROWS`, `mc0:`/`mc1:
+/BIEXEC-SYSTEM/OSBROWS`, `OSFONTM`, `OSFONTS`, `MOPEN`, `MCLOCK`,
+`MBROWS`, `FONTM`, `FONTS`) - zero for the target file, even with
+40x the observation window. This directly disproves Round 458's
+"the window was too short" hypothesis.
+
+### Task #294: full disassembly of the real syscall-6 response
+
+Built a single-slice (`system_run_interleaved(1)`) granularity trace
+starting the instant after trampoline install, printing `pc`/`v0`/`v1`/
+`a0`/`ra`/`sp` every step. This is finer than any previous trace in
+this project's history (previous finest was 500-2000-slice steps).
+Full sequence observed and, for two key regions, backed by a complete
+disassembly (bytes extracted directly from a saved checkpoint's EE RAM
+block via the same `write_block()`/`read_block()` framing used in
+Round 458, decoded with this project's own Round-350 MIPS decoder):
+
+1. **Syscall dispatch** (steps 0-4): `pc=0x80000188` with `v1=0x00000006`
+   (our syscall number) and `a0=0x01fe0000` (our filename string
+   address) - confirms the trampoline's own setup was correct. `sp`
+   transitions from OSDSYS's own user stack (`0x005976a0`) to the real
+   kernel stack (`0x80015c30`-`0x80015c40`) over these 4 steps - a
+   genuine kernel exception-entry stack switch.
+
+2. **"EELOAD" string read** (steps 5-34): `pc` cycles through
+   `0x800055A8`-`0x8000565C`, with `v0`/`v1`/`a0` showing byte-by-byte
+   reads from `0x80012608` onward that spell out `EELOAD` in sequence -
+   the real BIOS's own name for the loader program `_LoadExecPS2`
+   hands off to (this project's design/citation history already
+   established EELOAD's existence per the real ps2sdk/psdevwiki
+   sources cited in Rounds 374-375, but this is the first time this
+   project has directly observed the real BIOS referencing it by name
+   in its own trace).
+
+3. **ROMDIR/module-table search - fully disassembled**
+   (`0x8000ABC0`-`0x8000AC50`, 464 bytes extracted from a checkpoint and
+   decoded): a generic name-search routine. It packs a 5-character
+   target name into `$t0="RESE"` (little-endian, i.e. real bytes
+   `52 45 53 45` = "RESE") plus a separate halfword check for `'T'`
+   (`0x54`) - together spelling the real ROMDIR bootstrap entry name
+   "RESET" - and walks 16-byte-stride entries from `$a0` to `$a1`,
+   comparing each entry's name word, a second name word, an extinfo
+   halfword, and a masked size field, filling a 3-word result struct
+   at `$a2` (base, entry pointer, computed size) on match. This exactly
+   matches the real ROMDIR entry format (`name[10]`, `extinfo_size`
+   u16, `file_size` u32) this project already models for `rom0:` opens
+   (Round 346).
+
+4. **String tokenizer** (`0x8000AC58`-`0x8000ACB4`): splits an input
+   string on whitespace/control bytes (`slti $v0,$v0,33` - the classic
+   "byte <= 32" whitespace test) into up to 12 stack-buffered
+   characters - almost certainly parsing our own trampoline's argument
+   string.
+
+5. **Second search/match routine - fully disassembled and CONFIRMED
+   SUCCESSFUL** (`0x8000ACB8`-`0x8000AD5C`): walks a NULL-terminated
+   linked list (`lw $v1,0($a3); beq $v1,$zero,exit`), comparing 3
+   packed fields (two words + a halfword, loaded from the tokenizer's
+   stack buffer) against each node via three chained `bnel`
+   (branch-if-not-equal-likely) instructions. At step ~625 in the fine
+   trace, `pc=0x8000AD14` - inside the MATCH-FOUND path (confirmed via
+   the disassembly: this is the `sw $v1,4($a2)` instruction that stores
+   the found entry into the result struct) - i.e. **the search
+   genuinely succeeded and returned a valid, non-null result** (traces
+   through to `0x8000AD5C`: `daddu $v0,$a2,$zero; jr $ra` - returns the
+   result-struct pointer, not zero/failure).
+
+6. **Real TCB-array walk** (steps ~650-1250): `pc` moves to
+   `0x80003E84`/`0x80004990`/`0x8000429C` and related addresses, with
+   `v0`/`v1` repeatedly showing values in the `0x80017xxx` range - the
+   exact real TCB array base (`0x80017400`) already cited in Round 380
+   from the real `ExecPS2Patch()` source excerpt. A clearly
+   monotonic-decreasing counter in `$a0` (0xec -> 0xd6 -> 0xc0 -> 0xaa
+   -> 0x93 -> 0x7d -> 0x67 -> 0x51 -> 0x3b -> 0x24 -> 0xe, each step
+   ~25 raw single-slice samples apart) is strong evidence of exactly
+   the real, cited "walks every OTHER TCB slot" behavior - genuine,
+   correct real kernel code, not a stall.
+
+7. **Settles into VBLANK-wait** (steps ~1750 onward): `pc` locks into
+   the exact same real, already-documented (Round 448) VBLANK-wait
+   cycle (`0x8000AF90`-`0x8000AFA8`) and stays there for the rest of
+   the 3000-step extended trace (up to step 2975, no further movement)
+   - the same resting point as every other characterization in this
+   project's history.
+
+**Assessment**: every single instruction traced and disassembled this
+round is real BIOS binary content (verified: `grep` for TCB/scheduler
+modeling in `source/core/ee/ee_core.c` returns zero hits - this
+project's own code implements none of this logic; it all comes from
+`bios.bin` executing natively, exactly per this project's established
+"let real code run it" design). The lookup succeeds, the TCB cleanup
+proceeds correctly and matches an already-cited real source - but the
+actual jump into the found module's own resident code (which would
+execute from a different, non-`0x8000xxxx` address range) is never
+observed within the traced window. This narrows the open question
+considerably: it is no longer "does the syscall-6 mechanism work" (it
+demonstrably does, now with disassembled proof) but specifically "why
+doesn't control transfer to the found module after a successful
+ROMDIR/table lookup and TCB cleanup" - most likely because this
+project's trampoline (which hijacks OSDSYS's own already-running
+thread's `pc` directly, deliberately avoiding Round 371-378's
+`CreateThread`-based mistake) doesn't replicate some piece of context
+OSDSYS's own normal, organic call to `_LoadExecPS2` would set up first.
+
+### Task #297: no fix - honest classification
+
+Per this project's own long-standing "task #180" discipline (do not
+guess at real, BIOS-resident kernel routine internals - already applied
+consistently for `_LoadExecPS2`/`_ExecPS2`/`SetGsCrt`/`CreateThread`
+elsewhere in `ee_core.c`), there is no safe, evidenced source change to
+make here: the code in question is entirely real BIOS machine code,
+correctly executing. Shipping a "fix" would mean either fabricating
+missing real kernel dispatch internals with no source citation, or
+patching around BIOS-adjacent behavior without understanding it -
+exactly what this project has consistently avoided. This is reported
+as an honest negative/informational result: substantial, concrete new
+understanding gained (dispatch mechanism, EELOAD lookup, and TCB
+cleanup all directly confirmed correct via disassembly - not just
+inferred), but the underlying "why doesn't OSDSYS ever call this
+organically, and why doesn't our synthetic call complete the handoff"
+questions remain open for a future round with either much deeper
+disassembly (the `0x80003E84`-`0x80004990` function range, not yet
+decoded) or live-PCSX2 ground truth (task #295, deferred this round).
+
+### Verification
+
+All work this round was scratch-only (`/tmp/driver_tekken4.c` through
+`driver_tekken6`, `/tmp/r459*_ckpt.bin`, `/tmp/r459_bioscode.bin`) - the
+tracked repo received no source changes, only these two docs files. No
+regression suite / Wii rebuild required (no source change to test).

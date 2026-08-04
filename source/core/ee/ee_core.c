@@ -5152,6 +5152,49 @@ static int ee_step(void)
                                     }
                                     ee_arm_rpc_call_pending(call_cd);
                                 }
+                            } else if (call_sid == SIF_SID_CDVD_DISKREADY && rpc_number == 0u && call_recvbuf != 0u) {
+                                /* Round 475 (direct continuation of Round 474's
+                                 * "finish the CDVDFSV gap" work): real
+                                 * sceCdDiskReady(mode), a THIRD, wholly
+                                 * separate CDVD RPC service (SIF_SID_CDVD_
+                                 * DISKREADY = 0x8000059A, see sif.h's own
+                                 * citation for the full grounding) - NOT
+                                 * part of the SIF_SID_CDVD_SCMD family at
+                                 * all, so it was never covered by that
+                                 * sid's own generic catch-all. Confirmed via
+                                 * a live full-RPC-traffic survey (bind_sid +
+                                 * call_sid logger, 40,000,000-slice organic
+                                 * boot) that this service is NEVER bound or
+                                 * called on the current boot path - a real,
+                                 * evidenced, previously undiscovered gap
+                                 * (this project had literally zero dispatch
+                                 * coverage for this sid), but dormant, same
+                                 * class of finding as Round 474's
+                                 * GETDISKTYPE fix. Real sceCdDiskReady()
+                                 * reads its single 4-byte reply word
+                                 * directly as the ready-state value (no
+                                 * separate status split, matching
+                                 * GETDISKTYPE's own shape) - real values
+                                 * (libcdvd-common.h's enum
+                                 * SCECdvdInterruptCode) are CdlNoIntr=0,
+                                 * CdlDataReady=1, SCECdComplete=2,
+                                 * CdlAcknowledge=3, CdlDataEnd=4,
+                                 * CdlDiskError=5, SCECdNotReady=6. Since
+                                 * this project's own disc loader (core/
+                                 * iso_loader.c) always has a valid CD image
+                                 * mounted synchronously with no real async
+                                 * spin-up/tray modeling, the only
+                                 * defensible real value - not a guess - is
+                                 * SCECdComplete (2), the real "drive ready,
+                                 * disc present and readable" terminal
+                                 * state, matching this project's own
+                                 * established convention (Round 474's
+                                 * immediate SCECdPS2CD reply) of answering
+                                 * "already done" for functions this project
+                                 * does not model as a multi-step async
+                                 * process. */
+                                ee_mem_write32(st, call_recvbuf + 0u, 0x02u); /* real SCECdComplete - see comment */
+                                ee_arm_rpc_call_pending(call_cd);
                             } else if (call_sid == SIF_SID_CDVD_SCMD && rpc_number == 3u) {
                                 /* Round 474 (CDVDFSV protocol depth,
                                  * direct continuation of Round 473's

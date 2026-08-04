@@ -8905,3 +8905,32 @@ negotiation protocol modeling remains the substantive open item.
 GETDISKTYPE is now correctly handled if/when a future round's work
 makes it reachable. SPU2 voice/DMA/ADPCM playback modeling (Round
 473's audio audit) remains real, scoped, but undertaken work.
+
+## Round 475: real SIF_SID_CDVD_DISKREADY (sceCdDiskReady) dispatch - a previously-unknown third CDVD RPC service, per the user's "finish the gap" instruction
+
+Fetched real ps2sdk `libcdvd.c`: `sceCdDiskReady()` binds to its own
+dedicated RPC service (`CD_SERVER_DISKREADY = 0x8000059A`), completely
+separate from the already-handled `NCMD`/`SCMD` services. This project
+had zero dispatch coverage for this sid at all. Live-instrumented full
+bind/call traffic across a 40M-slice organic-boot run: zero BIND/CALL
+events for this sid (never called on the current path, so not
+today's blocker) and confirmed no OTHER sid is silently unhandled
+either. Implemented the real fix: added `SIF_SID_CDVD_DISKREADY` to
+sif.h and a dispatch branch replying the real `SCECdComplete` (2)
+constant (per the fetched `enum SCECdvdInterruptCode`), matching this
+project's disc loader's always-ready synchronous CD-mount model.
+
+Host-native: clean compile, 128/128 regression tests pass. Forward-
+progress check: identical steady state to Round 470-474 baseline, no
+regression. Wii cross-build: `pcsx2-wii-git.elf`/`.dol` both built
+clean.
+
+### Next steps
+
+All three real CDVD RPC services (INIT/NCMD/SCMD/DISKREADY) are now
+correctly dispatched. The actual organic-boot blocker is unchanged:
+OSDSYS's disc-browser idle heartbeat (Round 471/472) never actually
+calls any of these newly-completed functions. The real remaining gap
+is still what stimulus would make OSDSYS's disc-browser escalate past
+its idle animation and actually initiate a real CDVDFSV negotiation
+sequence - not yet identified.

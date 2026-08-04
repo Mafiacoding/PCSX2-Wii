@@ -7992,3 +7992,267 @@ All work this round was scratch-only
 `/tmp/r465_ckpt.bin` through `/tmp/r465e_ckpt.bin`). No tracked source
 files were modified. No regression suite or Wii rebuild required for a
 docs-only investigation round.
+
+## Round 466: corrected entry-address trampoline (syscall 7, not 6) - real crt0 executes, new dead end found at 0x00203BE0
+
+### The architectural correction
+
+User-shared URL `https://ps2dev.github.io/ps2sdk/_exec_p_s2_8c_source.html`
+was fetched and read in full this round (earlier rounds had only
+partially cited it). Full source, reproduced here as the single most
+important citation driving this round's work:
+
+```c
+static int *p_ThreadID = (int *)0x800125EC;
+static int *p_ThreadStatus = (int *)0x800125F4;
+static int (*p_CancelWakeupThread)(int ThreadID) = (void *)0x80004970;
+static int (*p_ChangeThreadPriority)(int ThreadID, int priority) = (void *)0x80004288;
+static int (*p_InitPgifHandler2)(void) = (void *)0x800021b0;
+static int (*p_InitSemaphores)(void) = (void *)0x80004e68;
+static int (*p_DeleteThread)(int thread_id) = (void *)0x80003f00;
+static int (*p_TerminateThread)(int ThreadID) = (void *)0x80003e00;
+static struct TCB *p_TCBs = (struct TCB *)0x80017400;
+static void (*p_InitializeINTC)(int interrupts) = (void *)0x8000b8d0;
+static void (*p_InitializeTIMER)(void) = (void *)0x8000b900;
+static void (*p_InitializeFPU)(void) = (void *)0x8000b7a8;
+static void (*p_InitializeScratchPad)(void) = (void *)0x8000b840;
+static int (*p_ResetEE)(int flags) = (void *)0x8000ad68;
+static void (*p_InitializeGS)(void) = (void *)0x8000aa60;
+static void (*p_SetGSCrt)(unsigned short int interlace, unsigned short int mode, unsigned short int ffmd) = (void *)0x8000a060;
+
+#ifndef REUSE_EXECPS2
+static void (*p_FlushDCache)(void) = (void *)0x80002a80;
+static void (*p_FlushICache)(void) = (void *)0x80002ac0;
+static char *(*p_eestrcpy)(char *dst, const char *src) = (void *)0x80005560;
+static char *p_ArgsBuffer = (char *)0x80012608;
+#else
+static void *(*p_ExecPS2)(void *entry, void *gp, int argc, char *argv[]) = (void *)0x800057E8;
+#endif
+
+void *ExecPS2Patch(void *EntryPoint, void *gp, int argc, char *argv[])
+{
+    int i, CurrentThreadID;
+    struct TCB *tcb;
+    CurrentThreadID = *p_ThreadID;
+    p_CancelWakeupThread(CurrentThreadID);
+    p_ChangeThreadPriority(CurrentThreadID, 0);
+    for (i = 1, tcb = &p_TCBs[1]; i < MAX_THREADS; i++, tcb++) {
+        if (tcb->status != 0 && i != CurrentThreadID) {
+            if (tcb->status != THS_DORMANT) p_TerminateThread(i);
+            p_DeleteThread(i);
+        }
+    }
+    p_InitSemaphores();
+    p_InitPgifHandler2();
+    *p_ThreadStatus = 0;
+    SoftPeripheralEEReset();
+#ifdef REUSE_EXECPS2
+    return p_ExecPS2(EntryPoint, gp, argc, argv);
+#else
+    for (i = 0, ArgsPtr = p_ArgsBuffer; i < argc; i++) {
+        ArgsPtr = p_eestrcpy(ArgsPtr, argv[i]);
+    }
+    tcb = &p_TCBs[CurrentThreadID];
+    tcb->argstring = p_ArgsBuffer; tcb->argc = argc;
+    tcb->entry = EntryPoint; tcb->entry_ = EntryPoint; tcb->gpReg = gp;
+    tcb->initPriority = 0; tcb->currentPriority = 0;
+    tcb->wakeupCount = 0; tcb->waitSema = 0; tcb->semaId = 0;
+    p_FlushICache(); p_FlushDCache();
+    return EntryPoint;
+#endif
+}
+```
+
+**The critical fact**: `ExecPS2Patch`'s first parameter is
+`EntryPoint` - a resolved, jumpable code address - not a filename.
+This function does nothing with a filename at all; it only ever
+writes `tcb->entry`/`tcb->gpReg`/`tcb->argc`/`tcb->argstring` for the
+*repurposed calling thread's own TCB* (matching Round 463's directly-
+observed TCB-slot-3 write, and Round 464's observation that whatever
+raw `$a0` happens to hold gets written straight into `tcb->entry`).
+
+This means the real, user-facing `_LoadExecPS2(filename, argc, argv)`
+(syscall 6) must be a *separate*, higher-level real kernel/IOP
+mechanism that performs actual file-open + ELF-parse + entry-point-
+resolution, then internally calls into this same
+`ExecPS2Patch`-equivalent machinery with a resolved address - a real
+file-loading step this project's BIOS model has no IOP-side LOADFILE-
+RPC service to actually perform. Every filename-based trampoline test
+since Round 457 (`$v1=6`, `$a0`=filename-string-pointer) was therefore
+testing a mechanism that could never complete correctly in this
+project's model, regardless of any bug-fixing in `ee_core.c` itself -
+retroactively explaining every `$a0` loss/substitution chased across
+Rounds 457-465.
+
+This project's own `ee_core.c` (`source/core/ee/ee_core.c`, `sysnum==7`
+handler, written back in the Round 195/196 era) already contains
+independent, real, byte-exact confirmation of the correct convention -
+quoted here for the record:
+
+> `_ExecPS2(void *entry, void *gp, int num_args, char *args[])` -
+> task #195/#196 (71st finding), THE genuine real mechanism that
+> transfers control to a freshly LOADFILE-loaded program. Reached for
+> the first time this round: `$a0=0x00200008` (byte-exact match to
+> the real `e_entry` this same round's `sif_loadfile_elf_load()` read
+> out of the real "rom0:OSDSYS" ELF header), `$a1=0` (matching this
+> project's own synthetic LOADFILE reply's `gp=0`), `$a2=1`,
+> `$a3`=(an argv-style pointer) - i.e. real BIOS/EELOAD code calling
+> `ExecPS2(data.epc, data.gp, argc, argv)` exactly as real ps2sdk's
+> own `ExecPS2()`/`exit.c` wrapper does after a successful
+> `SifLoadElf()`.
+
+This confirms syscall **7** (`_ExecPS2`), not 6 (`_LoadExecPS2`), is
+the correct dispatch to use once the ELF has already been loaded by
+other means - exactly the situation this round's corrected trampoline
+creates by doing the ELF load itself, host-side, before firing the
+syscall.
+
+### What was built (scratch only)
+
+1. **Real ELF extraction**: `/tmp/round238_diag/disc.iso`'s
+   `SCED_500.41;1` file, extracted via this project's own pre-existing,
+   tested `iso_loader.c` (Round 139/170) - `iso_open()` correctly
+   auto-detected the disc's real raw-CD sector format (2352-byte
+   stride, Mode 2 Form 1, 24-byte data offset - confirmed via a small
+   test program, `/tmp/test_iso.c`), and `iso_find_in_root()` +
+   `iso_read_sector()` (in `/tmp/extract_elf.c`) correctly extracted
+   2,872,704 bytes to `/tmp/sced_500_41_real.elf`. (An earlier, hand-
+   rolled manual-ISO9660-parse attempt assuming plain 2048-byte
+   sectors produced non-ELF garbage bytes and was discarded once the
+   real sector format was understood - this project's own existing
+   loader infrastructure was correct where the manual attempt was not.)
+   Verified via direct header inspection: real ELF32/MIPS ET_EXEC,
+   `e_entry=0x003572a0`, three PT_LOAD segments:
+   ```
+   PT_LOAD vaddr=0x00100000 filesz=0x0      memsz=0xf6a80    (pure BSS)
+   PT_LOAD vaddr=0x00200000 filesz=0x0      memsz=0x140000   (pure BSS)
+   PT_LOAD vaddr=0x00340000 filesz=0x2b66ec memsz=0x1c8daf0  (real code+data+bss)
+   range: 0x00100000-0x01fcdaf0
+   ```
+2. **Real ELF load**: `/tmp/driver_r466.c`'s
+   `r466_load_real_elf_and_get_entry()` reads the extracted file and
+   calls this project's own pre-existing `ee_elf_load()`
+   (`source/core/ee_elf_loader.c`, Round 171) to write all three
+   PT_LOAD segments into EE RAM, confirmed correct via direct source
+   read: its zero-fill loop (`for (b=p_filesz; b<p_memsz; b++)
+   ee_mem_write8(st, p_vaddr+b, 0)`) unconditionally covers the full
+   bss range for every segment, including the two `p_filesz==0`
+   (pure-BSS) segments - there is no loader bug here, later confirmed
+   empirically (see below).
+3. **Corrected trampoline** (`r466_install_trampoline()`, replacing
+   Round 457's `r457_install_trampoline()`): sets `$a0=0x003572a0`
+   (the real, resolved entry address - not a filename pointer),
+   `$a1=0` (gp), `$a2=1` (argc, matching the real organic-boot
+   precedent above), `$a3`=pointer to a one-entry argv array (whose
+   single string is still the real disc path, for realism/future
+   comparison), `$v1=7` (`_ExecPS2`, not 6), then `syscall`. Guarded
+   the install against re-firing on checkpoint-resume runs (a real gap
+   found while building the chained multi-run test harness - a fresh
+   process's local `total` slice counter always restarts at 0
+   regardless of resume state, so without a `mode=="run"` guard a
+   resumed run would eventually re-cross the 15,000,000-slice
+   threshold and re-install the trampoline, silently discarding all
+   resumed progress).
+
+### Result: real game crt0 executes for the first time ever
+
+Single-instruction tracing (`system_run_interleaved(1)`, printing
+`pc`/`$v0`/`$v1`/`$a0`/`$ra` every step) confirms, for the first time
+in this project's history, genuine PS2 game code executing correct,
+recognizable crt0 startup logic:
+
+```
+0x003572a0: 3c02005f   lui  $v0, 0x005f       ; $v0 = _fbss  = 0x005f6700
+0x003572a4: 3c0301fd   lui  $v1, 0x01fd
+0x003572a8: 24426700   addiu $v0, $v0, 0x6700
+0x003572ac: 2463daf0   addiu $v1, $v1, 0xdaf0  ; $v1 = _end   = 0x01fcdaf0
+0x003572b0: 00000000   nop
+0x003572b4: 00000000   nop
+0x003572b8: 7c400000   sq   $zero, 0($v0)      ; zero 16 bytes (real EE SQ opcode)
+0x003572bc: 0043082b   sltu $at, $v0, $v1
+0x003572c0: 00000000   nop
+0x003572c4: 1420fffa   bne  $at, $zero, -6     ; loop while v0 < v1
+0x003572c8: 24420010   addiu $v0, $v0, 0x10    ; (delay slot) v0 += 16
+```
+
+This is a textbook-correct real ps2sdk crt0 BSS-clear loop, verified
+by decoding every instruction by hand against real MIPS-I/EE
+encodings (opcode 0x1F = SQ, confirmed against this project's own
+Round 350 decoder's opcode table) - `$v0`/`$v1` exactly match the
+loader's own reported `load_start`(-derived `_fbss`)/`load_end`
+(`_end`) values, and the loop correctly clears the game's real ~27MB
+BSS region (`_end - _fbss = 0x19d73f0`, ~1.7M sixteen-byte iterations
+at 16 bytes/pass) - explaining why this loop alone consumes the first
+~1.48M emulated slices after trampoline install.
+
+After the loop genuinely completes (`$v0` reaches `$v1`, the `bne`
+falls through), execution continues into real code at
+`0x003572D4-0x00357324`, which issues a real syscall. Tracing shows
+the very next PC is `0x8000021C` - genuine BIOS ROM kernel code - and
+the subsequent trace (`0x8000023C`, `0x80000390`, `0x800003CC`,
+`0x80001304`-`0x800016F4`, including a live-captured `STATUS`-register
+write at `0x800003C8` via this project's existing Round 461
+instrumentation) is exactly consistent with the real **SetupThread**
+syscall (EE syscall 60) - the mechanism `ee_elf_loader.h`'s own
+citation of real crt0 documents as how crt0 obtains a real, valid
+`$sp` (real EELOAD/loaders never set `$sp` themselves).
+
+### The new dead end: 0x00203BE0
+
+Immediately after this real SetupThread-style dispatch (a genuine
+JALR/EPC-write/STATUS-write/ERET sequence at `0x80002848-0x80002878`,
+captured live by this project's existing Round 461
+ERET/EPC-write/STATUS-write instrumentation), the thread-resume jump
+lands at **`0x00203BE0`** - inside `PT_LOAD1` (`0x00200000-0x00340000`),
+the game's *other*, pure-BSS PT_LOAD segment. Since `ee_elf_load()`'s
+zero-fill is confirmed correct (see above), this address holds literal
+zero words, which decode as `SLL $zero,$zero,0` (real MIPS NOP) - and
+the trace confirms this exactly: PC advances by precisely `0x20`
+bytes (8 instructions) per single-slice call, matching this project's
+known 8:1 EE:IOP interleave ratio exactly, with every GPR completely
+static across many single-step samples (real NOPs touch no registers).
+
+Extending the run to 40,000,000 total slices shows the EE eventually
+NOP-slides all the way to `PT_LOAD2`'s base (`~0x00340000`) and resumes
+real code there, and through further genuine BIOS exception activity
+(more real ERET/EPC-write/STATUS-write cycles, all captured live)
+ultimately resettles into the *same* long-standing OSDSYS dispatcher
+resting loop this project has observed since deep in its history
+(`0x8000CF90`-class addresses) - not a crash, but also not new visible
+progress. GS state (`pmode=0x66`, `dispfb1=0`, `display1=0`) and GIF
+draw counts (343 sprites, 4888 lines, 333 points, 0 triangles) are
+byte-identical to the pre-install organic-boot steady state.
+
+### Open question for Round 467
+
+Why does the real thread-resume jump land at `0x00203BE0` instead of
+continuing crt0 execution in the game's own code region
+(`~0x003572xx` onward, right after the SetupThread call site)?
+`ExecPS2Patch`'s real source (quoted above) only ever writes
+`tcb->entry`/`tcb->gpReg`/`tcb->argc`/`tcb->argstring` - it never
+touches `tcb->stack`/`tcb->stackSize`/`tcb->stack_res`, which real
+hardware (and this trace) correctly leaves pointing at the *original*
+calling thread's (OSDSYS's) own stack; that part is expected and
+matches real semantics, not a bug. The open question is specifically
+what `0x00203BE0` is derived from - a targeted disassembly of
+`0x80002840-0x80002878` (the JALR/ERET site itself) is the concrete
+next step, to determine whether this project's `p_ExecPS2`/dispatch
+modeling reads some TCB or context field incorrectly, or whether
+`0x00203BE0` is a genuinely correct-per-real-hardware artifact of
+OSDSYS's own stale thread context (in which case the real divergence
+from hardware behavior is further upstream still).
+
+### Task classification and verification
+
+Real, substantial, evidenced forward progress - first-ever genuine
+game-crt0 execution (correct BSS-clear, correct SetupThread-style
+syscall dispatch) - but no splash-screen or new GS output yet, and no
+tracked-source fix (the correction applies entirely to the scratch
+test trampoline, not to any BIOS-emulation logic in `ee_core.c`,
+`ee_elf_loader.c`, or `iso_loader.c` - all three behaved exactly as
+already documented). All work this round was scratch-only
+(`/tmp/driver_r466.c`, `/tmp/ee_core_r465e.c` reused unmodified,
+`/tmp/sced_500_41_real.elf`, `/tmp/extract_elf.c`, `/tmp/test_iso.c`,
+checkpoints `/tmp/r466_chain*.ckpt`). No tracked source files were
+modified. No regression suite or Wii rebuild required for a docs-only
+investigation round, matching the precedent set by Rounds 463-465.

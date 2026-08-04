@@ -21362,3 +21362,151 @@ would explain the divergence is still unlocated, and guessing at it
 would violate this project's standing discipline against unevidenced
 fixes. Organic boot path unchanged (no new run needed this round;
 Round 464's re-verification still holds since no source changed).
+
+## Round 466 (tasks #361 revised, #362-365): corrected entry-address trampoline built and run - real game crt0 executes for the first time ever, reaches a new, more precisely located dead end
+
+User shared three reference URLs this round and asked to continue
+toward the splash screen. The first (`ps2sdk`'s `ExecPS2.c` full
+source, already partially cited in earlier rounds but this time
+fetched and read in FULL) produced the round's key architectural
+correction: `ExecPS2Patch(EntryPoint, gp, argc, argv)` - the real
+function underlying both `_ExecPS2` (syscall 7) and, after real
+file-loading, `_LoadExecPS2` (syscall 6) - takes an **already-resolved
+jumpable entry-point address** as its first argument, not a filename.
+Every trampoline test since Round 457 used syscall 6 with `$a0` set to
+a raw filename-string pointer, based on the real, correct
+`_LoadExecPS2(filename, argc, argv)` signature - but this project's
+BIOS ROM model has no real IOP-side LOADFILE-RPC file-reading service
+backing that syscall, so the filename could never actually be resolved
+to an entry point by resident ROM code. This retroactively explains
+every `$a0` loss/substitution documented in Rounds 457-465: the test
+methodology itself, not any single function's logic, was miscalibrated.
+
+This project's own `ee_core.c` already contains independent, real
+confirmation: its `sysnum==7` handler comment (written back in the
+Round 195/196 era) cites **byte-exact real organic-boot evidence** for
+`_ExecPS2`'s calling convention - `$a0=0x00200008` (OSDSYS's own real
+`e_entry`, matching a `sif_loadfile_elf_load()` ELF-header read that
+same round), `$a1=0` (gp), `$a2=1` (argc), `$a3`=an argv-style
+pointer. This is exactly the signature the fetched `ExecPS2.c` source
+describes, and confirms syscall **7**, not 6, is the right dispatch
+mechanism to use once the ELF has already been loaded by other means.
+
+**What was built and run this round** (scratch only - see below for
+why no tracked source changed):
+
+1. Extracted the real game ELF (`SCED_500.41;1`) from the disc image
+   using this project's own, previously-built, tested infrastructure -
+   `iso_loader.c`'s `iso_open()`/`iso_find_in_root()`/`iso_read_sector()`
+   (Round 139/170), which correctly auto-detected the disc's real raw
+   Mode-2-Form-1 sector format (2352-byte stride, 24-byte data offset) -
+   an earlier hand-rolled plain-2048-byte-sector extraction attempt
+   this round produced garbage bytes and was discarded once this was
+   understood. Verified the extracted file is a genuine ELF32/MIPS
+   ET_EXEC image with real `e_entry=0x003572a0` and three PT_LOAD
+   segments spanning `[0x00100000,0x01fcdaf0)`.
+2. Used this project's own, pre-existing, tested ELF loader
+   (`ee_elf_loader.c`, Round 171) to load all three PT_LOAD segments
+   into EE RAM host-side, before ever touching the CPU state - i.e.
+   this driver performs the file-read + ELF-parse + memory-load work
+   that a real IOP-side LOADFILE RPC would normally do, so the BIOS
+   syscall itself doesn't need to.
+3. Rebuilt the Round 457 trampoline with the corrected calling
+   convention: `$a0=0x003572a0` (the real, resolved entry address,
+   not a filename pointer), `$a1=0` (gp), `$a2=1` (argc), `$a3`=a
+   pointer to a one-entry argv array (matching the real organic-boot
+   precedent exactly), `$v1=7` (`_ExecPS2`, not 6), then `syscall`.
+
+**Result - real, substantial, evidenced forward progress:**
+
+For the first time in this project's history, **real PS2 game code
+actually executes past the initial hijack point.** Fine-grained
+single-instruction tracing confirms the EE core, immediately after our
+syscall fires, executes a genuine ps2sdk crt0 BSS-clear loop at
+`0x003572B0-0x003572C8` - decoded instruction-by-instruction: `$v0`
+(`_fbss=0x005f6700`) and `$v1` (`_end=0x01fcdaf0`, exactly matching
+our own loader's reported `load_end`) are compared via `sltu`, and a
+real EE-specific `SQ $zero,0($v0)` (128-bit store-quadword-of-zero)
+clears 16 bytes per iteration, advancing `$v0` by `0x10` each pass -
+textbook-correct real ps2sdk crt0 behavior, clearing the game's real
+~27MB BSS region one quadword at a time (roughly 1.7M iterations,
+which is why the loop dominates the first ~1.48M emulated slices after
+install).
+
+After the BSS-clear loop genuinely completes (`$v0` reaches `$v1`),
+crt0 continues into real code at `0x003572D4-0x00357324`, which issues
+a real syscall - and single-instruction tracing shows the EE
+transitions into genuine BIOS ROM code (`0x8000021C` through
+`0x800016F4`, including a captured real `STATUS`-register write at
+`0x800003C8`) that is exactly consistent with the real **SetupThread**
+syscall (EE syscall 60) crt0 is documented to call for a real stack
+pointer, per `ee_elf_loader.h`'s own citation of real crt0 behavior.
+
+**The new, more precisely located dead end**: after this real
+SetupThread-style dispatch completes (traced through a real
+JALR/ERET/EPC-write sequence at `0x80002848-0x80002878`, captured live
+by this project's existing Round 461 ERET/EPC instrumentation), the
+thread-resume jump lands at `0x00203BE0` - inside the *other* game
+PT_LOAD segment (`PT_LOAD1`, `0x00200000-0x00340000`), which is a
+pure-BSS segment our own `ee_elf_load()` correctly zero-fills (verified
+by direct source read - the zero-fill loop unconditionally covers
+`[p_filesz,p_memsz)` for every segment, including `p_filesz==0` ones,
+so there is no loader bug here). Landing there means the CPU executes
+an extended run of literal zero words, which decode as `SLL
+$zero,$zero,0` (NOP) - confirmed by the per-slice PC advancing by
+exactly `0x20` bytes (8 instructions) per emulated slice, matching this
+project's known 8:1 EE:IOP interleave ratio exactly, with GPRs
+completely static across many single-step traces (real NOPs touch no
+registers). Extending the run to 40,000,000 slices shows the EE
+eventually resumes real code again near `0x00340000` (PT_LOAD2's base)
+and, through further genuine BIOS exception activity (more real
+ERET/EPC-write/STATUS-write cycles, all captured live), ultimately
+resettles into the *same* long-standing OSDSYS dispatcher resting loop
+this project has observed since deep in its history
+(`0x8000CF90`/`0x8000CFD8`/`0x8000F864`-class addresses) - not a crash,
+but also not new visible progress. GS state is unchanged from every
+prior round (`pmode=0x66`, `dispfb1=0`, `display1=0`), and GIF draw
+counts are byte-identical to the pre-install organic-boot steady state
+(343 sprites, 4888 lines, 333 points, 0 triangles) - confirming no new
+rendering occurred during this excursion.
+
+**Open question for a future round**: why does the real thread-resume
+jump (immediately after the real SetupThread-style dispatch) land at
+`0x00203BE0` instead of continuing crt0 execution back in the game's
+own code region (`~0x003572xx` onward)? The real `ExecPS2Patch` source
+(quoted in full in `docs/ROADMAP.md`) only ever writes `tcb->entry`/
+`tcb->gpReg`/`tcb->argc`/`tcb->argstring` for the repurposed TCB - it
+never touches `tcb->stack`/`tcb->stackSize`/`tcb->stack_res`, which
+real hardware (and this trace) correctly leaves pointing at the
+*original* calling thread's (OSDSYS's) own stack - that part is
+expected, matches real ps2sdk semantics, and is not the bug. The
+`0x00203BE0` jump target itself is the open question: is it read from
+a TCB field this project's `p_ExecPS2`/dispatch modeling doesn't set
+correctly, or is it genuinely a stale/leftover value from OSDSYS's own
+original thread context that real hardware would also produce here
+(in which case the actual real-hardware divergence point is even
+further upstream)? Needs a targeted disassembly of
+`0x80002840-0x80002878` (the JALR/ERET site) in a future round - not
+guessed at here, per this project's standing discipline against
+unevidenced fixes.
+
+**Why no tracked source changed this round**: `ee_core.c` was not
+modified - the architectural correction (syscall 7 vs 6, entry-address
+vs filename) applies entirely to the *scratch test trampoline*
+(`/tmp/driver_r466.c`, never committed), not to any BIOS-emulation
+logic in tracked source. The real syscall 6/7 dispatch (raising a real
+exception and letting resident BIOS ROM code handle everything) was
+already correctly implemented in Rounds 195/196/251 and needed no
+change. `ee_elf_loader.c`/`iso_loader.c` (both pre-existing, both used
+read-only this round) also needed no change - both behaved exactly as
+documented. This is therefore a docs-only investigation round: host-
+native regression suite and Wii cross-build are correctly skipped (no
+source changed), matching the precedent set by Rounds 463-465.
+
+This round is real, significant, evidenced forward progress - the
+first time this project has ever gotten real PS2 game code to execute
+meaningfully past a hijack point, including a fully genuine BSS-clear
+and a fully genuine BIOS syscall dispatch - even though it does not
+yet reach a splash screen or any new visible GS output. See
+`docs/ROADMAP.md` for the full instruction-level trace excerpts and
+the concrete Round 467 plan.

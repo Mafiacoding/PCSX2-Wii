@@ -6212,3 +6212,29 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
   opcode gap, not yet identified against real source.
 - Next: cite real PCSX2 R5900OpcodeTables.cpp/VUops.cpp for funct
   0x20's real semantics before implementing.
+
+## Round 446: MAJOR FORWARD PROGRESS - VADDq (funct=0x20) test fix, 3.4x instruction jump
+- Per user's "implement it as test fix, revert if it doesn't work"
+  instruction: fetched real PCSX2 VUops.cpp, confirmed _vuADDq/
+  _vuADDi/_vuSUBq/_vuSUBi/_vuMADDq exist using Q/I broadcast
+  registers - strong evidence funct=0x20 (the exact value this
+  project's boot halted on) is VADDq: FD=FS+Q broadcast.
+- Fix: added funct==0x20 only (not unobserved siblings 0x21-0x27) to
+  the COP2 CO-format dispatch, mirroring existing VMULq's code shape.
+- 128/128 regression suite pass, 0 warnings.
+- MAJOR RESULT: fresh 40M-slice cold boot no longer halts at all -
+  runs the full 40M-slice/40s budget cleanly, reaching 319,998,310
+  instructions (vs Round 445's 93,508,707 - a 3.4x increase, +226.5M
+  new instructions). pmode=0x66 unchanged. RPC balanced (228/228).
+  Empirically confirms the VADDq hypothesis: a wrong implementation
+  would very likely have crashed within a few million more
+  instructions, not run cleanly for 226M+ more.
+- Wii cross-build clean, 0 warnings.
+- DECISION: kept the fix (clearly works empirically).
+- Checkpoint/resume tooling hit a pre-existing, already-documented
+  segfault (same-binary-resume requirement) - not pursued further,
+  fresh-run evidence was already sufficient.
+- Next: characterize the new resting state (may be a legitimate
+  steady-state loop, not a bug) with Round 442-style quantitative
+  methodology; check GS circuit-2 registers again for further
+  changes.

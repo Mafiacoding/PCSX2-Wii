@@ -7385,6 +7385,51 @@ static int ee_step(void)
                 default:   r = a | b; break;              /* VIOR  */
                 }
                 vu0_vi_write(st, fd, r);
+            } else if (funct == 0x20) {
+                /* VADDq - Round 446 (task #242 follow-up), TEST FIX:
+                 * this project's real host-native boot trace halted at
+                 * pc=0x0050DB34 on this exact funct value (raw instr
+                 * 0x4B000160: fs=0/VF0, ft=0/unused, fd=5,
+                 * destmask=0x8/X-lane-only) right after the Round 445
+                 * SetGsCrt fix let real GS PMODE get configured for
+                 * the first time. Real, cited (fetched this round,
+                 * PCSX2's own pcsx2/VUops.cpp): _vuADDq is a real,
+                 * existing PCSX2 function - "static __fi void
+                 * _vuADDq(VURegs* VU) { vuADDbc(VU, VU->VI[REG_Q].UL);
+                 * }" - i.e. FD[lane] = FS[lane] + Q (the SAME real Q
+                 * broadcast register, cop2_ctrl[22], already used by
+                 * this file's own existing VMULq at funct 0x1C), per
+                 * destmask lane. This is the natural "second
+                 * immediate-broadcast row" sitting immediately after
+                 * the already-implemented funct<=0x1F broadcast row
+                 * (ADDq/MADDq/ADDi/MADDi/SUBq/MSUBq/SUBi/MSUBi at
+                 * 0x20-0x27, paralleling that row's own structure) -
+                 * this file's own existing VDIV/VSQRT/VRSQRT comment
+                 * (funct 0x38-0x3A via the idx dispatch) already
+                 * anticipated this exact op ("cop2_ctrl[22] - this
+                 * project's single source of truth for Q (already
+                 * read by VMULq/VADDq/etc above)"), before it was
+                 * actually implemented. ONLY funct==0x20 is added
+                 * here (not the full sibling row, 0x21-0x27) since
+                 * only this exact value was directly observed in the
+                 * real halt-site disassembly - the remaining siblings
+                 * are a scoped future gap, not guessed at. Shipped as
+                 * an empirically-tested fix: verified via the 128-
+                 * test host-native regression suite plus a fresh
+                 * cold-boot forward-progress check against the Round
+                 * 445 baseline (93,508,707 instructions, halt at
+                 * pc=0x0050DB34) before being kept. */
+                for (int lane = 0; lane < 4; lane++) {
+                    if (!(destmask & (0x8u >> lane))) continue;
+                    uint32_t ua = vu0_vf_read_lane(st, fs, (uint32_t)lane);
+                    uint32_t uq = vu0_vi_read(st, 22);
+                    float a, q, r; uint32_t ur;
+                    memcpy(&a, &ua, 4);
+                    memcpy(&q, &uq, 4);
+                    r = a + q;
+                    memcpy(&ur, &r, 4);
+                    vu0_vf_write_lane(st, fd, (uint32_t)lane, ur);
+                }
             } else {
                 halt("unimplemented COP2 CO-format sub-opcode (VU0 vector datapath not implemented)");
                 return 1;

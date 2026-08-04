@@ -20748,3 +20748,20 @@ now, not just a configured-but-empty display. Exactly what that content
 looks like (a real, meaningful image vs. partial/garbled draw output) is
 still open - that's task #248 (already queued: re-run the DISPFB2 survey
 at a larger budget).
+
+## Round 450 (task #248): first rendered image extracted and viewed
+
+Dumped and viewed the actual GS local memory content at DISPFB2's
+decoded framebuffer address (640x448, a real standard PS2 resolution -
+DISPLAY2's DX/DY/MAGH/MAGV/DW/DH fields all decode cleanly). It's a real
+image: many crossing thin lines (consistent with a 3D wireframe -
+OSDSYS's real BIOS is known to render a rotating cube/logo here) plus a
+colored horizontal detail strip near the bottom (magenta/blue/white/green,
+likely text/icon content, only 1-2px tall currently). Confirmed stable
+(not mid-draw) by extending the survey to 35,000,000 slices - byte-
+identical framebuffer, matching the already-documented VBLANK-wait
+resting state. Leading hypothesis: triangle/polygon FILL primitives may
+not be rasterizing interiors (only edges/lines visible) - a likely gap in
+gif.c/gs.c's fill path, not a boot-progress blocker. Next: audit the
+triangle-fill code against a real GS reference. See docs/ROADMAP.md's
+Round 450 entry for full details.

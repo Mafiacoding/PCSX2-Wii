@@ -6381,3 +6381,45 @@ Wii/Dolphin run reaching this boot point right now would very likely show
 visible, non-blank content on screen - not yet confirmed to be a
 *meaningful* image (vs. partial/garbled draw output), which is task
 #248's job (already queued: GS DISPFB2 large-budget survey).
+
+## Round 450 (2026-08-04, task #248): first actual rendered image extracted and viewed - real geometry, but wireframe-only (no filled polygons)
+
+Direct follow-up to Round 449's DISPFB2 finding. Dumped the real GS local
+memory PSMCT32 content at the DISPFB2-decoded framebuffer address
+(bp=143360 words, bw=640px) across the full real DISPLAY2-decoded
+resolution - DX=636 DY=50 MAGH=3 MAGV=0 DW=2559 DH=447 decode to a clean
+**640x448**, a genuine, standard PS2 NTSC display mode - and rendered it
+to a PNG to actually look at it, rather than just sampling a handful of
+pixels.
+
+**Result: it's a real, structured image, not noise.** Many thin
+crossing lines across most of the frame (consistent with a 3D wireframe
+scene - OSDSYS's real BIOS is known to render a rotating cube/logo at
+this stage) plus a colored horizontal detail strip near the bottom edge
+(magenta/blue/white/green pixels in a thin band, consistent with
+text/icon-row content, though currently only 1-2 pixels tall).
+
+**The image is stable, not still-drawing**: extending the survey from
+15,000,000 to 35,000,000 slices (removing driver_r313.c's `run` mode's
+one-shot "first display milestone" loop-break, scratch-only change, not
+committed) produced a byte-identical framebuffer (145,160/286,720
+non-zero pixels, unchanged) - real execution continued (EE instruction
+count and PC both advanced), but nothing further wrote to this GS memory
+region. This matches Round 448's "poll loop confirmed as real VBLANK-wait"
+finding: OSDSYS parks in an idle/wait loop after this initial draw rather
+than continuously re-rendering.
+
+**Leading hypothesis for the wireframe-only look**: real triangle/polygon
+fill primitives may not be rasterizing their interiors correctly (only
+edges/lines are appearing), which would point at a gap in this project's
+triangle-fill GS path (gs.c/gif.c) rather than at boot progress itself -
+boot has clearly gotten far enough to issue real, structured GIF draw
+commands. This is unconfirmed and is the natural next investigative
+target: audit gif.c/gs.c's triangle-fill primitive against a real PS2 GS
+manual/PCSX2 reference to see if fills are being silently skipped,
+downgraded to outlines, or clipped.
+
+Images captured this round (not committed to the repo - investigation
+artifacts only, not source): the raw 640x448 framebuffer PNG at both the
+15M and 35M slice marks (byte-identical), a 2x-scaled version, and a
+zoomed crop of the bottom colored strip.

@@ -6238,3 +6238,33 @@ Classified Round 424's BUMP_BASE-parking finding: it's the real, working "module
   steady-state loop, not a bug) with Round 442-style quantitative
   methodology; check GS circuit-2 registers again for further
   changes.
+
+## Round 447 (2026-08-04): Extended boot survey - resting state characterized as real game-loop, not a stuck spin
+
+Docs-only round (no source changes). Per user request to see how far the
+boot goes, GS next steps, and what steady loop is next:
+
+- Re-confirmed the Round 446 ceiling (40,000,000 slices / 319,998,310 EE
+  instructions, zero crash, zero new opcode-gap halt) using reliable
+  synchronous `timeout`-bounded runs after background/detached runs proved
+  unreliable in this sandbox (die silently around ~85-90s regardless of
+  `setsid`/`disown`).
+- New finding: GS DISPFB2 (circuit-2 framebuffer register) changes value
+  between slice 36M and 38M (`0x1446` -> `0x1400`) - the first evidence of
+  post-milestone GS activity beyond the static Round 445 PMODE/circuit-2
+  setup. All other GS registers remain stable across 15M-40M slices.
+- New finding: fine-grained PC sampling over the final 1,000,000 slices
+  shows execution inside the loaded GAME ELF's own address range
+  (`0x00500000-0x00520000`, i.e. real Tekken Tag Tournament Demo code, not
+  BIOS/OSDSYS), visiting a broad working set interleaved with a small
+  legitimate poll loop (`0x005189A0-0x005189B8`: load status word, mask
+  bit 2, spin while clear, then write bit back) - disassembled directly
+  from the checkpoint's EE RAM dump. Classic VBLANK-wait/busy-wait pattern,
+  consistent with a genuine per-frame main loop, not a bug.
+- Checkpoint/resume chaining remains broken (`SIGSEGV` on resume, same
+  binary, pre-existing fragility - not fixed this round).
+
+Next: fix/replace checkpoint-resume (or find another way past the sandbox's
+~40s single-call budget) to push the survey further; re-check DISPFB2 for a
+stable double-buffer cadence at a larger budget; watch for a new opcode gap
+among VADDq's unimplemented siblings (funct 0x21-0x27) as the budget grows.

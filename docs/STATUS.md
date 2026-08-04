@@ -20459,3 +20459,118 @@ Scratch memory-dump instrumentation reverted from `driver_r313.c` before this en
 **Honest scope**: `dispfb1`/`display1` (circuit 1) remain 0, consistent with circuit 2 being the real active path (unchanged from Round 445). No new halt was reached within the 40M-slice budget - the boot may now be in a legitimate steady-state loop (e.g. VBLANK-wait or menu idle) rather than still making forward progress; this needs characterization next round (was `pc` oscillating between a small set of addresses in the pre-full-budget partial runs: `0x00510228`/`0x00510E28`/`0x005189B0`/`0x005189A0`, suggesting a real loop, not random wandering).
 
 **Next round's concrete targets**: (1) characterize the current resting state at `pc=0x0050172C`/the observed oscillating addresses - confirm whether it's a legitimate loop (VBLANK-wait, RPC steady-state, or idle menu) via the same quantitative methodology as Round 442; (2) if a real halt is reachable with a larger budget, find and fix it; (3) fix the checkpoint/resume tooling fragility if deeper surveys become necessary; (4) if a stable loop is confirmed, check GS state for any further changes (dispfb2/display2/smode1/smode2) since circuit 2 was last read in Round 445, since a legitimate steady frame-cycle loop could mean OSDSYS is now genuinely rendering/updating frames.
+
+## Round 447 (2026-08-04): Extended boot survey - post-VADDq resting state characterized, NOT a stuck loop
+
+Docs-only investigative round, per user request: "boot up tekken or the bios
+see how far it goes, see the next steps for the gs, and see what steady loop
+is next." No source changes to the emulator itself this round - all work was
+in the scratch `driver_r313.c` host-native test harness (reverted to its
+clean committed state before this entry was written; `git diff --stat`
+confirmed zero uncommitted changes afterward).
+
+**Methodology note first, since it shaped this round's approach:** background
+(`nohup`/`setsid`/`disown`) boot-trace runs launched via the sandbox bash tool
+kept dying silently around the ~85-90 second mark regardless of detachment
+technique, well short of the driver's 180-second internal wall-clock budget
+- apparently a sandbox-level constraint on how long a detached child process
+survives once its launching tool call returns, not something fixable from
+inside the driver. Switched to synchronous `timeout N driver run ...` calls
+sized to complete within the tool's 45-second hard cap (observed steady-state
+throughput ~950,000-1,015,000 slices/sec on a fresh cold-boot run), and did
+NOT rely on checkpoint/resume chaining to go further - confirmed once again
+that resume produces `[R313-SIGSEGV] fault at addr=...` even with the exact
+same binary for both write and resume (matches the pre-existing, documented
+RAM-pointer-repointing fragility noted in Round 313's own header comments;
+not pursued/fixed this round since a single-shot 40,000,000-slice cold run
+already reaches well past the prior 40M-slice budget used in Round 446 and
+answers the user's question without it).
+
+**Finding 1 - no new opcode-gap halt through 40,000,000 slices / 319,998,310
+EE instructions.** This exactly reproduces Round 446's 40M-slice/40s-wall-clock
+result (same deterministic cold boot, same binary logic minus added
+instrumentation), re-confirming VADDq is stable and that nothing beyond it
+has been discovered as a blocker within this budget. `pc=0x0050172C` at the
+end of the run, `halted=0` for both EE and IOP.
+
+**Finding 2 - GS DISPFB2 (circuit 2 framebuffer register) is NOT static -
+it changes value between slice 36,000,000 and 38,000,000.** Bisected via three
+additional cold runs at 32M/36M/38M slices: `dispfb2=0x1446` at 32M and 36M
+slices, `dispfb2=0x1400` at 38M and 40M slices. All other GS registers
+surveyed (`dispfb1`, `display1`, `display2`, `smode1`, `smode2`, `srfsh`,
+`synch1`, `synch2`, `syncv`, `imr`, `bgcolor`, `pmode=0x66`, `csr=0x8`)
+remained identical across all five runs (15M/32M/36M/38M/40M slices) -
+DISPFB2 is the only register observed to change post-milestone. This is
+the direct answer to "next steps for the GS": real code is actively
+reconfiguring the circuit-2 framebuffer base/pointer, consistent with
+genuine per-frame or double-buffering activity rather than a one-time
+static setup that then goes idle.
+
+**Finding 3 - the resting state is NOT a stuck idle loop.** Added a
+scratch fine-grained PC-sampling feature to `driver_r313.c` (samples `ee->pc`
+every 20,000 slices for the final 1,000,000 slices of a run, discarded before
+commit) and ran it against the 40,000,000-slice cold boot. The 51 captured
+samples span a broad address range, `0x005016F8` to `0x0050E688`, all within
+the loaded GAME ELF's own code region (this project's real Tekken Tag
+Tournament Demo binary, not the BIOS/OSDSYS range `0x00200000-0x00480000`
+used in earlier rounds) - i.e. this survey is now observing real PS2 game
+code executing varied logic, not the BIOS boot menu.
+
+Within that broad trace, one small repeating cluster stood out:
+`0x005189A0 -> 0x005189A4 -> 0x005189A8 -> 0x005189AC -> 0x005189B0 ->
+0x005189B4 -> 0x005189B8 -> (back to 0x005189A0)`, recurring multiple times
+across the sample window, interspersed with substantial execution elsewhere.
+Disassembled these 8 real words directly from the checkpoint's EE RAM dump
+(offline, no live PCSX2 needed - the address is well within the 32MB EE RAM
+range and maps 1:1 as a kuseg address):
+
+```
+0x005189A0: 8c620000   lw    $v0, 0($v1)
+0x005189A4: 30420004   andi  $v0, $v0, 0x4
+0x005189A8: 00000000   nop
+0x005189AC: 00000000   nop
+0x005189B0: 00000000   nop
+0x005189B4: 1040fffa   beq   $v0, $zero, -6      ; branches to 0x005189A0
+0x005189B8: 24020004   addiu $v0, $zero, 4        ; (branch delay slot)
+0x005189BC: ac620000   sw    $v0, 0($v1)
+```
+
+This is a textbook "poll a hardware status register for bit 2, spin while
+clear, then write the bit back (acknowledge/clear-on-write) once set"
+pattern - most consistent with a VBLANK-wait or VU/VIF-busy-wait gate,
+which is exactly what a real PS2 game's per-frame main loop is expected to
+do. Combined with Finding 2 (DISPFB2 actively changing) and the broad
+non-repeating instruction trace surrounding this small poll, the evidence
+points to this project now executing something that behaves like the real
+game's per-frame loop, not a bug-induced stall. No fix is indicated here -
+this is presented as a characterization finding, not a gap.
+
+**Answering the user's three-part request directly:**
+1. How far does it go: at least 40,000,000 slices / 319,998,310 EE
+   instructions with zero crash and zero new opcode-gap halt (same ceiling
+   as Round 446 - this round extended the *analysis* at that ceiling rather
+   than pushing the ceiling further, since checkpoint/resume chaining
+   remains broken and single-shot cold runs are bounded by the sandbox's
+   ~40s reliable synchronous window).
+2. Next steps for the GS: DISPFB2 is the one register still actively
+   changing; worth re-checking at a larger budget once resume/chaining is
+   fixed or a faster interpreter path is available, to see if DISPFB2
+   settles into a stable double-buffer alternation (expected for real
+   rendering) or keeps drifting.
+3. What steady loop is next: a small, legitimate hardware-status poll loop
+   (0x005189A0-0x005189B8), interleaved with broad execution across the
+   loaded game ELF's address range - not a stuck spin.
+
+**Next round's concrete targets:** (1) fix or replace the checkpoint/resume
+mechanism (or otherwise raise the effective single-session slice budget)
+so future surveys aren't bounded by the sandbox's ~40s synchronous-call
+ceiling; (2) if/when a larger budget is available, re-run this same
+DISPFB2/poll-loop characterization to see whether it stabilizes into a
+real double-buffered vsync cadence; (3) continue watching for any new
+opcode-gap halt as the budget grows, since VADDq's siblings (funct
+0x21-0x27, VADDi/VSUBq/VSUBi/VMADDq/etc., per the VUops.cpp citations from
+Round 446) remain unimplemented and could still surface.
+
+No git commit changes this round beyond this docs update (task #246 in
+docs/ROADMAP.md mirrors this entry); `driver_r313.c` was reverted to its
+clean committed state before finishing.

@@ -6268,3 +6268,13 @@ Next: fix/replace checkpoint-resume (or find another way past the sandbox's
 ~40s single-call budget) to push the survey further; re-check DISPFB2 for a
 stable double-buffer cadence at a larger budget; watch for a new opcode gap
 among VADDq's unimplemented siblings (funct 0x21-0x27) as the budget grows.
+
+## Round 448 (2026-08-04, task #250): poll loop confirmed as real VBLANK-wait
+
+Traced backward from Round 447's poll loop and found it primes/polls/acks
+real EE INTC I_STAT (0x1000F000) bit 2 (VBLANK_START) - the canonical
+SyncV()/VBLANK-wait idiom. Independently converges with Round 160's much
+older live-hardware finding of the same I_STAT-polling pattern elsewhere
+in the BIOS. Strong confirmation this project is now executing a genuine
+per-frame VBLANK-wait inside real game code, not a modeling artifact.
+Docs-only, no source changes.

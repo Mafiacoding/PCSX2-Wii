@@ -20574,3 +20574,49 @@ Round 446) remain unimplemented and could still surface.
 No git commit changes this round beyond this docs update (task #246 in
 docs/ROADMAP.md mirrors this entry); `driver_r313.c` was reverted to its
 clean committed state before finishing.
+
+## Round 448 (2026-08-04): poll loop confirmed as real VBLANK-wait (task #250), converges with Round 160's independent live-hardware finding
+
+Docs-only follow-up to Round 447's poll-loop characterization. No source
+changes. Traced backward from the loop entry (0x005189A0) using the same
+offline EE-RAM-dump disassembly technique, and found the setup code
+immediately before it:
+
+```
+0x00518990: lui   $v1, 0x1000
+0x00518994: addiu $v0, $zero, 4
+0x00518998: ori   $v1, $v1, 0xf000     ; $v1 = 0x1000F000
+0x0051899C: sw    $v0, 0($v1)          ; I_STAT = 4 (clear stale VBLANK_START)
+0x005189A0: lw    $v0, 0($v1)          ; loop: read I_STAT
+0x005189A4: andi  $v0, $v0, 0x4        ; mask bit 2 (VBLANK_START)
+0x005189A8-B0:    nop x3
+0x005189B4: beq   $v0, $zero, 0x005189a0   ; spin while clear
+0x005189B8: addiu $v0, $zero, 4        ; (delay slot)
+0x005189BC: sw    $v0, 0($v1)          ; I_STAT = 4 (ack VBLANK_START)
+```
+
+`$v1 = 0x1000F000` is the real EE INTC I_STAT register (see
+`source/hw/ee_intc.c`'s own `#define EE_INTC_STAT 0x1000F000u`, matching
+the real hardware map). Bit 2 of I_STAT is VBLANK_START. Writing 1 to a
+set I_STAT bit clears it on real hardware (write-1-to-clear), which is
+exactly what both the priming write (clear any stale pending bit before
+entering the wait) and the trailing write (acknowledge once observed set)
+do. This is precisely the real PS2 SDK's canonical `SyncV()`/VBLANK-wait
+idiom, confirming Round 447's hypothesis outright.
+
+This independently converges with a much older finding: Round 160 (a live
+real-BIOS+GT3 reference session, hundreds of rounds ago, completely
+unrelated code path in the BIOS itself rather than game code) already
+documented "the real kernel separately uses a totally different,
+mask-independent waiting convention... a direct I_STAT-polling VBLANK-wait
+routine at 0x8000af70" (see `source/core/ee/ee_core.c` line ~648's Round
+161 comment block). Two independent investigations, ~287 rounds apart, on
+two different code regions (BIOS vs. now-loaded game code), both land on
+the same real hardware idiom - direct I_STAT bit-2 polling rather than the
+INTC_MASK/interrupt-driven path. This is strong corroborating evidence
+that this project's I_STAT modeling (`source/hw/ee_intc.c`) and the
+Round 447 disassembly are both correct, and that what's currently running
+is a genuine PS2 per-frame VBLANK-wait, not a modeling artifact.
+
+Task #250 closed. Remaining Round 448 targets (checkpoint/resume fix,
+regression baseline, Wii build health check) still open - see docs/ROADMAP.md.

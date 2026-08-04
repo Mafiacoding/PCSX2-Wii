@@ -8954,3 +8954,24 @@ system-update-check logic, (2) implement real MCSERV read/directory
 content modeling against a synthetic memory-card image, (3) place an
 OSDMenu-equivalent ELF at the correct real path and test whether this
 project's own EE/IOP core can run it to a working menu/game-launch.
+
+## Round 477: refined OSDMenu strategy - primary install path is far more tractable, reuses existing trampoline infrastructure
+
+Fetched OSDMenu's own patcher/loader READMEs directly. Found the
+default install (standalone ELF, launched directly) does NOT need the
+Sony memory-card "system update" auto-detection mechanism Round 476
+scoped against - that's only one alternate install option. OSDMenu's
+real disc-launch path routes through rom0:PS2LOGO + SYSTEM.CNF + game
+ELF load, the SAME real chain this project's Round 457-469 trampoline
+work already validated end-to-end. Memory-card config can also be
+compiled out entirely (memory-card-independent build mode exists),
+neutralizing Round 476's main blocker concern for a first attempt.
+
+### Next steps
+
+(1) Obtain a real osdmenu.elf - build from source (needs a new ps2sdk
+EE-side toolchain this project hasn't set up before) or fetch a
+pre-built release binary. (2) Adapt the existing trampoline harness
+(currently loads the Tekken Tag Tournament Demo's own game ELF) to
+load and run osdmenu.elf instead, and observe how far its own simpler
+init code progresses versus real OSDSYS's stuck disc-browser.

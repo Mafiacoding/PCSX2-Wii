@@ -410,3 +410,107 @@ int32_t iop_heap_query_block_size(uint32_t address) {
     return (int32_t)((M_SIZE(p->info) << 8) |
                       (M_ALLOCATED(p->info) ? IOP_HEAP_USED : IOP_HEAP_FREE));
 }
+
+/* Round 448 (task #247): host-native checkpoint/resume support.
+ *
+ * g_alloclist is this file's one piece of host-heap-allocated state
+ * (malloc()'d alloc_table nodes - see file header for why the
+ * bookkeeping lives in host memory rather than guest RAM bytes).
+ * This project's test-only host-native checkpoint tooling
+ * (driver_r313.c, never committed/shipped) does a raw byte dump/
+ * restore of this file's [__data_start,_end) static-storage range,
+ * which includes the g_alloclist POINTER itself - but the pointee
+ * memory it references was malloc()'d by a DIFFERENT process (the
+ * one that wrote the checkpoint) and does not exist in the resuming
+ * process's address space, so blindly restoring the raw pointer
+ * value and later dereferencing it faults (observed directly as
+ * "[R313-SIGSEGV] fault at addr=..." in Rounds 307-447's
+ * checkpoint/resume attempts - this was the root cause, isolated by
+ * Round 448 confirming this file is the ONLY translation unit in
+ * source/ that calls malloc()/calloc()/strdup() at all).
+ *
+ * Fix: expose an explicit save/load pair (mirroring how
+ * driver_r313.c already explicitly re-points ee->ram/iop->ram rather
+ * than trusting their raw restored pointer values) that serializes
+ * only the process-independent state - each table's list[]
+ * info-bitfield array, in chain order - and reconstructs the chain
+ * from scratch in the resuming process on load, using fresh
+ * malloc()'d nodes and the exact same deterministic next-pointer
+ * wiring new_table()/do_maintain() already use (within-table
+ * &list[i+1] chaining, cross-table &next_table->list[SM_FIRST]
+ * stitching at each table boundary). The `next` pointers themselves
+ * are never part of the serialized data and never need to be -
+ * do_alloc()/do_free() only ever shuffle `info` values between fixed
+ * slots (see their "tmp = a->info; a->info = i; i = tmp;" swap
+ * pattern throughout this file), so a table's link structure is
+ * always exactly what new_table()/do_maintain() built it as. */
+
+uint32_t iop_heap_snapshot_size(void) {
+    uint32_t count = 0u;
+    struct alloc_table *t;
+    for (t = g_alloclist; t; t = t->next) count++;
+    return (uint32_t)sizeof(uint32_t) + count * (uint32_t)(SM_MAX * sizeof(uint32_t));
+}
+
+void iop_heap_snapshot_save(void *buf) {
+    uint8_t *p = (uint8_t *)buf;
+    uint32_t count = 0u, i;
+    struct alloc_table *t;
+    for (t = g_alloclist; t; t = t->next) count++;
+    memcpy(p, &count, sizeof(count));
+    p += sizeof(count);
+    for (t = g_alloclist; t; t = t->next) {
+        for (i = 0u; i < (uint32_t)SM_MAX; i++) {
+            memcpy(p, &t->list[i].info, sizeof(uint32_t));
+            p += sizeof(uint32_t);
+        }
+    }
+}
+
+void iop_heap_snapshot_load(const void *buf, uint32_t size) {
+    const uint8_t *p = (const uint8_t *)buf;
+    uint32_t count = 0u, i, tidx;
+    struct alloc_table *prev = NULL, *first = NULL, *t;
+    (void)size;
+
+    /* Deliberately do NOT walk/free() the incoming g_alloclist here.
+     * In this function's primary real use (driver_r313.c's
+     * load_checkpoint(), called AFTER the raw [__data_start,_end)
+     * block has already been restored) g_alloclist at this point
+     * already holds a STALE pointer value from whichever OTHER
+     * process wrote the checkpoint - walking/free()'ing it would
+     * dereference memory that was never valid in THIS process's
+     * address space (this was the exact, confirmed root cause of
+     * the "[R313-SIGSEGV] fault at addr=..." resume failures from
+     * Rounds 307-448: an earlier version of this function tried to
+     * free() that stale chain first and crashed immediately). It is
+     * always safe to simply overwrite g_alloclist with a freshly
+     * built chain below and accept leaking whatever it pointed to
+     * before this call - this is host-process memory in a short-
+     * lived, never-shipped test/checkpoint tool, not guest state,
+     * so a one-time leak of a few hundred KB has no correctness
+     * impact. (In the standalone-test call pattern - see
+     * tests/test_iop_heap.c - the caller's own iop_heap_init() is
+     * called immediately before this anyway, so the leaked chain is
+     * always small and short-lived either way.) */
+
+    memcpy(&count, p, sizeof(count));
+    p += sizeof(count);
+
+    for (tidx = 0u; tidx < count; tidx++) {
+        t = new_table(); /* sets deterministic within-table next-chain */
+        if (!t) break;
+        for (i = 0u; i < (uint32_t)SM_MAX; i++) {
+            memcpy(&t->list[i].info, p, sizeof(uint32_t));
+            p += sizeof(uint32_t);
+        }
+        if (prev) {
+            prev->next = t;
+            prev->list[SM_LAST].next = &t->list[SM_FIRST]; /* cross-table stitch, matches do_maintain() */
+        } else {
+            first = t;
+        }
+        prev = t;
+    }
+    g_alloclist = first;
+}

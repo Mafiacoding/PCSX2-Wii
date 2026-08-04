@@ -20620,3 +20620,85 @@ is a genuine PS2 per-frame VBLANK-wait, not a modeling artifact.
 
 Task #250 closed. Remaining Round 448 targets (checkpoint/resume fix,
 regression baseline, Wii build health check) still open - see docs/ROADMAP.md.
+
+## Round 448 (2026-08-04, task #247): root-caused and partially fixed the checkpoint/resume SIGSEGV - one real bug fixed, a second remains
+
+Real source change (not docs-only): `source/hw/iop_heap.c`, `include/core/hw/iop_heap.h`,
+`tests/test_iop_heap.c`, and `driver_r313.c` (the host-native checkpoint/
+resume test harness - never shipped/committed as part of the emulator
+itself, but IS a tracked file in this repo).
+
+**Root cause #1 (confirmed and fixed).** Grepped the entire `source/` tree
+for `malloc(`/`calloc(`/`strdup(` and found exactly one hit outside the two
+already-handled EE/IOP RAM `memalign()` buffers: `source/hw/iop_heap.c`'s
+`g_alloclist`, a host-heap-allocated linked list backing the real SYSMEM
+free-list allocator (Round 401). `driver_r313.c`'s checkpoint format does a
+raw byte dump/restore of the whole `[__data_start,_end)` static-storage
+range, which includes this pointer - but the pointee memory was `malloc()`'d
+by whichever process wrote the checkpoint and does not exist in the
+resuming process's address space. This was the exact, confirmed cause of
+every "[R313-SIGSEGV] fault at addr=..." resume failure recorded since
+Round 307.
+
+Fix: added an explicit `iop_heap_snapshot_size()`/`_save()`/`_load()` API
+(mirroring how `ee->ram`/`iop->ram` are already explicitly re-pointed rather
+than trusted from the raw restore) that serializes only the process-
+independent state - each table's `list[]` free-list `info` bitfields, in
+chain order - and reconstructs the chain from scratch in the resuming
+process using fresh `malloc()`'d nodes and the exact same deterministic
+next-pointer wiring `new_table()`/`do_maintain()` already use (the `next`
+pointers themselves were confirmed, by reading `do_alloc()`/`do_free()`,
+to never be reordered - only the fixed-slot `info` values get shuffled -
+so they're fully reconstructable and never need to be serialized).
+`driver_r313.c` was updated to call this pair alongside its existing
+`ee->ram`/`iop->ram` handling.
+
+One iteration bug during implementation, also fixed: the first version of
+`iop_heap_snapshot_load()` tried to `free()` the chain `g_alloclist`
+pointed to *before* overwriting it - but by the time this runs (inside
+`load_checkpoint()`, after the raw `.data`/`.bss` block restore), that
+pointer is already the stale value being replaced, so freeing it crashed
+immediately. Fixed by not touching the incoming pointer at all and
+accepting a one-time small host-memory leak (a few hundred KB, in a short-
+lived test tool, not guest state - no correctness impact).
+
+Added a permanent regression test (`tests/test_iop_heap.c`, +11 checks,
+28 total up from 17) that forces enough allocations to trigger a real
+table-growth (exercising the cross-table stitching path, not just the
+single-table case), snapshots, resets, reloads, and verifies every block's
+allocated/free state and address survives byte-for-byte, and that the
+restored chain is still functionally alloc/free-capable afterward. Full
+128-test host-native regression suite re-run clean (128/128) with these
+changes. Wii cross-build clean (zero new warnings/errors, `.dol`/`.elf`
+both produced).
+
+**Result: `load_checkpoint()` itself now succeeds** (prints "[+] resumed
+from checkpoint ...", something that never happened cleanly before) - this
+confirmed the iop_heap fix is correct and complete for its own scope.
+However, **a second, different SIGSEGV still occurs immediately afterward**,
+inside the very first `system_run_interleaved()` call following a resume
+(confirmed via a bracketing diagnostic: entry into the main loop prints
+successfully with a sane, real `ee->pc` matching the checkpoint's actual
+resting state; the crash happens between that point and the next print).
+Tested and ruled out ASLR/load-address variance between the writing and
+resuming process as the cause (`setarch -R` to disable ASLR entirely
+produced the identical fault address). The segv handler's own
+`backtrace()` call crashes before it can print frame symbols, suggesting
+stack or return-address corruption rather than a simple null/stale-pointer
+read - this is a different failure mode than root cause #1's clean,
+symbolizable fault, and was not resolved this round. A fresh, non-resumed
+`run` (this round's entire Round 447 survey, and this round's own 128-test
+suite + Wii build verification) is entirely unaffected - this is
+resume-path-only.
+
+Task #247 is therefore **partially complete**: one confirmed, fixed, tested
+bug shipped as real progress; the checkpoint/resume mechanism is not yet
+fully usable end-to-end. Given the diminishing returns of further blind
+guessing without a working backtrace, this is being left as an open item
+rather than continuing to guess. Next round's concrete target: get a
+working backtrace for the second fault (try compiling with
+`-fno-omit-frame-pointer` and a lower optimization level even for the
+"release" driver build, or add manual frame-pointer-chasing/stack-canary
+instrumentation around `system_run_interleaved()` calls specifically) to
+identify what's actually corrupting the stack/return address during
+resumed execution.

@@ -39,6 +39,7 @@
 #include "core/hw/iop_cdrom_legacy.h"
 #include "core/hw/iop_sio2.h"
 #include "core/hw/gs.h"
+#include "core/hw/iop_heap.h"
 
 /* R313: safe-printf helper (see docs/STATUS.md Round 312) - r313_safe_printf()/
  * stdio reliably crashes on any call made after this checkpoint
@@ -126,6 +127,19 @@ static void dump_checkpoint(const char *path)
     write_block(f, (void*)&__data_start, (size_t)(&_end - &__data_start));
     write_block(f, ee->ram, ee->ram_size);
     write_block(f, iop->ram, iop->ram_size);
+    /* Round 448 (task #247): explicit IOP-heap-chain snapshot -
+     * see iop_heap.h's citation on why the raw [__data_start,_end)
+     * block alone is not enough for this one piece of state (the
+     * only host-heap-allocated global anywhere under source/). */
+    {
+        uint32_t hsz = iop_heap_snapshot_size();
+        void *hbuf = malloc(hsz ? hsz : 1);
+        if (hbuf) {
+            iop_heap_snapshot_save(hbuf);
+            write_block(f, hbuf, hsz);
+            free(hbuf);
+        }
+    }
     fclose(f);
     r313_safe_printf("[+] checkpoint written to %s\n", path);
 }
@@ -159,6 +173,24 @@ static int load_checkpoint(const char *path)
     iop_dma_bind_iop_ram(iop->ram, iop->ram_size);
     rc |= read_block_into(f, ee->ram, ee_ram_size);
     rc |= read_block_into(f, iop->ram, iop_ram_size);
+    /* Round 448 (task #247): rebuild the IOP heap chain from its
+     * explicit snapshot, in THIS process's own fresh malloc()'d
+     * nodes - the raw block above just clobbered g_alloclist with a
+     * stale pointer from the writing process (see iop_heap.h's
+     * citation), so this must run AFTER that block and BEFORE
+     * anything touches the IOP heap. */
+    {
+        uint64_t hsz64 = 0;
+        if (fread(&hsz64, sizeof(hsz64), 1, f) == 1 && hsz64 > 0) {
+            void *hbuf = malloc((size_t)hsz64);
+            if (hbuf && fread(hbuf, 1, (size_t)hsz64, f) == hsz64) {
+                iop_heap_snapshot_load(hbuf, (uint32_t)hsz64);
+            } else {
+                rc |= -1;
+            }
+            free(hbuf);
+        }
+    }
     fclose(f);
     if (rc == 0) r313_safe_printf("[+] resumed from checkpoint %s\n", path);
     return rc;

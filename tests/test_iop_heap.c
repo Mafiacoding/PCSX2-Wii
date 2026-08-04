@@ -1,6 +1,7 @@
 /* Round 401 (task #128): host-native test for the real SYSMEM
  * free-list heap allocator port (source/hw/iop_heap.c). */
 #include <stdio.h>
+#include <stdlib.h>
 #include <assert.h>
 #include "core/hw/iop_heap.h"
 
@@ -98,6 +99,74 @@ int main(void) {
     iop_heap_init();
     uint32_t total_reset = iop_heap_query_total_free();
     CHECK(total_reset == total0, "re-init restores original total free size");
+
+    /* Round 448 (task #247): snapshot save/load round-trip, added
+     * to fix the host-native checkpoint/resume test harness's
+     * long-standing SIGSEGV-on-resume bug (root-caused to this
+     * file's g_alloclist being the ONLY host-heap-allocated state
+     * anywhere under source/ - see iop_heap.h's citation on the new
+     * functions). Force enough allocations to guarantee at least one
+     * table growth, so the cross-table next-pointer stitching path
+     * (do_maintain()'s &next_table->list[SM_FIRST] wiring) is
+     * actually exercised, not just the single-table case. */
+    {
+        uint32_t snap_addrs[40];
+        int snap_n = 0, i;
+        iop_heap_init();
+        for (i = 0; i < 35; i++) {
+            uint32_t a = iop_heap_alloc(IOP_HEAP_ALLOC_FIRST, 512u, 0u);
+            if (a != 0u) snap_addrs[snap_n++] = a;
+        }
+        CHECK(snap_n == 35, "snapshot test: all 35 pre-growth allocations succeed");
+        for (i = 0; i < snap_n; i += 3) {
+            iop_heap_free(snap_addrs[i]);
+        }
+
+        uint32_t maxfree_before = iop_heap_query_max_free();
+        uint32_t totalfree_before = iop_heap_query_total_free();
+
+        uint32_t snap_sz = iop_heap_snapshot_size();
+        CHECK(snap_sz > 0u, "snapshot size is non-zero after growth+mixed alloc/free");
+        void *snap_buf = malloc(snap_sz);
+        CHECK(snap_buf != NULL, "snapshot buffer allocation succeeds");
+        iop_heap_snapshot_save(snap_buf);
+
+        /* Simulate a fresh resuming process: re-init (as
+         * system_init() would before load_checkpoint() runs), THEN
+         * load the snapshot - the exact call order driver_r313.c
+         * uses. */
+        iop_heap_init();
+        iop_heap_snapshot_load(snap_buf, snap_sz);
+
+        uint32_t maxfree_after = iop_heap_query_max_free();
+        uint32_t totalfree_after = iop_heap_query_total_free();
+        CHECK(maxfree_after == maxfree_before, "snapshot round-trip preserves max free size");
+        CHECK(totalfree_after == totalfree_before, "snapshot round-trip preserves total free size");
+
+        int all_blocks_ok = 1;
+        for (i = 0; i < snap_n; i++) {
+            int32_t q = iop_heap_query_block_size(snap_addrs[i]);
+            int should_be_free = (i % 3 == 0);
+            if (q == -1) { all_blocks_ok = 0; break; }
+            if (should_be_free && !((uint32_t)q & IOP_HEAP_FREE)) { all_blocks_ok = 0; break; }
+            if (!should_be_free && ((uint32_t)q & IOP_HEAP_FREE)) { all_blocks_ok = 0; break; }
+        }
+        CHECK(all_blocks_ok, "every block's allocated/free state survives the snapshot round-trip");
+
+        /* Restored chain must still be FUNCTIONAL (proves the
+         * reconstructed next-pointer links work, not just the info
+         * bitfields matching by coincidence). */
+        uint32_t post_a = iop_heap_alloc(IOP_HEAP_ALLOC_FIRST, 256u, 0u);
+        CHECK(post_a != 0u, "restored heap can still allocate after snapshot round-trip");
+        int post_fr = iop_heap_free(post_a);
+        CHECK(post_fr == 0, "restored heap can still free after snapshot round-trip");
+
+        free(snap_buf);
+    }
+
+    /* final re-init leaves the module in a clean state for any
+     * process-wide reuse. */
+    iop_heap_init();
 
     printf("\n%d check(s) failed, %d passed\n", g_fail, g_pass);
     return g_fail != 0;

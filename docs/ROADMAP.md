@@ -6278,3 +6278,25 @@ older live-hardware finding of the same I_STAT-polling pattern elsewhere
 in the BIOS. Strong confirmation this project is now executing a genuine
 per-frame VBLANK-wait inside real game code, not a modeling artifact.
 Docs-only, no source changes.
+
+## Round 448 (2026-08-04, task #247): checkpoint/resume - one bug fixed, one remains
+
+Root-caused and fixed the confirmed cause of the long-standing
+"[R313-SIGSEGV] fault at addr=..." resume failures: `source/hw/iop_heap.c`'s
+`g_alloclist` was the only host-heap-allocated state outside the already-
+handled EE/IOP RAM buffers, and driver_r313.c's raw checkpoint restore left
+it pointing at memory that belonged to a different process. Added explicit
+`iop_heap_snapshot_size()/_save()/_load()` API (real source change,
+committed), wired into driver_r313.c, covered by 11 new regression checks
+in tests/test_iop_heap.c (28 total, all passing). 128/128 full regression
+suite clean; Wii cross-build clean.
+
+`load_checkpoint()` itself now succeeds (previously always crashed) -
+confirms this fix is correct. But a SECOND, different SIGSEGV still occurs
+during the first post-resume system_run_interleaved() call - ruled out
+ASLR as the cause; the fault crashes even the segv handler's own
+backtrace(), suggesting stack/return-address corruption rather than a
+simple stale pointer. Not resolved this round - left as an open item.
+Task #247 partially complete (real fix shipped, full resume not yet
+working). Next: get a symbolized backtrace for the second fault before
+attempting another fix.

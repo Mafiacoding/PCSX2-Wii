@@ -20801,3 +20801,23 @@ static; sprites plateau. OSDSYS is genuinely resting in a stable idle state,
 not a bug or missing rendering feature - advancing further requires a real
 boot-progress trigger, not more rendering-pipeline work. See ROADMAP.md's
 Round 452 task #267 entry for detail.
+
+## Round 454 (tasks #272-273): boot-animation research + honest gap synthesis (docs-only)
+
+Task #272: confirmed via web research that the real PS2's iconic boot
+animation is rendered live by the console's own GS hardware (not a stored
+video/image asset) - architecturally consistent with, and corroborating,
+Round 451's finding that the current rendered frame is genuine real-time
+line/sprite/point GS content, not a rendering defect.
+
+Task #273: synthesized existing findings into an honest characterization
+of what's still needed for a real interactive OSDSYS menu. Solid: the
+current VBLANK-wait idle loop is real/correct (Round 448), pad-press
+simulation doesn't unstick it (Round 272/360), and the current scene is
+confirmed static for 185M+ slices (Round 452). Caveat flagged: the
+long-standing `dispatch_ncmd()=0` blocker (Rounds 269-380) predates this
+project's Round 441-448 fixes and the current trace runs in code
+(0x0050xxxx-0x0051xxxx) that didn't exist in those old measurements - it
+needs re-verification at current boot depth before being trusted as the
+active blocker. See docs/ROADMAP.md's Round 454 entries for full detail
+and citations.

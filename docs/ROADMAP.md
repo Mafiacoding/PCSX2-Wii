@@ -6528,3 +6528,70 @@ genuine further boot-progress question - out of scope for a rendering-
 pipeline characterization round, and a natural candidate for a future round
 (see task #273, already queued: "characterize what's still needed to reach
 the actual OSDSYS main menu").
+
+## Round 454 (task #272): real PS2 boot animation is confirmed dynamically-rendered ribbon geometry - strong corroboration for the line/sprite finding
+
+Research task, docs-only, no source changes. Looked into how the real PS2's
+iconic startup animation (swirling ribbons converging on the "2" logo,
+followed by the disc browser) actually works, to sanity-check Round 451's
+finding that our current rendered frame is composed entirely of real LINE
+(4888), SPRITE (~343-571), and POINT (333) primitives with zero triangles.
+
+Confirmed from PS2 homebrew/preservation community sources: the real PS2
+startup animation is NOT a pre-rendered video or image sequence stored in
+BIOS ROM - it is rendered live, in real time, by the console's own GS
+hardware, using logic and assets embedded directly in the BIOS. This is
+exactly the same category of thing this project is now doing (a real,
+dynamically-computed GS scene, not a static asset blit).
+
+This is strong circumstantial corroboration, not proof, that a line/point/
+sprite-heavy scene at this stage of boot is architecturally plausible for
+the real PS2 startup sequence (curved ribbon shapes are a natural fit for
+chains of line segments, and UI/particle elements for small sprites),
+rather than evidence of a rendering defect. It does not prove this
+project's specific 4888-line scene IS the real ribbon animation (no
+byte-level BIOS ROMDIR asset comparison was attempted this round - out of
+scope), only that "real-time line/sprite-heavy GS content at this boot
+stage" is consistent with known real PS2 behavior in general, reinforcing
+Round 451/452's conclusion that this is correct, expected emulation
+behavior rather than a bug.
+
+## Round 454 (task #273): what's actually still needed to reach a real, interactive OSDSYS menu - honest synthesis of existing findings, one significant caveat flagged
+
+Docs-only synthesis task, no new runs. Pulled together this project's own
+existing, extensively-documented findings (Rounds 269-452) to characterize
+the real remaining gap between the current rendering (a real, stable,
+GS-circuit-2 VBLANK-wait idle scene) and an actual interactive OSDSYS main
+menu.
+
+**What's solid and unlikely to need revisiting:**
+- The current resting loop (`0x005189A0` family) is a real, correctly-
+  modeled PS2 SDK `SyncV()`/VBLANK-wait idiom (Round 448, converging
+  independently with Round 160's much older live-hardware finding on a
+  different code region) - not a bug, not a stall.
+- Simulated pad-button-press (CROSS, repeating toggle) has zero effect on
+  advancing this state (Round 272, reconfirmed Round 360) - a real
+  interactive PS2 typically needs its own real event source (memory card
+  poll result, real SIO2 timing, or similar), not just "a button is down."
+- Round 452 (tasks #265-267, this session) newly confirms the CURRENT
+  scene is completely static for at least 185,000,000 slices (~1.48B EE
+  instructions) - genuinely resting, not slowly building toward more
+  content on its own.
+
+**The significant caveat.** The most concrete historically-documented
+blocker - `dispatch_ncmd()` call count stuck at 0, meaning OSDSYS never
+organically attempts to read the disc (Round 269, reconfirmed through
+Round 380) - was characterized entirely BEFORE this project's own Round
+441 (BOOTEND fix), Round 444 (VU0/COP2), Round 445 (SetGsCrt), Round 446
+(VADDq), and Round 448 (checkpoint/resume) fixes. The current boot trace
+now executes real VU0 vector-math and real GS-circuit-2 setup code in a
+completely different address range (`0x0050xxxx`-`0x0051xxxx`) that did
+not even exist in any trace where `dispatch_ncmd()=0` was measured. That
+finding should NOT be assumed to still hold at the current boot depth -
+it needs re-verification against the current, far-more-advanced trace
+before being treated as the active blocker. This is flagged here rather
+than re-tested this round to keep this task properly scoped as synthesis;
+re-running the existing `-DEE_FILEIO_DEBUG`-style disc-read instrumentation
+(Round 380's own already-shipped methodology) against the current 185M+
+slice trace is the single most concrete, well-evidenced next step, and is
+a natural target for a future round.

@@ -190,4 +190,15 @@ typedef struct {
 
 iop_module_loader_stats_t *iop_module_loader_get_stats(void);
 
+/* Round 513: diagnostic accessors for correlating a live IOP PC with
+ * the real module that owns it, used by host-native tests. Mirrors
+ * this file's own g.modlist[]/g.entry_points[] internal arrays (see
+ * iop_module_loader.c's own header comment for their real-IOPBTCONF
+ * provenance) without exposing the struct itself. index is 0-based,
+ * same order IOPBTCONF listed the modules in. Returns NULL/0 for an
+ * out-of-range index. */
+int iop_module_loader_get_module_count(void);
+const char *iop_module_loader_get_module_name(int index);
+uint32_t iop_module_loader_get_module_entry(int index);
+
 #endif

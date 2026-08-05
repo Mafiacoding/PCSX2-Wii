@@ -366,6 +366,11 @@ const iop_hle_thread_stats_t *iop_hle_thread_get_stats(void);
 int iop_hle_thread_get_thread_count(void);
 int iop_hle_thread_get_current_thread_id(void);
 uint32_t iop_hle_thread_get_status(int thid);
+/* Round 513: current priority number (thbase.h convention - lower
+ * number is more urgent; HIGHEST_PRIORITY=1, LOWEST_PRIORITY=126).
+ * Returns 0 for an unused/invalid thid, matching get_status's own
+ * 0-for-invalid convention (0 is not a valid real priority value). */
+uint32_t iop_hle_thread_get_priority(int thid);
 int iop_hle_thread_get_sema_count(void);
 int iop_hle_thread_get_evf_count(void);
 int iop_hle_thread_get_alarm_count(void);

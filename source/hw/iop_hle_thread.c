@@ -1301,6 +1301,11 @@ uint32_t iop_hle_thread_get_status(int thid)
     iop_tcb_t *t = tcb(thid);
     return (t && t->in_use) ? t->status : 0u;
 }
+uint32_t iop_hle_thread_get_priority(int thid)
+{
+    iop_tcb_t *t = tcb(thid);
+    return (t && t->in_use) ? t->priority : 0u;
+}
 int iop_hle_thread_get_sema_count(void)
 {
     int n = 0;

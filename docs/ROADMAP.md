@@ -9740,3 +9740,13 @@ Organic-boot survey (`tools/round512-iop-thread-survey/`) shows the scheduler IS
 No source change this round (diagnostic only) - regression/Wii build correctly skipped.
 
 Next: Round 513 - identify thread 1's module identity + all threads' priority numbers to resolve which explanation is correct.
+
+## Round 513: thread-1 identity + priority survey - classifies as genuine dispatch/integration gap
+
+Added `iop_hle_thread_get_priority()` + module-list getters (`iop_module_loader_get_module_count/name/entry`), small diagnostic-only additions. Survey shows thread 1 (priority=64, an uncited placeholder default) is not real module code but this project's own module-loader idle/trampoline landing pad (`g.trampoline_addr` = BUMP_BASE = its live pc). Threads 4/5/6 (real module-created threads, priority 80/96) never run because `g_iop.idle` (CPU-core level, task #179) and THREADMAN's TCB status (Round 389+) were never integrated - nothing demotes thread 1's TCB status when the CPU goes idle, so it permanently outranks the real worker threads by priority alone.
+
+Classified as a genuine, precisely-located integration gap, not correct real starvation. Fix deferred to a follow-up round (needs a real design decision on what TCB state the idle root thread should enter).
+
+Verified: full 129-test regression suite (0 failures), Wii cross-build clean (37/37 files).
+
+Next: design + implement the idle/THREADMAN integration fix, re-measure thread 4/5/6 dispatch. Task #447 remains open.

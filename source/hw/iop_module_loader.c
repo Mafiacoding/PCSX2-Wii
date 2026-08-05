@@ -193,6 +193,20 @@ void iop_module_loader_reset(void)
 
 iop_module_loader_stats_t *iop_module_loader_get_stats(void) { return &g.stats; }
 
+int iop_module_loader_get_module_count(void) { return g.modlist_count; }
+
+const char *iop_module_loader_get_module_name(int index)
+{
+    if (index < 0 || index >= g.modlist_count) return NULL;
+    return g.modlist[index];
+}
+
+uint32_t iop_module_loader_get_module_entry(int index)
+{
+    if (index < 0 || index >= g.modlist_count) return 0u;
+    return g.entry_points[index];
+}
+
 static inline uint32_t rd_le32(const uint8_t *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);

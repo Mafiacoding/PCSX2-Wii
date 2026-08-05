@@ -9693,3 +9693,16 @@ Interpretation: real BIOS disc-enumeration and BOOT2-dispatch are separate mecha
 No tracked emulator source changed - live-hardware investigative round, regression/Wii build correctly skipped.
 
 Next: task #447 revisit with this round's evidence. Optional: Pine-assisted trace of a real commercial disc's boot for comparison, if the organic path is still worth pursuing.
+
+## Round 509: does this project's OWN emulator core boot uLaunchELF's real BOOT.ELF?
+User uploaded uLaunchELF v4.43a's real BOOT.ELF (497KB, ET_EXEC, entry=0x01D0001C) and asked if our own emulator (not real PCSX2) can launch it. Reused the syscall-7 trampoline recipe (organic warm-up, `ee_elf_load()` direct, VBLANK-END mask, syscall install) - same methodology already used for Tekken's game ELF and osdmenu.elf.
+
+Result: ELF loads correctly (PT_LOAD segments match real header exactly), trampoline dispatches correctly (lands at real exception vector 0x80000180), runs crash-free for 640M instructions - but PC stays entirely within the same well-documented shared kernel idle-dispatch loop (0x8000CC8C-0x8000F868 family) characterized since Round 265-271, and GS state is byte-identical before/after the entire run (purely inherited from OSDSYS's own warmup, no evidence uLaunchELF's own code ran its UI).
+
+Third independent confirmation of the same systemic finding (after Tekken and osdmenu.elf): the trampoline mechanism itself is correct, but the shared kernel idle-wait loop needs a real stimulus never delivered mid-run (only once before warmup). Not a uLaunchELF-specific bug.
+
+Driver committed as `tools/round509-ulaunchelf-test/` (driver.c + README, not the BOOT.ELF binary itself - third-party GPL, kept out of tracked repo).
+
+No tracked emulator source changed - regression/Wii build correctly skipped.
+
+Next: try delivering a pad-button-press event DURING the post-trampoline run (not just once before warmup) - untried by any round so far.

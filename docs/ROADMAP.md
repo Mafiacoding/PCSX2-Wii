@@ -9016,3 +9016,39 @@ disassemble it, check GS/framebuffer state for any OSDMenu-drawn UI,
 determine what stimulus (interrupt/RPC/pad input) it may be waiting
 on. Continue the parallel real-OSDSYS-escalation thread per the
 user's "do both in parallel" decision.
+
+
+## Round 479: ruled out CDVD disc-presence hardware signal as the missing escalation trigger; extended the real S-command traffic census
+
+Built a fresh, minimal driver (main.c's own real boot sequence:
+bios_load + system_init + iop_cdvd_mount_iso +
+iop_cdvd_set_disc_present) to test whether the real "disc present,
+spun up" CDVD status/type register state (vs mount-only, leaving the
+register at its no-disc reset value) changes OSDSYS's organic-boot
+trajectory. Result: byte-for-byte identical final state either way
+(pc=0x0050172C, instr=319998310 at 40M slices, matching Round 472's
+own baseline exactly) - this hypothesis is definitively ruled out.
+
+Extended Round 475's own real-RPC-traffic census with a full
+S-command rpc_number breakdown: CD_SCMD_READCLOCK (rpc=1) called 48
+times, CD_SCMD_OPEN_CONFIG/CLOSE_CONFIG/READ_CONFIG (rpc=14/15/16)
+each called once - a coherent real EEPROM-config read plus a
+real-time-clock poll. GetDiskType (rpc=3) and DiskReady are still
+never called, and dispatch_ncmd() is still zero - confirmed across
+this entire real S-command census, OSDSYS never once asks "what kind
+of disc is this" or "is it ready." The blocker is upstream of any
+disc-protocol layer this project has access to fix.
+
+No source change - two real, evidenced negative/narrowing results.
+Regression suite and Wii rebuild correctly skipped.
+
+### Next steps
+
+The real outer dispatcher (0x0021477C, fully decoded by Round 471) is
+itself called indirectly from a caller that issues one distinct a1
+command per real disc/config/clock operation during a one-time init
+burst, then settles into the a1=0x500D heartbeat forever. The actual
+open question is what decides that transition - disassembling the
+CALLER of 0x0021477C (not yet attempted) is the concrete next step,
+genuinely new ground after 60+ rounds spent on the dispatch chain
+itself.

@@ -1152,6 +1152,7 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
         st->idle = 1;
         st->cop0[12] |= 0x1u; /* Status.IEc = 1 */
         st->exception_pending = 0;
+        iop_hle_thread_retire_root_thread(st); /* Round 514: see this function's own header comment */
         strncpy(st->halt_reason, panic_msg, sizeof(st->halt_reason) - 1);
         st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';
         return 1;
@@ -1258,6 +1259,7 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
         st->idle = 1;
         st->cop0[12] |= 0x1u; /* Status.IEc = 1 */
         st->exception_pending = 0;
+        iop_hle_thread_retire_root_thread(st); /* Round 514: see this function's own header comment */
         strncpy(st->halt_reason, trap_msg, sizeof(st->halt_reason) - 1);
         st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';
         return 1;
@@ -1279,6 +1281,7 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
         st->idle = 1;
         st->cop0[12] |= 0x1u; /* Status.IEc = 1 */
         st->exception_pending = 0;
+        iop_hle_thread_retire_root_thread(st); /* Round 514: see this function's own header comment */
         strncpy(st->halt_reason, reg_panic_msg, sizeof(st->halt_reason) - 1);
         st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';
         return 1;
@@ -1401,6 +1404,8 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
      * clearing it here makes that already-decided design intent
      * actually work. */
     st->exception_pending = 0;
+
+    iop_hle_thread_retire_root_thread(st); /* Round 514: see this function's own header comment */
 
     strncpy(st->halt_reason, msg, sizeof(st->halt_reason) - 1);
     st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';

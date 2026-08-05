@@ -1294,6 +1294,22 @@ void iop_hle_thread_tick(iop_state_t *st)
 
 const iop_hle_thread_stats_t *iop_hle_thread_get_stats(void) { return &g.stats; }
 
+void iop_hle_thread_retire_root_thread(iop_state_t *st)
+{
+    if (g.thread_count == 0) return; /* no thread primitive has ever run - nothing to retire */
+    int cur = g.current_thread_id;
+    if (cur == 0) return; /* already idle at the scheduler level, nothing to do */
+    iop_tcb_t *t = tcb(cur);
+    if (!t) return;
+    /* Real THREADMAN semantics: this synthetic bridge thread's one
+     * job (running the module loader's fixed dispatch sequence) has
+     * genuinely finished, matching a real ExitThread-style handoff -
+     * not a WaitSema/SleepThread-style block (nothing will ever
+     * signal or wake it again; it must never be reselected). */
+    t->status = IOP_THS_DORMANT;
+    reschedule(st);
+}
+
 int iop_hle_thread_get_thread_count(void) { return g.thread_count; }
 int iop_hle_thread_get_current_thread_id(void) { return g.current_thread_id; }
 uint32_t iop_hle_thread_get_status(int thid)

@@ -22639,3 +22639,13 @@ No existing function signatures or logic were changed. Extended the Round 509 uL
 **Leak check:** outputs mirror scanned (filename patterns + `.ckpt` + `git ls-files` grep) - all clean. No BIOS/disc/binary data added; `tools/round513-thread-priority/` contains only our own diagnostic driver source and documentation.
 
 **Next:** design and implement the idle/THREADMAN integration fix (what TCB state thread 1 should enter when `g_iop.idle` is set, with a citeable real-hardware basis if one can be found), then re-measure whether threads 4/5/6 ever get real CPU time. Task #447's SIF2/SBUS blocker remains open either way.
+
+## Round 514: idle/THREADMAN integration fix - threads 4-8 now get real CPU time
+
+**Fix:** added `iop_hle_thread_retire_root_thread(iop_state_t *st)` (source/hw/iop_hle_thread.c, include/core/hw/iop_hle_thread.h), wired into all 4 of iop_module_loader.c's boot-complete paths (panic-loop bypass, trap-stub bypass, registration-walk-panic bypass, main completion path) right after their existing `st->idle = 1` line. When the module loader recognizes boot-dispatch is exhausted, thread 1 (the synthetic "implicit root thread" identified in Round 513) is now transitioned to `IOP_THS_DORMANT` (a real ExitThread-style handoff, not a wait) and `reschedule()` is invoked - the THREADMAN scheduler's own existing, correct priority-based pick_next_ready() then naturally either dispatches a real, previously-starved worker thread (loading its actual saved CreateThread/StartThread context) or, if nothing else is ready, falls back to the pre-existing idle mechanism on its own.
+
+**Result:** re-running Round 513's survey driver post-fix: thread 1 now correctly DORMANT; threads 4/5/6 (previously permanently READY) actually ran their real module code and progressed to WAIT (real semaphore/event-flag blocks); **two new real threads (7, 8) were created** by that newly-running code (priority 81 each) - genuine additional forward progress into real module logic that never executed before. Live IOP pc moved from 0x00100000 (synthetic idle trampoline) to 0x0011ad58 (real module code, within the SIFCMD/REBOOT module range). Stable and identical across both a 20,000,000 and a 60,000,000-instruction run - no crash, no infinite loop, no divergence.
+
+**Verification:** full 129-test host-native regression suite, 0 failures. Wii cross-build health check clean across all 37 tracked source files.
+
+**Next:** re-survey with a disc mounted / longer budget to see if this new real thread activity (threads 7/8, and threads 4/5/6's newly-reached WAIT states) advances task #447's SIF2/SBUS blocker; audit what threads 7/8 actually are (which module created them).

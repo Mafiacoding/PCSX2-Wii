@@ -375,4 +375,32 @@ int iop_hle_thread_get_sema_count(void);
 int iop_hle_thread_get_evf_count(void);
 int iop_hle_thread_get_alarm_count(void);
 
+/* Round 514: real integration between iop_module_loader.c's own
+ * task #179 idle mechanism (g_iop.idle, CPU-core level) and this
+ * file's THREADMAN scheduler (Round 389+, TCB level) - see Round
+ * 513's docs/STATUS.md finding for the full evidence trail. Before
+ * this fix the two mechanisms never talked to each other: the
+ * synthetic "implicit root thread" (TCB slot 1, bridging the
+ * module loader's own sequential dispatch - see ensure_root_
+ * thread()'s header comment) stayed in THS_RUN status forever at
+ * its uncited default priority (64), permanently outranking any
+ * real, module-created worker thread with a numerically-larger
+ * (less urgent) priority, even after the module loader itself
+ * correctly recognized boot-dispatch was exhausted and asked the
+ * CPU core to idle. Call this exactly once, at the same one-shot
+ * moment iop_module_loader.c's own trap handler first recognizes
+ * that transition (mirroring every other one-shot fix at that same
+ * call site, e.g. the Status.IEc/exception_pending corrections).
+ * Retires the current thread (if any) out of the runnable pool
+ * (THS_DORMANT - its job, running the fixed module-dispatch
+ * sequence, is genuinely finished, matching a real ExitThread-style
+ * handoff) and re-invokes the scheduler's own real priority pick:
+ * a real, previously-READY worker thread with better (or any)
+ * priority is dispatched for real - loading its actual saved
+ * context from when it was created via CreateThread/StartThread -
+ * or, if genuinely nothing else is ready, the scheduler's own
+ * pre-existing "nothing ready" fallback correctly re-enters the
+ * same idle state on its own (no special-casing needed here). */
+void iop_hle_thread_retire_root_thread(iop_state_t *st);
+
 #endif

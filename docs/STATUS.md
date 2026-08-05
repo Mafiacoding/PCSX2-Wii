@@ -22602,3 +22602,22 @@ No existing function signatures or logic were changed. Extended the Round 509 uL
 **Leak check:** outputs mirror scanned (filename patterns including `.elf`, `.ckpt` scan, `git ls-files` grep) - all clean. No BIOS/disc/binary data added; `tools/round511-sif2-dma/` contains only our own diagnostic driver source and documentation.
 
 **Next:** Round 512 - design and implement persistent IOP threading/scheduler (task #472), per the user's explicit instruction to tackle this after the SIF DMA fix.
+
+## Round 512: IOP thread-scheduler survey - corrects Round 511's "IOP halts, needs threading built" framing
+
+**Context:** per the user's instruction to tackle persistent IOP threading after the SIF2 DMA fix, this round began by investigating `source/hw/iop_hle_thread.c` before writing any new code - and found a full, real, priority-based preemptive THREADMAN scheduler (real `CreateThread`/`StartThread`/`WaitSema`/`SignalSema`/`SleepThread`/`WakeupThread`/EventFlags/Alarm, ps2sdk-cited ordinals and struct layouts) already implemented in an earlier investigative arc (task #116/117, "Round 389+"), and that `iop_module_loader.c`'s "task #179" fix already changed post-module-exhaustion behavior from a hard `halted` state to a genuinely interrupt-responsive `idle` (not halted) state. **Round 511's framing - "the IOP halts... instead of staying alive as an event-driven scheduler" - is corrected here as stale/inaccurate relative to the current tracked source.**
+
+**Method:** built `tools/round512-iop-thread-survey/driver.c`, an organic-boot survey using the existing (not new) `iop_hle_thread_get_thread_count()`/`get_sema_count()`/`get_evf_count()`/`get_alarm_count()`/`get_status()` diagnostic getters.
+
+**Result (20,000,000-instruction organic boot, re-confirmed stable through 60,000,000 in the companion Round 511 driver):**
+- 6 real threads, 3 real semaphores, 2 real event flags created from actual interpreted module init code - the scheduler is genuinely exercised, not dormant.
+- Thread 1 = **RUN**, threads 2/3 = **DORMANT**, threads 4/5/6 = **READY** (created and schedulable, but never dispatched).
+- IOP PC oscillates between `0x00100000` (module-loader trampoline/idle-park) and `0x80000080` (real general exception vector) repeatedly - consistent with thread 1 fielding real periodic hardware interrupts and returning, without ever calling a THREADMAN primitive that would trigger `reschedule()`.
+
+**Interpretation:** `reschedule()` is correctly wired to every real THREADMAN primitive that could change readiness - not itself a bug. The observed starvation (3 live threads permanently READY while thread 1 permanently RUNs) has two possible explanations this round's evidence doesn't yet distinguish: (1) genuinely correct, real starvation-by-design if thread 1's priority number is ≤ threads 4-6's (real hardware would behave identically - a non-yielding higher-or-equal-priority thread legitimately monopolizes the CPU), in which case the real question becomes what should cause thread 1 to yield; or (2) a genuine dispatch gap if thread 1's priority is actually lower urgency than 4-6's and something fails to trigger `reschedule()` at the right point. Identifying thread 1's real module identity and each thread's actual priority number is the concrete next step - not yet done this round.
+
+**Classification:** diagnostic/investigative round - no tracked emulator source changed (only new scratch driver code added under `tools/`). Host-native regression suite and Wii cross-build correctly skipped, matching this project's own established convention for docs-only rounds.
+
+**Leak check:** outputs mirror scanned (filename patterns + `.ckpt` + `git ls-files` grep) - all clean. No BIOS/disc/binary data added.
+
+**Next:** Round 513 - identify thread 1's real module identity (likely via disassembling its live PC region or cross-referencing the module load order) and each of the 6 threads' actual priority numbers, to determine whether the observed starvation is correct real-hardware behavior or a genuine scheduler gap. Task #447's SIF2/SBUS blocker remains open either way.

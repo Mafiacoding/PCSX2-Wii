@@ -9730,3 +9730,13 @@ Verified: 4 relevant regression tests pass (test_dma_sif2, test_iop_dma, test_dm
 Driver committed as `tools/round511-sif2-dma/` (driver.c + README).
 
 Next: Round 512 - persistent IOP threading/scheduler (task #472).
+
+## Round 512: IOP thread-scheduler survey - corrects Round 511's framing
+
+Before implementing "persistent IOP threading" (per user's "do first 2 and after that 1" instruction), investigated the existing source first - found a full, real, priority-based THREADMAN scheduler already exists (Round 389+) and the IOP already goes `idle`-not-`halted` after module boot (task #179, pre-existing). Round 511's "IOP halts, needs a scheduler built" framing was stale - corrected here.
+
+Organic-boot survey (`tools/round512-iop-thread-survey/`) shows the scheduler IS active: 6 real threads, 3 semaphores, 2 event flags created from real module init code. But 3 of 6 threads sit permanently READY while thread 1 permanently RUNs and never yields - real starvation, cause not yet determined (could be correct-by-priority or a genuine gap).
+
+No source change this round (diagnostic only) - regression/Wii build correctly skipped.
+
+Next: Round 513 - identify thread 1's module identity + all threads' priority numbers to resolve which explanation is correct.

@@ -22389,3 +22389,25 @@ This writes `0x83` to RAM address `0x10`, then spins re-reading that same addres
 **Leak check.** BIOS files (`bios.bin`, `bios_us.bin`) and all scratch drivers stayed under `/tmp/round238_diag/` only; never copied into `/tmp/pcsx2-wii-git` or the outputs mirror. Filename-pattern scan, `.ckpt` scan, and `git ls-files` grep all clean (below).
 
 **Next.** If the user wants the US BIOS pursued further, the concrete next step is the same value-watch/backward-trace methodology used throughout Rounds 480-502: find what real component (IOP-side code, most likely) is supposed to write RAM offset 0x10 during early hardware bring-up, and why our IOP model's boot sequence never does. Otherwise, task #447 (JP-path decision: accept disc-browser idle as correct, or pivot to the syscall-7 trampoline) remains the standing next step on the primary investigative thread.
+
+---
+
+## Round 504: user-uploaded real PAL BIOS (30004R V6) - identical root cause to Round 503's US BIOS, and a bigger finding: it's an old-vs-new BIOS-revision gap, not a region-specific one
+
+**Context.** User uploaded `PS2 Bios 30004R V6 Pal.bin` (4,194,304 bytes) immediately after Round 503's US-BIOS finding, asking to "try the pal one" too.
+
+**Identity verification.** `strings`: `"20011004-175839,ROMconf,PS20160EC20011004.bin,kuma@rom-server/~/f10kDVE4.3/g/app/rom"` - version 1.60, region `E` (Europe/PAL), built 2001-10-04. Genuinely distinct from both existing dumps: 3,809,880/4,194,304 bytes differ vs. the JP `scph10000.bin` (2000-01-17 build, no `ROMVER`-prefixed string - an earlier-generation BIOS layout), 3,374,852 bytes differ vs. the US `bios_us.bin` (v2.00, 2004-06-14). Copied to scratch-only `/tmp/round238_diag/bios_pal.bin`, never committed/rsynced.
+
+**Boot survey (identical recipe/budget to Round 503).** Same result class as the US BIOS: EE never leaves BIOS ROM, resting `pc=0x9FC41060` after 480,000,000 instructions, GS state fully zero, browser-state fields both `0x0`. Progress-checkpoint trace (8 samples, slice 500K-60M) again confined entirely to the `0x9FC41048-0x9FC41060` window - the identical tight spin loop as Round 503's US BIOS.
+
+**The key new finding: byte-for-byte identical machine code at the same ROM file offset.** `xxd` diff at ROM offset `0x41040-0x41070` across all three dumps: the US BIOS (2004) and this PAL BIOS (2001) have **byte-for-byte identical instruction bytes** at this exact offset (`0000e38c 0100 8624 0000 e28c ... faff6210 ...`) - the same RAM+0x10 spin-wait/COP0-Count-reset routine documented in Round 503. The JP `scph10000.bin` (2000-01-17, the oldest of the three, and the BIOS this whole 470+-round project has been built against) has **completely different code** at that same offset. This is not a coincidence of address layout - it's the same shared low-level boot-ROM library routine, present verbatim in two independently-built BIOS revisions spanning region and 3 years of build dates (2001 PAL, 2004 US), and absent (or relocated/resolved differently) in the oldest JP dump.
+
+**Revised classification.** Round 503 initially framed this as a "US vs JP" or region-specific difference. Round 504 corrects that: **it is an old-vs-new BIOS ROM library difference, not a region-specific one.** The JP `scph10000.bin` this project uses is from a very early BIOS generation (Jan 2000) that either predates this particular hardware-synchronization idiom or implements it differently at a different offset. Any BIOS dump from significantly later than early 2000 - regardless of region - will likely hit this exact same RAM+0x10 spin, since at least two independent later revisions (PAL 2001, US 2004) share the identical routine byte-for-byte.
+
+**Classification/scope.** Still no tracked-source fix implemented this round - same reasoning as Round 503 (root-causing the real producer of the RAM+0x10 signal, most plausibly an IOP-side write during early hardware bring-up that this project's IOP model doesn't yet perform at the right point, deserves its own dedicated investigative thread, not a same-round fix bolted onto a compatibility survey). But this round upgrades the priority/framing of that investigation: fixing it would unlock compatibility with a much broader set of real-world BIOS dumps than just one specific old JP file, which could matter if the user's ultimate real-hardware/Wii-target goal needs a more commonly-available BIOS revision.
+
+**Regression suite / Wii rebuild.** Correctly skipped - docs-only round, no tracked source changed.
+
+**Leak check.** `bios_pal.bin` and all Round 504 scratch drivers stayed under `/tmp/round238_diag/` only. Filename-pattern scan, `.ckpt` scan, and `git ls-files` grep all clean (below).
+
+**Next.** If/when the RAM+0x10 gap is prioritized: find what real IOP-side (or hardware-timing) mechanism is supposed to write EE RAM offset 0x10 during early bring-up on post-2000 BIOS revisions, using the same value-watch/backward-trace methodology that resolved the Round 468 VBLANK-handler gap. Otherwise, task #447 (JP-path decision on the primary OSDSYS disc-browser thread) remains the standing next step.

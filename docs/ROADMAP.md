@@ -9606,3 +9606,25 @@ evidenced baseline. No source change - docs-only round.
 Next: keep JP BIOS as primary baseline (task #447 still open). US
 BIOS's RAM+0x10 spin is a distinct, unexplored blocker - only worth
 chasing if there's a specific reason to need US-region behavior.
+
+## Round 504: real PAL BIOS uploaded - same spin as R503, but reveals it's old-vs-new BIOS, not region-specific
+
+User uploaded PS2 Bios 30004R V6 Pal.bin (real EU/PAL BIOS, v1.60,
+region E, 2001-10-04). Verified real/distinct, ran same survey as R503.
+
+Result: identical failure class to the US BIOS - stuck at
+0x9FC41048-0x9FC41060, GS fully zero. Byte-diffed ROM offset
+0x41040-0x41070 across all 3 dumps: US (2004) and PAL (2001) have
+BYTE-IDENTICAL code there (the RAM+0x10 spin-wait routine from R503).
+JP scph10000.bin (2000-01-17, oldest of the 3) has completely
+different code at that offset.
+
+Revised framing: this is an OLD-vs-NEW BIOS ROM library gap, not a
+region-specific one. Any BIOS newer than the early-2000 JP dump this
+project is built on will likely hit the same RAM+0x10 spin. Raises the
+priority of eventually root-causing it (would unlock much broader BIOS
+compatibility), but no source change this round - still needs its own
+dedicated investigative thread like R468's VBLANK-handler gap took.
+
+Next: task #447 (JP-path OSDSYS decision) still the standing next
+step; RAM+0x10 gap now a well-scoped, higher-priority future thread.

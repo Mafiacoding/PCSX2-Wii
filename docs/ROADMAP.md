@@ -9564,3 +9564,20 @@ screen for the reasons already characterized in Rounds 498-500.
 No source change - docs-only verification round.
 
 Next: same open decision as Round 500 (task #447).
+
+## Round 502: trampoline re-run at 12x post-install budget
+
+Re-ran the working syscall-7 trampoline (R466 entry-address fix +
+R469 VBLANK-END mask) with 60M slices post-install (480M EE
+instructions, 12x R469's budget). No crash. Real game code runs,
+but still eventually redirects back to the same OSDSYS resting-loop
+family (pc=0x8000CFEC, matching 0x8000CF90/CF98/CFD8/F864 from prior
+rounds). Confirms R469's finding holds at scale: masking VBLANK-END
+alone isn't sufficient - at least one more stale OSDSYS interrupt
+handler is still colliding with our zero-filled game memory.
+
+No source change - docs-only round.
+
+Next: enumerate every AddIntcHandler() registration during warmup
+(not just VBLANK-END) via value-watch, same technique as R468, to
+find and mask the remaining collision(s).

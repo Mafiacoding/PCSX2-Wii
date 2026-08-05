@@ -9545,3 +9545,22 @@ bug; or (b) reconsider whether the disc-browser thread is even on
 the critical path, given Rounds 457-469 already found a working
 syscall-7 _ExecPS2 trampoline that boots real game code directly,
 bypassing the browser UI entirely.
+
+## Round 501: fresh boot survey (user-reuploaded BIOS) - no crash
+
+User uploaded scph10000.bin fresh, asked for a status check.
+Confirmed byte-identical to the BIOS already in use (md5 match).
+60M-slice run (480M EE instructions max): EE never halted, no
+unimplemented-opcode trap fired, no crash of any kind. Stopped only
+because the budget ran out, at pc=0x00510C44, 479,997,909
+instructions executed - deepest single run yet in this thread.
+
+GS actively rendering (PMODE=0x66, circuit 2, non-zero DISPFB2/
+DISPLAY2). Browser-state fields still 0/0, consistent with every
+round since 470. Confirms: boot is clean and stable end-to-end, no
+bug is being hit - system is just resting at the disc-browser idle
+screen for the reasons already characterized in Rounds 498-500.
+
+No source change - docs-only verification round.
+
+Next: same open decision as Round 500 (task #447).

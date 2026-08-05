@@ -9448,3 +9448,28 @@ Next: back to the queued ps2sdk iop/ tree audit (user's explicit
 the disc-browser escalation thread directly - user's call on
 priority, defaulting to continuing autonomously per "go on until
 everything is finished."
+
+## Round 497: ps2sdk iop/ audit - scoping correction, moving to disc-browser thread
+
+GitHub tree/API browsing unreliable this session (empty results even
+for known-good ee/ paths); raw file fetches also intermittently
+empty. Doxygen files.html (ps2dev.github.io/ps2sdk) worked and
+confirmed a reliable non-GitHub alternative for future iop/ listing
+needs.
+
+Key finding: real ps2sdk iop/ splits into (1) kernel-interface
+headers - mostly already incorporated Rounds 394-398, (2)
+homebrew-only reimplemented drivers (netman, audsrv, etc) not used
+by stock BIOS, (3) the actual PADMAN/MCMAN/SIO2MAN/CDVDMAN modules
+real OSDSYS uses - these are Sony proprietary IRX binaries, NEVER
+part of ps2sdk open source. No ps2sdk audit can surface their real
+behavior - that's exactly why Rounds 480-496 disassemble the
+compiled BIOS directly. No addressable gap found; no tracked source
+changed.
+
+Per user's explicit "iop and after that the disc browser"
+instruction: moving to Round 498, the OSDSYS disc-browser escalation
+thread (open since Round 470-486) - what real condition/state
+transition escalates the disc-browser past its idle animation loop.
+This is direct-disassembly territory, unaffected by today's GitHub
+fetch issues.

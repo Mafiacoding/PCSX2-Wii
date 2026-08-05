@@ -9243,9 +9243,42 @@ out Round 301's already-fixed PollSema semantics as the blocker.
 No source change - correction + narrowing. Regression suite and Wii
 rebuild correctly skipped.
 
-### Next steps
+### Next steps (superseded by Round 489-490 below)
 
 Disassemble the ~150-200 bytes between the PollSema guard and the
 actual SID-load/send to find what decides the request's rpc_number
 payload, and identify which of the 24 real callers is the actual
 disk-type-query caller (not yet isolated) to see its own precondition.
+
+## Round 489-490: busy-check and retry-throttle gates both ruled out
+
+Disassembled + live-instrumented the request-slot busy-check
+(0x00213660): reports "free" unconditionally for the GetDiskType slot
+across all 53 real checks - ruled out as blocker.
+
+Live-instrumented the retry-throttle gate (global 0x0028A9E4 checked
+at 0x0020D4F0): initially looked like a one-shot permanent block (only
+1 of 52 samples showed "proceed"), but this was WRONG - caught by
+cross-referencing against the RPC-send census, which showed real sends
+continuing after "skip" events. Full disassembly of 0x0020D4C0-
+0x0020D5C0 resolved it: it's a per-invocation rate check (not
+consumed), and a "proceed" result enters an internal retry loop that
+can complete multiple real sends without re-checking the outer gate -
+explaining the apparent contradiction. Also ruled out.
+
+Found a second real call site (~0x0020ED70-0x0020EEA0) sharing the
+same send tail but with extra logic (buffer writes, unaligned 8-byte
+copy, call to 0x002134A8 with a1=11) resembling a GetToc/directory-
+entry request, not necessarily GetDiskType.
+
+No source change - two more gates eliminated by direct evidence.
+Regression suite and Wii rebuild correctly skipped.
+
+### Next steps
+
+All obvious gates inside the shared send helper are now ruled out
+(PollSema, busy-check, retry-throttle). The determinant must be set
+BEFORE the helper is called - disassemble backward from each of the
+24 known real callers of 0x0020D478 (0x0020DA08-0x0020F1A0, addresses
+already enumerated in Round 487) to find which one is the real
+disk-type-query caller and what precondition gates it.

@@ -2689,6 +2689,128 @@ static int ee_step(void)
                 st->next_pc = this_pc + 8u;
                 return 1;
             }
+            if (sysnum == 5 || sysnum == 8 || sysnum == 9) {
+                /* Round 493 - 5 (ResumeIntrDispatch), 8
+                 * (ResumeT3IntrDispatch), 9 (RFU009). Real ps2sdk
+                 * syscallnr.h (fetched Round 492, docs/reference/
+                 * ps2sdk/ee/kernel/include/syscallnr.h) labels 5 and 8
+                 * "Arbitrarily named" - neither is a documented public
+                 * API (not in kernel.h's public extern block); both
+                 * are internal continuation points used only by the
+                 * real BIOS's OWN kernel-patch-installation mechanism
+                 * (fetched alarm.c's InitAlarm() patches syscalls
+                 * 0xFC-0xFF/0x08/0x12C, tlbfunc.c's InitTLBFunctions()
+                 * patches 0x54-0x59) to resume the original dispatch
+                 * chain after a patch's own handler runs. This project
+                 * doesn't install BIOS kernel patches via that
+                 * mechanism, so a guest ELF has no legitimate reason to
+                 * issue these directly. 9 (RFU009) is "Reserved For
+                 * (future) Use" by the real syscallnr.h's own naming -
+                 * an intentionally-unused slot. Same generic-default
+                 * treatment as the 100/61/120/-120 group above. */
+                GPR(2) = 0; /* generic default return, matching established precedent */
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
+            if (sysnum == 4) {
+                /* Round 493 - 4 (KExit). Real ps2sdk kernel.h (fetched
+                 * Round 492): "extern void KExit(s32 exit_code)
+                 * __attribute__((noreturn));" - a genuine, real,
+                 * program-requested EE termination syscall (the raw
+                 * kernel primitive Exit()/ExitThread()/etc. ultimately
+                 * funnel into). This project's existing halt()
+                 * primitive (ee_state_t's halted/halt_reason fields)
+                 * is exactly this: "stop EE execution, record why."
+                 * $a0 (GPR(4)) carries the real exit_code per the
+                 * signature above; recorded in halt_reason for
+                 * diagnostics since this project has no host process
+                 * to actually exit() into. */
+                halt("KExit syscall (4) - guest program requested EE termination");
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
+            if (sysnum == 1) {
+                /* Round 493 - 1 (ResetEE). Real ps2sdk kernel.h
+                 * (fetched Round 492): "extern void ResetEE(u32
+                 * init_bitfield);" with real bit constants INIT_DMAC=
+                 * 0x01, INIT_VU1=0x02, INIT_VIF1=0x04, INIT_GIF=0x08,
+                 * INIT_VU0=0x10, INIT_VIF0=0x20, INIT_IPU=0x40. Real
+                 * ExecPS2.c (fetched Round 492, docs/reference/ps2sdk/
+                 * ee/kernel/src/osdsrc/src/ExecPS2.c)'s own
+                 * SoftPeripheralEEReset() calls p_ResetEE(0x7F) - ALL
+                 * bits set - as part of every real program launch, so
+                 * this project only needs to honor the bitfield
+                 * generally, not any specific partial-bitfield caller.
+                 *
+                 * INIT_DMAC: dma_init() (source/hw/dma.c) memset()s
+                 * g_dma AND g_sinks[] together, which would silently
+                 * destroy the GIF/VIF0/VIF1 DMA sink-callback bindings
+                 * ee_core_rebind_dma_sinks() installs - so that rebind
+                 * call is required immediately after, same as the
+                 * existing Round 449 checkpoint-resume citation for
+                 * why rebinding is needed post-dma_init().
+                 *
+                 * INIT_VIF0/INIT_VIF1: real vif_init() (source/hw/
+                 * vif.c) resets both g_vif0 and g_vif1 together in one
+                 * call with no per-instance granularity, unlike the
+                 * real bitfield's separate bits. Since the one real
+                 * call site this project has ever cited (ExecPS2.c's
+                 * 0x7F) always sets both bits together anyway, this is
+                 * an honest, evidenced simplification: either VIF bit
+                 * resets both VIFs.
+                 *
+                 * INIT_GIF: gif_init() (source/hw/gif.c).
+                 * INIT_VU1: vu1_init() (source/hw/vu.c).
+                 *
+                 * INIT_VU0: no dedicated vu0 reset function exists in
+                 * this codebase - VU0 "macro mode" is modeled directly
+                 * as ee_state_t fields (cop2_ctrl[32], vu0_vf[32][4],
+                 * vu0_mem[4096], vu0_micro[4096], per include/core/ee/
+                 * ee_core.h) rather than through a separate hw/*.c
+                 * module like VU1/GIF/VIF have. Cleared inline here.
+                 *
+                 * INIT_IPU: no IPU hardware model exists anywhere in
+                 * this codebase yet (confirmed via grep across source/
+                 * hw/*.c - real hardware's Image Processing Unit,
+                 * MPEG2/DVD macroblock decoding, is unimplemented).
+                 * Documented no-op for this bit only, honest about the
+                 * gap rather than silently ignoring it. */
+                uint32_t init_bits = GPR(4); /* $a0, real init_bitfield */
+                if (init_bits & 0x01u) { /* INIT_DMAC */
+                    dma_init();
+                    ee_core_rebind_dma_sinks();
+                }
+                if (init_bits & 0x02u) { /* INIT_VU1 */
+                    vu1_init();
+                }
+                if (init_bits & 0x04u) { /* INIT_VIF1 */
+                    vif_init();
+                }
+                if (init_bits & 0x08u) { /* INIT_GIF */
+                    gif_init();
+                }
+                if (init_bits & 0x10u) { /* INIT_VU0 */
+                    memset(st->cop2_ctrl, 0, sizeof(st->cop2_ctrl));
+                    memset(st->vu0_vf, 0, sizeof(st->vu0_vf));
+                    memset(st->vu0_mem, 0, sizeof(st->vu0_mem));
+                    memset(st->vu0_micro, 0, sizeof(st->vu0_micro));
+                    st->vu0_vf[0][3] = 0x3F800000u; /* VF00 hardwired to
+                        (0,0,0,1.0f) - same real-hardware fact cited by
+                        this project's own vu1_init() for VF00. */
+                }
+                if (init_bits & 0x20u) { /* INIT_VIF0 - see comment
+                    above: real vif_init() resets both VIF instances
+                    together, no per-instance granularity exists. */
+                    vif_init();
+                }
+                /* 0x40 (INIT_IPU): documented no-op, no IPU model exists. */
+                GPR(2) = 0; /* real ResetEE has no meaningful return value used by callers */
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
             if (sysnum == 60) {
                 /* 60 (0x3C) SetupThread - Round 171 (task #172
                  * continuation): CORRECTED from the previous "generic

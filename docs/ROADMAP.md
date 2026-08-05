@@ -9314,3 +9314,34 @@ callers of 0x0020D478 (0x0020DA08-0x0020F1A0) to find the actual
 disk-type-query caller. Separately (unrelated thread): implement the
 5 missing syscalls (ResetEE especially) if/when the ExecPS2/TCB
 trampoline work resumes.
+
+## Round 493: implemented the 5 syscalls Round 492 found missing
+
+ResetEE(1), KExit(4), ResumeIntrDispatch(5), ResumeT3IntrDispatch(8),
+RFU009(9) all now implemented in ee_core.c's syscall dispatch, per
+real ps2sdk semantics (kernel.h/syscallnr.h/ExecPS2.c, fetched
+Round 492). ResetEE walks the real INIT_* bitfield and drives the
+matching hw _init() functions (with a DMA-sink-rebind fix for
+INIT_DMAC); KExit uses the existing halt() primitive; 5/8/9 use the
+existing generic-default-return precedent.
+
+Host-native verification clean: syntax check, full existing EE test
+(10/10), new dedicated 15-check test for all 5 syscalls (15/15), 26
+other pre-existing tests unaffected. Wii cross-build not run this
+round - devkitPPC/libogc unavailable in this sandbox session
+(documented, not silently skipped).
+
+### Next steps
+
+1. Disassemble backward from the 24 known real callers of 0x0020D478
+   (0x0020DA08-0x0020F1A0) to find the real disk-type-query caller -
+   the deferred second half of the user's Round 492-493 instruction,
+   continuing the Round 487-490 GetDiskType thread.
+2. User has also requested (queued): fetch and implement everything
+   from github.com/ps2dev/ps2sdk/tree/master/iop (the real IOP-side
+   kernel/module source), analogous to Round 492's ee/kernel/ audit.
+   Large task, to be worked in upcoming 4-5-task batches.
+3. Verify Round 493's ee_core.c change against devkitPPC/libogc
+   whenever that toolchain becomes available in-session.
+4. Mechanical cleanup (not urgent): refresh tests/README.md's 62
+   stale gcc link lines found this round.

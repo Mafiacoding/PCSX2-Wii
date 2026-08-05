@@ -9680,3 +9680,16 @@ Answers user's "how far would a diagnostic ELF go" question: as far as any real 
 No tracked emulator source changed - tooling round, regression/Wii build correctly skipped.
 
 Next: task #447 (JP-path OSDSYS decision) still open.
+
+## Round 508: minimal bootable test disc (SYSTEM.CNF + ELF ISO) - real BIOS disc-browser boot attempt
+Built a minimal ISO9660 disc (pycdlib) containing `SYSTEM.CNF` (`BOOT2 = cdrom0:\BOOT.ELF;1`) + a reused copy of the Round 507 diagnostic ELF as `BOOT.ELF`, per the user's proposal to test organic BIOS disc-browser boot directly (not PCSX2's dev "Start File" shortcut). Mounted in real PCSX2; window title changed to `BOOT.ELF [?]`, confirming SYSTEM.CNF was parsed.
+
+Real OSDSYS's root menu is ブラウザ (Browser) / システム設定 (System Settings) - not previously documented at this precision. Browser shows a 3-item carousel: `MEMORY CARD / 1`, `MEMORY CARD / 2`, `PlayStation2 ディスク`. Our disc is correctly, specifically type-detected as `PlayStation2 ディスク` (real disc-type recognition, not a placeholder) - but pressing 決定(Circle) on it does NOT launch/boot: the browser silently wraps back to `MEMORY CARD / 1` with no loading screen, no error, no BOOT2 dispatch. Reproduced twice, identical result. This is a direct real-hardware repro of the user's live report: "the disc shows up in the ps2 menu but it wont load."
+
+Side finding: real PS2 framebuffer render area is a fixed 640x448 inside a wider PCSX2-Qt window - consistent with Round 506's revised render-gap conclusion (Qt layout bug), and explains why the disc icon was only partially visible on narrower window screenshots.
+
+Interpretation: real BIOS disc-enumeration and BOOT2-dispatch are separate mechanisms; our disc satisfies the first but not the second. Root cause (exact validation gap) not isolated at code level this round - would need Pine-assisted CDVD tracing or IOP BIOS disassembly. Leans task #447 toward the already-working syscall-7 trampoline path as the practical way forward, without conclusively closing the organic-boot door.
+
+No tracked emulator source changed - live-hardware investigative round, regression/Wii build correctly skipped.
+
+Next: task #447 revisit with this round's evidence. Optional: Pine-assisted trace of a real commercial disc's boot for comparison, if the organic path is still worth pursuing.

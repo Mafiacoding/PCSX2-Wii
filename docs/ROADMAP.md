@@ -9052,3 +9052,39 @@ open question is what decides that transition - disassembling the
 CALLER of 0x0021477C (not yet attempted) is the concrete next step,
 genuinely new ground after 60+ rounds spent on the dispatch chain
 itself.
+
+
+## Round 480: disassembled the caller at ra=0x00214a0c (per Round 479's proposed next step)
+
+Disassembled `[0x00214880,0x00214B40)` and the `0x0021477C` dispatcher
+body via this project's own `mips_disasm.py`. Two corrections to
+prior-round assumptions:
+
+1. The real function entry is `0x00214778` (lui v0,0x0047), not
+   `0x0021477C` (its second instruction) as cited since Round 471.
+2. This function is a variadic status-text formatter (5-arg varargs
+   prologue, float spills, `slt` range check against 0x80FF), not a
+   disc-command dispatcher - it never touches CDVD/SIF/IOP state.
+
+The specific caller at ra=0x00214a0c (`FUN_2149F0`) is a fixed,
+unconditional wrapper: `ori $a1,$zero,0xE621`, no branches, no state
+dependency - it cannot be the source of a repeating/varying a1 value,
+contradicting the Round 471 attribution of this site as the
+"a1=0x500D heartbeat" caller. The preceding block (0x214880-0x214924)
+is a small linear classifier on status codes (0x8200/0x7600/0x6240/
+0x6000/0x7000), also disc-protocol-free.
+
+This is a real course-correction: the 0x0021477C/0x00214a0c thread,
+pursued since Round 471, is very likely a status-text renderer, not
+the escalation gate. Closes off this specific thread as a dead end.
+
+No source change - pure disassembly/investigation. Regression suite
+and Wii rebuild correctly skipped.
+
+### Next steps
+
+Live-instrument (scratch-copy fprintf hook, matching Round 479 Part
+2's technique) direct calls to 0x00214778 itself, logging caller $ra
+and the a1 value on every real invocation - a hard, disassembly-
+independent map of every call site, rather than continuing to
+disassemble candidates from static code alone.

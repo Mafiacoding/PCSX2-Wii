@@ -9219,3 +9219,33 @@ completion order, a fuller real memory-card/HDD negotiation, or a
 different subsystem entirely) real OSDSYS needs before it will even
 attempt a disc-type check, since Round 479 already proved it never
 calls GetDiskType/DiskReady at all in this project's trace.
+
+
+## Round 487-488: located real GetDiskType/DiskReady call sites via static binary scan - corrects Round 479's "zero calls", rules out PollSema as the blocker
+
+Static-scanned the loaded OSDSYS image for the lui+ori idiom building
+SIF sid constants 0x80000593/0x8000059A. Found the real shared SCMD
+helper (0x0020D478, 24 real callers) and DiskReady helper (0x0020D5C0,
+2 real callers). Live-instrumented entry: the SCMD helper IS entered
+52 times, DiskReady once - Round 479's "zero calls" was a probe
+placement artifact (that round's catch-all hook sits after the
+rpc_number==3/0x18 dedicated branches in the dispatch chain, so it
+structurally could never see them).
+
+Live-instrumented every real RPC_CALL packet directly: sid=0x593 sent
+with rpc_number={1,24,14,15,16} (same set known since Round 471) -
+rpc_number=3 (GETDISKTYPE) never actually transmitted despite the
+wrapper being entered 52 times. Traced the wrapper's internal guard to
+real syscall 0x45 (PollSema, per PS2 Developer wiki) - live-
+instrumented it directly: succeeds 100% of the time (53/53), ruling
+out Round 301's already-fixed PollSema semantics as the blocker.
+
+No source change - correction + narrowing. Regression suite and Wii
+rebuild correctly skipped.
+
+### Next steps
+
+Disassemble the ~150-200 bytes between the PollSema guard and the
+actual SID-load/send to find what decides the request's rpc_number
+payload, and identify which of the 24 real callers is the actual
+disk-type-query caller (not yet isolated) to see its own precondition.

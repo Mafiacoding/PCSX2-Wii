@@ -1340,3 +1340,15 @@ int iop_hle_thread_get_alarm_count(void)
     for (int i = 0; i < IOP_HLE_THREAD_MAX_ALARMS; i++) if (g.alarms[i].in_use) n++;
     return n;
 }
+
+uint32_t iop_hle_thread_get_entry(int thid)
+{
+    iop_tcb_t *t = tcb(thid);
+    return (t && t->in_use) ? t->entry : 0u;
+}
+
+uint32_t iop_hle_thread_get_pc(int thid)
+{
+    iop_tcb_t *t = tcb(thid);
+    return (t && t->in_use) ? t->pc : 0u;
+}

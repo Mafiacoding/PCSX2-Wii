@@ -9750,3 +9750,13 @@ Classified as a genuine, precisely-located integration gap, not correct real sta
 Verified: full 129-test regression suite (0 failures), Wii cross-build clean (37/37 files).
 
 Next: design + implement the idle/THREADMAN integration fix, re-measure thread 4/5/6 dispatch. Task #447 remains open.
+
+## Round 515: thread-identity audit + task #447 decision (continue organic-boot path) + stale-task closeout
+
+Correlated Round 514's new real threads against the module table: CDVDFSV spawned 2 new worker threads (7/8) plus thread 4; FILEIO's threads are 5/6. All last ran through a shared SIFCMD RPC primitive (0x0011ad58) before blocking. SIF2 transfer count is still 0 though - the real DMA kick hasn't fired yet.
+
+Decision on task #447: keep pursuing the organic-boot path (do not accept idle-as-final, do not pivot to syscall-7 trampoline) - real module code that was completely unreachable before Round 514 is now running, too early to call this path exhausted.
+
+Closed stale tasks #335/337/345/346/355/357 as superseded by Round 466-468's full resolution of the trampoline dispatch mechanism via a different investigative path.
+
+Next: trace what CDVDFSV/FILEIO's newly-running threads are actually blocked on (real WaitSema/WaitEventFlag targets) to check for the missing SIF2-kick caller.

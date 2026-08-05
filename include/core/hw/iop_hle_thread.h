@@ -375,6 +375,15 @@ int iop_hle_thread_get_sema_count(void);
 int iop_hle_thread_get_evf_count(void);
 int iop_hle_thread_get_alarm_count(void);
 
+/* Round 514 follow-up: a TCB's original CreateThread() entry point
+ * and its live/saved pc (whichever thread is current, this is its
+ * real register file's pc; for a non-current thread it's the last
+ * pc it was saved at) - used to identify which real module created
+ * a given thread and where it currently sits. Returns 0 for an
+ * invalid/unused thid, matching this file's existing convention. */
+uint32_t iop_hle_thread_get_entry(int thid);
+uint32_t iop_hle_thread_get_pc(int thid);
+
 /* Round 514: real integration between iop_module_loader.c's own
  * task #179 idle mechanism (g_iop.idle, CPU-core level) and this
  * file's THREADMAN scheduler (Round 389+, TCB level) - see Round

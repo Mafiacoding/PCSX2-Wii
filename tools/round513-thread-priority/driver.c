@@ -17,6 +17,7 @@
 #include "core/hw/iop_dma.h"
 #include "core/hw/iop_hle_thread.h"
 #include "core/hw/iop_module_loader.h"
+#include "core/hw/iop_cdvd.h"
 
 static bios_image_t bios;
 
@@ -49,7 +50,9 @@ int main(int argc, char **argv)
         uint32_t st = iop_hle_thread_get_status(i);
         if (st != 0) {
             uint32_t prio = iop_hle_thread_get_priority(i);
-            printf("[R513]   thread[%d] status=0x%x (%s) priority=%u\n", i, st, status_str(st), prio);
+            uint32_t entry = iop_hle_thread_get_entry(i);
+            uint32_t tpc = iop_hle_thread_get_pc(i);
+            printf("[R513]   thread[%d] status=0x%x (%s) priority=%u entry=0x%08x pc=0x%08x\n", i, st, status_str(st), prio, entry, tpc);
         }
     }
 
@@ -67,5 +70,7 @@ int main(int argc, char **argv)
     printf("[R513] sema_count=%d evf_count=%d alarm_count=%d sif2_xfer=%u\n",
            iop_hle_thread_get_sema_count(), iop_hle_thread_get_evf_count(),
            iop_hle_thread_get_alarm_count(), iop_dma_get_sif2_transfer_count());
+    printf("[R513] d_stat=0x%08x last_ncommand=0x%02x\n",
+           dma_get_state()->d_stat, iop_cdvd_get_last_ncommand());
     return 0;
 }

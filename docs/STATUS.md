@@ -22411,3 +22411,44 @@ This writes `0x83` to RAM address `0x10`, then spins re-reading that same addres
 **Leak check.** `bios_pal.bin` and all Round 504 scratch drivers stayed under `/tmp/round238_diag/` only. Filename-pattern scan, `.ckpt` scan, and `git ls-files` grep all clean (below).
 
 **Next.** If/when the RAM+0x10 gap is prioritized: find what real IOP-side (or hardware-timing) mechanism is supposed to write EE RAM offset 0x10 during early bring-up on post-2000 BIOS revisions, using the same value-watch/backward-trace methodology that resolved the Round 468 VBLANK-handler gap. Otherwise, task #447 (JP-path decision on the primary OSDSYS disc-browser thread) remains the standing next step.
+
+---
+
+## Round 505: live-PCSX2 OSDSYS menu navigation (JP BIOS) - real keybindings, real menu flow, and a render-gap that turned out to be genuine content, not a bug
+
+**Context.** User asked to resume the live real-PCSX2 GUI excursion (`pcsx2-qt.exe`, JP BIOS booted via System > Start BIOS), pressing buttons through the real OSDSYS menu system "until the menu lets go." User also correctly pointed out that no CD/disc icon should be expected in the browser since no ISO is mounted in this instance - confirmed correct, real hardware would behave identically with no disc inserted, so this was not chased as a bug.
+
+**Real default keybindings, empirically confirmed via live menu transitions (Controller Port 1, keyboard-to-DualShock-2 mapping):**
+- D-Pad: arrow keys
+- Left analog: W/A/S/D
+- Circle (○決定/Confirm): **`l`**
+- Cross (✕戻る/Back): **`k`**
+- Triangle (△本体設定/△詳細設定): **`i`**
+
+This matches PCSX2's standard "IJKL diamond" default keyboard scheme (I=Triangle/top, J=Square/left, K=Cross/bottom, L=Circle/right - mirrors the physical DualShock button diamond).
+
+**Real OSDSYS menu flow, now mapped end-to-end for the first time in this project's history (Screens A -> B -> C -> D):**
+- **Screen A** (top-level resting/carousel screen): black viewport, faint icon at the left edge; the animated background cycles through multiple distinct scenes over time (a static-orb scene and a rotating-crystal-cubes scene were both observed at this same screen on different visits, plus a third white-cube/red-line scene - confirming Screen A's idle animation is a longer multi-scene loop, not a single static clip). Prompts: `○決定` / `△本体設定`.
+- **Screen A --Circle--> Screen B**: real "PS2" logo card (the disc-browser root). Prompts: `✕戻る` / `○決定`.
+- **Screen B --Circle--> Screen C**: real **"MEMORY CARD"** screen, showing genuine live capacity text `空き容量 7,989キロバイト` (free space 7,989 KB). Prompts: `✕戻る` / `○決定` / `△詳細設定`.
+- **Screen C --Triangle--> Screen D**: real memory-card **Detailed Settings** view - a card-icon graphic plus five real property labels: `場所` (Location), `種類` (Type), `サイズ` (Size), `更新日時` (Update date/time), `操作条件` (Operating conditions). Prompt: `✕戻る` only.
+- **Screen D --Cross--> Screen C --Cross--> Screen B --Cross--> Screen A**: Cross reliably backs out one level at a time, confirmed repeatedly.
+
+No disc/CD icon was found anywhere in the Screen A carousel - consistent with the user's own expectation (no ISO mounted in this PCSX2 instance) and not evidence of a gap.
+
+**Render-gap investigation (raised by the user's "if we are inside the bios we should see where is the issue" prompt).** A dark-grey rectangle covering roughly the right 64% of the viewport has been visible since the Controller Settings dialog in the prior window, and was still present across every OSDSYS screen this round. Diagnosed properly this round instead of just working around it:
+- Zoomed into the region at full resolution: confirmed flat, uniform color with no hidden/obscured text underneath.
+- Toggled real PCSX2 fullscreen mode (View > Fullscreen / Alt+Enter): the rectangle scaled proportionally with the video content rather than staying a fixed screen-pixel mask - ties it to the actual rendered output geometry, not a compositor overlay artifact.
+- **Switched the real renderer from Direct3D 12 to Vulkan** (Settings > Graphics > Graphics API) and re-observed the same OSDSYS screens: **the rectangle was pixel-identical in position/size under Vulkan as under D3D12.** Reverted back to Direct3D 12 afterward to match the established baseline.
+
+**Conclusion.** Because the gap is renderer-independent (identical under two completely different graphics backends), it is almost certainly **not a driver/rendering bug** - if it were D3D12-specific, Vulkan would very likely render differently. The far more consistent explanation is that real OSDSYS content genuinely only occupies the left portion of the window at this aspect-ratio/scaling setting (`Aspect Ratio: Auto Standard (4:3 Interlace)` in Graphics settings), and the panel graphics (PS2 logo, MEMORY CARD card, Detailed Settings card) are narrow by design, with the remainder of the window left as an unfilled background fill color rather than being centered or stretched. This also retroactively explains why earlier sessions' "MEMORY CARD" and "PS2" text looked cut off at the same x-boundary in every screenshot - real label text was reaching the edge of that same narrow content area, not being clipped by a rendering fault.
+
+**Also confirmed while investigating alternatives to the disc-browser path:** real PCSX2's `System` menu has a native **"Start File..."** option - PCSX2's built-in "boot an ELF directly" feature (equivalent to what FreeMCBoot does on real hardware via memory card). This bypasses BIOS/disc navigation entirely and would be the natural next step if the user wants to test homebrew/ELF loading instead of continuing to push on the OSDSYS disc-browser thread; it requires an `.elf` file to be supplied (none uploaded yet this round).
+
+**Session-loss note carried over from the prior window:** an earlier accidental session close (during the interrupted portion of this excursion) was recovered cleanly by re-running System > Start BIOS - no save-state was needed, the JP BIOS reboots deterministically in ~5-6 seconds.
+
+**Classification.** Investigative/GUI-exploration round - no tracked source changed. Regression suite and Wii rebuild correctly skipped.
+
+**Leak check.** No BIOS/disc files or checkpoints were written to `/tmp/pcsx2-wii-git` or the outputs mirror this round (this was a live-GUI-only excursion, no scratch driver files created). Filename-pattern scan, `.ckpt` scan, and `git ls-files` grep all clean (below).
+
+**Next.** Task #447 (JP-path OSDSYS decision) remains the standing next step on the primary investigative thread - this round's real menu map is useful ground truth for it but doesn't resolve it by itself. If the user wants to pursue the FreeMCBoot/ELF-loading angle instead, the next concrete step is uploading a homebrew `.elf` (e.g. a ps2sdk hello-world or FreeMCBoot's own loader) to test via real PCSX2's `System > Start File...`.

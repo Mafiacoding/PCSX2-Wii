@@ -9628,3 +9628,39 @@ dedicated investigative thread like R468's VBLANK-handler gap took.
 
 Next: task #447 (JP-path OSDSYS decision) still the standing next
 step; RAM+0x10 gap now a well-scoped, higher-priority future thread.
+
+## Round 505: live-PCSX2 OSDSYS menu navigation (JP BIOS) - real keybindings + menu map, render-gap resolved as genuine content
+
+Resumed the live real-PCSX2 GUI excursion. Confirmed real default
+keybindings (Circle=l, Cross=k, Triangle=i, D-pad=arrows, analog=WASD)
+and mapped the real OSDSYS menu flow end-to-end for the first time:
+Screen A (resting carousel) -> Circle -> Screen B ("PS2" logo) ->
+Circle -> Screen C (real "MEMORY CARD" screen, live 7,989KB free-space
+text) -> Triangle -> Screen D (Detailed Settings: Location/Type/
+Size/Update-date/Operating-conditions). Cross backs out one level at
+a time throughout.
+
+No disc icon in the carousel - correct, no ISO mounted in this
+instance, matches user's own expectation, not a bug.
+
+Diagnosed the persistent dark-rectangle render gap (present since the
+Controller Settings dialog last window): zoomed in (flat/uniform, no
+hidden content), toggled fullscreen (scales with video, not a fixed
+mask), and switched the real renderer D3D12 -> Vulkan -> D3D12 - the
+rectangle was pixel-identical under both renderers. Renderer-
+independence rules out a driver bug; far more likely this is real
+OSDSYS content (narrow panel graphics under the "Auto Standard 4:3"
+aspect setting), not a rendering fault. Retroactively explains prior
+rounds' text-cutoff observations too.
+
+Also found real PCSX2's System menu has a native "Start File..."
+(boot-an-ELF-directly) option - the FreeMCBoot-equivalent path the
+user asked about as an alternative to disc-browser navigation. Needs
+an uploaded .elf to test; none provided yet.
+
+No source change - GUI investigation only. Regression/Wii build
+correctly skipped.
+
+Next: task #447 (JP-path OSDSYS decision) still open. If pursuing the
+ELF-boot angle: user uploads a homebrew .elf, test via System > Start
+File... directly, bypassing BIOS/disc navigation entirely.

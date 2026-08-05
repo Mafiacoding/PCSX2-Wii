@@ -112,6 +112,7 @@
 #include "core/hw/ee_intc.h"
 #include "core/hw/ee_sio.h"
 #include "core/hw/ee_timers.h" /* Round 87 (127th finding) */
+#include "core/hw/ipu.h" /* Round 521/522 (task #487) */
 #include "core/hw/gs.h"
 #include "core/hw/gif.h"
 #include "core/hw/vif.h"
@@ -1140,10 +1141,13 @@ uint32_t ee_mem_read32(ee_state_t *st, uint32_t addr)
 {
     /* Hardware register window (0x10000000-0x1000FFFF): DMA controller,
      * SIF mailbox registers, and friends. Other addresses in this
-     * window (timers, INTC, GIF/VIF/IPU control regs) still fall
-     * through to the silent-no-op RAM/BIOS path below, which returns
-     * 0. See docs/ROADMAP.md. (SIO, 0x1000F100-0x1000F1C0, is now
-     * modeled for real - see ee_sio.c, Round 392.) */
+     * window (GIF/VIF control regs) still fall through to the
+     * silent-no-op RAM/BIOS path below, which returns 0. See
+     * docs/ROADMAP.md. (SIO, 0x1000F100-0x1000F1C0, is modeled for
+     * real - see ee_sio.c, Round 392. IPU_CMD/CTRL/BP/TOP,
+     * 0x10002000-0x10002038, is modeled for real as of Round 521/522,
+     * task #487 - see ipu.c; real decode logic is still a later,
+     * evidence-driven round, see ipu.h's scope note.) */
     uint32_t hw_val;
     uint32_t hw_addr = ee_hw_mmio_addr(addr);
     if (dma_mmio_read32(hw_addr, &hw_val))
@@ -1157,6 +1161,8 @@ uint32_t ee_mem_read32(ee_state_t *st, uint32_t addr)
     if (ee_timers_mmio_read32(hw_addr, &hw_val)) /* Round 87 (127th finding) */
         return hw_val;
     if (ee_sio_mmio_read32(hw_addr, &hw_val)) /* Round 392 */
+        return hw_val;
+    if (ipu_mmio_read32(hw_addr, &hw_val)) /* Round 521/522 (task #487) */
         return hw_val;
 
     uint8_t *p = ee_mem_ptr(st, addr, 4);
@@ -1223,6 +1229,8 @@ void ee_mem_write32(ee_state_t *st, uint32_t addr, uint32_t val)
     if (ee_timers_mmio_write32(hw_addr_w, val)) /* Round 87 (127th finding) */
         return;
     if (ee_sio_mmio_write32(hw_addr_w, val)) /* Round 392 */
+        return;
+    if (ipu_mmio_write32(hw_addr_w, val)) /* Round 521/522 (task #487) */
         return;
 
     uint8_t *p = ee_mem_ptr(st, addr, 4);
@@ -2194,6 +2202,8 @@ int ee_core_init(const bios_image_t *bios)
     vif_init();
     dma_set_sink(DMA_CHANNEL_VIF0, vif0_process_quadwords); /* VIF0/VIF1 DMA transfers now walk real VIFcode streams - see vif.h */
     dma_set_sink(DMA_CHANNEL_VIF1, vif1_process_quadwords);
+    ipu_init();
+    dma_set_sink(DMA_CHANNEL_TOIPU, ipu_process_quadwords); /* Round 521/522 (task #487): real input FIFO fill tracking, no decode yet - see ipu.h */
 
     /* (Round 449 note: the three dma_set_sink() calls above register
      * HOST C FUNCTION POINTERS into dma.c's static g_sinks[] table -
@@ -2277,6 +2287,7 @@ void ee_core_rebind_dma_sinks(void)
     dma_set_sink(DMA_CHANNEL_GIF, gif_process_quadwords);
     dma_set_sink(DMA_CHANNEL_VIF0, vif0_process_quadwords);
     dma_set_sink(DMA_CHANNEL_VIF1, vif1_process_quadwords);
+    dma_set_sink(DMA_CHANNEL_TOIPU, ipu_process_quadwords); /* Round 521/522 (task #487) - same stale-function-pointer-after-checkpoint-restore concern as the 3 sinks above, see this function's own header comment */
 }
 
 static void halt(const char *reason)

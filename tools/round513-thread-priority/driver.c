@@ -52,7 +52,9 @@ int main(int argc, char **argv)
             uint32_t prio = iop_hle_thread_get_priority(i);
             uint32_t entry = iop_hle_thread_get_entry(i);
             uint32_t tpc = iop_hle_thread_get_pc(i);
-            printf("[R513]   thread[%d] status=0x%x (%s) priority=%u entry=0x%08x pc=0x%08x\n", i, st, status_str(st), prio, entry, tpc);
+            int wt = iop_hle_thread_get_wait_type(i);
+            int wid = iop_hle_thread_get_wait_id(i);
+            printf("[R513]   thread[%d] status=0x%x (%s) priority=%u entry=0x%08x pc=0x%08x wait_type=%d wait_id=%d\n", i, st, status_str(st), prio, entry, tpc, wt, wid);
         }
     }
 

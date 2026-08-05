@@ -384,6 +384,14 @@ int iop_hle_thread_get_alarm_count(void);
 uint32_t iop_hle_thread_get_entry(int thid);
 uint32_t iop_hle_thread_get_pc(int thid);
 
+/* Round 518: what a WAIT-status thread is actually blocked on (task
+ * #447 follow-up - see Round 515's docs/STATUS.md finding). Returns
+ * IOP_TSW_* wait_type (0 if not waiting / invalid thid) and the
+ * associated sema/evf id (meaningful only for TSW_SEMA/TSW_EVENTFLAG;
+ * 0 otherwise, matching this file's 0-for-N/A convention). */
+int iop_hle_thread_get_wait_type(int thid);
+int iop_hle_thread_get_wait_id(int thid);
+
 /* Round 514: real integration between iop_module_loader.c's own
  * task #179 idle mechanism (g_iop.idle, CPU-core level) and this
  * file's THREADMAN scheduler (Round 389+, TCB level) - see Round

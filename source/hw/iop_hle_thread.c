@@ -1294,19 +1294,54 @@ void iop_hle_thread_tick(iop_state_t *st)
 
 const iop_hle_thread_stats_t *iop_hle_thread_get_stats(void) { return &g.stats; }
 
+/* Round 519 INCIDENT (see docs/STATUS.md for the full writeup):
+ * the original Round 514 body retired whatever thread happened to be
+ * g.current_thread_id on EVERY call - but this function was invoked
+ * from all 4 of iop_module_loader.c's idle-bypass re-entry points,
+ * which fire continuously once boot-dispatch is exhausted (that IS
+ * the steady-state idle loop). Without a guard, every subsequent
+ * re-entry retired whatever real worker thread had since become
+ * current straight to DORMANT - silently killing every real thread
+ * THREADMAN ever dispatched after the first one, which starved all
+ * subsequent real IOP activity (SIF RPC dispatch never fired again:
+ * rpc_pending_sets/delivered went from a real 228 pre-Round-514 to a
+ * hard 0 post-Round-514, and the EE boot depth regressed from
+ * pc=0x0050172C/~320M real instructions to parking at the very early
+ * pc=0x000820E0 BOOTEND poll).
+ *
+ * A first fix attempt guarded this body to only retire thread 1 (the
+ * real synthetic root/bridge thread per Round 513), only while it is
+ * still RUN, and only once ever (see the guard below). That was
+ * REBUILT AND RE-TESTED and did NOT restore the regression -
+ * rpc_pending_sets stayed 0. This disproves "repeated/wrong-thread
+ * retirement" as the sole cause: even a single, correctly-scoped,
+ * one-time retirement of thread 1 is incompatible with this
+ * project's real boot-progress dependency on thread 1 staying RUN.
+ *
+ * The actual working fix was to fully disable all 4 call sites in
+ * iop_module_loader.c (see that file's own Round 519 comments) -
+ * this function is intentionally left defined-but-unused below, in
+ * its guarded form, as a record of the disproven attempt. Do not
+ * wire it back up without new evidence explaining why thread 1 can
+ * safely be retired at all in this idle-bypass context. */
+static int g_root_thread_retired = 0;
+
 void iop_hle_thread_retire_root_thread(iop_state_t *st)
 {
+    if (g_root_thread_retired) return; /* only the synthetic root thread's one-time handoff, never again */
     if (g.thread_count == 0) return; /* no thread primitive has ever run - nothing to retire */
     int cur = g.current_thread_id;
-    if (cur == 0) return; /* already idle at the scheduler level, nothing to do */
+    if (cur != 1) return; /* only thread 1, the real synthetic bridge thread identified in Round 513 - never any other real thread */
     iop_tcb_t *t = tcb(cur);
     if (!t) return;
+    if (t->status != IOP_THS_RUN) return; /* only if it is genuinely still the live thread */
     /* Real THREADMAN semantics: this synthetic bridge thread's one
      * job (running the module loader's fixed dispatch sequence) has
      * genuinely finished, matching a real ExitThread-style handoff -
      * not a WaitSema/SleepThread-style block (nothing will ever
      * signal or wake it again; it must never be reselected). */
     t->status = IOP_THS_DORMANT;
+    g_root_thread_retired = 1;
     reschedule(st);
 }
 
@@ -1351,4 +1386,16 @@ uint32_t iop_hle_thread_get_pc(int thid)
 {
     iop_tcb_t *t = tcb(thid);
     return (t && t->in_use) ? t->pc : 0u;
+}
+
+int iop_hle_thread_get_wait_type(int thid)
+{
+    iop_tcb_t *t = tcb(thid);
+    return (t && t->in_use) ? t->wait_type : 0;
+}
+
+int iop_hle_thread_get_wait_id(int thid)
+{
+    iop_tcb_t *t = tcb(thid);
+    return (t && t->in_use) ? t->wait_id : 0;
 }

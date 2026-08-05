@@ -9150,3 +9150,34 @@ back to find what else runs on the drain loop's own ~4.92M-instruction
 periodic cadence (likely a real per-VBLANK/per-frame OSDSYS tick) -
 that outer tick handler, not the message subsystem it also drives, is
 the next place to look for the real decision point.
+
+
+## Round 483-484: found OSDSYS's real per-tick state-machine dispatcher and its state variable (0x001C0454) - it transitions init(20)->idle(0) once at instr=76.7M and never changes again
+
+Traced the drain loop's own caller (ra=0x002043d0, entry 0x00204308):
+a real per-tick main-loop dispatcher, gated by several flags
+(0x1BA0 device-change, 0x1B9C second message a1=0x5012, 0x1660 drain
+gate, 0x1220/0x1634 secondary gates) and a state variable at
+0x001C0454 (state 20 -> message a1=0x1031, matching Round 481's
+one-time startup-burst observation; state 21 handled further, not
+yet fully decoded).
+
+Live-instrumented every write to 0x001C0454: exactly ONE write across
+a 320M-instruction run - val=0 at instr=76,743,899 - then never
+written again. This is the real, concrete disc-browser state
+variable: it settles into idle(0) via OSDSYS's own correct init
+sequence, and nothing in this project's current emulated environment
+ever supplies whatever real condition would move it further.
+
+No source change - characterization only, but the most concrete
+answer yet to "what state is stuck and why." Regression suite and
+Wii rebuild correctly skipped.
+
+### Next steps
+
+(1) Fully decode the remaining state-dispatch cases (state 21+) in
+0x00204308. (2) Survey what real, not-yet-modeled condition (fuller
+CDVDFSV TOC/session negotiation, memory-card poll completion, a
+second-stage pad/controller event, a watchdog timer) could be the
+missing write source on real hardware, to form the next concrete,
+testable hypothesis.

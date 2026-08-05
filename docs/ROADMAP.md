@@ -9664,3 +9664,10 @@ correctly skipped.
 Next: task #447 (JP-path OSDSYS decision) still open. If pursuing the
 ELF-boot angle: user uploads a homebrew .elf, test via System > Start
 File... directly, bypassing BIOS/disc navigation entirely.
+
+## Round 506: uLaunchELF Debug Info dump + render-gap conclusion correction
+Browsed uLE v4.43a FileBrowser -> MISC/ (utility menu, not a filesystem folder) -> Debug Info screen. Got real `rom0:ROMVER == "0100JC200..."` fragment (JP BIOS) plus confirmation uLE runs via real `host:C:\Users\...` paths (argv[0]/boot_path/LaunchElfDir). Strings still partially cut off by the render-gap boundary.
+
+Corrected Round 505: the black-rectangle render gap stays at the same fixed x≈525 pixel boundary regardless of Aspect Ratio setting (tested "Fit to Window/Fullscreen" vs "Auto Standard 4:3 Interlace" - video content resized, gap boundary did not move). This points to a PCSX2-Qt video-widget layout/sizing bug rather than "genuine narrow BIOS content" as Round 505 concluded - renderer-independence alone wasn't a strong enough signal. Settings reverted to project baseline after testing. No tracked-source fix (this is an upstream PCSX2-Qt UI issue, not part of this project).
+
+Next: task #447 (JP-path OSDSYS decision) still open.

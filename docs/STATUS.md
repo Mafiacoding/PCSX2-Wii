@@ -22452,3 +22452,33 @@ No disc/CD icon was found anywhere in the Screen A carousel - consistent with th
 **Leak check.** No BIOS/disc files or checkpoints were written to `/tmp/pcsx2-wii-git` or the outputs mirror this round (this was a live-GUI-only excursion, no scratch driver files created). Filename-pattern scan, `.ckpt` scan, and `git ls-files` grep all clean (below).
 
 **Next.** Task #447 (JP-path OSDSYS decision) remains the standing next step on the primary investigative thread - this round's real menu map is useful ground truth for it but doesn't resolve it by itself. If the user wants to pursue the FreeMCBoot/ELF-loading angle instead, the next concrete step is uploading a homebrew `.elf` (e.g. a ps2sdk hello-world or FreeMCBoot's own loader) to test via real PCSX2's `System > Start File...`.
+
+## Round 506: uLaunchELF Debug Info dump (real ROMVER fragment + host paths) - and a correction to Round 505's render-gap conclusion
+
+**Context:** user reported FreeMcBoot does not run in this PCSX2 instance but uLaunchELF (uLE) does, and asked for a concrete ELF-based approach to dump useful diagnostic info. Selected "Browse rom0: in uLaunchELF" from the offered options.
+
+**uLE v4.43a real menu structure (mapped this round):**
+- Main menu ("No Disc!"): O:FileBrowser / Triangle:About uLE / SELECT:Configure.
+- FileBrowser device list: `mc0:/`, `mc1:/`, `xfrom0:/`, `hdd0:/`, `dvr_hdd0:/`, `cdfs:/`, `mass:/`, `host:/`, `MISC/` - no direct `rom0:` entry at this top level.
+- `MISC/` turned out to be a utility/shortcut menu, not a filesystem folder: `../`, PS2Browser, PS2Disc, PS2Net, PS2PowerOff, HddManager, TextEditor, JpgViewer, Configure, Load CNF--, Load CNF++, Set CNF_Path, Load CNF, ShowFont, **Debug Info**, About uLE, OSDSYS.
+
+**Debug Info screen (real, live data):**
+```
+Debug Info Screen:
+
+rom0:ROMVER == "0100JC200...[cut off by render gap, see below]
+
+argc == 1
+argv[0] == "host:C:\Users[...cut off]
+boot_path == "host:C:\Use[...cut off]
+LaunchElfDir == "host:C:\[...cut off]
+```
+This is genuine BIOS ROMVER data (`0100JC200...`) read live by uLE from `rom0:ROMVER` on the real JP BIOS, plus confirmation uLE itself is running via real `host:` filesystem access with real Windows path arguments (`argv[0]`, `boot_path`, `LaunchElfDir` all begin `host:C:\Users\...`). Full strings remain partially cut off by the render-gap boundary (see below); attempts to reveal more via aspect-ratio change, window-resize drag, and Right-arrow (no in-app horizontal scroll) only partially helped (revealed a few more characters, e.g. "0100JC200" vs. the earlier-visible "0100"). Accepted as sufficient ground truth for this round - not pursuing further extraction right now.
+
+**Correction to Round 505's render-gap conclusion:** Round 505 (committed `13b8ccb`) concluded the persistent dark-rectangle render gap was "genuine content, not a driver bug," based on it being pixel-identical across D3D12 vs Vulkan renderers. This round, changing Settings > Graphics > Display > Aspect Ratio from "Auto Standard (4:3 Interlace)" to "Fit to Window / Fullscreen" made the video content (uLE's text) visibly larger/more zoomed, but the black-rectangle boundary stayed at the exact same absolute x≈525 position regardless (confirmed again after reverting back to "Auto Standard (4:3 Interlace)" - boundary unchanged). This means the real render/video-output viewport is capped at a fixed pixel width independent of both renderer AND aspect-ratio/stretch settings. That is more consistent with a genuine Qt video-widget layout/sizing bug (the child widget stuck at ~525px within the wider main window) than with "real narrow BIOS content" as concluded in Round 505. **Revising Round 505's conclusion**: renderer-independence alone was insufficient evidence: a layout bug in PCSX2-Qt's own widget sizing would also be renderer-independent. The aspect-ratio-independence found this round is the stronger discriminator, and it points toward a PCSX2-Qt UI bug rather than authentic BIOS framebuffer content. This is a PCSX2-Qt-side (upstream, non-project) UI issue if confirmed further - not something in this project's own tracked source, so no fix is implemented here.
+
+**Classification:** investigative round, no tracked source changed. Settings reverted to project baseline (Auto Standard 4:3 Interlace, Direct3D 12) before closing out.
+
+**Leak check:** outputs mirror scanned (filename patterns + `.ckpt` + `git ls-files` grep) - all clean, zero matches. No BIOS/disc binary data written to any tracked or scratch location this round (uLE Debug Info text was read/observed on-screen only, not dumped to a file).
+
+**Next:** task #447 (JP-path OSDSYS decision) still open. Optionally: try uLE's ShowFont or other MISC/ entries for a wider text view, or accept current partial ROMVER/host-path strings as sufficient. Other two originally-offered options (Pine/debugger live memory read, custom ps2sdk diagnostic ELF) remain available if deeper dumps are wanted.

@@ -9345,3 +9345,15 @@ round - devkitPPC/libogc unavailable in this sandbox session
    whenever that toolchain becomes available in-session.
 4. Mechanical cleanup (not urgent): refresh tests/README.md's 62
    stale gcc link lines found this round.
+
+## Round 493 follow-up: Wii cross-build verified clean
+
+devkitPPC/libogc found at outputs/build/devkitpro (present all along,
+just needed explicit env-var export). make clean && make: 0 warnings,
+0 errors after fixing 2 nested-comment (-Wcomment) warnings in Round
+493's own new ResetEE comments. Host-native tests re-confirmed
+passing post-fix.
+
+Round 493 is now fully closed (source fix + host-native tests +
+Wii cross-build all verified). Next: Round 494 GetDiskType caller
+disassembly, then the queued ps2sdk iop/ tree audit.

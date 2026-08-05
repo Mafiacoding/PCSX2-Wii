@@ -22181,3 +22181,21 @@ Also confirmed (in the same dump) that this function is a genuine infinite loop:
 **Verification.** `git diff --stat` (once committed): `source/core/ee/ee_core.c` (the 5 syscall handlers) and `tests/test_ee_syscall_resetee_kexit_rfu.c` (new dedicated test) plus `docs/STATUS.md`/`docs/ROADMAP.md`.
 
 **Next steps.** Per the user's own instruction, now proceed to the second half: disassemble backward from the 24 known real callers of `0x0020D478` (`0x0020DA08`-`0x0020F1A0`, enumerated by address in Round 487 Part 1) to find the real disk-type-query caller and its precondition. Separately, the user has also asked (mid-round, this same message) to implement everything from `github.com/ps2dev/ps2sdk/tree/master/iop` (the real IOP-side kernel/module source tree) once this round is done - a large task analogous to Round 492's `ee/kernel/` fetch+audit but for the IOP side, queued for upcoming rounds rather than folded into this one, consistent with the project's "4-5 tasks per batch" pacing rule.
+
+
+## Round 493 follow-up: Wii cross-build actually verified (toolchain was present, just not on PATH by default)
+
+**Correction to Round 493's STATUS entry.** That entry said the Wii cross-build "could not be run this round - devkitPPC/libogc unavailable." That was based on an incomplete check (only `$DEVKITPPC`/`$DEVKITPRO` env vars and `PATH` were checked). The user pointed out the toolchain is already present in this session. A broader filesystem search found it at `outputs/build/devkitpro/` (devkitPPC r32 + libogc, both previously set up and documented in `outputs/build/devkitpro/TOOLCHAIN_SETUP_NOTES.md` from an earlier round's toolchain-recovery work) - it just isn't wired into the shell's default environment, so it has to be exported explicitly each session:
+
+```
+export DEVKITPRO=<outputs>/build/devkitpro
+export DEVKITPPC=$DEVKITPRO/devkitPPC
+export PATH=$DEVKITPPC/bin:$PATH
+export LD_LIBRARY_PATH=$DEVKITPPC/lib:$LD_LIBRARY_PATH
+```
+
+With that, `make clean && make` on Round 493's tree completed successfully, producing `pcsx2-wii-git.elf`/`.dol`, but with 2 new compiler warnings: literal `/*` sequences inside two of Round 493's own new `ResetEE` code comments (referencing `hw/*.c` and `source/*.c` patterns) were being parsed by GCC as nested-comment starts (`-Wcomment`). Fixed by rewording those two comments (`hw/*.c` -> `hw/ .c`) - cosmetic only, no logic change. Rebuilt clean: 0 warnings, 0 errors. Re-ran both host-native tests after the edit to confirm no regression: `test_ee_core.c` (10/10) and `test_ee_syscall_resetee_kexit_rfu.c` (15/15), both still pass.
+
+**Classification.** Verification correction, not a new feature - Round 493's actual source-code fix (the 5 syscalls) is unchanged; this closes the one open item from that round's STATUS entry (Wii cross-build) and fixes 2 trivial warnings the build surfaced.
+
+**Verification.** `git diff --stat`: `source/core/ee/ee_core.c` only (2-line comment wording change). Wii build now clean (0 warnings/0 errors), both dedicated host-native tests re-confirmed passing.

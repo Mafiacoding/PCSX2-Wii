@@ -9760,3 +9760,7 @@ Decision on task #447: keep pursuing the organic-boot path (do not accept idle-a
 Closed stale tasks #335/337/345/346/355/357 as superseded by Round 466-468's full resolution of the trampoline dispatch mechanism via a different investigative path.
 
 Next: trace what CDVDFSV/FILEIO's newly-running threads are actually blocked on (real WaitSema/WaitEventFlag targets) to check for the missing SIF2-kick caller.
+
+## Round 516: ps2sdk iop/ audit closes task #440 - no real gap
+
+Audited real ps2sdk-master.zip's iop/system/ tree against our module coverage. Every real Sony IOPBTCONF module is already implemented; everything else (alloc, iomanx, iopmgr, sbusintr, siftoo, udnl, etc.) is confirmed via their own source headers to be ps2sdk homebrew tooling, not real retail BIOS modules. Task #440 closed - no fix needed, docs-only round.

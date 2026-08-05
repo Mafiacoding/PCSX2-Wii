@@ -9522,3 +9522,26 @@ docs-only verification round.
 Next (Round 500): the already-queued SIF DMA destination
 instrumentation (0x1C0440-0x1C0460 target search), now with
 GETDISKTYPE/DISKREADY/TRAYREQ all ruled out as the mechanism.
+
+## Round 500: SIF DMA destination instrumentation - zero hits near 0x1C0440-0x1C0460
+
+Instrumented both real SIF0-into-EE-RAM write paths (bulk transfer +
+RPC-reply) via scratch dma.c copy. 40M-slice run: 229 total writes,
+100% via the RPC-reply path, 100% landing at the same fixed
+0x0008C240 (the SIF RPC receive buffer). Zero bulk transfers. Zero
+hits anywhere near 0x1C0440-0x1C0460.
+
+Fourth independent real mechanism now ruled out as the browser-state
+trigger (after EE direct-write (R498), GETDISKTYPE/DISKREADY/TRAYREQ
+(R487-490, R499)). Same pattern every time: real, correctly modeled,
+never exercised on this boot path.
+
+No source change - docs-only round.
+
+Next: two honest options remain - (a) accept the idle state may be
+OSDSYS's correct permanent resting state for this exact boot
+scenario (disc mounted at cold boot, no further interaction), not a
+bug; or (b) reconsider whether the disc-browser thread is even on
+the critical path, given Rounds 457-469 already found a working
+syscall-7 _ExecPS2 trampoline that boots real game code directly,
+bypassing the browser UI entirely.

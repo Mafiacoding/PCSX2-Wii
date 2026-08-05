@@ -9413,3 +9413,38 @@ outside the window checked so far. If still zero, look for an
 indirect (jalr-via-register/jump-table) call site, and tie back
 into the Round 482-486 browser-state-machine work to find which
 state (if any) is supposed to trigger GetDiskType.
+
+## Round 496: dynamic confirmation GetDiskType's chain is dead code
+
+Widened Round 495's static scan to 0x00200000-0x00480000: still zero
+callers of the GetDiskType stub. Built a call-mechanism-agnostic
+dynamic probe (steps EE at the real 8:1 EE:IOP ratio, checks pc
+against all 3 chain addresses every instruction) and ran 180M EE
+instructions: stub_hits=0, wrapper_hits=0 throughout, while the
+shared send helper (used by the other 24 command wrappers) fired
+240 times - confirming the instrumentation works and GetDiskType's
+own chain is genuinely never entered, by any call mechanism, on
+this boot path.
+
+User-provided reference (Crystal Chips BootManager modchip
+firmware, github.com/saildot4k/Crystal-Chip-R34-v6) confirms
+GetDiskType is real, actively-used PS2 API - but called by
+BootManager itself (a homebrew ELF loaded after OSDSYS, same
+category as OSDMenu/Round 477-478), not by stock OSDSYS's own
+organic disc-browser code.
+
+Closes the Round 494-496 "disassemble the callers" arc. No tracked
+source changed.
+
+Two remaining avenues if picked up again: (a) which of the ~20
+Round 482-486 browser states triggers GetDiskType, and is it ever
+reached; (b) GetDiskType may simply not be on the stock BIOS's
+happy boot path at all, in which case it was never the real
+blocker - the actual gap is still the broader disc-browser
+escalation question circling since Round 470-486.
+
+Next: back to the queued ps2sdk iop/ tree audit (user's explicit
+"i do allow everything just do it" pre-authorization), or continue
+the disc-browser escalation thread directly - user's call on
+priority, defaulting to continuing autonomously per "go on until
+everything is finished."

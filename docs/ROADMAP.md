@@ -9495,3 +9495,30 @@ trace never generates.
 Next (Round 499): instrument every SIF DMA transfer's destination
 address during boot to check if any land near 0x001C0440-0x1C0460,
 or disassemble IOP-resident modules for a DMA target in that range.
+
+## Round 499: verified user-pasted AI Overview claim (sceCdTrayReq)
+
+User pasted a Google AI Overview claiming a physical tray/lid
+sensor interrupt fires sceCdTrayReq via SIF DMA from IOP to EE to
+break OSDSYS's idle loop. Verified against real ps2sdk source
+(fresh fetch of ee/rpc/cdvd/src/scmd.c succeeded - Round 497's
+flakiness was transient).
+
+sceCdTrayReq IS real: int sceCdTrayReq(int param, u32 *traychk),
+CD_SCMD_TRAYREQ=5 in the real enum - matches Round 494's caller #5
+(0x0020F1E8, $a1=5), previously catalogued by number only.
+
+But: (1) it's an EE-side app-initiated synchronous request, not an
+IOP-pushed SIF DMA signal as the AI Overview claimed - same mailbox
+pattern as every other S-command; (2) Round 487-490's ground-truth
+RPC census (216 real calls, 40M slices) never shows rpc=5 sent -
+third real CDVD status S-command (after GETDISKTYPE=3, DISKREADY)
+confirmed present-in-binary but never invoked on this boot path.
+
+Reinforces Round 498's IOP-side-DMA reframing (three real EE-side
+disc-status calls now ruled out as the trigger). No source change -
+docs-only verification round.
+
+Next (Round 500): the already-queued SIF DMA destination
+instrumentation (0x1C0440-0x1C0460 target search), now with
+GETDISKTYPE/DISKREADY/TRAYREQ all ruled out as the mechanism.

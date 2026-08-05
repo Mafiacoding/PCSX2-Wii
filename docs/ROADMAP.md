@@ -9181,3 +9181,41 @@ CDVDFSV TOC/session negotiation, memory-card poll completion, a
 second-stage pad/controller event, a watchdog timer) could be the
 missing write source on real hardware, to form the next concrete,
 testable hypothesis.
+
+
+## Round 485-486: fully decoded OSDSYS's browser-state field (0x001C0444, ~20 states) - also idle-forever; web research + disc-presence EDGE-timing test - also negative
+
+Round 485: decoded the rest of the per-tick dispatcher (0x00204308).
+Found a second state field at 0x001C0444 checked against 20 distinct
+values (2-18, 22-24), all calling a real handler (0x00210E70) when
+active; 0/1 = idle, skips it. Confirmed the function loops back to
+its own top (0x00204830 -> 0x00204360) - the real OSDSYS main loop.
+Write-watched 0x001C0444: exactly one write (val=0 at instr=31.0M),
+never again - same idle-forever pattern as 0x001C0454.
+
+Round 486: per user's instruction, searched the web for real PS2
+OSDSYS/CDVD disc-detection documentation (PS2 Developer wiki,
+ps2-home.com ESR community docs). Found real disc-type detection is
+mechacon/hardware-register-driven and likely transition-sensitive -
+a hypothesis this project's own methodology had never tested, since
+every prior test set disc-present BEFORE running any BIOS code
+(no observable transition). Built a driver that boots with no disc,
+then fires the real presence signal mid-run at two different
+timings (before and after the startup burst). Both produced the
+identical final state as every prior test - edge timing is ruled out
+too.
+
+No source change - both rounds are characterization/hypothesis-testing.
+Regression suite and Wii rebuild correctly skipped.
+
+### Next steps
+
+OSDSYS's full per-tick state machine is now mapped and proven correct;
+the gap is upstream of it - something prevents it from ever writing a
+second, non-idle value into 0x001C0444/0x001C0454 under any
+disc-related stimulus tested so far (static presence, edge timing).
+Continue web research into what OTHER real prerequisite (module-load
+completion order, a fuller real memory-card/HDD negotiation, or a
+different subsystem entirely) real OSDSYS needs before it will even
+attempt a disc-type check, since Round 479 already proved it never
+calls GetDiskType/DiskReady at all in this project's trace.

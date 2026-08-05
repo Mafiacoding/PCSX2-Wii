@@ -286,6 +286,22 @@ static inline int ee_tlb_translate(ee_state_t *st, uint32_t vaddr, uint32_t *out
 #define EE_EXC_CODE_TLBS  (3u << 2) /* TLB miss, store */
 #define EE_EXC_CODE_BP    (9u << 2) /* Breakpoint (BREAK instruction) - task #178, see the BREAK case below */
 #define EE_EXC_CODE_SYS   (8u << 2) /* Syscall - task #180 (55th finding), see the SYSCALL case below */
+#define EE_EXC_CODE_TR    (13u << 2) /* Trap - real MIPS/EE-standard ExcCode 13 (MIPS32/64
+                                         Architecture Reference Manual Vol II ExcCode table,
+                                         identical on the R5900 EE Core), raised by the
+                                         TEQ/TNE/TGE/TGEU/TLT/TLTU SPECIAL-funct family below
+                                         when their trap condition is true. Round 478: first
+                                         observed live via a real, genuine compiler-generated
+                                         divide-by-zero guard (divu $v0,$v1 ; teq $v1,$zero,7)
+                                         at EE PC 0x01D02004, hit by real, unmodified,
+                                         open-source OSDMenu (pcm720/OSDMenu v1.3.0) code
+                                         executing for the first time via the existing
+                                         Round 457-469 _ExecPS2 trampoline mechanism, loading a
+                                         user-supplied prebuilt osdmenu.elf instead of a game
+                                         ELF. Previously this funct value (0x34) fell through to
+                                         the unconditional halt() below - a total, unconditional
+                                         emulation gap for this entire standard MIPS trap
+                                         instruction family, not specific to OSDMenu. */
 
 /* Raises a real R5900 exception: updates Cause/EPC/Status and vectors
  * pc/next_pc to the correct handler address. Ported from PCSX2's own
@@ -6282,6 +6298,24 @@ static int ee_step(void)
         case 0x2B: /* SLTU */   if (rd) GPR(rd) = (GPR(rs) < GPR(rt)) ? 1 : 0; break;
         case 0x2D: /* DADDU */  if (rd) GPR(rd) = GPR(rs) + GPR(rt); break;
         case 0x2F: /* DSUBU */  if (rd) GPR(rd) = GPR(rs) - GPR(rt); break;
+        /* Round 478: real, standard MIPS II/III/EE trap-on-condition
+         * family (funct 0x30-0x36, skipping reserved 0x35/0x37) - see
+         * the EE_EXC_CODE_TR comment above for the live evidence
+         * (real OSDMenu code's divu/teq divide-by-zero guard) that
+         * led here. Semantics per the real MIPS ISA: if the
+         * comparison holds, raise a Trap exception (ExcCode 13);
+         * otherwise the instruction is a no-op and execution just
+         * continues to the next instruction (matches this file's
+         * existing BREAK case precedent just above: call
+         * ee_raise_exception() and fall through to this switch's
+         * normal `break`, do NOT return 1 - raising an exception
+         * redirects pc, it does not halt the core). */
+        case 0x30: /* TGE  */ if ((int64_t)GPR(rs) >= (int64_t)GPR(rt)) ee_raise_exception(st, EE_EXC_CODE_TR, this_pc, in_delay_slot); break;
+        case 0x31: /* TGEU */ if (GPR(rs) >= GPR(rt)) ee_raise_exception(st, EE_EXC_CODE_TR, this_pc, in_delay_slot); break;
+        case 0x32: /* TLT  */ if ((int64_t)GPR(rs) <  (int64_t)GPR(rt)) ee_raise_exception(st, EE_EXC_CODE_TR, this_pc, in_delay_slot); break;
+        case 0x33: /* TLTU */ if (GPR(rs) <  GPR(rt)) ee_raise_exception(st, EE_EXC_CODE_TR, this_pc, in_delay_slot); break;
+        case 0x34: /* TEQ  */ if (GPR(rs) == GPR(rt)) ee_raise_exception(st, EE_EXC_CODE_TR, this_pc, in_delay_slot); break;
+        case 0x36: /* TNE  */ if (GPR(rs) != GPR(rt)) ee_raise_exception(st, EE_EXC_CODE_TR, this_pc, in_delay_slot); break;
         case 0x38: /* DSLL */   if (rd) GPR(rd) = GPR(rt) << sa; break;
         case 0x3A: /* DSRL */   if (rd) GPR(rd) = GPR(rt) >> sa; break;
         case 0x3B: /* DSRA */   if (rd) GPR(rd) = (uint64_t)((int64_t)GPR(rt) >> sa); break;

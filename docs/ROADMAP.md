@@ -8975,3 +8975,44 @@ pre-built release binary. (2) Adapt the existing trampoline harness
 (currently loads the Tekken Tag Tournament Demo's own game ELF) to
 load and run osdmenu.elf instead, and observe how far its own simpler
 init code progresses versus real OSDSYS's stuck disc-browser.
+
+
+## Round 478: real OSDMenu executes for the first time; fixed a total emulation gap - the entire standard MIPS trap-instruction family (TEQ/TNE/TGE/TGEU/TLT/TLTU) was unimplemented
+
+Loaded the user-supplied real osdmenu.elf (pcm720/OSDMenu v1.3.0) via
+the existing Round 457-469 trampoline. Real, unmodified OSDMenu code
+executed for the first time in this project's history (pc advanced
+from its real entry 0x01D0001C to 0x01D02008), then halted on
+"unimplemented SPECIAL funct". Parsed the raw ELF bytes directly (no
+guessing) and found the actual failing instruction: `teq $v1,$zero,7`
+at 0x01D02004 - GCC's standard divide-by-zero guard following a real
+`divu`. TEQ (funct 0x34) and its five siblings (TNE/TGE/TGEU/TLT/TLTU,
+funct 0x30-0x36) are real, standard MIPS II/III/EE trap instructions
+that had ZERO coverage in ee_core.c - any compiled code doing runtime
+divide-by-zero checks (default GCC codegen) would hit this wall.
+
+Implemented all six (EE_EXC_CODE_TR=13<<2, matching the real MIPS
+ExcCode "Tr" value; raises via the existing ee_raise_exception(),
+same pattern as the existing BREAK case). Re-ran the OSDMenu boot
+survey against the fix: zero halts across the full 40M-slice budget
+(previously halted after ~1,580 instructions of OSDMenu's own code) -
+OSDMenu progressed to a real interrupt-driven idle loop. 128/128
+regression tests pass. Wii cross-build clean (also fixed a
+session-local LD_LIBRARY_PATH gap blocking libmpfr.so.4 discovery).
+No regression: purely additive switch cases; no prior organic-boot
+survey (Rounds 470-477) ever hit this halt, so the real BIOS path
+never exercised this opcode family within the depth explored.
+
+This is the most significant OSDMenu-thread milestone yet: real,
+third-party, open-source PS2 software now runs further via this
+project's own EE-core emulation than the real BIOS OSDSYS ever has on
+the disc-browser path, and the blocker it hit was a genuine, narrow,
+fixable emulator gap - not a protocol-negotiation mystery.
+
+### Next steps
+
+Characterize OSDMenu's new resting idle loop (0x8000CCxx range) -
+disassemble it, check GS/framebuffer state for any OSDMenu-drawn UI,
+determine what stimulus (interrupt/RPC/pad input) it may be waiting
+on. Continue the parallel real-OSDSYS-escalation thread per the
+user's "do both in parallel" decision.

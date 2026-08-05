@@ -2768,12 +2768,12 @@ static int ee_step(void)
                  * this codebase - VU0 "macro mode" is modeled directly
                  * as ee_state_t fields (cop2_ctrl[32], vu0_vf[32][4],
                  * vu0_mem[4096], vu0_micro[4096], per include/core/ee/
-                 * ee_core.h) rather than through a separate hw/*.c
+                 * ee_core.h) rather than through a separate hw/ .c
                  * module like VU1/GIF/VIF have. Cleared inline here.
                  *
                  * INIT_IPU: no IPU hardware model exists anywhere in
                  * this codebase yet (confirmed via grep across source/
-                 * hw/*.c - real hardware's Image Processing Unit,
+                 * hw/ .c - real hardware's Image Processing Unit,
                  * MPEG2/DVD macroblock decoding, is unimplemented).
                  * Documented no-op for this bit only, honest about the
                  * gap rather than silently ignoring it. */

@@ -9671,3 +9671,12 @@ Browsed uLE v4.43a FileBrowser -> MISC/ (utility menu, not a filesystem folder) 
 Corrected Round 505: the black-rectangle render gap stays at the same fixed x≈525 pixel boundary regardless of Aspect Ratio setting (tested "Fit to Window/Fullscreen" vs "Auto Standard 4:3 Interlace" - video content resized, gap boundary did not move). This points to a PCSX2-Qt video-widget layout/sizing bug rather than "genuine narrow BIOS content" as Round 505 concluded - renderer-independence alone wasn't a strong enough signal. Settings reverted to project baseline after testing. No tracked-source fix (this is an upstream PCSX2-Qt UI issue, not part of this project).
 
 Next: task #447 (JP-path OSDSYS decision) still open.
+
+## Round 507: custom ps2sdk diagnostic ELF - real ground truth beyond uLaunchELF
+Installed ps2dev/ps2sdk prebuilt toolchain in the sandbox, wrote and built a small diagnostic ELF (`tools/round507-diag-elf/`) using ps2sdk's on-screen debug console. Loaded via System > Start File in real PCSX2. Obtained: full `rom0:ROMVER == "0100JC20000117"` (uncut, unlike Round 506's render-gap-truncated capture), confirmed real `host:` path resolution, found `rom0:` supports named open but not directory enumeration (opendir/readdir returns 0 entries) - relevant to Round 346's rom0: FILEIO scope, confirmed no memory card in mc1: slot (matches Round 456), and real `sceCdGetDiskType()=0`/`sceCdStatus()=10` (no disc mounted).
+
+Answers user's "how far would a diagnostic ELF go" question: as far as any real PS2 homebrew ELF can go via legit BIOS/kernel syscalls under real PCSX2 - comprehensive ground truth, but bounded to the PS2's own address space (not PCSX2's C++ internals, which need Pine/debugger instead). Proposed as a reusable coverage-probe: same ELF run against real PCSX2 (ground truth) vs our own emulator core (diff the two).
+
+No tracked emulator source changed - tooling round, regression/Wii build correctly skipped.
+
+Next: task #447 (JP-path OSDSYS decision) still open.

@@ -9088,3 +9088,33 @@ Live-instrument (scratch-copy fprintf hook, matching Round 479 Part
 and the a1 value on every real invocation - a hard, disassembly-
 independent map of every call site, rather than continuing to
 disassemble candidates from static code alone.
+
+
+## Round 481: live-instrumented every real call to 0x00214778 - found the true a1=0x500D heartbeat producer/consumer
+
+Added a scratch-copy fprintf probe (`if (pc==0x00214778) log ra,a1`) to
+ee_step() and re-ran the 40M-slice organic-boot survey. Ground-truth
+census: 94 total calls, in two phases - a one-time startup burst
+(calls 1-46, ~12 distinct call sites, wide variety of real message
+IDs including the 0xE621 call from Round 480), then calls 47-94 (the
+entire remainder of the run) from exactly ONE site, ra=0x00200a3c,
+always a1=0x500d. This corrects Round 471's misattribution of
+0x00214a0c as the heartbeat caller (it's real but one-shot).
+
+Disassembled 0x00200970 (containing ra=0x00200a3c): a real 128-slot
+circular message-queue drain loop, gated by read/write cursor globals
+(0x001D9394/0x001D9398). Disassembled its producer helper (0x002008C8,
+called with a0=60): queues two 0x500D messages only when
+global[0x00287824] < 60 - the first hard-evidenced gating condition
+found for the idle heartbeat.
+
+No source change - characterization only. Regression suite and Wii
+rebuild correctly skipped.
+
+### Next steps
+
+Read global 0x00287824's actual value/growth-rate across a run to see
+if/how it could ever reach 60, and disassemble the drain loop's
+read_cursor>=write_cursor early-exit path (0x00200A60) to see what
+OSDSYS does once the 0x500D heartbeat stops being queued - this may
+be the actual escalation path.

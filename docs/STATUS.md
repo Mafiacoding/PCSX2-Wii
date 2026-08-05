@@ -22119,3 +22119,16 @@ Also confirmed (in the same dump) that this function is a genuine infinite loop:
 **Verification.** No tracked source changed this round (`git status`/`git diff --stat` confirm only `docs/STATUS.md`/`docs/ROADMAP.md`) - regression suite and Wii rebuild correctly skipped.
 
 **Honest assessment and next steps.** Four rounds deep into the GetDiskType investigation (487-490), every "obvious" gate inside the shared send helper has now been ruled out: the semaphore/PollSema guard (Round 487-488), the request-slot busy-check (this round), and the retry-throttle budget gate (this round). None of them distinguish `rpc_number==3` from the S-commands that DO send successfully through the exact same code. This means the real determinant must be set **before** the shared helper is ever reached - by whichever specific caller, among the 24 real callers of `0x0020D478` already enumerated by address in Round 487 Part 1 (`0x0020DA08` through `0x0020F1A0`), is responsible for a disk-type query. The next step is a bounded, mechanical one (24 known addresses, no more open-ended searching needed): disassemble backward from each of those 24 call sites to find which one sets up a GetDiskType-specific request, and what precondition gates that specific caller from ever running under current boot stimulus.
+
+
+## Round 491 (per explicit user request): incorporated real ps2sdk `sifrpc.c`/`loadfile.h` as tracked reference source
+
+**Context.** The user directly requested both files be included: `ee/kernel/src/sifrpc.c` (the real EE-side SIF RPC implementation) and `ee/kernel/include/loadfile.h` (the real LOADFILE RPC client API), fetched verbatim from `github.com/ps2dev/ps2sdk` (`master` branch, Academic Free License 2.0 - unlike the unclear-license community archives cited in earlier rounds, this is the official, clearly-licensed open-source SDK, so it is kept in full rather than only cited in short snippets).
+
+**Relevance to the active investigation.** `sifrpc.c`'s `sceSifCallRpc()` shows the real client-side `SifRpcCallPkt_t` field layout - `rpc_number`, `send_size`, `recvbuf`, `recv_size`, `rmode`, `cd` (client data), `sd` (server data) - which lines up exactly with the fields this project's own Round 487-490 RPC census (`call_cd`/`call_sid`/`rpc_number`/`call_recvbuf`) has been decoding from raw memory by hand. It also documents the real bind/call/sema-wait architecture (`sceSifBindRpc` creates a semaphore and blocks on `WaitSema` until `_request_end`'s `iSignalSema` fires) that this project's own OSDSYS binary implements a hand-rolled, non-libc version of - useful ground truth for the ongoing "why doesn't the GetDiskType caller ever run" search. `loadfile.h` documents the real `SifExecModuleFile`/`_SifLoadModule` LOADFILE RPC client API, relevant background for the earlier `_LoadExecPS2` trampoline work (Rounds 457-469).
+
+**Stored at** `docs/reference/ps2sdk/sifrpc.c`, `docs/reference/ps2sdk/loadfile.h`, `docs/reference/ps2sdk/README.md` (attribution/index).
+
+**Classification.** Reference-material addition per explicit user request - no BIOS/game data, no tracked emulator-source change; regression suite and Wii rebuild correctly skipped.
+
+**Verification.** `git diff --stat` confirms only the three new `docs/reference/ps2sdk/` files were added.

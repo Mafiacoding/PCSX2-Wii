@@ -9706,3 +9706,15 @@ Driver committed as `tools/round509-ulaunchelf-test/` (driver.c + README, not th
 No tracked emulator source changed - regression/Wii build correctly skipped.
 
 Next: try delivering a pad-button-press event DURING the post-trampoline run (not just once before warmup) - untried by any round so far.
+
+## Round 510: pad-command hit-counter falsifies "mid-run pad press" hypothesis
+
+Per user instruction ("if its an pad issue fix it"): added `iop_sio2_get_pad_command_count()` diagnostic counter to `source/hw/iop_sio2.c`/`include/core/hw/iop_sio2.h` (purely additive, tracked hit-counter following project convention). Re-ran the Round 509 uLaunchELF trampoline with CROSS held throughout - `pad_cmd_count=0` at every sample across ~800M instructions.
+
+**Not a pad issue.** The shared kernel idle loop never issues a single SIO2 pad-read transaction, so no pad-timing fix could help. Falsifies Round 509's speculative next-step. Real blocker remains task #447 (SBUS/SIF2 handshake) - unchanged, still open.
+
+Verified: host-native regression (test_sio2_pad, test_iop_sio2_mc both PASS) + full standalone source-tree compile clean. Wii cross-build: set up devkitPPC r32 + libogc 1.8.18 fresh this session (archive was uncompressed tar despite `.gz` name; needed libmpfr.so.4→so.6 compat symlink); all changed/tracked files compile clean under the real PPC cross-compiler; full link blocked only by a pre-existing, unrelated gap (`libfat`/`fat.h` not available in any upload - needed by `main.c` for SD access, untouched by this round's change).
+
+Driver committed as `tools/round510-pad-diagnostic/` (driver.c + README, no binary/BIOS data).
+
+Next: task #447 (SBUS/SIF2 handshake) remains the real blocker.

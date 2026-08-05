@@ -283,7 +283,15 @@ int  iop_sio2_pad_is_connected(void);
 void iop_sio2_pad_set_buttons(uint16_t pressed_mask); /* bit=1 -> pressed */
 void iop_sio2_pad_press(uint16_t pressed_bits);
 void iop_sio2_pad_release(uint16_t pressed_bits);
-uint16_t iop_sio2_pad_get_buttons(void); /* pressed-polarity readback */
+uint16_t iop_sio2_pad_get_buttons(void);
+
+/* Round 510 diagnostic: counts real pad-address (0x01) SIO2 command
+ * transfers actually dispatched via the control-register bit-0
+ * trigger (mc_process_command() -> pad_process_command()). Used to
+ * determine whether the shared kernel idle-wait loop this project
+ * has documented since Round 265-271 ever actually issues a pad-read
+ * SIO2 transaction, as opposed to gating on something else entirely. */
+uint32_t iop_sio2_get_pad_command_count(void); /* pressed-polarity readback */
 
 /* Round 195: analog-mode toggle + 4-axis analog-stick state. See the
  * citation trail above the Round 195 comment block for why the mode

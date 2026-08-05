@@ -35,6 +35,7 @@ typedef struct {
                         * (Center) each */
 } pad_t;
 static pad_t g_pad;
+static uint32_t g_pad_command_count = 0; /* Round 510 diagnostic */
 
 /* Command/reply staging buffers for the batched FIFOIN -> CTRL-start
  * -> FIFOOUT model described in the header. */
@@ -141,6 +142,11 @@ uint16_t iop_sio2_pad_get_buttons(void)
     return g_pad.buttons;
 }
 
+uint32_t iop_sio2_get_pad_command_count(void)
+{
+    return g_pad_command_count;
+}
+
 void iop_sio2_pad_set_analog_mode(int enabled)
 {
     g_pad.analog_mode = enabled ? 1 : 0;
@@ -180,6 +186,7 @@ void iop_sio2_pad_get_analog_axes(uint8_t *right_x, uint8_t *right_y,
  * here. */
 static void pad_process_command(void)
 {
+    g_pad_command_count++;
     int n = g_cmd_len;
     g_reply_len = 0;
     g_reply_pos = 0;

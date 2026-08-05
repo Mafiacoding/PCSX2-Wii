@@ -9581,3 +9581,28 @@ No source change - docs-only round.
 Next: enumerate every AddIntcHandler() registration during warmup
 (not just VBLANK-END) via value-watch, same technique as R468, to
 find and mask the remaining collision(s).
+
+## Round 503: real US BIOS uploaded by user - new earlier blocker, not an improvement
+
+User uploaded ps2-0200a-20040614-100909.bin (real US/region-A BIOS,
+v2.00, 2004-06-14), expecting it to boot better than the long-used JP
+scph10000.bin. Verified real and distinct (91% bytes differ). Swapped
+into the same organic boot survey used since R470/R501.
+
+Result: EE never reaches RAM-resident OSDSYS/GS setup at all - stuck
+in a ROM-resident spin loop at 0x9FC41048-0x9FC41060 (phys
+0x1FC41048), GS state fully zero. Disassembled the loop: writes 0x83
+to RAM offset 0x10, then spins re-reading that address waiting for it
+to change (paired with a COP0 Count reset right after - a timing-
+calibration idiom). Instrumented check confirms RAM[0x10] is static
+0x00000000 for the whole run - nothing in our IOP/hardware model ever
+writes it.
+
+Verdict: this is a real but EARLIER and separate gap from the R470-502
+disc-browser thread. The US BIOS is not currently better for this
+project - JP BIOS remains the farther-progressing, more thoroughly
+evidenced baseline. No source change - docs-only round.
+
+Next: keep JP BIOS as primary baseline (task #447 still open). US
+BIOS's RAM+0x10 spin is a distinct, unexplored blocker - only worth
+chasing if there's a specific reason to need US-region behavior.

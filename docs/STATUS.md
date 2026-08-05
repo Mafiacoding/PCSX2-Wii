@@ -22347,3 +22347,45 @@ With that, `make clean && make` on Round 493's tree completed successfully, prod
 **Verification.** `git diff --stat`: docs only. Leak check clean (below).
 
 **Next.** The concrete, mechanical next step (following Round 468's exact methodology, just applied to a different interrupt cause): value-watch every real `AddIntcHandler()`-class registration during the organic warm-up phase to enumerate every interrupt cause OSDSYS registers a handler for (not just VBLANK-END/cause 3), then either mask all of them before firing the trampoline, or - more precisely - identify which specific cause's handler is the one still firing and redirecting control after this round's run, the same way Round 468 pinned down VBLANK-END specifically.
+
+---
+
+## Round 503: user-uploaded real US BIOS (ps2-0200a) - new, EARLIER blocking point found, not an improvement
+
+**Context.** User uploaded `ps2-0200a-20040614-100909.bin` (4,194,304 bytes) with the message "now it should be better we have an us bios not jp anymore check it out". Expectation was that a US-region BIOS might boot further/cleaner than the JP `scph10000.bin` this project has used since Round 238.
+
+**BIOS identity verification.** `strings` on the dump confirms real Sony BIOS content: `"20040614-100909,ROMconf,PS20200AC20040614.bin,kuma@rom-server/~/k200iop/g/app/rom"` - version 2.00, region code `A` (America/US), build date 2004-06-14, plus the standard `"Copyright 1993-1999 (C) Sony Computer Entertainment Inc."` strings and `SCPH-` marker. `cmp -l` against the existing JP `scph10000.bin`: 3,818,038 of 4,194,304 bytes differ (91%) - confirmed a genuinely distinct BIOS build/ROMDIR, not a relabeled copy. Copied to scratch-only `/tmp/round238_diag/bios_us.bin` (never committed/rsynced - real BIOS ROM data, per the standing leak-prevention rule).
+
+**Boot survey (same recipe as Round 501, BIOS path swapped).** 60,000,000-slice run (480,000,000 EE instructions): **EE never halts, but never reaches RAM-resident OSDSYS code either.** Final `ee_pc=0x9FC41050` - inside **BIOS ROM itself** (KSEG1, physical `0x1FC41050` = ROM file offset `0x41050`), not the `0x0050xxxx`/`0x0020xxxx`-class RAM addresses every JP-BIOS round since Round 445 has rested at. GS state is **completely zero** (`pmode=0x0 dispfb1=0x0 display1=0x0 dispfb2=0x0 display2=0x0`) - no display setup has happened at all, a strictly earlier point than the JP BIOS's Round 501 baseline (which reaches real `PMODE=0x66`/active `DISPFB2`/`DISPLAY2` circuit-2 rendering by the same instruction budget).
+
+**Progress-checkpoint trace** (8 samples from slice 500K to 60M) shows `ee_pc` confined to a tight 24-byte window, `0x9FC41048-0x9FC41060`, for the entire run - a genuine spin loop, not slow ROM-resident progress. IOP `pc` is similarly confined to `0x00117CB8-0x00117E14` for most of the run (consistent with the IOP-reboot-cycle pattern documented in earlier rounds, e.g. Round 373), with one late excursion to `0x00104EF0`.
+
+**Disassembly (capstone, MIPS32LE + EE 64-bit ALU ops like `daddu`/`dsll` decoded by hand where capstone falls back to `.byte`)** of ROM offset `0x41024-0x41068`:
+```
+0x9FC41024: lui   $v0, 0xb000
+0x9FC41028: addiu $v1, $zero, 0x83
+0x9FC4102C: ori   $v0, $v0, 0x10        ; $v0 = 0xB0000010 (KSEG1, phys 0x00000010 = RAM+0x10)
+0x9FC41030: lui   $a3, 0xb000
+0x9FC41034: sw    $v1, 0($v0)           ; RAM[0x10] = 0x83
+0x9FC41038: daddu $a3, $a3, $0 / ori-equiv -> $a3 = 0xB0000010 (same address)
+0x9FC4103C: nop
+0x9FC41040: lw    $v1, 0($a3)           ; first read of RAM[0x10]
+0x9FC41044: addiu $a2, $a0, 1
+0x9FC41048: lw    $v0, 0($a3)           ; <-- loop head (branch target)
+0x9FC4104C-0x9FC41058: nop x4
+0x9FC4105C: beq   $v1, $v0, 0x9FC41048  ; spin while unchanged
+0x9FC41060: nop
+0x9FC41064: mtc0  $zero, $9 (Count)     ; reset COP0 Count to 0 (only reached once value changes)
+0x9FC41068: sync  0x10
+```
+This writes `0x83` to RAM address `0x10`, then spins re-reading that same address waiting for its value to *change* from whatever it reads. A direct instrumented check (`r503_check_ram10`, 20 checkpoints across 40M slices) confirms `ee_mem_read32(0x00000010)` reads a static `0x00000000` for the entire run - **nothing in this project's IOP/hardware model ever writes RAM offset 0x10 after the initial `0x83` write**, so the two back-to-back reads always compare equal and the `beq` never falls through. Root cause is definitively pinned: this is a genuine early-boot hardware synchronization primitive (write-a-sentinel-then-wait-for-external-change pattern, paired with a COP0 Count reset immediately after - classic timing-calibration idiom) that some other component (most plausibly the IOP, or a real hardware refresh/ready signal) is supposed to satisfy, and does not in our model.
+
+**Classification.** This is a real, newly-discovered gap - but it is **earlier and unrelated** to the OSDSYS disc-browser-escalation gap this project's Rounds 470-502 have been investigating on the JP BIOS path. The US BIOS's ROM-resident boot code takes a measurably different route through early hardware bring-up (this exact spin-on-RAM+0x10 sequence does not appear to be part of the JP BIOS's boot path, or if it is, the JP BIOS's copy of it resolves correctly). No tracked-source fix implemented this round - identifying and modeling the real producer of this signal (IOP-side write, or a hardware timing/refresh-ready condition) is out of scope for a single round and would need the same kind of dedicated tracing (Rounds 480-502 took 20+ rounds to resolve one such gate) applied fresh to this new code path.
+
+**Verdict on the user's question ("should be better... check it out").** Directly and honestly: **no, not currently** - this newer US BIOS (v2.00, 2004-06-14) gets stuck *earlier* in this project's host-native reimplementation than the JP `scph10000.bin` baseline every round since Round 470 has been built around. The JP BIOS reaches real GS/display setup (PMODE=0x66, active framebuffer) and a stable RAM-resident OSDSYS idle loop; the US BIOS never leaves ROM-resident early-boot code within the same 480M-instruction budget. This is likely because BIOS versions differ significantly in their ROM-resident hardware bring-up sequences (this is a 2004 BIOS vs. the JP dump's earlier revision), and this project's hardware model has been tuned/evidenced against the JP path specifically across 470+ rounds. Recommendation: keep the JP BIOS as the primary investigative baseline; the US BIOS's new spin-loop is a legitimate but separate, unexplored blocker that could be a future investigative thread if there's a specific reason to prefer the US region (e.g. matching a specific real console/game-region combination).
+
+**Regression suite / Wii rebuild.** Correctly skipped - docs-only round, no tracked source changed.
+
+**Leak check.** BIOS files (`bios.bin`, `bios_us.bin`) and all scratch drivers stayed under `/tmp/round238_diag/` only; never copied into `/tmp/pcsx2-wii-git` or the outputs mirror. Filename-pattern scan, `.ckpt` scan, and `git ls-files` grep all clean (below).
+
+**Next.** If the user wants the US BIOS pursued further, the concrete next step is the same value-watch/backward-trace methodology used throughout Rounds 480-502: find what real component (IOP-side code, most likely) is supposed to write RAM offset 0x10 during early hardware bring-up, and why our IOP model's boot sequence never does. Otherwise, task #447 (JP-path decision: accept disc-browser idle as correct, or pivot to the syscall-7 trampoline) remains the standing next step on the primary investigative thread.

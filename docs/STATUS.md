@@ -22667,3 +22667,15 @@ Extracted the already-uploaded real `ps2sdk-master.zip` and audited `iop/system/
 **Conclusion:** no real, evidenced implementation gap found. Task #440 is closed with this negative result rather than left open indefinitely - matching this project's own established precedent (Round 497) of correctly deprioritizing this audit in favor of the organic-boot escalation work, now with a concrete reason why: there is nothing left in the real module list to audit against.
 
 **Classification:** docs-only round - no tracked emulator source changed. Regression suite and Wii rebuild correctly skipped.
+
+## Round 517: final consolidated verification for the Round 513-516 fast batch (task #482)
+
+Per the user's "Everything, fast, less verification per step" authorization for this batch, full 129-test regression suite and Wii cross-build health check runs were done per-round only where source actually changed (Round 513, Round 514), and deferred to a single final consolidated pass across the whole batch otherwise. This round runs that final pass.
+
+**Full regression suite:** all 129 tests in `tests/*.c` re-verified against the current tree (Round 514's `iop_hle_thread_retire_root_thread()` fix + Round 513/515's diagnostic getters, unchanged since Round 515). 129/129 PASS, 0 BUILDFAIL, 0 TESTFAIL - 56 tests link cleanly against the full precompiled-object set, the remaining 73 (which `#include` a `.c` file also present in that set) resolve via the established selective-object-exclusion fallback. No regression from the Round 513/514 per-round runs.
+
+**Wii cross-build health check:** all 37 tracked `source/*.c` files (excluding the pre-existing `main.c`/`ppc_dynarec.c`/`gs_wii_output.c` libfat gap) compile clean with devkitPPC - 0 WIIFAIL.
+
+**Conclusion:** the entire Round 513-516 batch (thread-priority survey, idle/THREADMAN integration fix, thread-identity audit + task #447 decision, stale-task closeout, ps2sdk iop/ audit) is verified clean end-to-end. No regression introduced by moving through 4 rounds with reduced per-step verification - the "fast" authorization did not cost correctness this time, though the standing caution (Round 425/426 precedent) remains warranted for future fast batches.
+
+**Classification:** docs-only round - no tracked emulator source changed, this round is pure verification.

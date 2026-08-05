@@ -9764,3 +9764,7 @@ Next: trace what CDVDFSV/FILEIO's newly-running threads are actually blocked on 
 ## Round 516: ps2sdk iop/ audit closes task #440 - no real gap
 
 Audited real ps2sdk-master.zip's iop/system/ tree against our module coverage. Every real Sony IOPBTCONF module is already implemented; everything else (alloc, iomanx, iopmgr, sbusintr, siftoo, udnl, etc.) is confirmed via their own source headers to be ps2sdk homebrew tooling, not real retail BIOS modules. Task #440 closed - no fix needed, docs-only round.
+
+## Round 517: final consolidated verification (task #482) - Round 513-516 batch clean
+
+Full 129-test regression suite (129/129 PASS) and Wii cross-build health check (37/37 clean, 0 WIIFAIL) re-run against the entire Round 513-516 batch (thread-priority fix, thread-identity audit, task #447 decision, ps2sdk audit). No regression found - the batch's reduced-per-step verification (per the user's "fast" authorization) did not let anything slip through this time. Docs-only verification round.

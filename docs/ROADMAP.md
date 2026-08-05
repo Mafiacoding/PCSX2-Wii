@@ -9473,3 +9473,25 @@ thread (open since Round 470-486) - what real condition/state
 transition escalates the disc-browser past its idle animation loop.
 This is direct-disassembly territory, unaffected by today's GitHub
 fetch issues.
+
+## Round 498: browser-state field - no EE write path can ever set it nonzero
+
+Static scan of all "sw $rt,0x444($rs)" / "sw $rt,0x454($rs)" in the
+resident OSDSYS image: 5+2 real writers found, ALL write literal
+zero. No EE-code write path can ever set the browser-nav-state or
+pending-message-state fields nonzero. Re-confirmed idle-forever
+using the real system_run_interleaved() at 640M EE instructions
+(2x prior surveys in this thread) - v444=0x0, v454=0x0 throughout.
+
+Reframes the open question: since no EE instruction can set these
+fields, the real "go active" signal must come from IOP-side code
+via SIF DMA into EE RAM (bypassing EE's own sw instructions
+entirely) - the same mailbox-reply mechanism already characterized
+for GetDiskType/GetToc (Round 487-496). This ties the disc-browser
+stall and the GetDiskType dead-code finding to the same probable
+root cause: a missing/unmodeled IOP-side reply this project's boot
+trace never generates.
+
+Next (Round 499): instrument every SIF DMA transfer's destination
+address during boot to check if any land near 0x001C0440-0x1C0460,
+or disassemble IOP-resident modules for a DMA target in that range.

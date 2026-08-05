@@ -9118,3 +9118,35 @@ if/how it could ever reach 60, and disassemble the drain loop's
 read_cursor>=write_cursor early-exit path (0x00200A60) to see what
 OSDSYS does once the 0x500D heartbeat stops being queued - this may
 be the actual escalation path.
+
+
+## Round 482: confirmed global[0x00287824] does reach 60 - and crossing it changes nothing observable
+
+Extended the Round 481 probe with a write-watch on 0x00287824 and a
+visit-counter on the drain loop's queue-empty exit path (0x00200A60).
+A 60M-slice run shows the counter incrementing by exactly 1 per drain
+cycle (~4.92M instructions apart), reaching exactly 60 at
+instr=369,523,553, then never incrementing again for the remaining
+~110M instructions - confirming the slt-gated producer really does
+stop once the threshold hits.
+
+Two fresh-boot runs - one just before the threshold (46M slices,
+counter=59) and one well past it (62M slices, counter frozen at 60) -
+land at the identical EE pc (0x005189AC) and byte-identical GS state
+(pmode/dispfb1/display1/dispfb2/display2 all unchanged). The drain
+loop keeps firing on its normal cadence after the threshold, now
+always finding the queue empty.
+
+Classification: real negative result. The counter=60 exhaustion is a
+simple call-count limiter on a repeating status line, not an
+escalation gate. No source change - regression suite and Wii rebuild
+correctly skipped.
+
+### Next steps
+
+The 0x00214778/0x00200970/0x002008C8 status-message subsystem is now
+fully characterized and ruled out as the escalation trigger. Step
+back to find what else runs on the drain loop's own ~4.92M-instruction
+periodic cadence (likely a real per-VBLANK/per-frame OSDSYS tick) -
+that outer tick handler, not the message subsystem it also drives, is
+the next place to look for the real decision point.

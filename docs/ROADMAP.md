@@ -9357,3 +9357,31 @@ passing post-fix.
 Round 493 is now fully closed (source fix + host-native tests +
 Wii cross-build all verified). Next: Round 494 GetDiskType caller
 disassembly, then the queued ps2sdk iop/ tree audit.
+
+## Round 494: GetDiskType caller disassembly (docs-only)
+
+Cross-validated Round 487's 24-caller count via an independent live
+boot-trace method. Decoded `0x0020D478`'s real calling convention:
+it takes NO rpc_number argument - always sends a fixed SID
+(0x80000593) via 0x00213300, reading the actual command payload
+from a shared mailbox struct at [$s0+0x5020] that callers must
+pre-stage themselves. Decoded caller #9 of 24 in full; its fixed
+parameter block (a1=20, t2=16) matches Round 487 Part 3's
+already-identified GetToc/directory-entry signature, not
+GetDiskType - meaning the 24 callers are thin generic wrappers
+whose real command identity lives in the parameter block they pass
+to a deeper shared function (0x002134A8), not in anything visible
+at the 0x0020D478 call site itself.
+
+No tracked source changed - investigation/model-refinement only.
+
+Next (Round 495): extract the remaining 23 callers' own fixed
+parameter blocks and cross-reference against the real
+SIF_SID_CDVD_SCMD command table to find GetDiskType's signature.
+If no caller resolves cleanly, escalate to live dynamic
+instrumentation of writes to the [$s0+0x5020] mailbox during a
+boot run that reaches the disc browser (Round 481-style technique).
+Then: the queued ps2sdk iop/ tree audit (explicitly pre-authorized
+by the user - "implement everything from
+github.com/ps2dev/ps2sdk/tree/master/iop ... i do allow everything
+just do it").

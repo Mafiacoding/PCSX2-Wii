@@ -9385,3 +9385,31 @@ Then: the queued ps2sdk iop/ tree audit (explicitly pre-authorized
 by the user - "implement everything from
 github.com/ps2dev/ps2sdk/tree/master/iop ... i do allow everything
 just do it").
+
+## Round 495: full GetDiskType call chain decoded (rpc_number=3, caller #2 of 24)
+
+Systematically decoded the fixed $a1 parameter each of the 24
+callers passes to 0x002134A8: values are exactly 1-25, a clean
+real S-command rpc_number enumeration (cross-validated against
+Round 474's real CD_SCMD_CMDS citation - $a1=1 matches READCLOCK,
+already known to be the most-called real command). GetDiskType
+(rpc_number=3) is caller #2, at 0x0020DA98-0x0020DB1C.
+
+Traced the full 3-level call chain: 0x002084D0 (bare
+sceCdGetDiskType() library stub) -> 0x0020DA98 (stages
+rpc_number=3) -> 0x0020D478 (shared send). Found ZERO real callers
+of the outermost stub (0x002084D0) anywhere in the resident
+0x00200000-0x00280000 OSDSYS image, via both direct JAL scan and
+raw pointer-table scan. This fully explains Round 487-488's
+"rpc_number==3 never appears" finding: the entire real call chain
+is dead code on the current boot path, not a payload that gets
+built and dropped somewhere inside dispatch.
+
+No tracked source changed - investigation only.
+
+Next (Round 496): re-run both scans across the wider
+0x00200000-0x00480000 range in case OSDSYS's real caller lives
+outside the window checked so far. If still zero, look for an
+indirect (jalr-via-register/jump-table) call site, and tie back
+into the Round 482-486 browser-state-machine work to find which
+state (if any) is supposed to trigger GetDiskType.

@@ -9282,3 +9282,35 @@ BEFORE the helper is called - disassemble backward from each of the
 24 known real callers of 0x0020D478 (0x0020DA08-0x0020F1A0, addresses
 already enumerated in Round 487) to find which one is the real
 disk-type-query caller and what precondition gates it.
+
+## Round 492: fetched real ps2sdk ee/kernel/ source, audited syscall coverage
+
+Fetched ee/kernel/ (src+include, ~14 files) via jsdelivr listing +
+raw.githubusercontent.com (api.github.com/github.com tree page both
+blocked for this fetch tool). Scoped to kernel/ only - the rest of
+ee/ (draw/graph/libgs/libcglue/etc) is userland client code that
+compiles into game ELFs, not something an EE emulator separately
+implements.
+
+Two findings validate prior closed work: real ExecPS2.c's TCB struct
+(entry@0x0C, argc@0x34, argstring@0x38) matches Round 461-463's
+independently-reverse-engineered layout exactly; its real reset path
+calls InitializeINTC() unconditionally, confirming Round 468's INTC-
+masking diagnosis from an independent source.
+
+Syscall coverage audit: 143/148 real syscalls handled. 5 genuinely
+missing: ResetEE(1), KExit(4), ResumeIntrDispatch(5),
+ResumeT3IntrDispatch(8), RFU009(9) - none appear anywhere in
+ee_core.c. ResetEE is directly relevant: real ExecPS2 always calls it.
+
+No source change - reference acquisition + characterization.
+Regression suite and Wii rebuild correctly skipped.
+
+### Next steps
+
+Per user's original instruction to return to Round 489-490's GetDiskType
+thread after this fetch: disassemble backward from the 24 known real
+callers of 0x0020D478 (0x0020DA08-0x0020F1A0) to find the actual
+disk-type-query caller. Separately (unrelated thread): implement the
+5 missing syscalls (ResetEE especially) if/when the ExecPS2/TCB
+trampoline work resumes.

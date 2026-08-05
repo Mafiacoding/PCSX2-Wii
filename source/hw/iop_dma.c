@@ -36,6 +36,7 @@ static const iop_dma_range_t s_ranges[] = {
 #define NUM_RANGES (int)(sizeof(s_ranges) / sizeof(s_ranges[0]))
 
 static iop_dma_state_t g_dma;
+static uint32_t g_sif2_transfer_count; /* Round 511 diagnostic: counts real, completed IOP-RAM-to-EE-RAM SIF2 transfers */
 
 void iop_dma_init(void)
 {
@@ -52,6 +53,7 @@ void iop_dma_bind_iop_ram(uint8_t *ram, uint32_t ram_size)
 }
 
 #define IOP_DMA_SIF0_CHANNEL 9
+#define IOP_DMA_SIF2_CHANNEL 2
 
 /*
  * Round 199 (task #367): SIF0 (channel 9, real "fromIOP" direction -
@@ -118,6 +120,85 @@ static void iop_dma_sif0_try_transfer(iop_dma_channel_t *ch)
     dma_channel_receive_quadwords(DMA_CHANNEL_SIF0, g_iop_ram + ch->madr, qwc);
     ch->chcr &= ~0x01000000u; /* real hardware auto-clears STR upon completion */
     iop_dma_signal_channel_done(IOP_DMA_SIF0_CHANNEL); /* real per-channel completion IRQ path, already existing (Round 114) */
+}
+
+/*
+ * Round 511 (task #470, following directly from Round 510's diagnosis
+ * that the shared kernel idle loop this project has documented since
+ * Rounds 265-271 waits on DMAC_STAT bit 0x80 = SIF2 completion OR
+ * INTC_STAT bit 0x2 = SBUS, and that "SIF2's DPCR enable bit is set...
+ * but dma_channel_kick() is never called for it" - Round 267's
+ * finding, re-confirmed as recently as Round 469's investigation):
+ * IOP DMA channel 2 (real hardware/PCSX2 base 0x1F8010A0) is
+ * PS1-legacy "GPU" repurposed as the real, both-directions SIF2
+ * channel on PS2 hardware - confirmed via the user's own uploaded,
+ * real 2002-era IOP SIFMAN reimplementation source
+ * (dmacman.h: "#define DMAch_GPU 2 // SIF2 both directions",
+ * "#define DMAch_SIF2_MADR (*(volatile int*)0xBF8010A0)" etc. -
+ * exactly this project's own existing channel-2/0x1F8010A0 mapping,
+ * already present in s_ranges[] below, just never given a real
+ * transfer function). The same source's sifman_call18_sceSifSetSIF2DMA()
+ * (sifman.c) is the real kicker: sets MADR to the source buffer
+ * (masked to 0xFFFFFF, i.e. within the IOP's own address space),
+ * BCR_size/BCR_count (low/high halfwords of BCR, same layout this
+ * project's existing iop_dma_sif0_try_transfer() below already uses
+ * for SIF0's BS*BA total-word-count convention - independently
+ * confirmed matching, not assumed), then writes CHCR with DMAf_TR
+ * (0x01000000, the same real STR/start bit SIF0 already gates on)
+ * OR'd with DMAf_DR (0x00000001) when-and-only-when the caller's own
+ * `attr` parameter requested SIF_TO_EE - i.e. the DR bit is the real,
+ * cited signal that this specific kick moves data IOP RAM -> EE RAM
+ * (the exact direction this project's existing
+ * dma_channel_receive_quadwords() inbound-write primitive, Round 198,
+ * already implements and already wires up for SIF0 above - this
+ * function is a direct sibling, not new architecture).
+ *
+ * Honest scope: only the IOP-RAM-to-EE-RAM (DR=1/"to EE") direction
+ * is implemented, mirroring Round 199's own documented SIF0/SIF1
+ * asymmetry (SIF1's reverse direction was left as open scope, not
+ * fabricated). A CHCR write with TR set but DR clear (the real
+ * EE-to-IOP direction sceSifSetSIF2DMA() also supports per this same
+ * source) is intentionally left as a plain register latch - this
+ * project has no citable source yet for what IOP-side buffer such a
+ * transfer should land in, so nothing is invented for it.
+ */
+static void iop_dma_sif2_try_transfer(iop_dma_channel_t *ch)
+{
+    if (!g_iop_ram)
+        return; /* iop_dma_bind_iop_ram() never called - same safety check as SIF0 above */
+
+    uint32_t bs = ch->bcr & 0xFFFFu;         /* real BCR_size, low halfword (0xBF8010A4) */
+    uint32_t ba = (ch->bcr >> 16) & 0xFFFFu; /* real BCR_count, high halfword (0xBF8010A6) */
+    if (bs == 0) bs = 0x10000u; /* same real "0 means 10000h" convention as SIF0 */
+    uint32_t total_words = (ba == 0) ? bs : (bs * ba);
+
+    uint32_t total_bytes = total_words * 4u;
+    uint32_t qwc = total_bytes / 16u;
+    if (qwc == 0) {
+        ch->chcr &= ~0x01000000u; /* nothing to move - still clear STR, matches SIF0's degenerate case */
+        return;
+    }
+
+    /* Real sceSifSetSIF2DMA() masks its own MADR write to 0xFFFFFF
+     * (24-bit IOP-local address space) before this project's own
+     * iop_dma_mmio_write32() ever stores it - ch->madr already holds
+     * that masked value by the time this function runs, so no
+     * additional masking is needed here (mirrors how SIF0's own
+     * madr is used as-is below). */
+    if ((uint64_t)ch->madr + (uint64_t)(qwc * 16u) > (uint64_t)g_iop_ram_size) {
+        ch->chcr &= ~0x01000000u; /* out-of-bounds source: drop rather than read past IOP RAM */
+        return;
+    }
+
+    dma_channel_receive_quadwords(DMA_CHANNEL_SIF2, g_iop_ram + ch->madr, qwc);
+    ch->chcr &= ~0x01000000u; /* real hardware auto-clears STR upon completion */
+    iop_dma_signal_channel_done(IOP_DMA_SIF2_CHANNEL); /* real per-channel completion IRQ path, same as SIF0 */
+    g_sif2_transfer_count++; /* Round 511 diagnostic */
+}
+
+uint32_t iop_dma_get_sif2_transfer_count(void)
+{
+    return g_sif2_transfer_count;
 }
 
 int iop_dma_channel_write_bytes(int channel, const uint8_t *data, uint32_t nbytes)
@@ -276,6 +357,18 @@ int iop_dma_mmio_write32(uint32_t addr, uint32_t value)
             int this_channel = (int)(c - g_dma.ch);
             if (this_channel == IOP_DMA_SIF0_CHANNEL && (value & 0x01000000u)) {
                 iop_dma_sif0_try_transfer(c);
+            }
+            /* Round 511 (task #470): channel 2 (real "GPU"/SIF2 dual-
+             * purpose channel, s_ranges[] base 0x1F8010A0) - only the
+             * real IOP-RAM-to-EE-RAM direction (DMAf_TR=0x01000000
+             * AND DMAf_DR=0x00000001 both set, per the cited real
+             * sceSifSetSIF2DMA() semantics in iop_dma_sif2_try_transfer()'s
+             * own doc comment) triggers a real transfer. TR-without-DR
+             * (the reverse, EE-to-IOP direction) is intentionally left
+             * as a plain latch - honest unmodeled scope, not fabricated. */
+            if (this_channel == IOP_DMA_SIF2_CHANNEL &&
+                (value & 0x01000000u) && (value & 0x00000001u)) {
+                iop_dma_sif2_try_transfer(c);
             }
             return 1;
         }

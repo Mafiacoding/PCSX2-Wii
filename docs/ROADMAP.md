@@ -9718,3 +9718,15 @@ Verified: host-native regression (test_sio2_pad, test_iop_sio2_mc both PASS) + f
 Driver committed as `tools/round510-pad-diagnostic/` (driver.c + README, no binary/BIOS data).
 
 Next: task #447 (SBUS/SIF2 handshake) remains the real blocker.
+
+## Round 511: real SIF2 (IOP DMA channel 2) inbound transfer engine
+
+Per user instruction ("do first 2 and after that 1"): implemented `iop_dma_sif2_try_transfer()` in `source/hw/iop_dma.c` - IOP DMA channel 2 (real "GPU"/SIF2 dual-purpose channel, per the user's own uploaded real `sifman.c`/`dmacman.h` source) now performs a real IOP-RAM-to-EE-RAM transfer when CHCR is written with both `DMAf_TR` (STR) and `DMAf_DR` (SIF_TO_EE direction) set, reusing the existing `dma_channel_receive_quadwords()` primitive. Added `iop_dma_get_sif2_transfer_count()` diagnostic counter.
+
+**Correct fix, but insufficient alone.** Organic boot survey (~145M instructions across two runs) shows the transfer counter stays at 0 - no guest code in the current boot trace ever issues the real kick. Anticipated outcome: the code that would call `sceSifSetSIF2DMA()` is inside IOP module service logic this project's IOP core never reaches, since it halts after running the fixed module set once (task #92) rather than staying alive as a scheduler. Directly motivates Round 512.
+
+Verified: 4 relevant regression tests pass (test_dma_sif2, test_iop_dma, test_dma_inbound, test_dma_reply_delivered), full source-tree compile clean, Wii cross-build clean (toolchain set up fresh this session).
+
+Driver committed as `tools/round511-sif2-dma/` (driver.c + README).
+
+Next: Round 512 - persistent IOP threading/scheduler (task #472).

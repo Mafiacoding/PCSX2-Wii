@@ -1995,7 +1995,45 @@ static int sif_loadfile_elf_load_disc(ee_state_t *st, const char *discname, uint
 static void sif_cmd_iop_write_private_queue_copy(ee_state_t *st, uint32_t cd_ptr, uint32_t inner_cid)
 {
     uint32_t queue_ptr = ee_mem_read32(st, 0x0046D618u);
-    if (!queue_ptr || queue_ptr < 0x00100000u)
+    /* Round 562 (task #530 continuation): the original guard below only
+     * rejected values under 1MB, with no upper bound - so any "plausible-
+     * looking" garbage above that (e.g. a value EELOAD's own unrelated
+     * code transiently left at this address before OSDSYS has even run)
+     * was trusted as a real pointer and dereferenced. Caught via direct
+     * instrumentation on the cdrom0:/disc fast-boot path (Round 554/561):
+     * at the exact moment this deferred write fires (rel~5180 past the
+     * LF_F_ELF_LOAD anchor, ~200 cycles after ee_arm_rpc_call_pending()),
+     * MEM[0x0046D618] holds 0x0E910E5C - not a coincidence-free real
+     * pointer, but a value EELOAD's own code at pc=0x00083A68 had just
+     * written to that address moments earlier (rel=4979, confirmed via
+     * a value-change watch) for reasons unrelated to this function's
+     * "real queue buffer" assumption. The organic (rom0:) path never
+     * exhibits this: MEM[0x0046D618] stays exactly 0 for the entire
+     * observed window, since OSDSYS's own code - the only real writer
+     * of a genuine queue pointer here - hasn't started running yet this
+     * early in boot (confirmed: OSDSYS's own resident code, 0x00200000+,
+     * isn't entered until instruction offset +9146 past this same
+     * anchor per Round 561, versus this deferred write firing at +5180
+     * - OSDSYS simply cannot have written a real pointer here yet). The
+     * resulting dereference (writing to queue_ptr+0x00 through +0x2C)
+     * hit an unmapped address and raised a real TLB-refill (store)
+     * exception, this project's own EE_EXC_CODE_TLBS (ee_core.c line
+     * ~377) - the exact, previously-unexplained fork point Round 561
+     * pinpointed between the organic and patched boot trajectories.
+     * Fix: add a real, already-established upper bound - EE_RAM_SIZE
+     * (32MB, the actual modeled PS2 main RAM size, already used
+     * elsewhere in this file, e.g. the stack-pointer-fallback
+     * computation) - since no genuine RAM pointer can legitimately
+     * exceed it. 0x0E910E5C (~233MB) fails this trivially; any value
+     * OSDSYS's real code would plausibly write here (a pointer into
+     * its own loaded RAM image) passes it. This does not attempt to
+     * guess the "correct" value or synthesize a fake one - it only
+     * makes the existing "not yet populated / not plausible" silent
+     * no-op path (already present, already the documented safe
+     * fallback for this exact scenario) trigger correctly for genuinely
+     * implausible values, matching organic's own already-safe
+     * behavior. */
+    if (!queue_ptr || queue_ptr < 0x00100000u || queue_ptr >= EE_RAM_SIZE)
         return; /* not yet populated / not a plausible real pointer - stay silent, no guessing */
     uint32_t qbuf = queue_ptr & 0x1FFFFFFFu; /* real vaddr -> phys, same convention as sif_loadfile_translate_base() */
     ee_mem_write32(st, qbuf + 0x00u, 0x30u);        /* psize=48 low byte doubles as the real byte-count gate (see citation above) */

@@ -9886,3 +9886,12 @@ Used the real PS2 hardware Memory Map page (per the user's request) to cross-che
 Obtained real semantics directly from PCSX2's `Hw.h`/`Hw.cpp` (already this project's cited DMAC source): reset value 0x1201 for both registers, and `dmacInterrupt()`'s real gate (`DMAC_ENABLER` byte+2 == 1 means DMAC suspended). Independently corroborated by the psdevwiki PS2_Config_Commands page's hack entries for real games (Max Payne, etc.) that write to D_ENABLEW.
 
 Implemented as a single shared shadow register (`d_enable_state`) reachable from both addresses, matching PCSX2's own behavior. `dma_dmac_interrupt_pending()` now includes the suspend-byte gate. Sanity harness + full 129-test regression suite (129/129 PASS) + Wii cross-build (clean, 0 warnings) + organic-boot baseline (bit-for-bit identical to established baseline: ee_pc=0x0050172C, rpc_pending_sets=228, rpc_delivered=228) all confirm the fix is correct and introduces zero regression, since nothing on the current boot path touches this register yet.
+
+
+## Round 540: completed the Memory_Map register-coverage audit - GIF/VIF control registers confirmed as the one remaining gap, correctly deferred (not fixed) as architecturally out of scope
+
+Finished cross-checking every remaining register group from the psdevwiki Memory_Map page against tracked source. EE Timers, IPU, CDVD, IOP Interrupt Control, IOP DMA, IOP Timers, SIO2, and SPU2 are all already correctly implemented. A minor DMAC per-channel over-permissiveness (ASR0/ASR1/SADR accepted on channels real hardware doesn't equip them on) was found but judged not actionable - no real code would ever exercise it.
+
+The one confirmed real gap: GIF (0x10003000+) and VIF0/VIF1 (0x10003800+/0x10003c00+) control-register blocks are genuinely unimplemented (already self-flagged in ee_core.c's own comments, not newly discovered). Fetched PCSX2's real Gif_Unit.h to check before attempting a fix: GIF_STAT's bits are live outputs of a full three-path (XGKICK/DIRECT/DMA) transfer-arbitration engine, not independent storage. Implementing it honestly requires building that whole engine first - fabricating plausible status values without it would repeat the exact mistake this project has avoided elsewhere (e.g. SPU2's deliberately-unmodeled ENDX auto-set). Correctly deferred as a larger standalone future task, not attempted as a shortcut.
+
+Register-coverage audit (started Round 539) is now complete. No further source change this round; diagnostic/audit round only.

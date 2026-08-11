@@ -9866,3 +9866,14 @@ Answered the user's direct question honestly: of ~1,479 files in the extracted p
 `iop/system/threadman/thbase.c` (1,506 lines, previously only headers had been read) - the real IOP scheduler's ready-queue is a doubly-linked list per priority bucket; this project's `iop_hle_thread.c` uses a flat array with an O(n) priority scan instead. Different data structure, but the documented reasoning already in the code (from Round 512-514's starvation-fix work) shows it produces identical scheduling decisions for the states this project models. No gap found - a clean cross-check, not a new lead.
 
 Both findings are IOP-side; task #447's redirect mystery is EE-side (already exhaustively tested through Round 534-535, independent of IOP threadman). Diagnostic round only, no tracked source changed, regression/Wii-build correctly skipped.
+
+
+## Round 538: full real ExecPS2Patch preamble (incl. InitializeINTC(0xdffd)) replicated via genuine subroutine calls - redirect still happens, sixth hypothesis refuted (task #447)
+
+Round 463 already proved the real ExecPS2Patch() preamble (CancelWakeupThread, ChangeThreadPriority, thread cleanup, InitSemaphores, InitPgifHandler2, full SoftPeripheralEEReset incl. InitializeINTC 9x) fires correctly via syscall 6 - but Round 466 switched this project's trampoline to syscall 7, which per the real ps2sdk source is just the bare final-step primitive and contains none of that preamble. This explained Round 468's "INTC_MASK never written" finding precisely.
+
+This round (JP BIOS only, per the user's correction) replicated the entire preamble via genuine synthetic subroutine calls - including InitializeINTC(0xdffd), the single most-suspected missing piece - immediately before firing the syscall-7 trampoline. All 13 preamble calls plus 16 thread-cleanup calls completed cleanly with real BIOS machine code. The trampoline fired correctly through the real exception vector (ee_pc=0x80000180). But the redirect into the same 0x8000CCxx/0x8000CFxx/0x8000D0xx family still happened, on the same ~640M-instruction timescale as every prior round.
+
+Sixth hypothesis refuted. New reframing for a future round: since these addresses are OSDSYS's own never-overwritten resident code (Round 467/468's decoded VBLANK-END handler dispatch chain), the redirect may not be "missing state" at all but the real kernel's own idle/default-execution fallback when no thread is recognized as properly ready - worth checking the hijacked thread's post-preamble ready/scheduler state directly next.
+
+Diagnostic round only, no tracked source changed, regression/Wii-build correctly skipped.

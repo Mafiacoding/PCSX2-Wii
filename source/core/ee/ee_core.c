@@ -1722,6 +1722,133 @@ static int sif_loadfile_elf_load(ee_state_t *st, const char *romname, uint32_t *
     return 1;
 }
 
+/* Round 554 (task #521/#522): raw byte-range disc reader for ELF
+ * program-header parsing (mirrors ee_fio_disc_read_bytes()'s own
+ * sector-spanning walk, but into a plain buffer instead of EE RAM -
+ * program headers need to be inspected by this function itself
+ * before any RAM write happens). */
+static uint32_t sif_loadfile_disc_read_raw(uint32_t base_lba, uint32_t file_byte_offset, uint8_t *dst, uint32_t n)
+{
+    uint32_t copied = 0u;
+    while (copied < n) {
+        uint8_t sbuf[ISO_SECTOR_SIZE];
+        uint32_t abs_byte = file_byte_offset + copied;
+        uint32_t sector_index = abs_byte / ISO_SECTOR_SIZE;
+        uint32_t sector_off = abs_byte % ISO_SECTOR_SIZE;
+        uint32_t chunk = ISO_SECTOR_SIZE - sector_off;
+        uint32_t remaining = n - copied;
+        uint32_t k;
+        if (chunk > remaining) chunk = remaining;
+        if (iop_cdvd_disc_read_sector(base_lba + sector_index, sbuf) != 0) break; /* real read failure - stop, honest partial */
+        for (k = 0; k < chunk; k++) dst[copied + k] = sbuf[sector_off + k];
+        copied += chunk;
+    }
+    return copied;
+}
+
+/* Round 554 (task #521/#522): real cdrom0:/cdrom1: counterpart to
+ * sif_loadfile_elf_load() above. Root-caused this round via a live
+ * syscall-dispatch + RPC-payload trace: EELOAD's own real fast-boot
+ * code (Round 552's patched "cdrom0:\SCED_500.41;1" path string)
+ * sends its LF_F_ELF_LOAD RPC_CALL request through this SAME generic
+ * SIF_SID_LOADFILE service that rom0:OSDSYS already uses (syscall 119
+ * / sceSifSetDma DOES fire, with a real 2-descriptor SIF_CMD_RPC_CALL
+ * packet whose rpc_number==1) - but until this round, the handler
+ * only ever knew how to resolve a name via romdir_lookup() (the BIOS
+ * ROM's own rom0: filesystem), so any cdrom0:/cdrom1: request
+ * silently failed (0 return, left un-replied, an "honest gap" per
+ * that function's own comment). That silent failure is exactly why
+ * the real WaitSema() this RPC's REND reply should unblock never
+ * resolved (Round 552/553's "frozen at 0x000836C4" WaitSema(0) block)
+ * - confirmed by this round's own host-native verification: with this
+ * fix, sif_loadfile_elf_load_disc() succeeds (real epc=0x003572A0,
+ * the actual game ELF's entry point), the REND reply is delivered,
+ * WaitSema resolves, and execution proceeds tens of millions of
+ * instructions past the previous freeze point.
+ *
+ * This project already has a real, tested, standalone ISO9660 reader
+ * (iso_loader.c) wired to the disc via iop_cdvd_disc_find_file() /
+ * iop_cdvd_disc_read_sector() (Round 367, already proven correct for
+ * real cdrom0:/cdrom1: FIO_F_OPEN/FIO_F_READ game-data traffic) - this
+ * function is a thin reuse of that SAME real mechanism for ELF
+ * loading, not a new disc parser. Follows the same "translate the
+ * segment base once, apply a fixed delta across the whole segment,
+ * write raw physical RAM bytes directly" pattern as
+ * sif_loadfile_elf_load() above, for consistency with that
+ * already-established, already-working ELF-segment-copy discipline. */
+static int sif_loadfile_elf_load_disc(ee_state_t *st, const char *discname, uint32_t *out_epc, uint32_t *out_gp)
+{
+    uint32_t base_lba, file_size;
+    if (!iop_cdvd_disc_find_file(discname, &base_lba, &file_size)) {
+        /* Real ISO9660 directory entries store the ";N" version
+         * suffix as part of the stored name (iso_loader.h's own
+         * documented caller convention, already relied on by the
+         * FIO_F_OPEN handler above) - same ";1" fallback established
+         * there, kept here for consistency even though real EELOAD
+         * path strings observed so far already include it. */
+        char with_ver[64];
+        int vk;
+        for (vk = 0; vk < 58 && discname[vk]; vk++) with_ver[vk] = discname[vk];
+        with_ver[vk] = 0;
+        if (vk == 0 || strchr(with_ver, ';')) return 0;
+        with_ver[vk] = ';'; with_ver[vk + 1] = '1'; with_ver[vk + 2] = 0;
+        if (!iop_cdvd_disc_find_file(with_ver, &base_lba, &file_size)) return 0;
+    }
+    if (file_size < 52u) return 0;
+
+    uint8_t hdr[ISO_SECTOR_SIZE];
+    if (iop_cdvd_disc_read_sector(base_lba, hdr) != 0) return 0;
+    if (hdr[0] != 0x7Fu || hdr[1] != 'E' || hdr[2] != 'L' || hdr[3] != 'F') return 0;
+
+    uint32_t e_entry = elfld_rd_le32(hdr + 24u);
+    uint32_t e_phoff = elfld_rd_le32(hdr + 28u);
+    uint16_t e_phentsize = elfld_rd_le16(hdr + 42u);
+    uint16_t e_phnum = elfld_rd_le16(hdr + 44u);
+    uint32_t i;
+
+    for (i = 0; i < (uint32_t)e_phnum; i++) {
+        uint8_t phbuf[32];
+        uint32_t ph_off = e_phoff + i * (uint32_t)e_phentsize;
+        uint32_t got = sif_loadfile_disc_read_raw(base_lba, ph_off, phbuf, 32u);
+        uint32_t p_type, p_offset, p_vaddr, p_filesz, p_memsz;
+        uint32_t phys_base;
+        int64_t delta;
+        uint32_t copied;
+        if (got < 32u) break;
+        p_type = elfld_rd_le32(phbuf + 0u);
+        p_offset = elfld_rd_le32(phbuf + 4u);
+        p_vaddr = elfld_rd_le32(phbuf + 8u);
+        p_filesz = elfld_rd_le32(phbuf + 16u);
+        p_memsz = elfld_rd_le32(phbuf + 20u);
+        if (p_type != 1u) continue; /* PT_LOAD only, matches sif_loadfile_elf_load() above */
+
+        phys_base = sif_loadfile_translate_base(st, p_vaddr);
+        delta = (int64_t)phys_base - (int64_t)p_vaddr;
+
+        copied = 0u;
+        while (copied < p_filesz) {
+            uint8_t sbuf[ISO_SECTOR_SIZE];
+            uint32_t abs_byte = p_offset + copied;
+            uint32_t sector_index = abs_byte / ISO_SECTOR_SIZE;
+            uint32_t sector_off = abs_byte % ISO_SECTOR_SIZE;
+            uint32_t chunk = ISO_SECTOR_SIZE - sector_off;
+            uint32_t remaining = p_filesz - copied;
+            uint32_t k;
+            if (chunk > remaining) chunk = remaining;
+            if (iop_cdvd_disc_read_sector(base_lba + sector_index, sbuf) != 0) break; /* honest partial on real read failure */
+            for (k = 0; k < chunk; k++)
+                sif_loadfile_ram_write8_delta(st, p_vaddr + copied + k, delta, sbuf[sector_off + k]);
+            copied += chunk;
+        }
+        for (; copied < p_memsz; copied++)
+            sif_loadfile_ram_write8_delta(st, p_vaddr + copied, delta, 0u); /* BSS zero-fill, same fixed delta */
+    }
+
+    *out_epc = e_entry;
+    *out_gp = 0u; /* real IOP-side elf_load_all_section() hardcodes this reply field to 0 - see citation above */
+    return 1;
+}
+
 /* task #192 (68th finding): synthesizes the real IOP's SIF_CMD_RPC_END
  * (REND) reply to a SIF_CMD_RPC_BIND request - see sif.h for the full
  * citation trail (byte-exact match to real sceSifBindRpc()/
@@ -4272,21 +4399,32 @@ static int ee_step(void)
                                  * i=0, count=2, never i+1). */
                                 uint32_t payload_base = dmat_ptr + (i - 1u) * 16u;
                                 uint32_t payload_src = ee_mem_read32(st, payload_base + 0u);
+                                char devname[64];
                                 char romname[64];
                                 int pk;
                                 for (pk = 0; pk < 63; pk++) {
                                     uint8_t b = ee_mem_read8(st, payload_src + 8u + (uint32_t)pk);
-                                    if (b == 0u || b == ':') break; /* stop at "rom0:" separator or NUL */
-                                    romname[pk] = (char)b;
+                                    if (b == 0u || b == ':') break; /* stop at the device-name separator or NUL */
+                                    devname[pk] = (char)b;
                                 }
+                                devname[pk < 63 ? pk : 63] = 0;
                                 /* real path strings observed are
-                                 * "rom0:NAME" - this project's own
-                                 * ROMDIR entries are stored by NAME
-                                 * only (no device prefix), so skip
-                                 * past the device-name colon rather
-                                 * than searching for "rom0:OSDSYS" as
-                                 * a literal ROMDIR entry name (which
-                                 * would never match). */
+                                 * "DEVICE:NAME" (e.g. "rom0:OSDSYS"
+                                 * or, per Round 552/554 (task
+                                 * #521/#522), "cdrom0:\SCED_500.41;1")
+                                 * - this project's own rom0: ROMDIR
+                                 * entries are stored by NAME only (no
+                                 * device prefix), so skip past the
+                                 * device-name colon rather than
+                                 * searching for the whole
+                                 * "DEVICE:NAME" string as a literal
+                                 * ROMDIR entry name (which would never
+                                 * match); the real ISO9660 cdrom0:/
+                                 * cdrom1: path (Round 554) keeps a
+                                 * leading backslash convention this
+                                 * project's own FIO_F_OPEN handler
+                                 * above already strips - kept, not
+                                 * guessed, for consistency. */
                                 if (pk > 0 && payload_src != 0u) {
                                     uint8_t colon = ee_mem_read8(st, payload_src + 8u + (uint32_t)pk);
                                     if (colon == ':') {
@@ -4305,7 +4443,27 @@ static int ee_step(void)
                                 }
                                 if (romname[0] != 0) {
                                     uint32_t elf_epc = 0u, elf_gp = 0u;
-                                    if (sif_loadfile_elf_load(st, romname, &elf_epc, &elf_gp)) {
+                                    int r554_ok = 0;
+                                    if (strcmp(devname, "rom0") == 0) {
+                                        r554_ok = sif_loadfile_elf_load(st, romname, &elf_epc, &elf_gp);
+                                    } else if (strcmp(devname, "cdrom0") == 0 || strcmp(devname, "cdrom1") == 0) {
+                                        /* Round 554 (task #521/#522,
+                                         * the real fix): route real
+                                         * disc ELF loads (e.g. the
+                                         * actual game's own
+                                         * SCED_500.41 executable)
+                                         * through the real ISO9660
+                                         * mechanism instead of the
+                                         * BIOS-only romdir_lookup()
+                                         * path above - see
+                                         * sif_loadfile_elf_load_disc()'s
+                                         * own citation for the full
+                                         * grounding. */
+                                        const char *disc_name = romname;
+                                        if (disc_name[0] == '\\') disc_name++;
+                                        r554_ok = sif_loadfile_elf_load_disc(st, disc_name, &elf_epc, &elf_gp);
+                                    }
+                                    if (r554_ok) {
                                         /* Real result data (t_ExecData-style epc/gp,
                                          * per the real, fetched _SifLoadElfPart()) is
                                          * delivered directly into the caller's own

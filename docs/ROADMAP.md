@@ -9932,3 +9932,8 @@ This also gives a well-evidenced (not yet re-verified) alternative explanation f
 Recommended next step for task #447: instead of extending the synthetic trampoline further, let organic boot run to 0x00082170 and patch the target path/argv there exactly as PCSX2 does, letting real EELOAD do the real ExecPS2 dispatch itself - since this project's own trace already reaches and executes this exact address range during normal boot.
 
 Docs-only round - no tracked emulator source changed, regression/Wii rebuild correctly skipped.
+
+
+## Round 544: organic-boot EELOAD_START instrumentation (task #447 follow-up to Round 543)
+
+Direct-instrumented (edge-triggered, every-instruction) survey of real `EELOAD_START` (`0x00082000`) invocations during organic boot, with and without simulated Triangle presses, up to 105,000,000 slices (2.6x the prior 40M baseline). Result: only the real cold-boot invocation (`argc=0`, launches OSDSYS) ever fires; no second (game-launch) invocation observed even with 50 simulated presses spread across the run. Reconfirms task #447's disc-browser-escalation blocker from a new, exhaustive angle and shows Round 543's `eeloadHook()`-patch idea needs that blocker solved (or bypassed) first, since it depends on organically reaching EELOAD's second invocation. Scoped a promising alternative for a future round: synthetically jump EE PC straight to `EELOAD_START` with `$a0=0` (replicating the real, already-observed calling convention) rather than either replicating a full kernel preamble (current trampoline's approach) or waiting for organic escalation. Docs-only round; no tracked source changed.

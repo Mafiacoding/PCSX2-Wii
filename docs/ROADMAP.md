@@ -9895,3 +9895,14 @@ Finished cross-checking every remaining register group from the psdevwiki Memory
 The one confirmed real gap: GIF (0x10003000+) and VIF0/VIF1 (0x10003800+/0x10003c00+) control-register blocks are genuinely unimplemented (already self-flagged in ee_core.c's own comments, not newly discovered). Fetched PCSX2's real Gif_Unit.h to check before attempting a fix: GIF_STAT's bits are live outputs of a full three-path (XGKICK/DIRECT/DMA) transfer-arbitration engine, not independent storage. Implementing it honestly requires building that whole engine first - fabricating plausible status values without it would repeat the exact mistake this project has avoided elsewhere (e.g. SPU2's deliberately-unmodeled ENDX auto-set). Correctly deferred as a larger standalone future task, not attempted as a shortcut.
 
 Register-coverage audit (started Round 539) is now complete. No further source change this round; diagnostic/audit round only.
+
+
+## Round 541: TCB[tid].status confirmed READY throughout the redirect window - refutes Round 538's "scheduler not-ready fallback" hypothesis (task #447, seventh refuted)
+
+Tested Round 538's own proposed next step directly: instrumented the hijacked thread's real TCB.status field (offset 0x08, base 0x80017400, stride 0x4C - confirmed twice already via independent methods) across the full preamble, the syscall-7 jump, and 680M+ instructions into the redirect window.
+
+Result: TCB[3].status read 0x00000002 (READY) at every single checkpoint - before the jump, after the jump, at the exact moment the redirect first happens, and long after. The real "current thread" global also stayed fixed at 3 throughout, with zero deviation. The kernel's own scheduler bookkeeping is fully internally consistent and shows no sign of ever considering the hijacked thread not-ready.
+
+This directly refutes the hypothesis that the redirect is a "no ready thread" fallback. Whatever causes control flow to reach the 0x8000CCxx family, it isn't scheduler rejection - the TCB says everything is fine. Next promising avenue: disassemble what real code path (interrupt/exception/otherwise) actually transfers control there during normal execution, treating it as a real reachable path rather than an idle fallback.
+
+Seventh hypothesis refuted in this arc. Diagnostic round, no tracked source changed.

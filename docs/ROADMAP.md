@@ -9855,3 +9855,14 @@ Result: the 40M-slice organic warmup left the US BIOS meaningfully earlier in it
 Next step for a future round: re-run with a much larger US BIOS warmup budget so it reaches an OSDSYS-idle steady state comparable to the Japan BIOS before firing the trampoline.
 
 Diagnostic round only - no tracked source changed, regression/Wii-build correctly skipped.
+
+
+## Round 537: full ps2sdk iop/fs/ + iop/system/threadman/ audit - confirms no CDVDFSV source exists in ps2sdk, IOP scheduler cross-check clean (task #447)
+
+Answered the user's direct question honestly: of ~1,479 files in the extracted ps2sdk tree, only ~60 had actually been read across all prior rounds. This round covers the two most plausibly-relevant remaining areas.
+
+`iop/fs/` (24 subdirs, all homebrew filesystem drivers - FAT/VFAT/netfs/romdrv/etc.) contains no CD-ROM/ISO9660 filesystem driver at all - the real CDVDFSV module is proprietary BIOS-resident Sony code, never part of ps2sdk. This confirms there is no further ps2sdk material to extract for the disc-filesystem layer; Round 367's independently-researched `iso_loader.c` remains the correct and only reference.
+
+`iop/system/threadman/thbase.c` (1,506 lines, previously only headers had been read) - the real IOP scheduler's ready-queue is a doubly-linked list per priority bucket; this project's `iop_hle_thread.c` uses a flat array with an O(n) priority scan instead. Different data structure, but the documented reasoning already in the code (from Round 512-514's starvation-fix work) shows it produces identical scheduling decisions for the states this project models. No gap found - a clean cross-check, not a new lead.
+
+Both findings are IOP-side; task #447's redirect mystery is EE-side (already exhaustively tested through Round 534-535, independent of IOP threadman). Diagnostic round only, no tracked source changed, regression/Wii-build correctly skipped.

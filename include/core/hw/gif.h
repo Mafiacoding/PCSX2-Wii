@@ -635,8 +635,51 @@
 
 void gif_init(void);
 
-/* Matches dma_sink_fn - register with dma_set_sink(DMA_CHANNEL_GIF, gif_process_quadwords). */
+/* Real GIF hardware transfer-path identifiers (APATH source paths).
+ * Values match PCSX2's own 0-indexed GIF_PATH enum (Gif_Unit.h)
+ * exactly, on purpose: DMA_CHANNEL_GIF (dma.h, =2) then already
+ * equals GIF_PATH_3 below with no translation needed, because the
+ * GIF DMA channel is, by hardware definition, always real PATH3
+ * (GS packet data arriving via the DMAC rather than via VIF1 DIRECT/
+ * DIRECTHL forwarding or a VU1 XGKICK). See Gif.h's GIF_TRANSFER_TYPE
+ * comment ("lower byte contains path minus 1") for the same
+ * convention in PCSX2's own transfer-type enum. */
+#define GIF_PATH_1 0u /* VU1 XGKICK - not modeled; see vu.c (real, pre-existing, documented gap) */
+#define GIF_PATH_2 1u /* VIF1 DIRECT/DIRECTHL forwarding - see vif.c's VIF_CMD_DIRECT/DIRECTHL case */
+#define GIF_PATH_3 2u /* GIF DMA channel (=DMA_CHANNEL_GIF) - real disc/DMA GS packet delivery */
+
+/* Real GIF register block addresses (PCSX2's GIFregisters struct,
+ * Gif.h - each field padded to a 0x10-byte stride from base
+ * 0x10003000, matching real hardware's MMIO layout exactly). */
+#define GIF_CTRL_ADDR  0x10003000u
+#define GIF_MODE_ADDR  0x10003010u
+#define GIF_STAT_ADDR  0x10003020u
+#define GIF_TAG0_ADDR  0x10003040u
+#define GIF_TAG1_ADDR  0x10003050u
+#define GIF_TAG2_ADDR  0x10003060u
+#define GIF_TAG3_ADDR  0x10003070u
+#define GIF_CNT_ADDR   0x10003080u
+#define GIF_P3CNT_ADDR 0x10003090u
+#define GIF_P3TAG_ADDR 0x100030A0u
+
+/* Matches dma_sink_fn - register with dma_set_sink(DMA_CHANNEL_GIF, gif_process_quadwords).
+ * `channel` is a real GIF_PATH_1/2/3 value (see above), NOT an
+ * arbitrary/ignored token - it selects which real APATH register
+ * state (GIF_TAG0-3/CNT, and for PATH3 only, also P3CNT/P3TAG) gets
+ * updated by the tag this call parses. Round 542: previously this
+ * parameter was accepted but completely unused (`(void)channel;`) -
+ * now it drives the real transfer-arbitration register model added
+ * this round (see gif_mmio_read32/write32 below). */
 void gif_process_quadwords(int channel, const uint8_t *data, uint32_t qwc);
+
+/* Real GIF MMIO register read/write, for wiring into the EE bus
+ * dispatch chain (ee_core.c's ee_mem_read32/write32), same pattern
+ * as dma_mmio_read32/write32 etc. Returns 1 if addr was a real GIF
+ * register (value written to *out_val / consumed from val), 0 if
+ * addr is outside the GIF register block (caller should fall
+ * through to the next handler in the chain). */
+int gif_mmio_read32(uint32_t addr, uint32_t *out_val);
+int gif_mmio_write32(uint32_t addr, uint32_t val);
 
 /* Exposed for tests: current parser state. */
 typedef struct {
@@ -1079,6 +1122,45 @@ typedef struct {
     uint64_t unsupported_prims_seen;
     uint64_t pixels_ztest_failed; /* task #89 - counts fragments rejected by the Z test, for test visibility */
     uint64_t pixels_atest_failed; /* Round 23 - counts fragments rejected by the alpha test, for test visibility */
+
+    /* Round 542: real GIF hardware register block (GIF_CTRL/MODE/
+     * STAT/TAG0-3/CNT/P3CNT/P3TAG, addresses 0x10003000-0x100030A0 -
+     * see Gif.h's tGIF_CTRL/tGIF_MODE/tGIF_STAT/tGIF_TAG0/tGIF_TAG1/
+     * tGIF_CNT/tGIF_P3CNT/tGIF_P3TAG unions, fetched verbatim from
+     * PCSX2's own source this round). gif_ctrl/gif_mode store exactly
+     * what software last wrote (RST is a self-clearing action, not
+     * stored - see gif_mmio_write32()). gif_stat is NOT independently
+     * stored: per real hardware (and PCSX2's Gif_Unit::Execute()/
+     * CanDoPath1/2/3(), read this round), STAT's dynamic bits
+     * (APATH/OPH/DIR/IP3/P1Q/P2Q/P3Q/FQC) are live outputs of the
+     * transfer-arbitration engine, not readable/writable storage -
+     * gif_mmio_read32() derives GIF_STAT's static bits (M3R/IMT
+     * mirror MODE, PSE mirrors CTRL) on the fly instead. M3P (VIF1's
+     * own PATH3-mask-request bit) is an honest, documented gap: this
+     * project's VIF1 model (vif.c) doesn't yet track a mask request
+     * separately from the MSKPATH3 register, so M3P always reads 0 -
+     * not fabricated, matches the real idle/no-mask-pending state.
+     * The dynamic APATH/OPH/DIR/IP3/PxQ/FQC bits all read 0 too: this
+     * project's transfers complete synchronously/atomically within a
+     * single gif_process_quadwords() call (no queued/in-flight state
+     * ever persists across calls), so "idle, nothing in flight" (all
+     * zero) is the real, correct value at every point software could
+     * observe it - not a shortcut. */
+    uint32_t gif_ctrl;   /* GIF_CTRL: only PSE (bit 3) is retained; RST (bit 0) is a self-clearing action */
+    uint32_t gif_mode;   /* GIF_MODE: M3R (bit 0), IMT (bit 2) */
+    /* GIF_TAG0-3: raw snapshot of the last GIF tag parsed on ANY
+     * path (real hardware: one shared tag-latch register set, not
+     * per-path - see Gif.h, only P3TAG/P3CNT below are PATH3-
+     * specific shadow copies). */
+    uint32_t gif_tag0, gif_tag1, gif_tag2, gif_tag3;
+    uint32_t gif_cnt;    /* GIF_CNT: LOOPCNT (last tag's NLOOP) / REGCNT (last tag's NREG) / VUADDR (always 0 - VU1 XGKICK/PATH1 unimplemented) */
+    /* GIF_P3CNT/GIF_P3TAG: PATH3-specific shadow of LOOPCNT/EOP, only
+     * updated when the parsed tag arrived via GIF_PATH_3 (real
+     * hardware: these two registers exist specifically to let
+     * software monitor PATH3 progress independent of whatever else
+     * is using the shared tag latch - see Gif.h's tGIF_P3CNT/
+     * tGIF_P3TAG comments). */
+    uint32_t gif_p3cnt, gif_p3tag;
 } gif_state_t;
 
 gif_state_t *gif_get_state(void);

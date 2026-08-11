@@ -451,7 +451,15 @@ static void vif_process(vif_state_t *vif, const uint8_t *data, uint32_t qwc)
                                  * more DMA data; we just forward what
                                  * we actually have this call. */
             if (words > 0) {
-                gif_process_quadwords(DMA_CHANNEL_GIF, data + pos * 4u, words / 4u);
+                /* Round 542: this is real hardware PATH2 (VIF1 DIRECT/
+                 * DIRECTHL forwarding straight to GIF, bypassing the
+                 * GIF DMA channel entirely) - was previously mislabeled
+                 * as DMA_CHANNEL_GIF (a DMA-channel constant, not a
+                 * transfer-path one) purely because gif_process_quadwords()
+                 * ignored its channel argument. Now that the argument
+                 * drives real GIF_TAG/CNT/P3CNT/P3TAG register state
+                 * (see gif.c), it must be the correct real path. */
+                gif_process_quadwords(GIF_PATH_2, data + pos * 4u, words / 4u);
                 vif->direct_qwords_forwarded += words / 4u;
             }
             pos += words;

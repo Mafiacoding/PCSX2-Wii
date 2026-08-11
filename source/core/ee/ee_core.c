@@ -1164,6 +1164,8 @@ uint32_t ee_mem_read32(ee_state_t *st, uint32_t addr)
         return hw_val;
     if (ipu_mmio_read32(hw_addr, &hw_val)) /* Round 521/522 (task #487) */
         return hw_val;
+    if (gif_mmio_read32(hw_addr, &hw_val)) /* Round 542 (task #510) */
+        return hw_val;
 
     uint8_t *p = ee_mem_ptr(st, addr, 4);
     if (!p) { ee_mem_check_tlb_fault(st, addr, 0); return 0; }
@@ -1231,6 +1233,8 @@ void ee_mem_write32(ee_state_t *st, uint32_t addr, uint32_t val)
     if (ee_sio_mmio_write32(hw_addr_w, val)) /* Round 392 */
         return;
     if (ipu_mmio_write32(hw_addr_w, val)) /* Round 521/522 (task #487) */
+        return;
+    if (gif_mmio_write32(hw_addr_w, val)) /* Round 542 (task #510) */
         return;
 
     uint8_t *p = ee_mem_ptr(st, addr, 4);
@@ -2198,7 +2202,11 @@ int ee_core_init(const bios_image_t *bios)
 
     dma_bind_ee_ram(g_state.ram, g_state.ram_size); /* chain-mode DMA reads tags/data from here */
     gif_init();
-    dma_set_sink(DMA_CHANNEL_GIF, gif_process_quadwords); /* GIF DMA transfers now actually get parsed and drawn */
+    dma_set_sink(DMA_CHANNEL_GIF, gif_process_quadwords); /* GIF DMA transfers now actually get parsed and drawn.
+                                                             Round 542: DMA_CHANNEL_GIF(2) == GIF_PATH_3(2) by design
+                                                             (see gif.h) - the channel value dma.c passes through here
+                                                             IS already the correct real transfer-path selector, no
+                                                             wrapper/translation needed. */
     vif_init();
     dma_set_sink(DMA_CHANNEL_VIF0, vif0_process_quadwords); /* VIF0/VIF1 DMA transfers now walk real VIFcode streams - see vif.h */
     dma_set_sink(DMA_CHANNEL_VIF1, vif1_process_quadwords);
@@ -2284,7 +2292,7 @@ int ee_core_init(const bios_image_t *bios)
  * Round 449. */
 void ee_core_rebind_dma_sinks(void)
 {
-    dma_set_sink(DMA_CHANNEL_GIF, gif_process_quadwords);
+    dma_set_sink(DMA_CHANNEL_GIF, gif_process_quadwords); /* Round 542: DMA_CHANNEL_GIF(2) == GIF_PATH_3(2) - see gif.h */
     dma_set_sink(DMA_CHANNEL_VIF0, vif0_process_quadwords);
     dma_set_sink(DMA_CHANNEL_VIF1, vif1_process_quadwords);
     dma_set_sink(DMA_CHANNEL_TOIPU, ipu_process_quadwords); /* Round 521/522 (task #487) - same stale-function-pointer-after-checkpoint-restore concern as the 3 sinks above, see this function's own header comment */

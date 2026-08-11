@@ -169,7 +169,44 @@ void dma_channel_kick(int channel)
                 dma_channel_signal_done(channel); /* task #176 */
                 return;
 
-            default: /* REF/REFS/CALL/RET - not implemented */
+            case DMA_TAG_REF: /* 3 */
+            case DMA_TAG_REFS: /* 4 - task #447/#521 (Round 553): real PCSX2 source
+                 * (docs/reference/pcsx2/pcsx2/Hw.cpp's hwDmacSrcChainWithStack(),
+                 * cross-checked against Dmac.h's own tag_id comments) treats REF
+                 * and REFS identically for basic chain-walk purposes: "Transfer
+                 * QWC from ADDR field" (i.e. the SAME transfer_quadwords(addr,qwc)
+                 * shape this file already uses for REFE, just without stopping),
+                 * then "Set TADR to next tag" (tadr += 16) and continue the walk
+                 * (hwDmacSrcChainWithStack returns false = not-done for both,
+                 * unlike REFE's true = done). REFS's real difference from REF is
+                 * STADR-based "stall control" (an unrelated flow-control feature,
+                 * not modeled here, same honest scope as this file's existing
+                 * "no chain-mode stall control" gap) - the basic data-transfer and
+                 * chain-advancement behavior this fix needs is identical for both,
+                 * so both are handled together rather than leaving REFS on the
+                 * unsupported path this fix specifically closes for REF.
+                 *
+                 * Found via a real, reproducible host-native trace (task #447's
+                 * Round 552 fast-boot-patch scratch driver): EELOAD's own real,
+                 * unmodified code - reached organically for the first time via
+                 * Round 552's "rom0:OSDSYS"-string patch, no register hijacking
+                 * involved - calls a real SIF0 chain-mode DMA send (via a function
+                 * at 0x00083fd0, called right after a real CreateSema) whose real
+                 * tag chain includes a REF tag (id=3) this project had never
+                 * implemented; the previous default: path aborted the transfer
+                 * (DMA_ERR_UNSUPPORTED_TAG, STR cleared, no completion signal),
+                 * which is the most likely reason the real completion interrupt
+                 * that should eventually let EELOAD's own code SignalSema() the
+                 * semaphore it is WaitSema()-blocked on never fires. */
+                if (!transfer_quadwords(channel, addr, qwc)) { ch->last_error = DMA_ERR_OUT_OF_BOUNDS; return; }
+                ch->tadr += 16u;
+                continue;
+
+            default: /* CALL/RET - not implemented (no evidence yet this project's
+                 * traces ever need the address-stack mechanism these two tag
+                 * types require; left honestly unsupported per task #447/#521's
+                 * evidence-only-implement standard, unlike REF/REFS above which
+                 * were directly observed and confirmed against real PCSX2 source). */
                 ch->last_error = DMA_ERR_UNSUPPORTED_TAG;
                 ch->chcr &= ~0x100u;
                 return;

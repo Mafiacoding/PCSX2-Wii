@@ -23190,3 +23190,33 @@ Directly continuing Round 546's reframing finding. Built a minimal, portable dua
 **Recommended next step.** Directly compare real FIO_F_OPEN/FIO_F_CLOSE traffic (via the existing `EE_FILEIO_DEBUG` log) between the pre-`e76e6bc` and post-`e76e6bc` trees, specifically in the window between the first invocation (`instr~30M`) and where the second invocation used to fire (`instr~59M` historically), to see exactly which real file-open response differs and what OSDSYS's own code does differently as a result - this would either locate the genuine real trigger condition (allowing a correct, evidenced fix that restores the second invocation without reintroducing the fd-exhaustion bug) or rule out the FIO connection entirely in favor of some other, still-unidentified factor.
 
 **No tracked source changed this round** - the checkpoint builds all lived in disposable `git worktree`s (`/tmp/wt_*`, removed after each run) and never touched the tracked `/tmp/pcsx2-wii-git` working tree itself. Regression suite and Wii rebuild correctly skipped. Scratch: `/tmp/bisect_survey.c`, `/tmp/build_and_run.sh`.
+
+
+## Round 548 (task #447/#516): found the EXACT real mechanism behind the lost second invocation - it was a full resource-reload RETRY LOOP triggered by fd-table exhaustion, not a legitimate real escalation; also found a second, separate, still-open "close reads garbage fd" bug present in both trees
+
+Directly continuing Round 547's bisection. Built two `EE_FILEIO_DEBUG`-style instrumented rebuilds of `ee_core.c` (temporary `R548_FIO_TRACE` macro, added to scratch copies only, never touching tracked source) - one checked out at Round 441 (`45ae602`, pre-fix, 8 fd slots), one at the current tree (post-fix, 64 slots) - both logging every real `FIO_F_OPEN`/`FIO_F_CLOSE` with instruction count and reply/fd value, run side-by-side over the same 8,000,000-slice budget.
+
+**The old (pre-fix) tree's real trace, in full:**
+```
+instr=31,076,418-31,121,303: OSOPEN(fd1)->close, OSCLOCK(fd2)->close, OSBROWS(fd3)->close,
+  mc1:/mc0: BIEXEC-SYSTEM/OSBROWS (both -4, unmodeled prefix), OSFONTM(fd4)->close, OSFONTS(fd5)->close,
+  MOPEN(fd6)->close(garbage fd)
+instr=38,294,003: MCLOCK(fd7)->close(garbage fd)
+instr=41,508,483: MBROWS -> reply=-4  <-- FIRST REAL FAILURE: table already full (7/7 usable slots consumed)
+instr=60,019,181 onward: OSDSYS re-attempts its ENTIRE resource sequence again (OSOPEN, OSCLOCK,
+  OSBROWS, mc1:/mc0:, OSFONTM, OSFONTS) - EVERY SINGLE ONE fails with reply=-4, including the very
+  first one (OSOPEN), because all 7 usable slots are STILL occupied (see below)
+```
+**Root cause of the exhaustion**: every real `FIO_F_CLOSE` in this trace reads a garbage `close_fd` value (`19`, `20`, `20`, `19`, `19`, `194401`, `107454`) instead of the small real fd (`1`-`7`) that the matching `FIO_F_OPEN` actually returned - so `ee_fio_rom_fd_close()` is called on the wrong fd every time and never releases the real slots. This is a **second, separate, still-unfixed bug** (present identically in both trees - not the regression itself, but the reason the fd table fills up in the first place).
+
+**The new (post-fix) tree's real trace over the identical window**: the same first five opens/closes happen identically, then **`MBROWS` succeeds** (`reply=8`, real fd assigned - plenty of the new 64 slots free), and OSDSYS proceeds forward into **genuinely new territory never reached in the old trace at all**: `rom0:FONTM` (`reply=9`) at `instr=53,067,556`. No retry-the-whole-sequence pass ever happens by `instr=64,000,000` - control flow simply moves forward instead of looping back.
+
+**The real mechanism, now fully understood.** In the pre-fix tree, `MBROWS`'s real open attempt hits genuine (if buggy) table exhaustion and fails. Roughly 18,500,000 instructions later, OSDSYS's own code responds to that failure by **retrying its entire early resource-load sequence from the top** - and every file in that retry fails identically (same exhausted table), including files that succeeded the first time (`OSOPEN`). This retry-everything pass is what immediately precedes/coincides with the second `0x00082000`/`0x00082008` handler invocation Round 547 measured. In the post-fix tree, `MBROWS` never fails (ample fd headroom), so this retry loop never triggers, and OSDSYS instead proceeds to load additional real files it never reached before.
+
+**Conclusion - reverting Round 443's fix would be wrong, and the earlier "2 invocations" was very likely not hardware-accurate.** Real PS2 hardware has no reason to hit a 7-file fd ceiling this shallow into its own resource loading, so real hardware's own genuine second invocation (Round 437's live-PCSX2 verification) is almost certainly triggered by something else entirely - the pre-fix tree's second invocation was most plausibly a lucky-looking symptom of an unrelated bug (the fd-exhaustion retry loop), not a case of this project accidentally matching real hardware's real mechanism. The post-fix tree's behavior (open more distinct real files, don't retry) is arguably closer to correct, even though it no longer reproduces the visible "2 invocations" symptom.
+
+**Two concrete, separate leads for future rounds, neither attempted here (no safe evidenced fix yet):**
+1. **The garbage `close_fd` bug** (`ee_mem_read32(st, call_recvbuf + 0u)` reading `19`/`20`/`194401`/etc. instead of the real small fd) - a genuine, real, currently open bug independent of task #447, worth its own investigation into whether `call_recvbuf` is the wrong address for this specific RPC shape or something else is mis-decoded. Not fixed this round since the real correct extraction point hasn't been confirmed against real ps2sdk source yet.
+2. **The genuine real second-invocation trigger** (matching real hardware, per Round 437) remains unidentified and is now confirmed to be unrelated to fd-table capacity. Future investigation should look elsewhere in OSDSYS's own resource-loading/disc-browser logic for what real condition (independent of any FILEIO failure) should cause a legitimate second call into `0x00082000`.
+
+**Classification.** No tracked source changed - both instrumented builds lived in disposable `git worktree`s (`/tmp/wt_old`, `/tmp/wt_new`, both removed and confirmed absent via `git worktree list` before committing). Regression suite and Wii rebuild correctly skipped. Scratch: `/tmp/fio_diff/ee_core_old.c`, `/tmp/fio_diff/ee_core_current.c`, `/tmp/fio_diff/old.log`, `/tmp/fio_diff/new.log`.

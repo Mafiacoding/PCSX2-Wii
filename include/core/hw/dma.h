@@ -77,7 +77,56 @@ typedef struct {
     uint32_t d_rbsr;
     uint32_t d_rbor;
     uint32_t d_stadr;
+
+    /* DMAC_ENABLER (0x1000F520, read) / DMAC_ENABLEW (0x1000F590,
+     * write) - real PS2 hardware's DMAC-suspend flag, NOT part of the
+     * 0x1000E000 shared-register block above (see the dedicated doc
+     * comment right below this struct for the real semantics and
+     * citation). Both addresses read/write this single shadow value,
+     * matching PCSX2's own hwReset(), which sets both to the same
+     * 0x1201 constant. */
+    uint32_t d_enable_state;
 } dma_state_t;
+
+/*
+ * Round 539 (real-PS2-hardware Memory Map cross-check, task #447 side
+ * investigation): DMAC_ENABLER (0x1000F520)/DMAC_ENABLEW (0x1000F590) -
+ * a real, documented PS2 hardware register pair, confirmed directly
+ * against PCSX2's pcsx2/Hw.h (already this file's cited source for the
+ * rest of the DMAC layout) and pcsx2/Hw.cpp. Real semantics, verified
+ * from PCSX2 source (not fabricated):
+ *   - hwReset() sets BOTH psHu32(DMAC_ENABLEW) and psHu32(DMAC_ENABLER)
+ *     to 0x1201 at boot/reset (PCSX2's own comment: "i guess this is
+ *     kinda a version, it's used by some bioses" - the low bits' exact
+ *     meaning isn't independently documented anywhere PCSX2 devs cite
+ *     either, so this project reproduces the same fixed reset constant
+ *     rather than guessing at undocumented low-bit semantics).
+ *   - dmacInterrupt() gates real DMAC interrupt (Cause.IP3) delivery
+ *     with `psHu8(DMAC_ENABLER+2) == 1` - i.e. byte offset +2 of the
+ *     32-bit register (bits 16-23) being EXACTLY 0x01 (bit 16 set,
+ *     bits 17-23 clear) means "DMAC suspended", blocking the interrupt
+ *     even if otherwise pending. This is the real, documented "DMAC
+ *     suspend" mechanism some real games use via direct MMIO writes -
+ *     independently corroborated by the psdevwiki PS3 PS2_Emulation/
+ *     PS2_Config_Commands page's 0x02/0x03/0x41 hack-command entries,
+ *     which reference writing 0/0xFFFFFFFF to D_ENABLEW to toggle
+ *     exactly this bit for specific real games.
+ *   - Real hardware doesn't document ENABLER and ENABLEW as functionally
+ *     distinct storage - PCSX2 writes both to the same value at reset
+ *     and only ever reads back via ENABLER's byte+2 - so this project
+ *     models them as a single shared shadow register reachable from
+ *     either address, rather than fabricating a read/write split that
+ *     isn't evidenced anywhere.
+ *   - Previously this project had ZERO handling for either address:
+ *     both fell through dma_mmio_read32()/write32() entirely (neither
+ *     is in the 0x1000E000-0x1000F000 DMAC_CTRL block, nor any channel
+ *     range), landing in ee_core.c's generic RAM path, which for this
+ *     non-RAM-backed address returns a TLB fault via
+ *     ee_mem_check_tlb_fault() instead of a normal register access -
+ *     a real, previously-unnoticed bug: any code writing D_ENABLEW
+ *     would fault instead of the write being accepted. dma_mmio_read32()/
+ *     write32() below now handle both addresses directly.
+ */
 
 /*
  * Task #176: DMAC_STAT (0x1000E010, stored as d_stat above) real
@@ -271,9 +320,15 @@ void dma_channel_set_irq_enable(int channel, int enabled);
  * pending: (status_low & enable_high) != 0, OR status_low bit 15 set
  * (the BEIS/stall-detect bit) - matches PCSX2's dmacInterrupt() in
  * Hw.cpp, INCLUDING the real DMAC_CTRL.DMAE (master enable, bit 0 of
- * d_ctrl) gate it also checks. ee_core.c's ee_check_dmac_interrupt()
- * calls this every step, mirroring ee_check_timer_interrupt()'s
- * Cause.IP7 pattern for this new external line (task #176).
+ * d_ctrl) gate it also checks, AND (as of Round 539) the real
+ * DMAC_ENABLER "suspended" byte gate (`psHu8(DMAC_ENABLER+2) == 1`) -
+ * this was previously the one documented, deliberately-not-fabricated
+ * gap in this function's fidelity (see the old comment this replaces);
+ * DMAC_ENABLER/ENABLEW are now modeled for real (see dma_state_t's
+ * d_enable_state field doc comment above), so the gate is included.
+ * ee_core.c's ee_check_dmac_interrupt() calls this every step,
+ * mirroring ee_check_timer_interrupt()'s Cause.IP7 pattern for this
+ * external line (task #176).
  */
 int dma_dmac_interrupt_pending(void);
 

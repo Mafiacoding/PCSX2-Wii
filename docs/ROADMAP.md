@@ -9877,3 +9877,12 @@ This round (JP BIOS only, per the user's correction) replicated the entire pream
 Sixth hypothesis refuted. New reframing for a future round: since these addresses are OSDSYS's own never-overwritten resident code (Round 467/468's decoded VBLANK-END handler dispatch chain), the redirect may not be "missing state" at all but the real kernel's own idle/default-execution fallback when no thread is recognized as properly ready - worth checking the hijacked thread's post-preamble ready/scheduler state directly next.
 
 Diagnostic round only, no tracked source changed, regression/Wii-build correctly skipped.
+
+
+## Round 539: implemented real DMAC_ENABLER (0x1000F520)/DMAC_ENABLEW (0x1000F590) registers - genuine gap found via psdevwiki Memory_Map cross-check
+
+Used the real PS2 hardware Memory Map page (per the user's request) to cross-check register coverage in `source/hw/dma.c`. Found DMAC_ENABLER/DMAC_ENABLEW - a real, documented PS2 DMAC-suspend register pair - had zero implementation; both addresses previously fell through to a spurious TLB fault instead of a normal register access. This closes a gap `dma_dmac_interrupt_pending()`'s own comment had honestly flagged as deliberately-not-fabricated pending evidence.
+
+Obtained real semantics directly from PCSX2's `Hw.h`/`Hw.cpp` (already this project's cited DMAC source): reset value 0x1201 for both registers, and `dmacInterrupt()`'s real gate (`DMAC_ENABLER` byte+2 == 1 means DMAC suspended). Independently corroborated by the psdevwiki PS2_Config_Commands page's hack entries for real games (Max Payne, etc.) that write to D_ENABLEW.
+
+Implemented as a single shared shadow register (`d_enable_state`) reachable from both addresses, matching PCSX2's own behavior. `dma_dmac_interrupt_pending()` now includes the suspend-byte gate. Sanity harness + full 129-test regression suite (129/129 PASS) + Wii cross-build (clean, 0 warnings) + organic-boot baseline (bit-for-bit identical to established baseline: ee_pc=0x0050172C, rpc_pending_sets=228, rpc_delivered=228) all confirm the fix is correct and introduces zero regression, since nothing on the current boot path touches this register yet.

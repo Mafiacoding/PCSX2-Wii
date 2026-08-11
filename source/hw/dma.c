@@ -23,6 +23,12 @@ void dma_init(void)
      * resets register state on emulator (re)start, but the RAM binding
      * is a one-time wiring done by ee_core_init() at a different point
      * in the boot sequence. */
+
+    /* Round 539: real hardware/PCSX2 hwReset() sets DMAC_ENABLER and
+     * DMAC_ENABLEW to 0x1201 at boot/reset (see dma.h's doc comment on
+     * d_enable_state for the full citation) - NOT zero, unlike every
+     * other register memset above. */
+    g_dma.d_enable_state = 0x1201u;
 }
 
 dma_state_t *dma_get_state(void) { return &g_dma; }
@@ -274,13 +280,16 @@ int dma_dmac_interrupt_pending(void)
      * bus-error/stall-detect - never set by this project, no bus
      * errors modeled, but checked here for completeness/fidelity)
      * is set - AND the DMAC is actually enabled (DMAC_CTRL.DMAE,
-     * bit 0 of d_ctrl; real hardware also checks a "DMAC suspended"
-     * byte this project doesn't model at all, so that half of the
-     * gate is left out rather than fabricated). */
+     * bit 0 of d_ctrl) AND not suspended (Round 539: real hardware's
+     * DMAC_ENABLER "suspended" byte, `psHu8(DMAC_ENABLER+2) == 1` -
+     * previously left out as a documented, deliberately-not-fabricated
+     * gap; now modeled for real via d_enable_state, see dma.h). */
     uint32_t status_low = g_dma.d_stat & 0xFFFFu;
     uint32_t enable_high = (g_dma.d_stat >> 16) & 0xFFFFu;
     if (!(g_dma.d_ctrl & 0x1u))
         return 0; /* DMAC_CTRL.DMAE == 0: master DMA enable is off */
+    if (((g_dma.d_enable_state >> 16) & 0xFFu) == 0x01u)
+        return 0; /* DMAC_ENABLER byte+2 == 1: DMAC suspended */
     if ((status_low & enable_high) != 0u)
         return 1;
     if (status_low & 0x8000u)
@@ -368,6 +377,14 @@ int dma_mmio_read32(uint32_t addr, uint32_t *out_val)
         *out_val = reg ? *reg : 0;
         return 1;
     }
+    if (addr == 0x1000F520u || addr == 0x1000F590u) {
+        /* Round 539: DMAC_ENABLER/DMAC_ENABLEW - see dma.h's
+         * d_enable_state doc comment. Not adjacent to either range
+         * above (they live in the same 0x1000F000-0x1000FFFF page as
+         * INTC/SIF/MCH, at offset 0x520/0x590), so handled explicitly. */
+        *out_val = g_dma.d_enable_state;
+        return 1;
+    }
     return 0;
 }
 
@@ -403,6 +420,15 @@ int dma_mmio_write32(uint32_t addr, uint32_t val)
     if (addr >= DMAC_CTRL_BASE && addr < DMAC_CTRL_END) {
         uint32_t *reg = ctrl_reg_ptr(addr);
         if (reg) *reg = val;
+        return 1;
+    }
+    if (addr == 0x1000F520u || addr == 0x1000F590u) {
+        /* Round 539: DMAC_ENABLER/DMAC_ENABLEW - see dma.h's
+         * d_enable_state doc comment. PCSX2 doesn't special-case a
+         * toggle/mask here (unlike DMAC_STAT above) - it's a plain
+         * store, matching real games' documented use (write 0 or
+         * 0xFFFFFFFF wholesale, not per-bit twiddling). */
+        g_dma.d_enable_state = val;
         return 1;
     }
     return 0;

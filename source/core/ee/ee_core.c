@@ -2032,10 +2032,36 @@ static void sif_cmd_iop_write_private_queue_copy(ee_state_t *st, uint32_t cd_ptr
      * no-op path (already present, already the documented safe
      * fallback for this exact scenario) trigger correctly for genuinely
      * implausible values, matching organic's own already-safe
-     * behavior. */
-    if (!queue_ptr || queue_ptr < 0x00100000u || queue_ptr >= EE_RAM_SIZE)
-        return; /* not yet populated / not a plausible real pointer - stay silent, no guessing */
+     * behavior.
+     *
+     * Round 565 correction (task #537, git-bisected regression): Round
+     * 562's upper-bound check above compared the RAW pre-mask queue_ptr
+     * against EE_RAM_SIZE. That's wrong for any real pointer that isn't
+     * already a small physical offset - this project's own convention
+     * (see the qbuf computation immediately below, and
+     * sif_loadfile_translate_base()) is that real EE addresses arrive
+     * in a mapped/virtual form and must be masked with 0x1FFFFFFF to
+     * get the physical RAM offset. A genuine, real queue pointer this
+     * project itself produces organically - confirmed via direct
+     * instrumentation (/tmp/r565_watch, true diskless boot) - is
+     * 0x2046D540 (masked: 0x0046D540, a perfectly ordinary ~4.6MB
+     * physical offset, well inside the real 32MB RAM). Checked as a
+     * raw value, 0x2046D540 (~545MB) trivially exceeds EE_RAM_SIZE and
+     * was being silently rejected by Round 562's guard - which git-
+     * bisection (task #537) proved is exactly what broke organic
+     * (diskless) boot's forward progress: this function's suppressed
+     * side-effect write was the real signal this project's own
+     * WaitSema(semid=0) trampoline (0x00210F84) needed, so blocking it
+     * introduced a permanent early park (~30.9M instructions,
+     * pmode/GS never configured) that did not exist before Round 562.
+     * Fix: compute qbuf (the masked physical address) first, and check
+     * *that* against EE_RAM_SIZE instead of the raw queue_ptr. This
+     * still correctly rejects Round 562's original garbage case
+     * (0x0E910E5C masks to itself, still ~244MB, still fails), while
+     * correctly accepting real pointers like 0x2046D540. */
     uint32_t qbuf = queue_ptr & 0x1FFFFFFFu; /* real vaddr -> phys, same convention as sif_loadfile_translate_base() */
+    if (!queue_ptr || queue_ptr < 0x00100000u || qbuf >= EE_RAM_SIZE)
+        return; /* not yet populated / not a plausible real pointer - stay silent, no guessing */
     ee_mem_write32(st, qbuf + 0x00u, 0x30u);        /* psize=48 low byte doubles as the real byte-count gate (see citation above) */
     ee_mem_write32(st, qbuf + 0x04u, 0u);
     ee_mem_write32(st, qbuf + 0x08u, SIF_CMD_RPC_END);

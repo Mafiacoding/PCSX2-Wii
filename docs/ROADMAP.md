@@ -9844,3 +9844,14 @@ More rigorous follow-up to Round 533: instead of hand-editing TCB.status, called
 ## Round 535: continuous pad input during post-trampoline window - zero effect, exact bit-for-bit match to Round 534 (task #447)
 
 Tested the last untested hypothesis from Round 534: fed continuous CROSS press/release throughout the entire 40M-slice post-trampoline window (previous rounds only pressed once during warmup). Result: final ee_pc and instruction count are IDENTICAL to Round 534's no-continuous-input run, down to the exact instruction. Refutes the attract-mode/timeout-to-browser hypothesis decisively - real continuous input would defeat a real timeout, but changed nothing. Also flags an open question: does pad input reach a real polled code path in this specific post-trampoline context at all? Diagnostic round, no tracked source changed.
+
+
+## Round 536: US-BIOS trampoline test - redirect lands in raw BIOS ROM code, not OSDSYS's loop; warmup depth mismatch flagged for re-test (task #447)
+
+Tested the syscall-7 trampoline against the real US BIOS (`ps2-0200a`) instead of the Japan BIOS used in every round since 466, per the user's explicit "try the bios" instruction. Dropped Round 534's TerminateThread/DeleteThread subroutine-call step this round since those addresses are scph10000-specific and unverified for the US BIOS - safety call, not an oversight.
+
+Result: the 40M-slice organic warmup left the US BIOS meaningfully earlier in its boot (`tid=0`, GS never configured, `INTC_MASK` already 0) than the Japan BIOS reaches at the same budget (`tid=3`, GS configured, INTC_MASK previously nonzero). The trampoline still installed and fired correctly, and the real disc ELF still loaded correctly. But the post-trampoline redirect this time lands in `0xBFC00380`-`0xBFC00700` (raw BIOS ROM reset-vector region) instead of the `0x8000CCxx`/`0x8000CFxx`/`0x8000F8xx` OSDSYS-loop family seen with the Japan BIOS - a different address family, consistent with a structurally similar "lands back in BIOS-resident code" phenomenon, but not a clean apples-to-apples comparison since the two BIOS revisions weren't at equivalent boot depth when the trampoline fired.
+
+Next step for a future round: re-run with a much larger US BIOS warmup budget so it reaches an OSDSYS-idle steady state comparable to the Japan BIOS before firing the trampoline.
+
+Diagnostic round only - no tracked source changed, regression/Wii-build correctly skipped.

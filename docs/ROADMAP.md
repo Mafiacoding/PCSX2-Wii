@@ -10244,3 +10244,16 @@ a real cmd=0x39 (also Null on real hardware) at word 8. Whether this is
 genuine real BIOS content or an upstream miscount elsewhere is still
 unresolved - needs live PCSX2 or a real captured VIF trace to settle,
 not available this session. Docs-only round, no source changed.
+
+## Round 585 (task #561): live PCSX2 trace resolves VIF1 "packet content mystery"
+Docs-only. User provided a live `pcsx2-qt.exe` (JP BIOS, DebugServer) instance.
+Traced a real VIF1 chain-DMA kick end to end (CHCR watchpoint -> TADR
+watchpoint -> backtrace). Confirmed TADR/channel match our own model
+(validation), but the "packet content looks like MIPS code" mystery is
+explained: the whole call stack at the kick site sits in `0x00500000`-
+`0x00509fff` (BIOS kernel bootstrap range, no game disc mounted) - this is
+the BIOS using VIF1's chain-DMA as a generic bulk-copy engine during early
+init, not a real VU1 graphics kick. Not a VIF-parsing bug. Task #561's
+"packet content mystery" closed as a mischaracterization; task #560's real
+MSCALF/MSCNT fix (Round 583) stands unaffected. See `docs/STATUS.md` Round
+585 for full trace evidence.

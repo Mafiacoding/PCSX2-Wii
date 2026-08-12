@@ -24413,3 +24413,66 @@ a real captured GS/VIF trace log from a real console/emulator run of this
 exact BIOS) to compare the real byte-for-byte VIF1 packet content against
 our synthetic diskless boot's packet content at the same point, since
 static source-reading alone has been exhausted for this specific lead.
+
+## Round 585 (task #561): live PCSX2 trace resolves the VIF1 "packet content mystery" - it's BIOS bootstrap, not graphics
+
+**Context.** Round 584 left one open question: why does real EE memory at the
+live-confirmed VIF1 TADR address contain what decodes as coherent MIPS
+machine code rather than VIF-tag/packet-formatted bytes? The user made a
+live `pcsx2-qt.exe` instance available this round (JP BIOS loaded, diskless,
+"Unknown Game") via the `pcsx2-mcp` DebugServer tools, enabling direct
+investigation instead of further speculation.
+
+**Method.** Connected via `pcsx2_connect` (DebugServer, PC=0x005189a0).
+Set a write watchpoint on VIF1's CHCR (`0x10009000`); caught a real kick at
+PC=`0x0050bd10` (`sw v0,(s0)`, v0=0x70000145 = STR | MOD=chain). Backtracked
+via the generic "kick DMA channel" helper (entry `0x0050bc50`) to find the
+real TADR about to be programmed: set a watchpoint on TADR (`0x10009030`),
+caught the write one instruction early, and read `s3=0x80002290` (new TADR)
+- matching this project's own independently-derived VIF1 packet address from
+earlier scratch diagnostics almost exactly (strong validation of the DMA/tag
+addressing model). Confirmed `s0=0x10009000` at this exact point (genuinely
+VIF1, not a different channel - ruling out Round 584's leading hypothesis).
+
+Read real memory at `0x80002290` both immediately before and immediately
+after the TADR write committed: **identical content both times**, and it
+decodes as unmistakable MIPS code, not VIF data - e.g. bytes `08 00 e0 03`
+= `0x03e00008` = `JR ra`, immediately followed by `60 00 bd 27` =
+`0x27bd0060` = `ADDIU sp,sp,0x60` (its branch-delay slot) - a completely
+canonical MIPS function-return idiom, and a few words later `01 80 07 3c` =
+`0x3c078001` = `LUI a3,0x8001`. This is not noise; it's real code.
+
+**The actual explanation.** Pulled a full backtrace at the kick site
+(`pcsx2_get_backtrace`): all 8 frames sit in the `0x00500000`-`0x00509fff`
+range (`0x0050bd10 -> 0x00508518 -> 0x00508fe4 -> 0x00509110 -> 0x005002cc
+-> 0x00500398 -> 0x005004d0 -> 0x005000a4`), bottoming out at the literal
+BIOS reset/entry jump `j ->0x00518140`. This is deep PS2 kernel/BIOS
+bootstrap code, not game or boot-animation graphics code - there is no game
+disc mounted ("Unknown Game" per `pcsx2_game_info`) and these addresses are
+well below where any loaded ELF/ animation code would live.
+
+**Conclusion.** The VIF1 DMA kick this investigation has been sampling (in
+both our own emulation's Round 581 checkpoint and this live trace) is the
+PS2 BIOS's own early-boot use of the VIF1 chain-DMA engine as a generic bulk
+data-mover (a documented real technique - spare DMA channels are faster than
+CPU `memcpy` for relocating kernel/IOP module images during bring-up), not a
+real VU1 microprogram kick carrying meaningful VIFcode-formatted graphics
+data. Its payload is genuinely, legitimately raw code/data being relocated
+byte-for-byte - both on real hardware and in our own emulation - which fully
+explains why neither side's "packet content" looked like a clean VIFcode
+stream. This was never a VIF-parsing bug; it was this investigation
+sampling a non-graphics, kernel-internal DMA transfer and mis-framing it as
+a graphics packet. Task #560's real, actual bug (the MSCALF/MSCNT opcode
+swap, Round 583) is unaffected and remains fixed and verified.
+
+**Verification.** No source changed this round - live-trace analysis only.
+Full workflow reduces to: docs update, commit, rsync, leak-check (per the
+docs-only-round exception to the mandatory workflow).
+
+**Disposition of task #561.** Closing out the "VIF1 packet content mystery"
+line of investigation - it's resolved as a mischaracterization, not a bug.
+No fix needed. Reopening only if a *later*, definitely-post-boot,
+definitely-graphics VIF1 kick (e.g. once a real game disc + boot animation
+is actually rendering) is found to show a genuine VIFcode-stream mismatch
+against real hardware - that would need a fresh live trace at that later
+point, not a re-analysis of this same early-boot sample.

@@ -10071,3 +10071,21 @@ in every outputs rsync going forward.
 Next: continue task #549 - determine whether a later, not-yet-reached boot phase is
 expected to issue the real triangle XGKICK, or whether diskless-boot verification
 should shift to the Tekken disc-boot path (task #551) for triangle-rendering proof.
+
+## Round 575 (task #550): host-native checkpoint/resume tooling shipped
+
+Built `source/core/checkpoint.c` + `include/core/checkpoint.h`, reusing this
+project's own pre-existing rebind-function contract (dma_bind_ee_ram/
+dma_bind_scratchpad/iop_dma_bind_iop_ram/ee_core_rebind_dma_sinks/
+system_rebind_iop_bridge/iop_cdrom_legacy_rebind_iso/iop_cdvd_rebind_iso) to
+save/restore EE+IOP+every hw/ peripheral's state to a file. Added one new
+accessor (`ee_hle_thread_get_checkpoint_blob()`) to close the one module that
+didn't already expose its static state. Verified via a fresh round-trip test
+driver (`tools/round575-checkpoint/driver.c`): save at a boot milestone, run
+further (mutating state), load back, confirm exact match. Known, documented
+limitation: IPU/SPU2/SPU-legacy skeleton register state (confirmed off the
+critical path per Round 521-525) isn't captured in v1. Regression suite and
+Wii cross-build both clean. See STATUS.md for full detail.
+
+Next: task #551 - use this to checkpoint past Tekken's slow early disc-boot
+segment and iterate faster on getting it to display something.

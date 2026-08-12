@@ -179,4 +179,17 @@ int ee_hle_thread_get_current_thread_id(void);
 uint32_t ee_hle_thread_get_status(int thid);
 uint32_t ee_hle_thread_get_priority(int thid);
 
+/* Round 575 (task #550): opaque state-blob accessor for host-native
+ * checkpoint/resume tooling. Unlike gs_get_state()/vif0_get_state()/
+ * etc. (typed pointers, for callers needing field-level access), this
+ * file's static TCB/semaphore scheduler state has no such caller -
+ * a raw blob is simpler and just as sufficient for a memcpy-based
+ * checkpoint format (memcpy-based save/restore). Fills the output
+ * pointer and size with the address/size of this
+ * file's entire static state; a checkpoint writer memcpy()s *size
+ * bytes from *ptr, a checkpoint reader memcpy()s them back (this
+ * struct has no internal pointers, so a raw byte restore is safe -
+ * unlike iop_heap.c's g_alloclist, see that file's citation). */
+void ee_hle_thread_get_checkpoint_blob(void **ptr, uint32_t *size);
+
 #endif

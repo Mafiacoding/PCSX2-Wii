@@ -74,6 +74,12 @@ void ee_hle_thread_init(void)
     memset(&g, 0, sizeof(g));
 }
 
+void ee_hle_thread_get_checkpoint_blob(void **ptr, uint32_t *size)
+{
+    *ptr = &g;
+    *size = (uint32_t)sizeof(g);
+}
+
 static ee_tcb_t *tcb(int thid) /* thid is 1-based */
 {
     if (thid < 1 || thid > EE_HLE_THREAD_MAX_THREADS) return NULL;

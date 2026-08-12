@@ -23759,3 +23759,61 @@ boot phase is the one expected to issue the real triangle XGKICK, or whether OSD
 diskless splash animation genuinely never draws triangles (only sprites/lines/points)
 by design, in which case triangle-rendering verification should move to the Tekken
 disc-boot path (task #551) instead.
+
+## Round 575 (2026-08-12) - task #550: host-native checkpoint/resume tooling
+
+**Goal:** per the user's standing task ordering, build a checkpoint file once
+GS-related work (task #549) reached a documented resting point, so future
+boot-survey work (task #551, Tekken disc-boot) doesn't need to re-run an
+entire slow boot from reset every time a test needs a few more instructions.
+
+**Implementation:** new `source/core/checkpoint.c`/`include/core/checkpoint.h`.
+Reuses this project's own pre-existing, documented restore-time API contract
+(`dma_bind_ee_ram()`/`dma_bind_scratchpad()`/`iop_dma_bind_iop_ram()`/
+`ee_core_rebind_dma_sinks()`/`system_rebind_iop_bridge()`/
+`iop_cdrom_legacy_rebind_iso()`/`iop_cdvd_rebind_iso()` - see `include/core/
+system.h`'s Round 448/449 citations) rather than inventing a new one. Captures
+EE core state + RAM, IOP core state + RAM, and every `hw/` peripheral's static
+state via its existing typed `_get_state()` accessor (dma/ee_intc/ee_sio/
+ee_timers/gif/gs/iop_dma/iop_excb/iop_hle_bios/iop_hle_modules/iop_intc/
+iop_timers/mch/sif/vif0/vif1/vu1), plus a new opaque blob accessor added to
+`ee_hle_thread.c`/`.h` this round (`ee_hle_thread_get_checkpoint_blob()`,
+following the pattern its own header already documented for exactly this
+purpose), plus the IOP heap allocator's dedicated snapshot pair
+(`iop_heap_snapshot_save/load()` - NOT a raw struct dump, since its
+malloc()'d chain would embed process-local pointers, the documented root
+cause of the Round 307-447 `[R313-SIGSEGV]` resume failures this format is
+designed to avoid repeating).
+
+File format: tagged blocks (4-byte tag + u32 size + payload), validated fully
+into scratch buffers before any live state is touched, so a truncated/corrupt
+file fails cleanly instead of half-applying. Never embeds BIOS/disc bytes -
+`checkpoint_load()` takes the caller's already-loaded `bios_image_t`s and an
+optional ISO path as parameters, exactly like the existing rebind-iso
+functions already require.
+
+**Known, documented limitation:** `ipu.c`/`iop_spu2.c`/`iop_spu_legacy.c` have
+no `_get_state()` accessor and are not captured in v1 - per the Round 521-525
+audit, these are confirmed off the critical GS/boot-progress path (skeleton
+register models with no consumer reading them back into control flow yet), so
+this is a scoped, acceptable gap, not a silent data-loss bug.
+
+**Verification:** wrote `tools/round575-checkpoint/driver.c`, a host-native
+round-trip test: boots the diskless JP-BIOS path to a 2,000,000-slice
+milestone, saves a checkpoint, runs 500,000 further slices (mutating EE
+pc/instructions_executed/RAM/GS state), then loads the checkpoint back and
+confirms every sampled field (instructions_executed, EE pc, a 64-byte EE RAM
+window, GS pmode/dispfb2) exactly matches the pre-mutation snapshot -
+`[PASS] checkpoint round-trip: restored state matches pre-checkpoint snapshot
+exactly`. Full regression suite (23/23, matching the known baseline) and Wii
+cross-build (devkitPPC/libogc, 0 warnings, 0 errors) both clean after adding
+`checkpoint.c` and the `ee_hle_thread` accessor to the tracked build.
+
+**Leak-prevention note:** checkpoint files (`.bin`, containing EE/IOP RAM
+dumps derived from BIOS-loaded code) are host-native testing artifacts only -
+never committed, rsynced, or otherwise persisted outside `/tmp` on this
+sandbox, per this project's standing BIOS/disc-data leak-prevention rule.
+
+Next: task #551 - use this checkpointing to speed up iteration on the Tekken
+disc-boot path (checkpoint past the slow early-boot segment once a stable
+milestone is established there, then iterate rapidly from that point).

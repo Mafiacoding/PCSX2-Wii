@@ -10219,3 +10219,17 @@ _vuIADDIU()/_vuISUBIU()) on its own correctness merits; 3 new
 test_vu_micro.c checks (27/27 pass), 45/45 scoped regression, clean Wii
 build. Checkpoint file generated via checkpoint_tool and placed in
 outputs/ per the user's explicit request.
+
+Round 583 (task #560): per user directive ("fix it right now"), researched
+real PCSX2's Vif_Codes.cpp vifCmdHandler[] dispatch table on GitHub and
+found MSCALF/MSCNT opcode values swapped in source/hw/vif.c (had
+MSCALF=0x17/MSCNT=0x15; real hardware is MSCALF=0x15/MSCNT=0x17) - fixed,
+with 5 new regression tests (129 total, 127 pass / 2 pre-existing unrelated
+fails), clean Wii build. Checkpoint-based empirical resume test shows this
+fix alone doesn't change forward progress in the tested window; deeper
+live instrumentation of vif_process()'s dispatch loop found real UNPACK
+VIFcodes parsing correctly interleaved with cmd bytes matching no real
+VIFcode encoding at all - pointing to a VIFcode-stream parser desync in
+non-V4-32 UNPACK sub-formats as the more precise next lead for task #560,
+not yet fixed (needs its own round auditing every UNPACK VN/VL
+combination against real PCSX2's vifUnpackSetup<> formula).

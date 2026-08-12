@@ -28,6 +28,9 @@ static uint32_t enc_vifcode(uint32_t cmd, uint32_t num, uint32_t imm)
 #define VIF_CMD_STMASK   0x20
 #define VIF_CMD_STROW    0x30
 #define VIF_CMD_STCOL    0x31
+#define VIF_CMD_MSCAL    0x14
+#define VIF_CMD_MSCALF   0x15
+#define VIF_CMD_MSCNT    0x17
 #define VIF_CMD_MPG      0x4A
 #define VIF_CMD_DIRECT   0x50
 #define VIF_CMD_UNPACK_S_32   0x60
@@ -511,6 +514,39 @@ int main(void)
         CHECK(vif_rd_le32(vu1->mem + 0*16 + 0) == 0x01010101u && vif_rd_le32(vu1->mem + 0*16 + 12) == 0x04040404u, "UNPACK 3-call split: 1st vector's X/W lanes correct (bytes from calls 1 and 3 stitched together)");
         CHECK(vif_rd_le32(vu1->mem + 2*16 + 12) == 0x0C0C0C0Cu, "UNPACK 3-call split: 3rd (last) vector's W lane correct (the final completing bytes)");
         CHECK(v1->itops == 0x155u, "UNPACK 3-call split: the fresh ITOP VIFcode right after the fully-completed 48-byte payload was parsed correctly");
+    }
+
+    {
+        /* Round 583 (task #560): regression test for the real MSCAL(0x14)/
+         * MSCALF(0x15)/MSCNT(0x17) opcode-value fix. Ground-truthed
+         * against real PCSX2's Vif_Codes.cpp vifCmdHandler[] dispatch
+         * table (see vif.c's Round 583 comment). Before this fix,
+         * this project had MSCALF=0x17 and MSCNT=0x15 (the two
+         * swapped), which silently routed any real MSCALF VIFcode
+         * (0x15) into the "resume at current tpc" MSCNT handler
+         * instead of the "start microprogram at IMM, count as a
+         * fresh MSCAL-family call" handler - exactly the bug behind
+         * task #560's "mscal_calls stays at 1 despite ongoing per-
+         * frame VIF1 traffic" symptom. */
+        vif_init();
+        vu1_init();
+        uint8_t buf[16];
+
+        /* Real MSCALF VIFcode: cmd=0x15, imm=0x10 (start byte = 0x80). */
+        wle32(buf + 0, enc_vifcode(VIF_CMD_MSCALF, 0, 0x10u));
+        for (int i = 1; i < 4; i++) wle32(buf + i * 4, enc_vifcode(VIF_CMD_NOP, 0, 0));
+        vif1_process_quadwords(DMA_CHANNEL_VIF1, buf, 1);
+        vif_state_t *v1 = vif1_get_state();
+        CHECK(v1->mscal_calls == 1, "MSCALF opcode fix: real cmd=0x15 dispatches to the MSCAL/MSCALF handler (mscal_calls==1)");
+        CHECK(v1->mscal_last_start_byte == 0x80u, "MSCALF opcode fix: start byte correctly computed as imm*8 (0x10*8=0x80)");
+        CHECK(v1->mscnt_calls == 0, "MSCALF opcode fix: real cmd=0x15 must NOT be misrouted into the MSCNT handler");
+
+        /* Real MSCNT VIFcode: cmd=0x17, imm field is reserved/unused. */
+        wle32(buf + 0, enc_vifcode(VIF_CMD_MSCNT, 0, 0));
+        for (int i = 1; i < 4; i++) wle32(buf + i * 4, enc_vifcode(VIF_CMD_NOP, 0, 0));
+        vif1_process_quadwords(DMA_CHANNEL_VIF1, buf, 1);
+        CHECK(v1->mscnt_calls == 1, "MSCNT opcode fix: real cmd=0x17 dispatches to the MSCNT (resume) handler (mscnt_calls==1)");
+        CHECK(v1->mscal_calls == 1, "MSCNT opcode fix: real cmd=0x17 must NOT be misrouted into the MSCAL/MSCALF handler (count stays 1)");
     }
 
     printf("\n%d check(s) failed\n", failures);

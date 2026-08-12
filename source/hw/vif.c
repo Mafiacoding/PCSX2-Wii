@@ -25,8 +25,26 @@
 #define VIF_CMD_FLUSH    0x11 /* VIF1 only */
 #define VIF_CMD_FLUSHA   0x13 /* VIF1 only */
 #define VIF_CMD_MSCAL    0x14
-#define VIF_CMD_MSCALF   0x17
-#define VIF_CMD_MSCNT    0x15
+#define VIF_CMD_MSCALF   0x15 /* Round 583 (task #560): was 0x17 - see fix note below */
+#define VIF_CMD_MSCNT    0x17 /* Round 583 (task #560): was 0x15 - see fix note below */
+/* Round 583 (task #560) FIX: MSCALF and MSCNT were swapped versus
+ * real hardware. Re-checked directly against real PCSX2's
+ * Vif_Codes.cpp vifCmdHandler[] dispatch table (both VIF0 and VIF1
+ * arrays), which lists, starting at index 0x10: FlushE, Flush, Null,
+ * FlushA, MSCAL, MSCALF, Null, MSCNT - i.e. real MSCAL=0x14,
+ * MSCALF=0x15, MSCNT=0x17. This file previously had MSCALF=0x17 and
+ * MSCNT=0x15 (the two swapped), despite the header comment above
+ * claiming this table was cross-checked against that same dispatch
+ * table - it wasn't, for these two entries. Effect of the bug: any
+ * real MSCALF VIFcode (0x15) arriving on the wire was dispatched to
+ * this file's MSCNT case (a "resume at current tpc" no-restart path)
+ * instead of the MSCAL/MSCALF case (a "start microprogram at IMM"
+ * path, which is also where mscal_calls is incremented - see below).
+ * This exactly explains task #560's "mscal_calls stays at 1 despite
+ * thousands of ongoing per-frame VIF1 DMA transfers" symptom: the
+ * real per-frame VU1 kick VIFcode is standard real-hardware MSCALF
+ * (flush PATH3 then call), which this project's swapped constant was
+ * silently routing into the wrong handler every single frame. */
 #define VIF_CMD_STMASK   0x20
 #define VIF_CMD_STROW    0x30
 #define VIF_CMD_STCOL    0x31

@@ -24294,3 +24294,80 @@ performed. The larger XGKICK question remains a diagnostic finding, not yet
 a fix: this round conclusively rules out "more VU1 opcodes" as the blocker
 and redirects the investigation to the EE-side MSCAL-never-refires gap
 (new follow-up task).
+
+## Round 583 (task #560): real MSCALF/MSCNT opcode-value fix + VIF1 dispatch desync lead
+
+**User directive (verbatim):** "if the real blocker is the second mscal you
+should find informations on it using pcsx2 docs or github but fix it right
+now."
+
+**Research.** Fetched real PCSX2's `Vif_Codes.cpp` (`/tmp/ref/pcsx2-master`)
+and read its `vifCmdHandler[]` dispatch table directly (both the VIF0 and
+VIF1 arrays list identical entries starting at index `0x10`): `FlushE,
+Flush, Null, FlushA, MSCAL, MSCALF, Null, MSCNT` - i.e. real hardware's
+`MSCAL=0x14`, `MSCALF=0x15`, `MSCNT=0x17`.
+
+**Bug found.** `source/hw/vif.c` had `VIF_CMD_MSCALF` and `VIF_CMD_MSCNT`
+**swapped**: `MSCALF=0x17`, `MSCNT=0x15` - despite this same file's own
+header comment claiming the whole table was "cross-checked against
+PCSX2's Vif_Codes.cpp ... not guessed." It wasn't, for these two entries.
+Effect: any real MSCALF VIFcode (`0x15`) arriving on the wire was silently
+dispatched into the MSCNT ("resume at current tpc") handler instead of the
+MSCAL/MSCALF ("start microprogram at IMM, increment `mscal_calls`")
+handler - exactly matching task #560's "`mscal_calls` stays at 1" symptom.
+The lower-level dispatch mechanism and MSCAL-vs-MSCNT semantic split
+(start-at-IMM vs resume-at-tpc) were already correct (Round 576); only the
+two numeric opcode values were wrong.
+
+**Fix.** Corrected `VIF_CMD_MSCALF` to `0x15` and `VIF_CMD_MSCNT` to
+`0x17` in `source/hw/vif.c`, with a detailed comment citing the exact real
+dispatch-table evidence so this doesn't regress silently again.
+
+**Verification.** Added 5 new regression checks to `tests/test_vif.c`
+(real cmd=0x15 dispatches to MSCAL/MSCALF and increments `mscal_calls`,
+NOT `mscnt_calls`; real cmd=0x17 dispatches to MSCNT and increments
+`mscnt_calls`, NOT `mscal_calls`; start-byte math). Full regression suite:
+129 tests total, 127 PASS / 2 pre-existing FAIL (both `test_ee_syscall_*`
+audit-sweep tests, confirmed via `grep` to not include `vif.h` at all -
+unrelated pre-existing gaps, not touched or worsened by this fix). Wii
+cross-build: clean, 0 warnings/errors.
+
+**Empirical impact check (checkpoint-based).** Resumed from the Round 581
+checkpoint (`ee_instr=319998597`, `vu1_tpc=0x28c0`/halted) and ran a
+further 5,000,000 slices with the fixed tree: `mscal_calls` stayed at 1
+and `mscnt_calls` stayed at 0 - **the fix, while real and correct, did not
+by itself change forward progress in this window.** Direct instrumentation
+of `dma_channel_kick()`/`transfer_quadwords()` confirms the VIF1 DMA sink
+callback (`vif1_process_quadwords`) IS being invoked continuously and
+correctly (qwc=210 double-buffered packets, thousands of times over the
+window, sink pointer non-null throughout - ruling out a "DMA sink
+unwired after checkpoint resume" methodology gap). Direct instrumentation
+of `vif_process()`'s VIFcode-dispatch loop shows real UNPACK-family
+VIFcodes (`0x68`=V3-16, `0x6a`=V3-8, `0x6c`=V4-32, etc.) being parsed
+continuously, correctly advancing - but interleaved with `cmd` byte values
+that do not match ANY real VIFcode encoding at all (`0x39, 0x18, 0x3a,
+0x3c, 0x24, 0x28, 0x2c, 0x34, 0x38, 0x08, 0x09, 0x0e, 0x1c, 0x54, 0x56,
+0x5c` all observed as "VIFcode cmd" values within the first few packets).
+
+**New lead for the next round.** This strongly suggests the real, deeper
+blocker is a VIFcode-stream **parser desync** - most likely
+`vif_unpack()`'s per-format word-count/skip math being correct only for
+the V4-32 format Round 579/580 focused on, and undercounting (or
+overcounting) the real payload size for other UNPACK sub-formats (V3-16,
+V3-8, V2-*, V1-*, or the 5-bit "VL=3" formats), causing `pos` to land
+mid-vector-data on the next loop iteration and mis-read raw vertex/texture
+bytes as a bogus VIFcode. If real MSCAL-family VIFcodes exist further into
+these packets, a desync landing before them would explain why they're
+never reached at all - a more fundamental blocker than the opcode-value
+swap fixed this round. Recommended next step: extend today's
+`vif_unpack_needed_bytes()`-vs-real-format audit to every UNPACK VN/VL
+combination (not just V4-32), cross-checked against real PCSX2's
+`vifUnpackSetup<>` formula in `Vif_UnpackSSE.cpp`/`Vif.h`.
+
+**Classification.** Real, evidenced, shipped source fix (opcode-value
+swap) - full mandatory workflow completed. The specific task #560 "why no
+2nd MSCAL" symptom is NOT yet fully resolved; root cause has been narrowed
+from "MSCAL dispatch mechanism" (now ruled out/fixed) to "VIF1 stream
+parser desync in non-V4-32 UNPACK formats" (new, more precise lead, not
+yet fixed - needs its own dedicated round given the scope of auditing
+every UNPACK format variant).

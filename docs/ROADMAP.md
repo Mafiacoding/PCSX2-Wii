@@ -10287,3 +10287,21 @@ runs, `gif_path1_transfers`/`triangles_drawn` still 0. Confirms Round 500's
 assessment that this isn't a simple one-field poke away from working. No
 source changed. Per user's "if it doesn't work, let's do other stuff" -
 moving on to other pending tasks.
+
+## Round 588: beta forced-render tool - real triangle now draws through the actual GS pipeline (proof, not a fix)
+Per user request ("build an beta version where you can try to force some
+rendering"): new host-native-only tool
+`tools/round588-beta-forced-render/driver.c` hand-builds a real GIF REGLIST
+packet (PRIM=TRIANGLE, RGBAQ, 3x XYZ2) and feeds it through the real
+`gif_process_quadwords()` entry point during the diskless JP BIOS boot.
+First attempt used bare pixel coordinates and landed off-screen (organic
+boot had already set a real non-zero XYOFFSET); corrected version reads the
+real current fbp/fbw/xyoffset and offsets accordingly. Verified: a genuine
+red triangle now renders into the GS framebuffer (centroid pixel matches
+injected RGBAQ exactly, pixel count grows as expected, PPM/PNG dump
+visually confirms a real filled triangle over the existing organic
+line/sprite scene). Proves the rendering pipeline itself works end-to-end;
+does NOT resolve task #447/#536 - OSDSYS's own code still never issues its
+own draw packet. No emulator-core source changed (tools/ only, excluded
+from the Wii build). Wii cross-build clean, no regression suite needed
+(no tracked core source touched).

@@ -153,6 +153,7 @@ void vu1_mem_write32(uint32_t addr, uint32_t value);
  * own guard against a genuinely-infinite microprogram, not a real
  * hardware behavior). */
 void vu1_exec_micro(uint32_t start_addr);
+void vu1_exec_micro_continue(void); /* Round 576: real MSCNT semantics - resumes from current tpc, see vu.c citation */
 
 /* Shared step function - executes exactly one 8-byte VU instruction
  * pair and advances *tpc by 8 (masked to micro_mask). Used by both

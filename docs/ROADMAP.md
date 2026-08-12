@@ -10089,3 +10089,18 @@ Wii cross-build both clean. See STATUS.md for full detail.
 
 Next: task #551 - use this to checkpoint past Tekken's slow early disc-boot
 segment and iterate faster on getting it to display something.
+
+## Round 576 (task #551): fixed real MSCNT semantics, ground-truthed via ps2sdk packet2 docs
+
+User-provided lead (ps2dev.github.io packet2_utils docs) revealed the real
+pattern real games use: MSCAL(addr) once to start a VU1 microprogram, then
+MSCNT (no address) once per subsequent draw call to resume it. This project's
+vif.c previously dispatched MSCNT through the same path as MSCAL, resetting
+the VU's TPC to the (almost-always-zero) VIFcode IMM field every time -
+silently restarting instead of resuming. Added vu1_exec_micro_continue()/
+vu0_exec_micro_continue() (resume from current TPC, no reset) and rewired
+vif.c's MSCNT case to use them. Verified: clean build, full regression suite,
+checkpoint round-trip, diskless-boot baseline all unchanged/passing; Wii
+cross-build clean. Next: re-run the Tekken disc-boot survey (harness needs
+rebuilding in this recovered sandbox) to check whether this unblocks XGKICK
+on the real game path.

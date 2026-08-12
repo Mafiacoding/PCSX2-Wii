@@ -23817,3 +23817,50 @@ sandbox, per this project's standing BIOS/disc-data leak-prevention rule.
 Next: task #551 - use this checkpointing to speed up iteration on the Tekken
 disc-boot path (checkpoint past the slow early-boot segment once a stable
 milestone is established there, then iterate rapidly from that point).
+
+## Round 576 (2026-08-12) - task #551: fixed real MSCNT semantics (user-provided lead)
+
+**Lead:** user shared ps2dev.github.io's packet2/packet2_utils documentation
+(the real ps2sdk library games use to build VU1/GS packets and issue XGKICK).
+
+**Finding:** `packet2_utils_vu_add_start_program()` issues FLUSH+MSCAL(addr) to
+start a VU1 microprogram; `packet2_utils_vu_add_continue_program()` issues
+FLUSH+MSCNT with NO address argument at all - this is the real, standard way
+game code re-invokes an already-started VU1 program once per subsequent draw
+call (start once via MSCAL, then MSCNT per object). Checked this project's
+`source/hw/vif.c` against that: MSCAL/MSCNT/MSCALF were all dispatched through
+the same code path, passing the VIFcode's IMM field (almost always 0 for a
+real MSCNT, since real hardware ignores/reserves that field) straight into
+`vu0_exec_micro()`/`vu1_exec_micro()`, which unconditionally resets the VU's
+TPC to that value. This was a previously-documented, honest simplification
+(see the pre-existing comment in `include/core/hw/vif.h`) - but it means every
+MSCNT was silently restarting the microprogram from address 0 instead of
+resuming from wherever it left off, which would badly corrupt any real
+multi-draw-call scene (exactly Tekken's likely rendering pattern).
+
+**Fix implemented:** added `vu1_exec_micro_continue()` (source/hw/vu.c) and
+`vu0_exec_micro_continue()` (source/core/ee/ee_core.c) - identical to the
+existing `_exec_micro()` functions but WITHOUT resetting TPC from an argument;
+they resume from the VU's own current TPC (`g_vu1.tpc` / `cop2_ctrl[26]`)
+as-is. `source/hw/vif.c`'s MSCNT case now calls these instead of the
+MSCAL/MSCALF path. Declarations added to `include/core/hw/vu.h`/
+`include/core/ee/ee_core.h`; `include/core/hw/vif.h`'s doc comment updated to
+describe the real fix instead of the old documented simplification.
+
+**Verification:** clean compile (`-Wall -Wextra -Werror`) of all three changed
+files, full host-native rebuild (41/41 objects, 0 errors), full regression
+suite (23/23, matching known baseline), checkpoint round-trip re-verified
+(still PASS - Round 575's tooling correctly captures/restores the fixed VU
+tpc fields), diskless JP-BIOS boot re-verified byte-identical to the pre-fix
+baseline (instr=16,000,000 at the same milestone - this boot phase's own
+microprogram usage, if any, doesn't exercise MSCNT differently, as expected
+since it's a BIOS-animation path rather than a real game's multi-object
+draw loop). Wii cross-build clean (0 warnings, 0 errors).
+
+**Still open:** this fix targets the mechanism most likely to matter for
+Tekken's actual rendering (task #551) but hasn't yet been verified against a
+live Tekken disc-boot run in this session (that survey needs a disc-boot
+driver rebuilt from scratch in this recovered sandbox - not yet done this
+round). Next: rebuild the disc-boot survey harness and check whether VU1 now
+reaches an XGKICK when running Tekken's own code, now that MSCNT correctly
+resumes multi-pass microprograms instead of restarting them.

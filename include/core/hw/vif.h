@@ -34,17 +34,22 @@
  *   MSCAL/MSCNT/MSCALF - now call into the real VU0/VU1 microcode
  *   interpreter (`include/core/hw/vu.h`, added alongside this round's
  *   VU0/VU1 micro-instruction memory work): this synchronously runs
- *   the microprogram at the VIFcode's IMM address until a real E-bit-
- *   flagged instruction retires (with the real one-more-instruction
- *   delay - see vu.h) or a safety cap is hit. MSCNT is treated
- *   identically to MSCAL (both start at IMM) rather than modeling
- *   MSCNT's real "start at the current TPC instead" distinction - an
- *   honest simplification, noted here rather than silently, since
- *   this project's vu0_exec_micro()/vu1_exec_micro() always take an
- *   explicit start address. Because MSCAL/MSCNT/MSCALF now run
- *   synchronously to completion, FLUSHE never actually has anything
- *   left to wait for by the time it's reached - a correct no-op given
- *   that, not a shortcut. See vu.h for the important caveat that no
+ *   the microprogram until a real E-bit-flagged instruction retires
+ *   (with the real one-more-instruction delay - see vu.h) or a safety
+ *   cap is hit. MSCAL/MSCALF start at the VIFcode's IMM address
+ *   (`vu0_exec_micro()`/`vu1_exec_micro()`); MSCNT resumes from the
+ *   VU's own current TPC instead, ignoring IMM (`vu0_exec_micro_
+ *   continue()`/`vu1_exec_micro_continue()`, Round 576/task #551) -
+ *   ground-truthed against ps2sdk's packet2_utils_vu_add_continue_
+ *   program(), the real standard way game code re-invokes an already-
+ *   started VU1 program once per subsequent draw call. Before Round
+ *   576 this project treated MSCNT identically to MSCAL, silently
+ *   restarting from address 0 (a real MSCNT VIFcode's IMM field is
+ *   unused/reserved, so it was always ~0) on every "continue" instead
+ *   of resuming - see vu.c's citation for the full writeup. Because
+ *   MSCAL/MSCNT/MSCALF now run synchronously to completion, FLUSHE
+ *   never actually has anything left to wait for by the time it's
+ *   reached - a correct no-op given that, not a shortcut. See vu.h for the important caveat that no
  *   real per-opcode VU instruction body is decoded yet (real control
  *   flow only) - this is a genuine, narrower step forward, not a full
  *   VU implementation.

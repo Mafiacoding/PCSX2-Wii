@@ -2599,6 +2599,30 @@ void vu0_exec_micro(ee_state_t *st, uint32_t start_addr)
     st->vu0_running = 0;
 }
 
+/* Round 576 (task #551): real MSCNT semantics for VU0 macro mode - see
+ * vu.c's vu1_exec_micro_continue() citation for the full real-hardware
+ * ground-truthing (ps2sdk's packet2_utils_vu_add_continue_program()).
+ * Resumes from cop2_ctrl[26] (VU0's real TPC register) AS-IS, instead
+ * of resetting it from a caller-supplied address like vu0_exec_micro()
+ * does for MSCAL/MSCALF. */
+void vu0_exec_micro_continue(ee_state_t *st)
+{
+    st->vu0_running = 1;
+
+    for (uint32_t i = 0; i < VU0_EXEC_STEP_CAP; i++) {
+        int stopped = vu_micro_step(st->vu0_vf, st->cop2_ctrl, st->vu0_acc,
+                                     st->vu0_mem, (uint32_t)(sizeof(st->vu0_mem) - 1u),
+                                     st->vu0_micro, (uint32_t)(sizeof(st->vu0_micro) - 1u),
+                                     &st->cop2_ctrl[26], &st->vu0_branch_delay, &st->vu0_branch_target,
+                                     &st->vu0_ebit_delay,
+                                     &st->vu0_instructions_executed, &st->vu0_unimplemented_opcodes_seen);
+        if (stopped)
+            break;
+    }
+
+    st->vu0_running = 0;
+}
+
 
 /* --- COP1 (FPU) helpers, ported from PCSX2's pcsx2/FPU.cpp ---
  * PS2's FPU isn't strict IEEE-754: it treats denormal inputs as

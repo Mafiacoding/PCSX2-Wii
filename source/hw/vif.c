@@ -362,15 +362,9 @@ static void vif_process(vif_state_t *vif, const uint8_t *data, uint32_t qwc)
             break;
 
         case VIF_CMD_MSCAL:
-        case VIF_CMD_MSCNT:
         case VIF_CMD_MSCALF: {
             /* Real hardware: MSCAL/MSCALF start the microprogram at
-             * IMM (MSCNT starts it at the CURRENT TPC instead - not
-             * modeled distinctly this round, since this project's
-             * vu0/vu1_exec_micro() always take an explicit start
-             * address; MSCNT is treated the same as MSCAL, an honest
-             * simplification noted here rather than silently). See
-             * include/core/hw/vu.h for what "execute" actually means
+             * IMM. See include/core/hw/vu.h for what "execute" means
              * this round (real control flow, no real opcode bodies
              * yet - a genuine, narrower step from vif.c's prior total
              * no-op). */
@@ -378,6 +372,28 @@ static void vif_process(vif_state_t *vif, const uint8_t *data, uint32_t qwc)
                 vu1_exec_micro(imm);
             else
                 vu0_exec_micro(ee_core_get_state(), imm);
+        } break;
+
+        case VIF_CMD_MSCNT: {
+            /* Round 576 (task #551): real MSCNT resumes the VU's
+             * microprogram from its CURRENT TPC, ignoring IMM (a real
+             * MSCNT VIFcode's IMM field is unused/reserved - ground-
+             * truthed against ps2sdk's own
+             * packet2_utils_vu_add_continue_program(), which issues
+             * FLUSH+MSCNT with NO address argument at all, unlike
+             * packet2_utils_vu_add_start_program()'s FLUSH+MSCAL(addr)
+             * - see vu.c's vu1_exec_micro_continue() citation). This
+             * project previously treated MSCNT identically to MSCAL
+             * (passing IMM, almost always 0, as a fresh start address
+             * every time), which would silently restart any multi-
+             * draw-call microprogram from address 0 on every "continue"
+             * instead of resuming where it left off - exactly the real,
+             * standard pattern real game code uses to issue one draw
+             * call per MSCNT after a single MSCAL. */
+            if (vif->is_vif1)
+                vu1_exec_micro_continue();
+            else
+                vu0_exec_micro_continue(ee_core_get_state());
         } break;
 
         case VIF_CMD_FLUSH:

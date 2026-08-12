@@ -650,3 +650,39 @@ void vu1_exec_micro(uint32_t start_addr)
 
     g_vu1.running = 0;
 }
+
+/* Round 576 (task #551): real MSCNT semantics. Ground-truthed against
+ * ps2sdk's packet2_utils_vu_add_continue_program() (ee/packet2/include/
+ * packet2_utils.h) - the real, standard way game code re-invokes an
+ * already-running VU1 microprogram for each subsequent draw call issues
+ * FLUSH + MSCNT with NO address operand at all (unlike MSCAL/MSCALF,
+ * which always carry an explicit start address). Real hardware's MSCNT
+ * resumes execution from wherever the VU's own micro program counter
+ * (TPC) was left after the PREVIOUS run stopped (typically an E-bit
+ * halt partway through a larger multi-object microprogram, or address
+ * 0 the very first time) - it does NOT restart from a caller-supplied
+ * address. vu1_exec_micro() (above) was, until this round, called
+ * identically for MSCAL/MSCALF/MSCNT alike (vif.c's dispatch passed the
+ * VIFcode's IMM field to all three), silently resetting g_vu1.tpc to
+ * that IMM value (typically 0, since a real MSCNT VIFcode's IMM field
+ * is unused/reserved) on every MSCNT - i.e. every "continue" call was
+ * actually restarting the program from address 0 instead of resuming.
+ * This function fixes that: it runs from g_vu1.tpc AS-IS, exactly like
+ * vu1_exec_micro() but without the reset line. */
+void vu1_exec_micro_continue(void)
+{
+    g_vu1.running = 1;
+
+    for (uint32_t i = 0; i < VU_EXEC_STEP_CAP; i++) {
+        int stopped = vu_micro_step(g_vu1.vf, g_vu1.vi, g_vu1.acc,
+                                     g_vu1.mem, VU1_MEM_SIZE - 1u,
+                                     g_vu1.micro, VU1_MICRO_SIZE - 1u,
+                                     &g_vu1.tpc, &g_vu1.branch_delay, &g_vu1.branch_target,
+                                     &g_vu1.ebit_delay,
+                                     &g_vu1.instructions_executed, &g_vu1.unimplemented_opcodes_seen);
+        if (stopped)
+            break;
+    }
+
+    g_vu1.running = 0;
+}

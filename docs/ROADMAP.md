@@ -10345,3 +10345,13 @@ window driven this round. Next step: close the stale background process
 (Task Manager) so DebugServer binds fresh to a new interactive instance,
 then redo the from-reset trace with real breakpoints/watchpoints. No
 tracked source changed; regression/Wii build correctly skipped.
+
+## Round 591 (task #447/#536): live ground truth - real 0x001C0454 = 5 at interactive main menu (vs stuck-at-0 in our own emulation, confirming Round 483's disassembly), but a new DebugServer stuck-state blocked capturing the live write event
+
+Direct continuation of Round 590 per the user's "now its open and the debug should work just fine simple boot the bios." Reconnected DebugServer to a fresh (non-stale) process, confirmed by a moving PC across checks. Booted JP BIOS diskless via `System > Start BIOS`, reached the real interactive main menu a 3rd time this session (reproducing Round 590).
+
+**Key finding**: live-read `0x001C0454` (this project's own Round 482-484-identified real OSDSYS state-machine field) while sitting at the real interactive menu - it reads `0x00000005`. This project's own emulation has NEVER observed this field leave `0` across 480+ investigative rounds (Round 483's own citation). This is the first-ever ground-truth confirmation that this field really is the escalation-state variable and that state `5` = "interactive main menu active," directly answering Round 486's open question.
+
+Attempted to catch the live 0->5 write event by arming watchpoints on `0x001C0454`/`0x001C0444` before a fresh Reset. Blocked by a new issue: after this Reset, DebugServer's `continue` and `step` RPCs stopped actually advancing the VM (status frozen at the same PC/cycle count across repeated calls; UI-level Pause toggle and viewport clicks also had no effect). Distinct from Round 590's stale-process issue (no leftover breakpoints, watchpoints correctly at 0 hits). Cleared all breakpoints/watchpoints before ending the round.
+
+No tracked source changed - docs-only round, regression/Wii build correctly skipped. Next step: recover/restart the live PCSX2 window, then redo the pre-armed-watchpoint reset trace to capture the real write's PC/backtrace - the concrete missing piece for task #447's final resolution.

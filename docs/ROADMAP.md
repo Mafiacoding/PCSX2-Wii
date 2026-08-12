@@ -10278,3 +10278,12 @@ disc-browser/`dispatch_ncmd()` never firing in our own trace) - our boot
 never executes the disc-status code path that would decide to draw this
 content in the first place. No safe, evidenced source fix this round; next
 step is resuming task #447 with this round's real-hardware target confirmed.
+
+## Round 587: beta-guess (force OSDSYS browser-state=active) - negative, discarded, pivoting per user request
+Scratch-only experiment: forced `0x001C0444` (OSDSYS disc-browser nav-state,
+Round 485) to `2` well after it settles to idle. Value stuck, nothing
+crashed, but no new behavior - same organic VU1/GIF pattern as un-poked
+runs, `gif_path1_transfers`/`triangles_drawn` still 0. Confirms Round 500's
+assessment that this isn't a simple one-field poke away from working. No
+source changed. Per user's "if it doesn't work, let's do other stuff" -
+moving on to other pending tasks.

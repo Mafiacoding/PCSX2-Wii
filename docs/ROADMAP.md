@@ -10233,3 +10233,14 @@ VIFcode encoding at all - pointing to a VIFcode-stream parser desync in
 non-V4-32 UNPACK sub-formats as the more precise next lead for task #560,
 not yet fixed (needs its own round auditing every UNPACK VN/VL
 combination against real PCSX2's vifUnpackSetup<> formula).
+
+Round 584 (task #561): fetched and read real PCSX2's vifCode_Null
+(Vif_Codes.cpp) in full - confirmed real hardware stalls (STAT.ER1) on
+an unrecognized VIFcode rather than guessing a skip, and our own
+vif_process() default case already matches that (return, not silently
+continue) - correcting Round 583's "uncontrolled parser desync" framing.
+Traced the first VIF1 kick word-by-word: 8 clean single-word codes then
+a real cmd=0x39 (also Null on real hardware) at word 8. Whether this is
+genuine real BIOS content or an upstream miscount elsewhere is still
+unresolved - needs live PCSX2 or a real captured VIF trace to settle,
+not available this session. Docs-only round, no source changed.

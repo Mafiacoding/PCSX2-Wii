@@ -24371,3 +24371,45 @@ from "MSCAL dispatch mechanism" (now ruled out/fixed) to "VIF1 stream
 parser desync in non-V4-32 UNPACK formats" (new, more precise lead, not
 yet fixed - needs its own dedicated round given the scope of auditing
 every UNPACK format variant).
+
+## Round 584 (task #561): refined the VIF1 desync lead - correction to Round 583
+
+Continued the checkpoint-resumed live instrumentation from Round 583.
+Found that `vif_process()`'s `default:` case (line ~689) already does
+exactly what real PCSX2's `vifCode_Null` does on an unrecognized VIFcode
+(fetched and read in full this round): real hardware sets `STAT.ER1` and
+**stalls** the VIF rather than guessing a skip length, and this file's
+`default: vif->unsupported_cmds_seen++; return;` already matches that
+intent (stops the current transfer's processing rather than continuing to
+misparse). **Round 583's framing of this as an uncontrolled "parser
+desync spreading garbage across the whole packet" was wrong** - each DMA
+kick is in fact stopping cleanly and correctly on the first unrecognized
+code, exactly as designed.
+
+**Refined finding.** Traced the very first VIF1 kick word-by-word
+(qwc=210 transfer at `0x800022a0`, resumed from the Round 581 checkpoint):
+8 clean, correctly-consumed codes (`NOP,FLUSHE,NOP,NOP,NOP,NOP,NOP,NOP` -
+all genuinely single-word real VIFcodes, no room for a counting bug in
+any of them individually) followed immediately by `cmd=0x39` at word
+offset 8 - which real hardware's own dispatch table also lists as `Null`
+(reserved/unimplemented), so hitting it isn't itself evidence of
+misalignment. The open question this round could NOT conclusively
+resolve: is `0x39` genuinely the real next byte in this packet (meaning
+either a real, currently-unexplained BIOS behavior, or that this specific
+qwc=210 tag's payload isn't meant to be interpreted as a pure VIFcode
+stream past its short header at all - e.g. a raw-data blob associated
+with an UNPACK/DIRECT this project doesn't yet realize should apply
+here), or whether it's the result of a subtler upstream miscount not
+caught by this round's checks. No live PCSX2 reference was available this
+session to cross-check the real byte-for-byte expected content at this
+exact address/cycle, which is what's actually needed to settle this
+conclusively.
+
+**Classification.** Docs-only round - no tracked source changed (the
+`default: return` behavior audited this round was already correct;
+nothing to fix there). Regression suite and Wii rebuild correctly
+skipped. Recommended next step for task #561: get live PCSX2 access (or
+a real captured GS/VIF trace log from a real console/emulator run of this
+exact BIOS) to compare the real byte-for-byte VIF1 packet content against
+our synthetic diskless boot's packet content at the same point, since
+static source-reading alone has been exhausted for this specific lead.

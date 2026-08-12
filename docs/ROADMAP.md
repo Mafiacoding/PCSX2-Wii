@@ -10305,3 +10305,19 @@ does NOT resolve task #447/#536 - OSDSYS's own code still never issues its
 own draw packet. No emulator-core source changed (tools/ only, excluded
 from the Wii build). Wii cross-build clean, no regression suite needed
 (no tracked core source touched).
+
+## Round 589: task #447 "real fix" attempt - exhaustive re-verification, no new fix found
+Per user's "do the real fix" request. Checked 5 never-instrumented OSDSYS
+dispatcher flags (device-changed/message-queued/3 gate flags) - all read 0,
+never written, across a 640M-instruction diskless boot. Fresh ground-truth
+dispatch_ncmd()/dispatch_scmd() census on current tree confirms
+dispatch_ncmd() still fires 0 times (task #447's literal namesake claim,
+reconfirmed); dispatch_scmd() only fires for the unrelated EEPROM-config
+read path (OPENCONFIG/READCONFIG/CLOSECONFIG). Live PCSX2 still connected
+but in an ambiguous, non-baseline state (GS registers all zero, thread PCs
+near this project's own trampoline-test address family) - not used for a
+destructive experiment without checking with the user first. No source
+changed. Recommended next step: a controlled, from-reset, single-step
+ground-truth trace of real hardware via the live PCSX2 session (never
+attempted) instead of further static/dynamic analysis of the resident BIOS
+image, which is now genuinely exhausted across 55 rounds.

@@ -10197,3 +10197,25 @@ plateau to 0x28c0) but XGKICK still hasn't fired within the tested budget
 - the investigation continues into Round 581+, likely needing a
 larger-budget survey than this session's ~170s-per-call sandbox allows in
 one shot.
+
+
+Round 581 (task #536/#557/#559): per user directive, deep-dived every real
+PCSX2 source touching XGKICK (VUops.cpp's _vuXGKICK/_vuTestPipes/
+_vuXGKICKTransfer, Vif_Unpack.cpp's dead catch-up hack referenced by the
+user's original link, VUmicro.cpp's twin dead hack, and a new find in
+Gif_Unit.h documenting a real BIOS-specific XGKICK tag-read race - "Fixed
+if you delay vu1's xgkick by 103 vu cycles" - judged not yet applicable
+since no real XGKICK opcode has been reached on our boot path). Root-caused
+the Round 580 tpc=0x28c0 halt via scratch instrumentation: it's a
+legitimate E-bit program end (not a crash wall), with exactly 2
+unimplemented opcodes hit before it - upper funct=0x30 (already confirmed
+genuinely invalid in Round 573) and lower opc=0x08=IADDIU (a real gap).
+This microprogram simply never contains an XGKICK opcode; the real blocker
+is that no second MSCAL ever fires afterward even as the EE core keeps
+executing, redirecting the investigation to an EE-side stall (new
+follow-up task) rather than further VU1 opcode gaps. Implemented real
+IADDIU/ISUBIU (15-bit unsigned immediate, ground-truthed from PCSX2's
+_vuIADDIU()/_vuISUBIU()) on its own correctness merits; 3 new
+test_vu_micro.c checks (27/27 pass), 45/45 scoped regression, clean Wii
+build. Checkpoint file generated via checkpoint_tool and placed in
+outputs/ per the user's explicit request.

@@ -24189,3 +24189,108 @@ returns) is the natural next step.
 (dedicated unit tests, scoped regression suite, Wii cross-build, non-
 regression boot survey), per the user's "go slow, verify every change"
 instruction.
+
+## Round 581: XGKICK deep-dive research + real IADDIU/ISUBIU fix (task #536/#557/#559)
+
+**User directive (verbatim).** "https://github.com/PCSX2/pcsx2/blob/master/
+pcsx2/VUops.cpp i think there is something , check all possible sources
+about xgkick and what and if i need something to fire it up , dont forget
+to put a checkpoint file inside output after this session". Two parts:
+a full source-level XGKICK investigation, and a checkpoint file deliverable.
+
+**XGKICK mechanism, fully mapped from real PCSX2 source.** Grepped the
+entire `pcsx2/` tree (`docs/reference/pcsx2-master` mirror) for every
+XGKICK-touching file. Three real trigger/drain points exist on real
+hardware/PCSX2, not one: (1) `_vuXGKICK(VU)` (`VUops.cpp` ~1909) - the
+`VU1MI_XGKICK` opcode handler itself, which flushes any prior outstanding
+kick then installs new state but does NOT drain it; (2) `_vuTestPipes(VU)`
+(`VUops.cpp` ~186) - a continuous, per-instruction pipeline-stall check that
+also METERS the drain of an already-installed kick
+(`_vuXGKICKTransfer((VU1.cycle - VU1.xgkicklastcycle) - 1, false)`) - this
+project's own vu.h documentation had previously only described the
+end-of-program flush, underselling this continuous drain path; (3) the
+E-bit-countdown-reaches-0 program-end flush (`VU1microInterp.cpp` ~186).
+`_vuXGKICKTransfer()` itself reads a real GIF tag via
+`gifUnit.GetGSPacketSize(GIF_PATH_1, ...)` and pushes bytes via
+`TransferGSPacketData(GIF_TRANS_XGKICK, ...)`.
+
+**The user's originally-referenced historical "hack" - located and read in
+full.** `Vif_Unpack.cpp` lines 190-209: a commented-out, DEAD per-VIF-Unpack
+XGKICK catch-up call, guarded by a real PCSX2 comment: "This is for use when
+XGKick is synced as VIF can overwrite XG Kick data as it's transferring
+out... VU currently flushes XGKICK on VU1 end so no need for this, yet". An
+identical dead hack exists in `VUmicro.cpp`'s `ExecuteBlock()`. Real PCSX2
+itself considered and rejected this exact mechanism as unnecessary given its
+own end-of-program flush - not something our simpler synchronous model
+needs to replicate.
+
+**New finding this round - `Gif_Unit.h`'s `GetGSPacketSize()` BIOS comment.**
+A real, explicit PCSX2 source comment: "Bios does this... (Fixed if you
+delay vu1's xgkick by 103 vu cycles)", documenting a known real-hardware
+race where XGKICK's GIF-tag read can outrun VU1's own in-flight writes to
+that same memory, wrapping the full 16KB VU1 memory bound without finding a
+valid EOP tag, causing the whole packet to be silently rejected. **Synthesis:
+this is not applicable to our project yet** - it only matters once a real
+XGKICK opcode is actually reached and executed, and this round confirms (see
+below) that the currently-executed boot-animation microprogram never
+contains one. Filed as forward-looking context, not an actionable fix.
+
+**Root-caused the `tpc=0x28c0` halt (Round 580's post-fix survey finding).**
+Built a disposable scratch-instrumented copy of `vu_micro_step()`
+(`/tmp/round578-vu1-diag/vu_scratch.c`, NOT part of tracked source) logging
+every unimplemented-opcode hit. Captured exactly 2, both before the E-bit
+instruction at `0x28c0` itself:
+- `pc=0x2870 upper=0x81a77930` (upper funct6=0x30): **already investigated
+  and documented in Round 573** as a genuinely invalid/unknown real-hardware
+  encoding (not a modeling gap) - no fix warranted, confirmed again here.
+- `pc=0x2888 lower=0x10000000` (lower opc=0x08 = **IADDIU**): a real,
+  previously-unimplemented opcode, marked in this project's own code as
+  "uncertain immediate packing".
+
+Both occur strictly *before* the E-bit at `0x28c0`, confirming (as Round 580
+suspected) that this specific microprogram reaches its own **legitimate,
+real end-of-program** - not a crash wall. **This program simply never
+contains an XGKICK opcode.** The real blocker for ever reaching a
+XGKICK-bearing microprogram is therefore NOT further VU1 opcode gaps - it's
+that no *second* MSCAL ever fires after this program completes (confirmed:
+`mscal_calls` stays at 1 across 300M+ further EE instructions even though
+the EE core's own PC keeps advancing between slices), meaning the EE side
+never issues the next VIF1 command stream that would presumably contain the
+real draw/XGKICK routine. That EE-side stall is the real next lead (tracked
+as a follow-up below) - it is a different, larger investigation than
+"what's missing in the VU1 opcode table".
+
+**Fix implemented anyway (task #559): real IADDIU/ISUBIU.** Even though it
+doesn't unblock XGKICK on this path, IADDIU is a genuine, well-defined,
+previously-unimplemented opcode this round's own diagnostic caught firing
+live - worth fixing on its own correctness merits (an integer-register
+value silently dropped could corrupt later address computation within the
+*same* microprogram, even though it doesn't prevent that microprogram's own
+E-bit end). Ground-truthed the real 15-bit unsigned immediate packing from
+PCSX2's own `_vuIADDIU()`/`_vuISUBIU()` (`VUops.cpp` 1026-1084):
+`VI[It] = VI[Is] +/- (((code>>10)&0x7800)|(code&0x7ff))` - i.e. the lower
+word's "dest" nibble (bits 21-24, normally a per-lane write mask for other
+lower ops) is repurposed as the immediate's high 4 bits, concatenated with
+the existing 11-bit imm field's low 11 bits. Implemented in
+`source/hw/vu.c`'s `vu_exec_lower()`, reusing the existing `vu_write_vi()`/
+`vu_read_vi16()` helpers (which already correctly implement real hardware's
+`It==0` hardwired-zero no-op and 16-bit truncation).
+
+**Verification.** 3 new checks added to `tests/test_vu_micro.c` (IADDIU
+arithmetic, ISUBIU arithmetic, IADDIU-with-It=vi0-is-a-no-op): 27/27 pass, 0
+failures. Scoped regression suite (same 45 DMA/GIF/GS/SIF/VIF/VU tests as
+Round 580): 45/45 PASS, 0 BUILDFAIL. Wii cross-build (devkitPPC/libogc,
+toolchain libs re-restored from the cached `outputs/build/` mirror again
+this session): clean, 0 errors.
+
+**Checkpoint file deliverable.** Per the user's explicit standalone
+instruction, a checkpoint file was generated via this project's own
+`checkpoint_tool`/`source/core/checkpoint.c` mechanism (task #550's
+tooling) and placed in `outputs/pcsx2-wii/` after leak-checking it for any
+embedded real BIOS/game data (see below).
+
+**Classification.** Real source change (IADDIU/ISUBIU) - full verification
+performed. The larger XGKICK question remains a diagnostic finding, not yet
+a fix: this round conclusively rules out "more VU1 opcodes" as the blocker
+and redirects the investigation to the EE-side MSCAL-never-refires gap
+(new follow-up task).

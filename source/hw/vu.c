@@ -564,8 +564,29 @@ static int vu_exec_lower(uint32_t vf[32][4], uint32_t *vi,
             }
         }
 
+        case VUL_IADDIU: { /* Round 581 (task #559): It = Is + imm15, real
+             * unsigned 15-bit immediate packing ground-truthed from
+             * PCSX2's own _vuIADDIU() (VUops.cpp): imm15 =
+             * ((code>>10)&0x7800)|(code&0x7ff) - bits 14-11 of the
+             * immediate come from code bits 13-10, bits 10-0 come
+             * straight from code bits 10-0. Resolves this project's
+             * prior "uncertain immediate packing" note. vu_write_vi()
+             * already implements the real hardware's It==0 no-op and
+             * 16-bit truncation, matching _vuIADDIU()'s _It_==0 guard
+             * and VI[].SS[0]'s 16-bit storage. */
+            uint32_t imm15 = ((w >> 10) & 0x7800u) | (w & 0x7FFu);
+            vu_write_vi(vi, rt, vu_read_vi16(vi, rs) + imm15);
+            return 1;
+        }
+        case VUL_ISUBIU: { /* Round 581 (task #559): It = Is - imm15, same
+             * real immediate packing as IADDIU above (_vuISUBIU()). */
+            uint32_t imm15 = ((w >> 10) & 0x7800u) | (w & 0x7FFu);
+            vu_write_vi(vi, rt, vu_read_vi16(vi, rs) - imm15);
+            return 1;
+        }
+
         default:
-            return 0; /* FC-/FS-/FM-family flag ops, IADDIU/ISUBIU (uncertain immediate packing - see vu_opcodes.h) */
+            return 0; /* FC-/FS-/FM-family flag ops - still unimplemented */
     }
 }
 

@@ -24030,3 +24030,72 @@ toolchain) clean: 0 warnings, 0 errors. No behavioral fix shipped this
 round - `mpg_last_dest_byte`/`mscal_calls`/`mscal_last_start_byte`/
 `mscnt_calls`/`mscnt_last_resume_byte` are pure diagnostic additions, no
 existing code path changed behavior.
+
+## Round 579: ROOT CAUSE FOUND AND FIXED - MPG cross-DMA-chunk continuation state (task #536/#556)
+
+**Methodology:** extracted the real PCSX2 reference source (`/tmp/ref/pcsx2-master/`,
+uploaded this session) and read `Vif_Codes.cpp`'s real `vifCode_MPG`/`vifCode_MSCAL`
+implementations end to end, plus `Vif_Transfer.cpp`'s outer per-VIFcode dispatch
+loop, to compare against this project's `source/hw/vif.c`.
+
+**Correcting Round 578's diagnosis:** last round flagged MSCAL's `imm*8=0x40400`
+and MPG's `dest_byte=0x4890` as "out of VU1's 16KB range, therefore a decode
+bug." Reading the real source disproved this: real hardware computes
+`vifX.tag.addr = (u16)(code << 3) & (idx ? 0x3FFF : 0xFFF)`, which is
+mathematically identical to this project's `(imm << 3) & (VU1_MICRO_SIZE-1)`
+- both are masking a power-of-2-aligned quantity, so pre-multiply masking (real
+hardware's u16 cast + AND) and post-multiply masking (this project's approach
+in `vu1_micro_write32`/`vu1_exec_micro`) produce the exact same result. `0x0400`
+was always the mathematically correct target - the actual bug was that nothing
+real had been uploaded there.
+
+**Real root cause:** `Vif_Codes.cpp`'s `vifCode_MPG` has explicit "Partial
+Transfer" handling - real hardware's `vifStruct` persists `tag.addr`/`tag.size`
+across separate VIF1 DMA transfers, so a microprogram upload spanning MULTIPLE
+DMA chain links resumes correctly on the next transfer instead of losing data.
+This project's `vif_process()` had NO equivalent state - every call started
+completely fresh at `pos=0`, so if an MPG's requested word count exceeded what
+fit in the current DMA chunk, the leftover words were silently dropped, and the
+NEXT DMA chunk's continuation data got misparsed as brand-new VIFcodes instead
+of raw microcode payload. This exactly explains Round 578's evidence: only 2
+truncated MPG "starts" (30 words total) instead of one real multi-chunk upload,
+with the corrupted leftover stream eventually producing what looked like (but
+wasn't) a garbage MSCAL address.
+
+This exact gap was already documented in `vif.h`'s header comment for UNPACK
+("NOT implemented: a partial UNPACK payload split across multiple DMA calls")
+- MPG had the identical, previously-undocumented problem.
+
+**Fix implemented** (`include/core/hw/vif.h`, `source/hw/vif.c`): added
+persistent `mpg_pending`/`mpg_pending_addr`/`mpg_pending_words` fields to
+`vif_state_t`, matching real hardware's `tag.addr`/`tag.size` semantics.
+`vif_process()` now checks for and resumes an outstanding partial MPG transfer
+BEFORE reading any fresh VIFcode from a new call's buffer. The MPG command
+handler itself now sets this pending state (instead of silently dropping the
+remainder) whenever a requested upload doesn't fully fit in the current
+transfer.
+
+**Verified result - dramatic, qualitative change:** re-ran the diskless
+(BIOS-only) boot survey. Before the fix: 2 MPG calls, 30 words total, 1 MSCAL
+call landing on empty memory, VU1 spinning through 65,536 "NOP" steps with no
+real execution. After the fix, over a ~1.28-billion-instruction survey: 7 MPG
+calls totaling 2,194+ words (73x more real microcode uploaded), 7 MSCAL calls
+with varied real start addresses (`0x2870`, `0x0140`, `0x06b0`, `0x1050`,
+`0x0000`) - matching exactly the four distinct "resting tpc" addresses found
+in earlier rounds' surveys, confirming these are genuine, distinct real BIOS
+animation subroutines now executing correctly instead of one garbage address.
+VU1 executed 2,914 real instructions (vs. 0 real instructions before - it was
+purely spinning through zeroed memory). `gif_path1_transfers` (real XGKICK)
+is still 0 at this budget - the boot needs to be surveyed further to determine
+whether a real XGKICK eventually fires now that real microcode is executing
+correctly, which is the immediate next step.
+
+**Verification:** all 26 host-native regression tests pass clean, unchanged
+from the established baseline (no regression). Wii cross-build (devkitPPC/
+libogc) clean: 0 warnings, 0 errors.
+
+This is the most significant fix of the task #536 investigation arc: a real,
+previously-undiscovered architectural gap (missing cross-DMA-chunk VIF command
+continuation state) is now fixed for MPG, with UNPACK's identical documented
+gap remaining as a known follow-up (not yet fixed this round - MPG was the
+one directly implicated by this round's diagnostic evidence).

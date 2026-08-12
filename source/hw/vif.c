@@ -286,6 +286,32 @@ static void vif_process(vif_state_t *vif, const uint8_t *data, uint32_t qwc)
     uint32_t total_words = qwc * 4u;
     uint32_t pos = 0; /* in 32-bit words */
 
+    /* Round 579 (task #536/#556): resume a real MPG upload left
+     * outstanding by a PRIOR vif_process() call (a real VIF1 DMA
+     * chain link boundary that landed mid-microprogram-upload) BEFORE
+     * reading any fresh VIFcode from this call's buffer - see vif.h's
+     * mpg_pending field comment. Matches real hardware's vifCode_MPG
+     * "Partial Transfer" -> resume-on-next-transfer semantics
+     * (Vif_Codes.cpp), which this project previously had no
+     * equivalent of at all. */
+    if (vif->mpg_pending) {
+        uint32_t avail = total_words - pos;
+        uint32_t words = (vif->mpg_pending_words < avail) ? vif->mpg_pending_words : avail;
+        for (uint32_t w = 0; w < words; w++) {
+            uint32_t word = vif_rd_le32(data + (pos + w) * 4u);
+            if (vif->is_vif1)
+                vu1_micro_write32(vif->mpg_pending_addr + w * 4u, word);
+            else
+                vu0_micro_write32(ee_core_get_state(), vif->mpg_pending_addr + w * 4u, word);
+        }
+        pos += words;
+        vif->mpg_pending_addr += words * 4u;
+        vif->mpg_pending_words -= words;
+        vif->mpg_words_written += words;
+        if (vif->mpg_pending_words == 0u)
+            vif->mpg_pending = 0;
+    }
+
     while (pos < total_words) {
         uint32_t code = vif_rd_le32(data + pos * 4u);
         pos++;
@@ -450,9 +476,9 @@ static void vif_process(vif_state_t *vif, const uint8_t *data, uint32_t qwc)
              * the data is actually written there instead of just
              * being skipped over. */
             uint32_t num = (code >> 16) & 0xFFu;
-            uint32_t words = (num ? num : 256u) * 2u;
-            if (words > total_words - pos)
-                words = total_words - pos;
+            uint32_t requested_words = (num ? num : 256u) * 2u;
+            uint32_t avail_words = total_words - pos;
+            uint32_t words = (requested_words > avail_words) ? avail_words : requested_words;
             uint32_t dest_byte = imm * 8u;
             for (uint32_t w = 0; w < words; w++) {
                 uint32_t word = vif_rd_le32(data + (pos + w) * 4u);
@@ -468,6 +494,19 @@ static void vif_process(vif_state_t *vif, const uint8_t *data, uint32_t qwc)
             vif->mpg_calls++;
             vif->mpg_words_written += words;
             vif->mpg_last_dest_byte = dest_byte;
+            /* Round 579: real hardware's "Partial Transfer" case -
+             * this DMA chain link ended before the full requested
+             * upload was written. Persist the remainder so the NEXT
+             * vif_process() call resumes writing it instead of the
+             * leftover words being misread as fresh VIFcodes - see
+             * vif.h's mpg_pending field comment. Since this consumes
+             * the rest of the current buffer, the outer while loop
+             * exits naturally (pos == total_words). */
+            if (words < requested_words) {
+                vif->mpg_pending = 1;
+                vif->mpg_pending_addr = dest_byte + words * 4u;
+                vif->mpg_pending_words = requested_words - words;
+            }
         } break;
 
         case VIF_CMD_DIRECT:

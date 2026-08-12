@@ -164,6 +164,30 @@ typedef struct {
     uint64_t mscnt_calls;
     uint32_t mscnt_last_resume_byte;  /* VU1 tpc value BEFORE the most recent MSCNT ran */
     uint32_t mpg_last_dest_byte;      /* dest_byte of the most recent real MPG upload */
+
+    /* Round 579 (task #536/#556): real MPG partial-transfer state,
+     * persisted ACROSS separate vif_process() calls - matches real
+     * hardware's vifStruct.tag.addr/tag.size + vifX.cmd/pass fields
+     * (PCSX2's vifCode_MPG "Partial Transfer" vs "Full Transfer"
+     * path, Vif_Codes.cpp). Ground-truthed this round: a real VU1
+     * microprogram upload can span MULTIPLE separate VIF1 DMA
+     * transfers (chain links), and real hardware resumes writing
+     * from where a truncated MPG left off on the NEXT transfer,
+     * rather than re-reading a fresh VIFcode at that offset. This
+     * project's vif_process() previously had no such state (see the
+     * older, still-accurate UNPACK-specific version of this same gap
+     * documented in this struct's own header comment above) - MPG
+     * had the identical gap, undocumented until this round's
+     * diagnostic counters (mscal_last_start_byte/mpg_last_dest_byte)
+     * caught it in the act: a 2-call, 30-word-total upload where real
+     * BIOS data plausibly spans far more than that, with the leftover
+     * continuation words silently misparsed as fresh VIFcodes on the
+     * following DMA chain link. mpg_pending is nonzero while a
+     * partial MPG transfer is outstanding; mpg_pending_addr/_words
+     * track the destination byte and words remaining. */
+    int      mpg_pending;
+    uint32_t mpg_pending_addr;
+    uint32_t mpg_pending_words;
 } vif_state_t;
 
 void vif_init(void);

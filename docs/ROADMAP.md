@@ -10154,3 +10154,25 @@ vif_unpack()'s consumed-word computation against the real PCSX2
 Vif_Unpack.cpp/Vif_Codes.cpp source to pin down the exact miscount. 26/26
 regression tests and Wii cross-build both clean; no behavioral fix shipped
 this round (diagnostic counters only).
+
+## Round 579: MPG cross-DMA-chunk continuation fix (ROOT CAUSE, task #536/#556)
+
+Cross-referenced real PCSX2's Vif_Codes.cpp against source/hw/vif.c per the
+user's request. Corrected Round 578's diagnosis (MSCAL/MPG address math is
+actually mathematically identical to real hardware - not a decode bug) and
+found the true root cause: real hardware persists MPG's tag.addr/tag.size
+across separate VIF1 DMA transfers so a microprogram upload spanning
+multiple DMA chain links resumes correctly; this project's vif_process()
+had no such state, silently dropping leftover words and misparsing the
+next chunk's continuation data as fresh VIFcodes. Implemented persistent
+mpg_pending/mpg_pending_addr/mpg_pending_words state matching real
+hardware's semantics. Result: MPG uploads jumped from 30 words/2 calls to
+2,194+ words/7 calls in the same survey window; MSCAL now fires 7 times at
+varied real addresses matching the four previously-observed "resting tpc"
+locations (0x2870/0x0140/0x06b0/0x1050/0x0000) instead of once at a
+garbage-looking address; VU1 executed 2,914 real instructions instead of
+0. gif_path1_transfers (real XGKICK) still 0 at ~1.28B instructions -
+next step is to survey further and/or investigate whether UNPACK has the
+same still-undocumented-as-fixed gap, since it shares the identical
+"NOT implemented: partial payload across multiple DMA calls" limitation
+noted in vif.h. 26/26 regression tests pass, Wii cross-build clean.

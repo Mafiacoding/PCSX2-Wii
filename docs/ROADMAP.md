@@ -10176,3 +10176,24 @@ next step is to survey further and/or investigate whether UNPACK has the
 same still-undocumented-as-fixed gap, since it shares the identical
 "NOT implemented: partial payload across multiple DMA calls" limitation
 noted in vif.h. 26/26 regression tests pass, Wii cross-build clean.
+
+
+Round 580 (task #536/#557): fixed UNPACK's cross-DMA-chunk continuation
+gap - the UNPACK-side twin of Round 579's MPG fix, found by following the
+same "does this command have the identical gap" question that MPG turned
+out to have. Real hardware buffers raw UNPACK payload bytes across
+truncated transfers (architecturally different from MPG's incremental-
+write approach) and only unpacks once the full expected payload has
+arrived; implemented via a new vif_unpack_needed_bytes() upfront sizing
+helper (a "dry run" of vif_unpack()'s own existing cursor logic, chosen
+over real PCSX2's independent closed-form formula after discovering the
+formula disagrees with this project's own un-STCYCL'd default cycle state)
+plus a 4096-byte unpack_buffer/unpack_pending resume mechanism in
+vif_state_t. 18 new dedicated split-transfer tests added to test_vif.c (72
+total, 0 failures); scoped 45-test regression clean; Wii cross-build
+clean. Post-fix diskless boot survey shows real forward movement (VU1
+micro-memory non-zero range widened, tpc advanced past the old 0x140
+plateau to 0x28c0) but XGKICK still hasn't fired within the tested budget
+- the investigation continues into Round 581+, likely needing a
+larger-budget survey than this session's ~170s-per-call sandbox allows in
+one shot.

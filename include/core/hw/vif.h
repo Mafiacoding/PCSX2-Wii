@@ -110,13 +110,18 @@
  *     register layout from `writeXYZW`), and STMOD-driven row
  *     accumulate/chain modes (modes 0-3, real `writeXYZW` switch).
  *
- * NOT implemented: a partial UNPACK payload split across multiple DMA
- * calls (real hardware/PCSX2 buffer this via `nVifStruct::buffer` -
- * this project's `vif_process()` only ever sees one contiguous
- * transfer at a time and assumes the full UNPACK payload is present
- * in it, silently truncating early via the existing bounds-checked
- * reads if it isn't - flagged here, not guessed at, matching this
- * project's established pattern for narrow first increments).
+ * Round 580 (task #536/#557): a partial UNPACK payload split across
+ * multiple DMA calls is now handled for real, closing the gap flagged
+ * above in earlier rounds. Ported from PCSX2's `Vif_Unpack.cpp`
+ * (`nVifUnpack<idx>()`'s buffer-then-process pattern) and
+ * `vifUnpackSetup<idx>()`'s closed-form upfront payload-size formula
+ * (`nVifT[16]` gsize table x STCYCL CL/WL, skipping-write vs
+ * filling-write cases) - see `vif.c`'s `vif_unpack_needed_bytes()`
+ * and `vif_state_t`'s `unpack_pending`/`unpack_buffer` fields for the
+ * full citation trail. This is the direct UNPACK-side counterpart of
+ * Round 579's MPG cross-DMA-chunk continuation fix, found by
+ * following the same "does this command have the identical gap"
+ * question that MPG turned out to have.
  */
 
 typedef struct {
@@ -188,6 +193,39 @@ typedef struct {
     int      mpg_pending;
     uint32_t mpg_pending_addr;
     uint32_t mpg_pending_words;
+
+    /* Round 580 (task #536/#557): real UNPACK partial-transfer state -
+     * the UNPACK-equivalent of Round 579's MPG fix, matching real
+     * hardware's nVifStruct::buffer accumulate-then-unpack semantics
+     * (Vif_Unpack.cpp's nVifUnpack<>/vifUnpackSetup<> - see vif.c's
+     * citation trail). Architecturally DIFFERENT from MPG's
+     * incremental-write-and-resume approach: real hardware BUFFERS
+     * raw payload bytes across truncated DMA transfers and only runs
+     * the actual per-vector unpack loop once the FULL expected
+     * payload has accumulated (buffer capped at 4096 bytes = 256*16,
+     * matching nVifStruct::buffer's real size, Vif_Dynarec.h - and
+     * matching this project's own vif_unpack_needed_bytes() worst
+     * case: num=256, gsize=16 -> exactly 4096 bytes, never more).
+     * unpack_pending is nonzero while a partial UNPACK transfer is
+     * outstanding; unpack_code/unpack_cmd are the original VIFcode
+     * that started it (needed to replay the unpack loop - address/
+     * NUM/USN/FLG bits - once complete); unpack_needed_bytes/
+     * unpack_have_bytes track the total payload size (computed
+     * upfront via the real vifUnpackSetup<> closed-form formula, see
+     * vif_unpack_needed_bytes()) and how much has been buffered so
+     * far. KNOWN SIMPLIFICATION (documented, not silently swept
+     * under the rug): the destination VU-mem base address for a
+     * FLG-relative (VIF1 TOPS-relative) UNPACK is recomputed from the
+     * CURRENT vif->tops at buffer-completion time, not latched at
+     * command-issue time like real hardware's tag.addr - a real gap
+     * only if TOPS itself changes mid-transfer, an edge case not
+     * expected to matter for the BIOS-boot upload this fix targets. */
+    int      unpack_pending;
+    uint32_t unpack_code;
+    uint32_t unpack_cmd;
+    uint32_t unpack_needed_bytes;
+    uint32_t unpack_have_bytes;
+    uint8_t  unpack_buffer[4096];
 } vif_state_t;
 
 void vif_init(void);

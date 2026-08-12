@@ -153,6 +153,80 @@ static void vif_unpack_write_lane(vif_state_t *vif, uint32_t dest_addr, int lane
  * combination (stops the caller from processing the rest of the
  * stream, same "stop rather than guess" philosophy as every other
  * out-of-scope code in this file). */
+/* Round 580 (task #536/#557): upfront payload-size calculation for an
+ * UNPACK VIFcode, BEFORE any data is read. Real hardware computes
+ * this via PCSX2's `Vif_Unpack.cpp` `vifUnpackSetup<idx>()` closed-
+ * form formula, but THIS project's own `vif_unpack()` fast path
+ * (below) determines its consumed-byte count a different way: by
+ * tracking the furthest byte offset any loop iteration actually
+ * dereferences (`max_read_end`), not via a closed-form CL/WL
+ * formula - a deliberate choice (see vif_unpack()'s own comment)
+ * that also, as a side effect, sidesteps a degenerate case in the
+ * textbook formula (CL=WL=0, this project's un-STCYCL'd default -
+ * see vif.c's `wl_eff = cycle_wl ? cycle_wl : 256u` convention -
+ * makes the real formula's "filling write" branch collapse to n=0,
+ * i.e. 0 bytes needed, which is wrong). To guarantee this function
+ * always agrees EXACTLY with what the fast path would itself compute
+ * (the property that actually matters - consistency between the
+ * single-call and split-across-calls paths, not textbook fidelity in
+ * isolation), this is a "dry run" of vif_unpack()'s own cursor/
+ * read-span loop: same is_fill/cl_eff/wl_eff/block_pos stepping, same
+ * per-VN/VL read_span sizing, same max_read_end tracking and final
+ * (+3)/4-rounded-up-to-words sizing - just without ever touching
+ * `data` (the read spans are pure functions of vn/vl/num/cycle state,
+ * not of the actual bytes present, so this needs no data pointer).
+ * Returns bytes (0 for a reserved VN/VL combo, matching vif_unpack()'s
+ * own gsize==0 check so callers can share that "unsupported"
+ * classification). */
+static uint32_t vif_unpack_needed_bytes(vif_state_t *vif, uint32_t cmd, uint32_t num)
+{
+    uint32_t vn = (cmd >> 2) & 0x3u;
+    uint32_t vl = cmd & 0x3u;
+    uint32_t gsize = VIF_UNPACK_SIZE[vn * 4u + vl];
+    if (gsize == 0u)
+        return 0u;
+
+    uint32_t cl_eff = vif->cycle_cl;
+    uint32_t wl_eff = vif->cycle_wl ? vif->cycle_wl : 256u;
+    int is_fill = (cl_eff < wl_eff);
+    uint32_t component_width = (vl == 0u) ? 4u : (vl == 1u) ? 2u : (vl == 2u) ? 1u : 2u;
+
+    uint32_t src_cursor = 0u;
+    uint32_t max_read_end = 0u;
+    uint32_t block_pos = 0u;
+
+    for (uint32_t v = 0; v < num; v++) {
+        uint32_t read_span;
+        if (vn == 3u && vl == 3u)
+            read_span = 2u; /* V4-5 */
+        else if (vn == 0u)
+            read_span = component_width; /* S */
+        else if (vn == 1u)
+            read_span = 2u * component_width; /* V2 */
+        else
+            read_span = 4u * component_width; /* V3 (real over-read quirk) or V4 */
+
+        uint32_t this_end = src_cursor + read_span;
+        if (this_end > max_read_end)
+            max_read_end = this_end;
+
+        block_pos++;
+        if (is_fill) {
+            if (block_pos <= cl_eff)
+                src_cursor += gsize;
+            else if (block_pos == wl_eff)
+                block_pos = 0;
+        } else {
+            src_cursor += gsize;
+            if (block_pos >= wl_eff)
+                block_pos = 0;
+        }
+    }
+
+    uint32_t words = (max_read_end + 3u) / 4u;
+    return words * 4u;
+}
+
 static int vif_unpack(vif_state_t *vif, uint32_t code, uint32_t cmd, const uint8_t *data, uint32_t total_words, uint32_t *pos)
 {
     uint32_t total_bytes = total_words * 4u;
@@ -312,6 +386,31 @@ static void vif_process(vif_state_t *vif, const uint8_t *data, uint32_t qwc)
             vif->mpg_pending = 0;
     }
 
+    /* Round 580 (task #536/#557): resume a real UNPACK payload left
+     * outstanding by a PRIOR vif_process() call - see vif.h's
+     * unpack_pending field comment. Unlike MPG's incremental-write-
+     * and-resume approach, this buffers raw bytes and only replays
+     * the actual unpack loop once vif_unpack_needed_bytes() worth of
+     * payload has fully accumulated (real hardware's nVifStruct::
+     * buffer semantics). */
+    if (vif->unpack_pending) {
+        uint32_t need = vif->unpack_needed_bytes - vif->unpack_have_bytes;
+        uint32_t avail = (total_words - pos) * 4u;
+        uint32_t take = (need < avail) ? need : avail;
+        memcpy(vif->unpack_buffer + vif->unpack_have_bytes, data + pos * 4u, take);
+        vif->unpack_have_bytes += take;
+        pos += take / 4u;
+
+        if (vif->unpack_have_bytes >= vif->unpack_needed_bytes) {
+            uint32_t local_pos = 0;
+            uint32_t local_total_words = vif->unpack_needed_bytes / 4u;
+            vif_unpack(vif, vif->unpack_code, vif->unpack_cmd, vif->unpack_buffer, local_total_words, &local_pos);
+            vif->unpack_pending = 0;
+            vif->unpack_have_bytes = 0;
+            vif->unpack_needed_bytes = 0;
+        }
+    }
+
     while (pos < total_words) {
         uint32_t code = vif_rd_le32(data + pos * 4u);
         pos++;
@@ -323,8 +422,36 @@ static void vif_process(vif_state_t *vif, const uint8_t *data, uint32_t qwc)
 
         if ((cmd & 0x60u) == 0x60u) {
             /* UNPACK (0x60-0x7F) - see vif.h/vif_unpack() for the
-             * full scope. vif_unpack() advances pos itself past
-             * whatever payload it consumed. */
+             * full scope. Round 580 (task #536/#557): check upfront
+             * (via vif_unpack_needed_bytes(), the real vifUnpackSetup<>
+             * formula) whether this call's remaining stream actually
+             * holds the FULL payload this UNPACK needs. If it does,
+             * fast-path exactly as before (vif_unpack() advances pos
+             * itself past whatever payload it consumed). If it
+             * doesn't, this is a real cross-DMA-chunk split (the
+             * UNPACK-side twin of Round 579's MPG fix) - buffer what's
+             * available now and finish it on a later vif_process()
+             * call (see the unpack_pending resume block above). */
+            uint32_t unpack_num = (code >> 16) & 0xFFu;
+            if (unpack_num == 0u)
+                unpack_num = 256u;
+            uint32_t needed_bytes = vif_unpack_needed_bytes(vif, cmd, unpack_num);
+            uint32_t avail_bytes = (total_words - pos) * 4u;
+
+            if (needed_bytes != 0u && needed_bytes > avail_bytes) {
+                uint32_t take = avail_bytes;
+                if (take > sizeof(vif->unpack_buffer))
+                    take = (uint32_t)sizeof(vif->unpack_buffer); /* defensive; needed_bytes is always <=4096 by construction */
+                memcpy(vif->unpack_buffer, data + pos * 4u, take);
+                vif->unpack_pending = 1;
+                vif->unpack_code = code;
+                vif->unpack_cmd = cmd;
+                vif->unpack_needed_bytes = needed_bytes;
+                vif->unpack_have_bytes = take;
+                pos += take / 4u;
+                continue;
+            }
+
             if (!vif_unpack(vif, code, cmd, data, total_words, &pos))
                 return;
             continue;

@@ -421,6 +421,98 @@ int main(void)
         CHECK(v1->itops == 0, "UNPACK reserved VN/VL: the words right after it were NOT misparsed as ITOP codes");
     }
 
+    { /* Round 580 (task #536/#557): UNPACK payload split across TWO
+       * separate vif1_process_quadwords() calls - a real VIF1 DMA
+       * chain link boundary landing mid-UNPACK-payload, the UNPACK
+       * counterpart of the MPG cross-DMA-chunk case Round 579 fixed.
+       * A real DMA transfer is always a whole number of quadwords
+       * (qwc), so a 1-qword (4-word) call carrying a V4-32/NUM=1
+       * UNPACK (VIFcode + 4 data words = 5 words needed) can only
+       * ever deliver the VIFcode + 3 of its 4 data words in a single
+       * qword - the 4th data word necessarily lands in the NEXT
+       * transfer. Real hardware buffers the partial payload and only
+       * unpacks once the full vector has arrived - verified by
+       * checking VU1 mem is COMPLETELY untouched after call 1, and
+       * only becomes correct after call 2 completes it. */
+        vif_init();
+        vu1_init(); /* VU1 mem is a separate global not reset by vif_init() - earlier tests in this file leave real data there */
+        uint8_t call1[16];
+        wle32(call1 + 0, enc_vifcode(VIF_CMD_UNPACK_V4_32, 1, 0)); /* NUM=1 vector, VU1 addr 0; needed_bytes=16 */
+        wle32(call1 + 4, 0xAAAAAAAAu); /* data word 0 of 4 */
+        wle32(call1 + 8, 0xBBBBBBBBu); /* data word 1 of 4 */
+        wle32(call1 + 12, 0xCCCCCCCCu); /* data word 2 of 4 - still short by 1 word/4 bytes */
+        vif1_process_quadwords(DMA_CHANNEL_VIF1, call1, 1);
+        vif_state_t *v1mid = vif1_get_state();
+        vu1_state_t *vu1mid = vu1_get_state();
+        CHECK(v1mid->unpack_pending == 1, "UNPACK split-transfer: still pending after call 1 (payload incomplete)");
+        CHECK(v1mid->unpack_have_bytes == 12u && v1mid->unpack_needed_bytes == 16u, "UNPACK split-transfer: buffered exactly 12 of 16 needed bytes after call 1 (a 1-qword call can only ever supply VIFcode+3 words)");
+        CHECK(vif_rd_le32(vu1mid->mem + 0) == 0u, "UNPACK split-transfer: VU1 mem X lane untouched after call 1 (real hardware buffers, doesn't write early)");
+        CHECK(vif_rd_le32(vu1mid->mem + 4) == 0u, "UNPACK split-transfer: VU1 mem Y lane untouched after call 1");
+
+        uint8_t call2[16];
+        wle32(call2 + 0, 0xDDDDDDDDu); /* data word 3 of 4 - completes the pending UNPACK (needs exactly 4 more bytes) */
+        wle32(call2 + 4, enc_vifcode(VIF_CMD_ITOP, 0, 0x3FFu)); /* fresh VIFcode right after - must be parsed correctly, not misparsed as leftover payload */
+        wle32(call2 + 8, enc_vifcode(VIF_CMD_NOP, 0, 0));
+        wle32(call2 + 12, enc_vifcode(VIF_CMD_NOP, 0, 0));
+        vif1_process_quadwords(DMA_CHANNEL_VIF1, call2, 1);
+        vif_state_t *v1end = vif1_get_state();
+        vu1_state_t *vu1end = vu1_get_state();
+        CHECK(v1end->unpack_pending == 0, "UNPACK split-transfer: no longer pending after call 2 completes the payload");
+        CHECK(vif_rd_le32(vu1end->mem + 0) == 0xAAAAAAAAu, "UNPACK split-transfer: X lane correct (from call 1's buffered bytes)");
+        CHECK(vif_rd_le32(vu1end->mem + 4) == 0xBBBBBBBBu, "UNPACK split-transfer: Y lane correct (from call 1's buffered bytes)");
+        CHECK(vif_rd_le32(vu1end->mem + 8) == 0xCCCCCCCCu, "UNPACK split-transfer: Z lane correct (from call 1's buffered bytes)");
+        CHECK(vif_rd_le32(vu1end->mem + 12) == 0xDDDDDDDDu, "UNPACK split-transfer: W lane correct (from call 2's completing byte)");
+        CHECK(v1end->itops == 0x3FFu, "UNPACK split-transfer: the fresh ITOP VIFcode right after the completed payload was parsed correctly, not misparsed as leftover payload data");
+        CHECK(v1end->unpack_vectors_written == 1u, "UNPACK split-transfer: exactly 1 real vector written total (not double-counted across the two calls)");
+    }
+
+    { /* Round 580: an UNPACK payload split across THREE real deliveries
+       * (2 real resumes) plus a genuinely-empty qwc=0 call thrown in
+       * the middle (real hardware can see zero-quadword transfers) -
+       * guards against an off-by-one in the resume-accumulation loop
+       * that a single-resume test alone wouldn't catch. V4-32,
+       * NUM=3 (3 vectors = 48 bytes needed, forcing multiple resumes
+       * since no single 1-2 qword call can supply that much) - needs
+       * an explicit STCYCL CL=1/WL=1 (real "no skip, no fill"
+       * identity mode) first, since the default un-STCYCL'd CL=WL=0
+       * state makes NUM>1 UNPACKs re-read a single vector's worth of
+       * source bytes for every vector (a real, pre-existing project
+       * characteristic unrelated to this round's fix - see the dry-
+       * run needed_bytes helper's citation in vif.c). */
+        vif_init();
+        vu1_init(); /* VU1 mem is a separate global not reset by vif_init() - earlier tests in this file leave real data there */
+        vif1_get_state()->cycle_cl = 1;
+        vif1_get_state()->cycle_wl = 1;
+        uint8_t c1[16], c2[32];
+        wle32(c1 + 0, enc_vifcode(VIF_CMD_UNPACK_V4_32, 3, 0)); /* needed_bytes = 3*16 = 48 */
+        wle32(c1 + 4, 0x01010101u);
+        wle32(c1 + 8, 0x02020202u);
+        wle32(c1 + 12, 0x03030303u);
+        vif1_process_quadwords(DMA_CHANNEL_VIF1, c1, 1); /* 1 qword -> VIFcode + 3 words = 12 bytes buffered */
+        CHECK(vif1_get_state()->unpack_pending == 1 && vif1_get_state()->unpack_have_bytes == 12u, "UNPACK 3-call split: pending with 12/48 bytes after call 1");
+
+        uint8_t empty[1];
+        vif1_process_quadwords(DMA_CHANNEL_VIF1, empty, 0); /* genuinely empty (qwc=0) transfer - must be a safe no-op */
+        CHECK(vif1_get_state()->unpack_pending == 1 && vif1_get_state()->unpack_have_bytes == 12u, "UNPACK 3-call split: a genuinely empty qwc=0 call in between changes nothing");
+
+        for (int i = 0; i < 8; i++) wle32(c2 + i * 4, (uint32_t)(0x04040404u + (uint32_t)i * 0x01010101u));
+        vif1_process_quadwords(DMA_CHANNEL_VIF1, c2, 2); /* 2 qwords = 8 more words = 32 bytes -> have=12+32=44, still short by 4 */
+        CHECK(vif1_get_state()->unpack_pending == 1 && vif1_get_state()->unpack_have_bytes == 44u, "UNPACK 3-call split: still pending with 44/48 bytes after the 2nd real call (2nd resume)");
+
+        uint8_t c4[16];
+        wle32(c4 + 0, 0x0C0C0C0Cu); /* the final 4 bytes, completing 48 */
+        wle32(c4 + 4, enc_vifcode(VIF_CMD_ITOP, 0, 0x155u));
+        wle32(c4 + 8, enc_vifcode(VIF_CMD_NOP, 0, 0));
+        wle32(c4 + 12, enc_vifcode(VIF_CMD_NOP, 0, 0));
+        vif1_process_quadwords(DMA_CHANNEL_VIF1, c4, 1);
+        vif_state_t *v1 = vif1_get_state();
+        vu1_state_t *vu1 = vu1_get_state();
+        CHECK(v1->unpack_pending == 0, "UNPACK 3-call split: completed after the 3rd real call (3rd resume)");
+        CHECK(vif_rd_le32(vu1->mem + 0*16 + 0) == 0x01010101u && vif_rd_le32(vu1->mem + 0*16 + 12) == 0x04040404u, "UNPACK 3-call split: 1st vector's X/W lanes correct (bytes from calls 1 and 3 stitched together)");
+        CHECK(vif_rd_le32(vu1->mem + 2*16 + 12) == 0x0C0C0C0Cu, "UNPACK 3-call split: 3rd (last) vector's W lane correct (the final completing bytes)");
+        CHECK(v1->itops == 0x155u, "UNPACK 3-call split: the fresh ITOP VIFcode right after the fully-completed 48-byte payload was parsed correctly");
+    }
+
     printf("\n%d check(s) failed\n", failures);
     return failures ? 1 : 0;
 }

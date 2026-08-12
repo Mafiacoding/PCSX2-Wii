@@ -24099,3 +24099,93 @@ previously-undiscovered architectural gap (missing cross-DMA-chunk VIF command
 continuation state) is now fixed for MPG, with UNPACK's identical documented
 gap remaining as a known follow-up (not yet fixed this round - MPG was the
 one directly implicated by this round's diagnostic evidence).
+
+
+## Round 580: UNPACK cross-DMA-chunk continuation fix (task #536/#557) - the UNPACK-side twin of Round 579's MPG fix
+
+**Context.** Per the user's explicit directive ("keep looking at the pcsx2
+source for xgkick... we need to figure out how pcsx2 handles the signal from
+VU1 so it can give us the display"), this round continued the real-PCSX2-
+source-comparison arc. Read real PCSX2's `VUops.cpp` (`_vuXGKICK`/
+`_vuXGKICKTransfer`, the `xgkickenable`/`xgkicksizeremaining`/etc. state
+machine) and confirmed this project's own existing XGKICK implementation
+(`source/hw/vu.c`, from Round 571) is architecturally correct - same address
+source register, same VU1-only GIF gating, same real `gif_process_quadwords()`
+push - just simplified to synchronous/non-throttled instead of real
+hardware's per-cycle-metered drain, a documented, harmless simplification.
+The real blocker: a full 16KB VU1 micro-memory scan post-Round-579 found ZERO
+XGKICK instruction candidates anywhere in the 2,914 real instructions
+executed - the opcode has genuinely never been reached yet, not a downstream
+data-validity issue.
+
+**Root cause (2nd instance of the same class of bug Round 579 found in MPG).**
+Read real PCSX2's `Vif_Unpack.cpp` (`nVifUnpack<idx>()`, `vifUnpackSetup<idx>()`)
+in full. UNPACK has the IDENTICAL "missing cross-DMA-chunk continuation state"
+gap that MPG had - already flagged (accurately, but unfixed) in this project's
+own `vif.h` header comment prior to this round. Architecturally different
+from MPG's fix though: real hardware BUFFERS raw UNPACK payload bytes into an
+`nVifStruct::buffer[256*16]` (4096-byte) accumulator across truncated
+transfers, and only runs the actual per-vector unpack loop once the FULL
+expected payload has arrived - not MPG's incremental-write-and-resume
+approach.
+
+**Fix implemented (`source/hw/vif.c`/`include/core/hw/vif.h`).** Added
+`vif_unpack_needed_bytes()`: an upfront payload-size calculation for an
+UNPACK VIFcode, computed as a "dry run" of `vif_unpack()`'s own existing
+cursor/read-span loop (same is_fill/cl_eff/wl_eff/block_pos stepping, same
+per-VN/VL read_span sizing, same max_read_end tracking) - deliberately NOT
+real PCSX2's independent closed-form `vifUnpackSetup<idx>()` formula, because
+that formula degenerates to 0 bytes needed for this project's own un-STCYCL'd
+default cycle state (CL=WL=0, mapped to a "filling write" with cl_eff=0 that
+never advances), a mismatch discovered and fixed during this round's own
+test-writing process. Mirroring the existing fast path's own cursor logic
+byte-for-byte guarantees the single-call and split-across-calls paths always
+agree, which is the property that actually matters here. New `vif_state_t`
+fields: `unpack_pending`/`unpack_code`/`unpack_cmd`/`unpack_needed_bytes`/
+`unpack_have_bytes`/`unpack_buffer[4096]`. `vif_process()` now buffers
+available bytes into `unpack_buffer` when a UNPACK's full payload isn't
+present in the current call, and replays the real `vif_unpack()` loop against
+the completed buffer once enough has accumulated across however many calls it
+takes - a genuinely empty (qwc=0) call in between is a safe no-op, matching
+real hardware's own zero-quadword-transfer possibility.
+
+**Verification.** New dedicated test coverage in `tests/test_vif.c`: a 2-call
+split (V4-32 NUM=1, a real qword-granularity cut mid-payload) and a 3-call
+split (V4-32 NUM=3 with an explicit STCYCL CL=1/WL=1, plus a genuinely-empty
+qwc=0 call thrown in between) - checking pending state, exact buffered byte
+counts, VU1 mem staying untouched until the payload completes, correct final
+lane values, and correct resumption of fresh VIFcodes immediately after a
+completed payload. All 72 checks in `test_vif.c` pass (18 new). Dedicated
+`test_vu_micro` (VU1 real IADD/SQ/LQ round-trip) and `test_ee_cop2_vu0` (VU0/
+COP2 macro-mode) unit suites: 0 failures. Scoped regression suite (45 DMA/
+GIF/GS/SIF/VIF/VU tests most relevant to this change): 45/45 PASS, 0
+BUILDFAIL. Wii cross-build (devkitPPC r32/libogc, after restoring
+`libmpfr.so.4`/`libfat.a`/`fat.h` into the sandbox's devkitPPC/libogc install
+from the cached `outputs/build/` mirror - the sandbox toolchain had gone
+stale again since the last round, same recurring restoration this project
+has needed after every sandbox reset): clean, 0 warnings, 0 errors, `.dol`
+produced.
+
+**Diskless BIOS boot survey (post-fix, real JP BIOS, no disc).** A ~600M-
+instruction budget run (limited by this session's per-tool-call wall-clock
+cap, not a real halt) shows genuine forward movement: the non-zero VU1
+micro-memory range widened to bytes 2196-12359 (vs. narrower ranges in prior
+rounds), and VU1's `tpc` reached `0x28c0` - close to (80 bytes past) the
+previously-known `0x2870` resting address, suggesting real execution is now
+pushing slightly further within/past that microprogram rather than reaching
+a wholly new one. `mpg_calls`=3 (622 words) and `mscal_calls`=1 within this
+shorter budget (not directly comparable to Round 579's larger-budget MPG/
+MSCAL counts, since interleaving with the EE core changes how much VIF1
+traffic arrives per wall-clock window). **The XGKICK scan still finds ZERO
+candidates** in the currently-uploaded microcode at this budget - real
+progress, but the "why does the boot-animation microprogram never XGKICK"
+question is not yet answered. A larger-budget survey (needs a background-job-
+capable environment, since this sandbox's tool calls cannot outlive their own
+~170s wall-clock window even under `nohup`/`disown` - confirmed empirically
+this round, background processes here are reaped when their parent tool call
+returns) is the natural next step.
+
+**Classification.** Real source change - full verification performed
+(dedicated unit tests, scoped regression suite, Wii cross-build, non-
+regression boot survey), per the user's "go slow, verify every change"
+instruction.

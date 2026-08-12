@@ -5,6 +5,7 @@
  */
 
 #include "core/hw/vu.h"
+#include "core/hw/gif.h"
 #include "vu_opcodes.h"
 #include <string.h>
 #include <math.h>
@@ -115,6 +116,66 @@ static int vu_exec_upper(uint32_t vf[32][4], uint32_t *vi, uint32_t acc[4], uint
         uint32_t sub = VU_SPEC_SUBOP(w);
         uint32_t bc  = VU_U_BC(w);
 
+        /* Round 573 (task #548): real accumulator-broadcast family,
+         * ground-truthed from PCSX2's own _UPPER_FD_bc_TABLE dispatch
+         * tables (see vu_opcodes.h's updated citation) - bc selects
+         * which lane of Ft is broadcast into every lane of the ACC
+         * computation. Evidence: the live diskless-boot VU1 trace
+         * that motivated this round hit sub=0x01(SUBAbc) bc=3(w) and
+         * sub=0x09(SUBAqi group) bc=0(SUBAq) 32 times each - real,
+         * load-bearing instructions this project was silently
+         * treating as unimplemented no-ops. The sibling ADDAbc/
+         * MADDAbc/MSUBAbc/MULAbc/ADDAq/MADDAq/ADDAi/MADDAi/MSUBAq/
+         * SUBAi/MSUBAi forms are implemented alongside since the real
+         * table structure is now unambiguous (not spec-only guessing -
+         * directly transcribed from the real dispatch table). */
+        if (sub == VUS_FD_ADDABC_GROUP) { /* ADDAx/y/z/w: ACC = Fs + Ft[bc] */
+            float ftbc = vu_f(vf[ft][bc]);
+            for (int l = 0; l < 4; l++) r[l] = vu_f(vf[fs][l]) + ftbc;
+            for (int l = 0; l < 4; l++) if ((dest >> (3 - l)) & 1) acc[l] = vu_u(r[l]);
+            return 1;
+        }
+        if (sub == VUS_FD_SUBABC_GROUP) { /* SUBAx/y/z/w: ACC = Fs - Ft[bc] */
+            float ftbc = vu_f(vf[ft][bc]);
+            for (int l = 0; l < 4; l++) r[l] = vu_f(vf[fs][l]) - ftbc;
+            for (int l = 0; l < 4; l++) if ((dest >> (3 - l)) & 1) acc[l] = vu_u(r[l]);
+            return 1;
+        }
+        if (sub == VUS_FD_MADDABC_GROUP) { /* MADDAx/y/z/w: ACC = ACC + Fs*Ft[bc] */
+            float ftbc = vu_f(vf[ft][bc]);
+            for (int l = 0; l < 4; l++) r[l] = vu_f(acc[l]) + vu_f(vf[fs][l]) * ftbc;
+            for (int l = 0; l < 4; l++) if ((dest >> (3 - l)) & 1) acc[l] = vu_u(r[l]);
+            return 1;
+        }
+        if (sub == VUS_FD_MSUBABC_GROUP) { /* MSUBAx/y/z/w: ACC = ACC - Fs*Ft[bc] */
+            float ftbc = vu_f(vf[ft][bc]);
+            for (int l = 0; l < 4; l++) r[l] = vu_f(acc[l]) - vu_f(vf[fs][l]) * ftbc;
+            for (int l = 0; l < 4; l++) if ((dest >> (3 - l)) & 1) acc[l] = vu_u(r[l]);
+            return 1;
+        }
+        if (sub == VUS_FD_MULABC_GROUP) { /* MULAx/y/z/w: ACC = Fs*Ft[bc] */
+            float ftbc = vu_f(vf[ft][bc]);
+            for (int l = 0; l < 4; l++) r[l] = vu_f(vf[fs][l]) * ftbc;
+            for (int l = 0; l < 4; l++) if ((dest >> (3 - l)) & 1) acc[l] = vu_u(r[l]);
+            return 1;
+        }
+        if (sub == VUS_FD_ADDAQI_GROUP) { /* bc: 00=ADDAq 01=MADDAq 10=ADDAi 11=MADDAi */
+            if (bc == 0) { for (int l = 0; l < 4; l++) r[l] = vu_f(vf[fs][l]) + Q; }
+            else if (bc == 1) { for (int l = 0; l < 4; l++) r[l] = vu_f(acc[l]) + vu_f(vf[fs][l]) * Q; }
+            else if (bc == 2) { for (int l = 0; l < 4; l++) r[l] = vu_f(vf[fs][l]) + I; }
+            else { for (int l = 0; l < 4; l++) r[l] = vu_f(acc[l]) + vu_f(vf[fs][l]) * I; }
+            for (int l = 0; l < 4; l++) if ((dest >> (3 - l)) & 1) acc[l] = vu_u(r[l]);
+            return 1;
+        }
+        if (sub == VUS_FD_SUBAQI_GROUP) { /* bc: 00=SUBAq 01=MSUBAq 10=SUBAi 11=MSUBAi */
+            if (bc == 0) { for (int l = 0; l < 4; l++) r[l] = vu_f(vf[fs][l]) - Q; }
+            else if (bc == 1) { for (int l = 0; l < 4; l++) r[l] = vu_f(acc[l]) - vu_f(vf[fs][l]) * Q; }
+            else if (bc == 2) { for (int l = 0; l < 4; l++) r[l] = vu_f(vf[fs][l]) - I; }
+            else { for (int l = 0; l < 4; l++) r[l] = vu_f(acc[l]) - vu_f(vf[fs][l]) * I; }
+            for (int l = 0; l < 4; l++) if ((dest >> (3 - l)) & 1) acc[l] = vu_u(r[l]);
+            return 1;
+        }
+
         if (sub == VUS_FD_ADDA_GROUP && bc == 0) { /* ADDA: ACC = Fs + Ft */
             for (int l = 0; l < 4; l++) r[l] = vu_f(vf[fs][l]) + vu_f(vf[ft][l]);
             for (int l = 0; l < 4; l++) if ((dest >> (3 - l)) & 1) acc[l] = vu_u(r[l]);
@@ -144,9 +205,67 @@ static int vu_exec_upper(uint32_t vf[32][4], uint32_t *vi, uint32_t acc[4], uint
         if (sub == VUS_FD_SUBA_GROUP && bc == 3) { /* NOP (upper) */
             return 1;
         }
+        if (sub == VUS_FD_ABSCLIP && bc == 0) { /* MULAq: ACC = Fs*Q (real table[7][bc=0]) */
+            for (int l = 0; l < 4; l++) r[l] = vu_f(vf[fs][l]) * Q;
+            for (int l = 0; l < 4; l++) if ((dest >> (3 - l)) & 1) acc[l] = vu_u(r[l]);
+            return 1;
+        }
         if (sub == VUS_FD_ABSCLIP && bc == 1) { /* ABS: Fd(=ft slot) = |Fs| */
             for (int l = 0; l < 4; l++) r[l] = fabsf(vu_f(vf[fs][l]));
             vu_write_dest(vf, ft, dest, r);
+            return 1;
+        }
+        if (sub == VUS_FD_ABSCLIP && bc == 2) { /* MULAi: ACC = Fs*I (real table[7][bc=2]) */
+            for (int l = 0; l < 4; l++) r[l] = vu_f(vf[fs][l]) * I;
+            for (int l = 0; l < 4; l++) if ((dest >> (3 - l)) & 1) acc[l] = vu_u(r[l]);
+            return 1;
+        }
+        if (sub == VUS_FD_ABSCLIP && bc == 3) {
+            /* CLIPw (Round 573, task #548): judges |Fs.x|,|Fs.y|,|Fs.z|
+             * against |Ft.w|, ported bit-exact from real PCSX2's
+             * _vuCLIP() (docs/reference/pcsx2/pcsx2/VUops.cpp) - the
+             * SAME real algorithm this project's VU0 macro-mode
+             * VCLIPw already implements at ee_core.c's idx==31 case
+             * (see that comment for the full citation trail: signed-
+             * integer sign-flip-XOR comparison, NOT a float compare,
+             * denormal Ft.w clamped to the largest denormal so only
+             * non-denormals compare higher). No destination register
+             * (Fd) - Fs/Ft here are true source operands, unlike ABS's
+             * reuse of the Ft field slot as a destination above.
+             * Result: 6 new judgment bits shifted into the clip-flag
+             * register each call, masked to the low 24 bits (4 calls'
+             * worth of history, matching real hardware's REG_CLIP_FLAG
+             * semantics). Stored in vi[18], reusing this project's own
+             * R(20)/I(21)/Q(22)-style convention of keeping VU control
+             * registers directly in the generic vi[] array - vi[18] =
+             * REG_CLIP_FLAG in PCSX2's VU.h VURegFlags enum, matching
+             * the ee_core.c VU0-macro-mode CLIP's cop2_ctrl[18] choice
+             * exactly so both VU0 and VU1 use the same real register
+             * index for the same real register.
+             *
+             * Evidence this was worth implementing (not spec-only):
+             * Round 573's live diskless-boot VU1 trace hit this exact
+             * bc==3 case 64 times out of 66,376 real VU1 instructions
+             * executed (the entire "unimplemented_opcodes_seen=96"
+             * count, minus 32 hits of upper funct=0x30 - confirmed via
+             * live cross-check against PCSX2's own opcode table
+             * (the PREFIX##unknown entries at the 0x30 slot in
+             * VUmicro.h's macro-generated dispatch tables in VUops.cpp)
+             * to be a genuinely invalid/unknown encoding on real
+             * hardware too, not a modeling gap - left unimplemented). */
+            uint32_t ftw = vf[ft][3];
+            int32_t value = (int32_t)ftw;
+            value = (ftw & 0x7f800000u) ? (value & 0x7fffffff) : 0x007fffff;
+            uint32_t fsx = vf[fs][0], fsy = vf[fs][1], fsz = vf[fs][2];
+            uint32_t clip = vi[18];
+            clip <<= 6;
+            if ((int32_t)(fsx ^ 0x00000000u) > value) clip |= 0x01u;
+            if ((int32_t)(fsx ^ 0x80000000u) > value) clip |= 0x02u;
+            if ((int32_t)(fsy ^ 0x00000000u) > value) clip |= 0x04u;
+            if ((int32_t)(fsy ^ 0x80000000u) > value) clip |= 0x08u;
+            if ((int32_t)(fsz ^ 0x00000000u) > value) clip |= 0x10u;
+            if ((int32_t)(fsz ^ 0x80000000u) > value) clip |= 0x20u;
+            vi[18] = clip & 0xFFFFFFu;
             return 1;
         }
         if (sub == VUS_FD_ITOF) { /* ITOF0/4/12/15: Fd(=ft slot) = (int32)Fs / 2^scale */
@@ -400,7 +519,48 @@ static int vu_exec_lower(uint32_t vf[32][4], uint32_t *vi,
                     if (bc2 == 3) { return 1; } /* WAITQ - non-pipelined interpreter, Q is always ready: true no-op */
                 }
                 if (fdslot == VULS_FD_WAITP && bc2 == 3) return 1; /* WAITP - same as WAITQ, no-op here */
-                return 0; /* R-group (RNEXT/RGET/RINIT/RXOR - needs a real LFSR, not modeled) and anything else unmatched */
+                if (fdslot == VULS_FD_XGKICK_GROUP && bc2 == 0) {
+                    /* XGKICK Is: kicks off a real PATH1 GIF transfer starting
+                     * at VU1 local mem address (Is register, masked to 0x3FF
+                     * quadwords then *16 - see PCSX2's _vuXGKICK(), a live
+                     * fetch this round: "addr = (VI[_Is_].US[0] & 0x3ff) *
+                     * 16"). Round 571 (task #536/#545): this was the missing
+                     * link between the already-working VU1 microcode
+                     * interpreter (MSCAL/MSCNT run real VU1 programs to
+                     * completion - see vif.c) and the GS - without XGKICK,
+                     * ANY geometry a VU1 microprogram computes (the real
+                     * PS2 boot animation's rotating-logo 3D geometry is
+                     * VU1-driven, per real PS2 architecture - EE-side GIF
+                     * packets alone only ever carried the 2D wireframe/
+                     * sprite UI elements, matching Round 570's finding of
+                     * zero EE-side triangle vertex kicks) had no way to
+                     * ever reach the rasterizer.
+                     *
+                     * This project makes the transfer synchronous - same
+                     * simplification precedent as vu1_exec_micro() already
+                     * treating MSCAL as blocking-to-completion instead of
+                     * real hardware's per-cycle async xgkickenable/
+                     * xgkickaddr/xgkickdiff queueing and metered drain (see
+                     * PCSX2's _vuXGKICKTransfer()) - not modeled here.
+                     *
+                     * VU0 has NO real XGKICK/GIF connection at all on real
+                     * hardware (only VU1 is wired to the GIF unit) - this
+                     * function is shared between VU0 macro-mode's COP2
+                     * micro-mode path (ee_core.c's vu0_exec_micro(), called
+                     * with VU0's 4KB mem_mask=0xFFF) and VU1's real
+                     * micro-mode (vu1_exec_micro(), mem_mask=0x3FFF), so the
+                     * real transfer is gated on VU1's specific mem_mask
+                     * value - VU0 callers safely no-op here instead of
+                     * misinterpreting VU0's much smaller data memory as a
+                     * GS packet stream. */
+                    uint32_t addr = (vu_read_vi16(vi, rs) & 0x3FFu) * 16u;
+                    if (mem_mask == (VU1_MEM_SIZE - 1u) && addr < VU1_MEM_SIZE) {
+                        uint32_t qwc = (VU1_MEM_SIZE - addr) / 16u;
+                        gif_process_quadwords(GIF_PATH_1, mem + addr, qwc);
+                    }
+                    return 1;
+                }
+                return 0; /* R-group (RNEXT/RGET/RINIT/RXOR - needs a real LFSR, not modeled), XTOP/XITOP (needs real VIF1 TOP register plumbing), and anything else unmatched */
             }
         }
 

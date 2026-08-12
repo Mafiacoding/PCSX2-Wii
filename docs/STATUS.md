@@ -23571,3 +23571,191 @@ Direct continuation of "progress until any image on Tekken or the JP BIOS" - the
 **Conclusion for task #536:** the JP BIOS image goal is already met (Round 566, diskless boot, visually confirmed). Reaching an image on the Tekken disc-boot path specifically requires real, evidenced EE multi-threading support (a comparable-scale undertaking to this project's own Round 389+ IOP multi-threading work, which took many dedicated rounds) - not a quick patch. No tracked source changed this round (all experimentation used disposable scratch copies of `ee_core.c`, never applied to the tracked tree). Regression suite/Wii rebuild correctly skipped.
 
 Scratch (disposable, none committed): `/tmp/r568_semwatch.c`/`r568_semwatch` (deduped game-code syscall tracer), `/tmp/r568b_dump.c`/`r568b_dump` (CreateSema struct + caller disassembly dump), `/tmp/r568c_disasm.c`/`r568c_disasm` (callee function disassembly), `/tmp/r568_exp_ee_core.c` (experimental instrumented `ee_core.c` copy with synthetic semaphore release, NOT applied to tracked source), `/tmp/r568_exp_driver.c`/`r568_exp` (experiment driver).
+
+## Round 569 (task #543, real fix, MAJOR MILESTONE): implemented real EE multi-threading - genuine project-owned thread/semaphore scheduler, verified byte-identical to the diskless BIOS boot baseline
+
+Direct continuation of the user's explicit instruction: "implement real EE multi-threading". Round 568 concluded that resolving the Tekken disc-boot path's `WaitSema(semid=0)` park (real game code, not a bug) requires this project to genuinely track and switch between multiple EE threads - something it never had.
+
+**Experiment #1 (real-vectoring the semaphore syscalls) - tried and disproven first.** `ee_core.c` already routes thread-lifecycle syscalls (32-57: CreateThread/StartThread/etc, since Round 240) to the real BIOS ROM's own exception handler via `ee_raise_exception()`, letting genuine Sony kernel code run. Semaphore syscalls (60/64-68: SetupThread/CreateSema/DeleteSema/SignalSema/WaitSema) instead use this project's own disconnected `g_ee_sema[]` C-HLE table. The obvious first fix - extend real-vectoring to the semaphore family too, so real BIOS code owns scheduling end-to-end - was built and tested against the true diskless-boot baseline (`pmode` reaching `0x66` by ~90M instructions in the working tree). Result: **regressed** - `pmode` stayed `0x0` through 1.28B+ instructions. Reverted; no tracked source touched by this experiment.
+
+**Plan B: a genuine, project-owned EE thread/semaphore scheduler**, directly mirroring this project's own proven IOP-side implementation (`source/hw/iop_hle_thread.c`, Round 389+): a real `ee_tcb_t` table (32 slots) and semaphore table (64 slots), a `reschedule()` that does a plain struct-copy context switch of the single live register file (matching real hardware - one physical register file, reloaded on every context switch), and dispatch on the already-decoded EE syscall number (`ee_core.c` already decodes `sysnum = GPR(3)` before the long `if (sysnum==N)` chain - the new module intercepts there via `ee_hle_thread_try_handle()`, making the old per-syscall blocks dead code for whichever numbers it claims, without deleting them). New files: `include/core/ee/ee_hle_thread.h` (182 lines, design rationale + real ps2sdk syscall-number/struct-layout citations) and `source/core/ee/ee_hle_thread.c` (~600 lines, full TCB/semaphore implementation covering CreateThread/DeleteThread/StartThread/ExitThread/ExitDeleteThread/TerminateThread/DisableDispatchThread/EnableDispatchThread/ChangeThreadPriority/RotateThreadReadyQueue/GetThreadId/ReferThreadStatus/SleepThread/WakeupThread/CancelWakeupThread/CreateSema/DeleteSema/SignalSema/iSignalSema/WaitSema/PollSema). EventFlags/Alarms/DelayThread intentionally out of scope, matching the IOP port's own first-version scope.
+
+**Five real, distinct bugs found and fixed during verification (this is why the "go slow"/full-verification discipline exists - each was independently invisible without host-native testing against the known-good baseline):**
+
+1. **Systemic wrong-return convention.** Every syscall completion in the new module used an `EE_RETURN_TO_CALLER()` macro that jumped `pc` straight to `$ra`. This is wrong for MIPS `syscall` semantics - `$ra` is not a call-return address for this instruction (unlike `jal`); it's whatever the calling ps2sdk stub function last set it to, and that same stub typically has its own code between the `syscall` instruction and its eventual `jr $ra`. Jumping straight to `$ra` silently skipped all of it, every single time. Fixed by using the already-defined-but-unused `EE_ADVANCE()` macro (`pc = this_pc+4`) everywhere instead, matching the original `g_ee_sema[]` handlers' own convention exactly.
+2. **WaitSema busy-park violation.** The blocking branch called the (buggy) return-to-caller macro *before* actually parking, so a locked semaphore silently "succeeded" without ever really blocking. Fixed to match this project's own established park idiom (`ee_core.c`'s original sysnum==68 handler, ~line 3179): leave `pc` at the syscall instruction so it re-executes and re-checks `count` next step.
+3. **Semaphore ID off-by-one.** `alloc_sema_slot()` returned 1-based IDs (first semaphore = ID 1); the original, proven implementation used 0-based IDs (first semaphore = ID 0) matching real hardware/BIOS conventions the boot code depends on (exactly the `semid=0` pattern Round 567/568 traced). Fixed to 0-based.
+4. **SignalSema count-gating bug.** The new `SignalSema` tried a "direct transfer" optimization - call `wake_one_sema_waiter()` first, only increment `count` if no tracked waiter was found. But `WaitSema`'s busy-park recheck only ever looks at `count`, never at "was I specifically signaled" - so a signal delivered via direct-transfer never actually unblocked the waiter (count stayed 0 forever). Fixed to always increment `count` (bounded by `max_count`), matching the original's simpler, proven semantics; `wake_one_sema_waiter()` is now pure bookkeeping.
+5. **PollSema return-value regression.** This project's own Round 301 live-hardware finding (already documented in `ee_core.c`'s original sysnum==69 handler) proved real `PollSema`'s success path returns the semaphore ID itself (`v0=semid`), not `0` - real OSDSYS code (`0x0020D478`/`0x0020E830`/`0x002034D0`) does an equality check against that exact value. The new module's first version returned a flat `0`, silently reintroducing a bug this project had already found and fixed once before. Fixed to return `semid`.
+
+**Verification.** With all five fixes applied, tested two configurations against the diskless BIOS boot baseline (`/tmp/r563b_diskless_check.c`, 158-160M instructions): (a) semaphore syscalls only routed through the new module (32-57 still real-vectored as before), and (b) the full module (all of 32-57 and 60/64-69 routed through the new scheduler, real-vectoring fully superseded). **Both configurations now reproduce the baseline byte-for-byte**: `pmode=0x66`, `dispfb2=0x1446`, `display2=0x1BF9FF0183227C`, `sprites=351`, `lines=4888`, `points=333`, `instr=159998824/159998899` - matching the pre-existing tree's own numbers exactly. Zero regression, confirmed for both the minimal and full versions of the new scheduler.
+
+**Tekken disc-boot path re-tested with the full scheduler active**: identical halt to Round 567/568 - `instr=41868665, pc=0x00400324, ee_halted=0`, same `WaitSema(semid=0)` park, same registers. Real EE multi-threading alone does **not** resolve this specific park. Re-examining the register dump (`a2=0x21FC8800, a3=0x40, t0=0x21FC8840`) and the fact this happens immediately after `SetupThread`+`CreateSema`, before any `CreateThread` call is ever made on this path, indicates the real blocker here is most likely an async DMA/interrupt-completion signal (not a peer EE thread at all) - a different, now much more precisely scoped follow-on problem for a future round, not a regression or a flaw in this round's scheduler.
+
+**Why this is still a real, worthwhile fix despite not immediately unblocking Tekken:** this project genuinely had no EE-side multi-threading before this round (an explicitly documented gap since Round 303/441); it now does, built to the same standard as the proven IOP-side implementation, verified not to regress anything, and ready for the next round to extend (event flags, alarms, and - critically - tracing whatever async completion mechanism the Tekken park is actually waiting on).
+
+**Mandatory workflow completed:** host-native regression suite (23 DMA/GS/GIF/SIF tests, 22 pass / 1 pre-existing unrelated build failure confirmed via `git stash` A/B comparison against the unmodified tree - `test_sif` fails to link identically on both, not a regression), dedicated `tests/test_ee_core.c` unit suite (10/10 checks pass), Wii cross-build (`devkitPPC`/`libogc`, clean compile and link of `ee_hle_thread.c` + patched `ee_core.c`, `.dol` produced).
+
+New tracked files: `include/core/ee/ee_hle_thread.h`, `source/core/ee/ee_hle_thread.c`. Modified: `source/core/ee/ee_core.c` (added `#include`, `ee_hle_thread_init()` call in `ee_core_init()`, and the `ee_hle_thread_try_handle()` dispatch hook immediately after `sysnum` decode - all old per-syscall blocks left in place as now-unreachable dead code for the numbers the new module claims, per this project's minimally-invasive-edit precedent).
+
+Scratch (disposable, none committed): `/tmp/r569_exp_ee_core.c` (Experiment #1, disproven, reverted), `/tmp/ee_hle_thread_v2.c` (sema-only test variant of the tracked module, used only for isolating which fix mattered), `/tmp/r569b_ee_core.c` (staging copy later copied into tracked source), `/tmp/r569b_diskless_driver.o`, `/tmp/r569_tekken_driver.o` and their linked test binaries.
+
+## Round 570 (task #536/#545, diagnostic round, no source change - 2026-08-12)
+
+**User's clarified goal:** "JP Has an Image yes but i want it to display the sony boot up from the bios or the bios menu." Round 566's diskless-boot "image" (confirmed matching a user-provided reference at the time) is NOT the real goal - the user wants the actual Sony boot-up animation or the real OSDSYS BIOS menu to render, not generic geometry. This round investigates the precise gap.
+
+**Method:** rebuilt `/tmp/r566_diskless_dump.c` (Round 566's diskless framebuffer-dump driver) against the current, Round-569-fixed tree. Ran it to instr=639,997,991 (80M EE/IOP slices, ~8x further than the Round 566 baseline's initial checks). Confirmed `pmode=0x66` (display enabled), `dispfb2`/`display2` unchanged from the known-good baseline - no regression from Round 569's real-scheduler work. Dumped both DISPFB1/DISPFB2 as PPM/PNG and visually inspected: the image is a dense tangle of unfilled line segments (a "scribble"), not a recognizable Sony logo/animation or menu UI.
+
+**Root cause, precisely quantified via temporary instrumentation (histogram counters added to `source/hw/gif.c`, run, then fully reverted - `git diff` clean, nothing shipped):**
+- GIF draw-primitive counters at instr=639,997,991: `triangles_drawn=0`, `sprites_drawn=449`, `lines_drawn=4888`, `points_drawn=333` (points are degenerate zero-length LINE_STRIP segments collapsing via `rasterize_line()`'s point fallback - not real POINT-type draws, confirmed by a second histogram showing zero vertex-kicks ever occur while PRIM=POINTs is the live primitive type).
+- PRIM register write histogram: PACKED-mode GIFtag writes are ALWAYS type POINT(1643x) or the reserved value 7 (275x) - never LINE/TRIANGLE/SPRITE. Loose A+D-mode `GS_REG_PRIM` writes DO span all types, including TRIANGLE(54x)/TRI_STRIP(50x)/TRI_FAN(41x) = 145 total triangle-type PRIM writes.
+- Vertex-kick histogram (instrumented at the actual `apply_xyz2_kick()` call site, keyed on the LIVE `g_gif.prim` at the moment of the kick - the authoritative measurement): of 9,657 total vertex-kick calls across the whole run, 8,506 (with 4,890 completing draws) happened while PRIM=LINE_STRIP, 898 (562 completing draws) while PRIM=SPRITE, 253 while PRIM=RESERVED(7) (never draws - no dispatch case). **Zero** vertex kicks ever happened while PRIM=TRIANGLE/TRI_STRIP/TRI_FAN, despite those PRIM values being set 145 times.
+- Conclusion: `rasterize_triangle()` (source/hw/gif.c, ~line 667) is a complete, correct, already-shipped implementation - Gouraud-capable, texture-sampling-capable (per its own header comments) - and is NOT the bottleneck. The bottleneck is entirely upstream: whatever real BIOS/OSDSYS code sets PRIM to a triangle type during this diskless boot window never follows up with the XYZ2/XYZF2/XYZ3 vertex register writes needed to actually kick a triangle. All actual geometry in this window is wireframe (LINE_STRIP) plus a small number of flat-filled SPRITE rects - matching Round 451/452's original "wireframe-only" finding and now precisely quantified and reconfirmed against the current (Round 569) tree.
+
+**Two remaining hypotheses for why triangle PRIM writes never get vertices (not yet distinguished - next round's work):**
+1. This is genuinely how the real early BIOS boot sequence behaves in this window - it draws a wireframe scaffold first (which is what we render) and the real textured/Gouraud triangle geometry (the actual Sony logo animation) only appears in a later phase this diskless boot hasn't reached yet at instr=640M. The 145 "orphaned" TRIANGLE-type PRIM writes could be leftover/unused context-setup writes (e.g. establishing default draw state before a texture upload that never proceeds to drawing).
+2. There's a real GIFtag/REGLIST dispatch gap: some second code path for feeding triangle vertex data (e.g. a different context, a REGLIST-mode register combination, or a GIFtag PRE-bit-embedded PRIM that this emulator's dispatch doesn't yet route to `apply_xyz2_kick()` under the correct PRIM value) exists on real hardware but isn't modeled here.
+
+**No source change this round** - the histogram instrumentation was diagnostic-only, added to a working copy of `source/hw/gif.c`, run, and then fully reverted via `git checkout -- source/hw/gif.c` (confirmed clean via `git diff`/`git status --porcelain`). Regression suite and Wii rebuild correctly skipped per the mandatory-workflow's docs-only/diagnostic-round exception. Task #536 (JP BIOS splash/menu) remains open with a much more precise problem statement; new task #545 tracks this specific sub-investigation.
+
+## Round 571 (task #536/#546, real fix, shipped): implemented VU1 XGKICK - the missing PATH1 GIF trigger, plus a new sharper diagnostic finding (VU1 never executes despite heavy VIF1 traffic)
+
+Direct continuation of the user's explicit instruction: "continue until the real triangle animation or boot animation works... check if we missed something from the gs implementation... search everywhere for clues also heavy online." Round 570 quantified that zero EE-side (PATH3/direct-GIF) triangle vertex-kicks ever happen in the diskless boot window, despite 145 triangle-type PRIM writes - all real geometry is LINE_STRIP/SPRITE. This round researched *why*: real PS2 hardware delivers GS data via three distinct paths - PATH1 (VU1 XGKICK, real-time 3D geometry computed by a VU1 microprogram), PATH2 (VIF1 DIRECT/DIRECTHL passthrough), and PATH3 (EE-direct GIF DMA, what Round 570 examined). This project's own `gif.h`/`gif.c` already named and partially supported all three channels, but PATH1 was a complete, honestly-documented no-op - `vu.c` had no XGKICK opcode decode at all, meaning any geometry a VU1 microprogram computed (the real boot animation's rotating-logo 3D geometry is architecturally VU1-driven, matching Round 570's wireframe-only EE-side finding) had no way to ever reach the rasterizer.
+
+**Implementation.** Cross-verified against real PCSX2 reference source already present in this repo (`docs/reference/pcsx2/pcsx2/VUops.cpp`'s `_vuXGKICK()`, `VU1microInterp.cpp`'s `_vu1ExecLower`, and the `VU1_LOWER_OPCODE`/`LowerOP_T3_00` nested opcode tables) and independently against this project's own already-proven `vu_opcodes.h` field-extraction scheme (matching the DIV/SQRT/RSQRT/WAITQ precedent). XGKICK is lower-opcode 0x40 (SPECIAL), fdslot=0x1B, bc2=0 - decoded in `vu_exec_lower()` (`source/hw/vu.c`) right after the existing WAITP case. Reads `$Is`, computes `addr = (vi[rs] & 0x3FF) * 16` (masks to 1024 quadwords into VU1's 16KB local mem, exactly matching real hardware's `_vuXGKICK()`), and performs the transfer synchronously (`gif_process_quadwords(GIF_PATH_1, mem + addr, qwc)`) - the same simplification precedent this project already uses for MSCAL/MSCNT (blocking-to-completion instead of real hardware's per-cycle async xgkick queue/drain). Gated on `mem_mask == VU1_MEM_SIZE-1` so VU0's shared use of the same decode function (`vu0_exec_micro()`, 4KB mem) safely no-ops instead of misinterpreting VU0's much smaller memory as a GS packet stream - VU0 has no real GIF connection on real hardware, only VU1 does. New `VULS_FD_XGKICK_GROUP`/`VULS_FD_XTOP_GROUP` enum constants added to `source/hw/vu_opcodes.h` (XTOP/XITOP identified in the same opcode-table region but NOT implemented - needs real VIF1 TOP-register plumbing, scoped out as a narrower follow-up).
+
+**Verification.** Host-native compile clean (isolated + full 40-object rebuild). Diskless BIOS boot dump (80M EE/IOP slices, instr=639,997,991) reproduced **byte-for-byte identical** GS/GIF state to the pre-change baseline (`pmode=0x66`, `dispfb2=0x1446`, `display2=0x1BF9FF0183227C`, triangles=0/sprites=449/lines=4888/points=333) - expected and correct, since (see below) VU1 never actually executes in this window, so the new code path is provably inert, not silently broken. Scoped regression suite: 23 tests, only the pre-existing unrelated `test_sif` build failure (unchanged baseline). Dedicated VU unit suites re-linked against the full object set and run standalone: `test_vu_micro` (23 checks), `test_vif` (54 checks), `test_ee_cop2_vu0` (10 checks) - all 0 failures. Wii cross-build (devkitPPC r32/libogc): clean compile and link, `pcsx2-wii-git.dol` produced.
+
+**New, sharper diagnostic finding (temporary instrumentation, fully reverted before commit):** added a one-off `vu1_get_state()` print helper and a per-channel DMA-kick counter to see whether XGKICK would ever actually fire in this boot window. Result: **VU1 executes zero microcode instructions across the entire 640M-instruction window**, despite VIF1's DMA channel being kicked **59,270 times** - heavy, continuous real data traffic. This means the blocker is one level further upstream than XGKICK: `vif.c`'s MSCAL/MSCNT/MSCALF VIFcode dispatch (confirmed, by direct code read, to unconditionally call `vu1_exec_micro()`) is never actually reached, even though VIF1 is clearly processing a large real data stream. The XGKICK capability now shipped is necessary but not sufficient on its own - the next blocker to trace is why 59,270 real VIF1 kicks never produce a single MSCAL/MSCNT dispatch.
+
+**Files changed:** `source/hw/vu.c` (+44/-2: `#include "core/hw/gif.h"`, new XGKICK decode branch), `source/hw/vu_opcodes.h` (+2: two new enum constants). No other tracked files touched; the `dma.c`/`gif.c` diagnostic instrumentation used to gather the VU1/DMA finding above was fully reverted (`git checkout --`) before this commit - confirmed clean via `git diff`/`git status --porcelain`.
+
+**Next (Round 572, direct continuation):** trace why VIF1's heavy real traffic never dispatches an MSCAL/MSCNT/MSCALF VIFcode - candidates: a decode-position/alignment bug in `vif_process()`'s per-VIFcode loop reading this specific real data stream, this boot window's traffic being entirely UNPACK/STCYCLE/NOP (i.e. correct real hardware behavior, no MSCAL this early), or some other gating condition despite the dispatch code itself being unconditional.
+
+## Round 572 (task #536/#547, real fix, MAJOR MILESTONE): root-caused and fixed why VIF1 never dispatched MSCAL/MSCNT - VU1 microcode now genuinely executes for the first time in this project's history
+
+Direct continuation of Round 571's sharper finding: VU1 executed zero instructions across the entire diskless boot window despite VIF1's DMA channel being kicked 59,270+ times. This round traced that gap to its precise root cause and fixed it.
+
+**Investigation.** Instrumented `vif_process()` (temporary, reverted before commit) to histogram every VIFcode seen on VIF1: only 3 total calls ever reached `vif_process()` in the whole window, all 3 ending in an early stall on a genuinely reserved/unimplemented VIFcode (0x41/0x42 - cross-checked against real PCSX2's `vifCmdHandler` table in `docs/reference/pcsx2/pcsx2/Vif_Codes.cpp`: both are `vifCode_Null` on real hardware too, which for real reserved codes correctly raises ER1 and stalls the VIF - this project's matching "unsupported, stop here" behavior was already correct). The real anomaly was one level down: instrumenting `dma_channel_kick()` showed 76,676 real kicks to VIF1's DMA channel, ALL in chain mode, but 76,675 of them failed to even read a valid chain tag. Tracing the first (successful) kick's own internal chain-walk (4 tags: CNT/NEXT/CNT/END) showed it completes cleanly, clearing STR and signaling completion correctly - but the *second* kick's `TADR` register held `0x80002290`.
+
+**Root cause.** `0x80002290` is not a corrupt address - it's a legitimate real hardware DMA address with bit 31 set. Cross-checked against real PCSX2's vendored `Dmac.h` (`docs/reference/pcsx2/pcsx2/Dmac.h`): `tDMAC_ADDR` is `{ ADDR:31, SPR:1 }` - bit 31 of any real MADR/TADR value is not part of a 32-bit linear address at all, it's the "Memory/SPR Address" selector bit. When set, the low bits address the EE's separate 16KB on-chip scratchpad, not main RAM. This project's DMA register file (`channel_reg_ptr()` in `source/hw/dma.c`) stored MADR/TADR/tag-ADDR values as flat, unmasked 32-bit RAM offsets with no SPR handling at all - so any real chain-mode transfer that legitimately continues into scratchpad always failed the `g_ee_ram_size` (32MB) bound check on the very next tag read. Worse, the chain-walk's response to a failed tag read is a silent `break` that never clears STR or signals completion (`dma_channel_kick()`'s chain-mode loop) - so the channel looks "still busy" forever, and every subsequent MMIO-triggered re-kick (76,675 of them, in this window alone) just re-fails at the exact same stuck TADR, doing nothing. This was the actual, precise reason VIF1's heavy real DMA traffic never delivered enough data to ever reach an MSCAL/MSCNT VIFcode.
+
+**Fix.** Added `dma_resolve_ptr()` (source/hw/dma.c): masks any raw DMA address to bits 0-30, and when bit 31 is set, routes through a newly-bound pointer to the EE's real 16KB scratchpad buffer (`ee_state_t.scratch`, already implemented and CPU-visible at KUSEG 0x70000000-0x70003FFF since Round 8 - `ee_core.c`'s `ee_mem_ptr()`) instead of main RAM. `ram_read32()`/`ram_ptr()` (used by `transfer_quadwords()` and `read_chain_tag()`) now go through this resolver. `read_chain_tag()`'s tag-ADDR-word extraction now preserves the raw SPR bit (previously masked away) so a NEXT-type tag can correctly continue a chain into scratchpad too.
+
+Binding follows this project's own established pattern exactly (`dma_bind_ee_ram()`): a new `dma_bind_scratchpad(uint8_t *scratch, uint32_t scratch_size)` is called from `ee_core_init()` right after the existing `dma_bind_ee_ram()` call, rather than dma.c calling `ee_core_get_state()` directly. This mattered in practice - the first version of this fix (`#include "core/ee/ee_core.h"` + direct `ee_core_get_state()` call) compiled fine but broke 6 of the project's standalone single-file tests (`test_dma_chain`/`test_dma_core`/`test_dma_gif_demo`/`test_dma_inbound`/`test_dma_reply_delivered`/`test_dma_sif2`, all of which `#include "hw/dma.c"` directly without linking `ee_core.o`) with `undefined reference to ee_core_get_state` link errors - caught immediately by the regression suite and corrected to the bind-pointer design before this was committed.
+
+**Verification - the fix works exactly as diagnosed.** Diskless BIOS boot dump (100M EE/IOP slices, instr=799,997,686): `[R571-VU1] instructions_executed=66376 unimplemented_opcodes_seen=96 running=0 tpc=0x140` - VU1 microcode genuinely executes for the first time in this project's history (previously always 0, every round back to Round 444's original VU0/COP2 work). `pmode`/`dispfb2`/`display2` all unchanged (`0x66`/`0x1446`/`0x1BF9FF0183227C`) - no regression to the already-working display path. Scoped regression suite: 23/23 (only the pre-existing unrelated `test_sif` build failure, matching baseline exactly - confirming the earlier 6-test breakage is fully resolved). Dedicated `test_ee_cop2_vu0`/`test_vu_micro`/`test_vif` unit suites: 10+23+54 checks, 0 failures. Clean Wii cross-build (devkitPPC r32/libogc, zero warnings after a trivial nested-comment fix in this round's own doc comment).
+
+**What's still open:** `unimplemented_opcodes_seen=96` means this particular VU1 microprogram hits 96 real opcode gaps before halting at `tpc=0x140` - it does not (yet) reach an XGKICK in this window, so `triangles=0`/GS state is otherwise unchanged this round. The natural next step (Round 573) is identifying which real VU1 opcodes are hit at those 96 sites and implementing whichever are evidenced necessary to let this program run to completion and (if it's the boot-animation program) actually XGKICK real geometry.
+
+**Files changed:** `source/hw/dma.c` (new `dma_resolve_ptr()`/`dma_bind_scratchpad()`, `ram_read32()`/`ram_ptr()` rewritten to route through it, `read_chain_tag()`'s ADDR-word extraction preserves the SPR bit), `include/core/hw/dma.h` (new `dma_bind_scratchpad()` declaration), `source/core/ee/ee_core.c` (one new line: `dma_bind_scratchpad(g_state.scratch, sizeof(g_state.scratch))` next to the existing `dma_bind_ee_ram()` call). `dma_channel_receive_quadwords()` (the inbound/device-to-EE-RAM direction) has the identical class of gap but was left unfixed this round - no trace evidence yet shows it's hit, and the project's own established "evidence-only-implement" standard (cited throughout `dma.c`'s own REF/REFS comment) argues against speculatively touching an unexercised code path.
+
+## Round 573 (2026-08-12) - task #548: real accumulator-broadcast VU family (SUBAbc/SUBAq/etc)
+
+**Starting point:** Round 572 shipped the DMA scratchpad-addressing fix, letting VU1
+genuinely execute real microcode for the first time (66,376 instructions in the
+diskless JP-BIOS boot dump), but with `unimplemented_opcodes_seen=96` and a halt
+at `tpc=0x140`.
+
+**Investigation:** Instrumented `vu_exec_upper()`'s unmatched-decode paths with a
+per-(sub,bc) histogram and re-ran the diskless boot dump. Found exactly two buckets:
+- Upper SPECIAL-group sub=0x01 bc=3 (32 hits) and sub=0x09 bc=0 (32 hits) - the
+  "*A-accumulator" family this project's Round 94 manual extraction had flagged as
+  ambiguous and left unimplemented.
+- Upper Class A funct=0x30 (32 hits) - cross-checked against real PCSX2's own
+  `_UPPER_OPCODE[64]` dispatch table (docs/reference/pcsx2/pcsx2/VUops.cpp) and
+  confirmed to be `PREFIX##unknown` on real hardware too (the "/* 0x30 */" row is
+  all-unknown in PCSX2's own table) - a genuinely invalid encoding, not a modeling
+  gap. Left unimplemented, now documented as confirmed-correct-to-leave-alone rather
+  than merely unhandled.
+
+**Root cause of the ambiguity:** this project's Round 94 opcode table was built from
+a hand-OCR'd Sony manual PDF and flagged the *A-accumulator group as unresolvable.
+This round instead read real PCSX2's own macro-generated dispatch tables directly
+(`_UPPER_FD_00_TABLE`/`_01_TABLE`/`_10_TABLE`/`_11_TABLE`, one real table per
+broadcast-lane bc value) - unambiguous ground truth. Transcribing straight down each
+table at a fixed sub (fd-slot) index across all 4 bc-tables gives the real, complete
+instruction family for that sub.
+
+**Fix implemented** (source/hw/vu.c, source/hw/vu_opcodes.h): the full real
+accumulator-broadcast family, all ground-truthed against PCSX2's tables:
+- ADDAbc/SUBAbc/MADDAbc/MSUBAbc (sub=0x00-0x03, broadcast Ft[bc] into ACC ops)
+- MULAbc (sub=0x06)
+- MULAq/MULAi (sub=0x07 bc=0/2, alongside the already-implemented ABS bc=1 and the
+  Round 572 CLIPw bc=3 addition)
+- ADDAq/MADDAq/ADDAi/MADDAi (sub=0x08)
+- SUBAq/MSUBAq/SUBAi/MSUBAi (sub=0x09) - this is the group that was actually
+  evidenced live: SUBAq (bc=0) hit 32 times in the boot trace.
+- SUBAbc(bc=3)=SUBAw was the other evidenced hit (sub=0x01 bc=3).
+
+The pre-existing ADDA/MADDA (sub=0x0A bc=0/1) and SUBA/MSUBA/OPMULA/NOP (sub=0x0B)
+groups were cross-checked against the same real tables and confirmed already
+correct - unchanged.
+
+CLIPw (sub=0x07 bc=3) was also implemented this round (ported bit-exact from real
+PCSX2's `_vuCLIP()`, matching this project's existing VU0-macro-mode VCLIPw
+convention of storing the clip flag in vi[18]) even though it turned out not to be
+hit by this particular microprogram - the real table structure is unambiguous now,
+so implementing it is no longer a guess.
+
+**Verification:** `unimplemented_opcodes_seen` dropped from 96 to 32 (only the
+confirmed-genuinely-invalid funct=0x30 pattern remains) with `instructions_executed`
+unchanged at 66,376 and zero regression to GS state (pmode/dispfb2/display2/GIF
+primitive counts all identical to the Round 572 baseline). Full regression suite:
+23/23 matching baseline (single pre-existing test_sif buildfail). Dedicated
+VU0/VU-micro/VIF unit tests: all passing (0 failures). Wii cross-build
+(devkitPPC/libogc): clean, 0 warnings, 0 errors.
+
+**Still open:** VU1 still halts at tpc=0x140 (E-bit-driven stop, not opcode-driven -
+running=0 after the program completes normally); the remaining 32 unimplemented hits
+are a confirmed non-bug. Next step per task #549: continue the GS/dummy-function
+audit toward actual triangle rendering.
+
+## Round 574 (2026-08-12) - task #549: XGKICK-never-fires finding + GS stub audit
+
+**Investigation:** With Round 573's opcode gaps closed (VU1 now decodes essentially
+every real instruction it encounters across the diskless JP-BIOS boot budget),
+instrumented the `gif_process_quadwords(GIF_PATH_1, ...)` call site inside vu.c's
+XGKICK handler with a call counter and re-ran the diskless boot dump.
+
+**Finding:** `xgkick_calls=0` across the entire run, despite VU1 correctly executing
+66,376 real instructions spanning many E-bit-terminated microprogram runs. This rules
+out "VU1 opcode decode gaps" as the reason triangles never render at this point in
+the boot - the microprogram(s) VU1 actually runs during this phase of the diskless
+BIOS boot simply never reach/issue an XGKICK instruction at all. GIF primitive
+counts are unchanged from the established baseline (triangles=0, sprites=481,
+lines=4888, points=333) - no regression, but also no new rendering progress.
+
+Also audited `source/hw/gs.c` (116 lines), `gif.c` (2468 lines), `gs_mem.c`
+(120 lines), and `gs_wii_output.c` (86 lines) for TODO/FIXME/stub/dummy/placeholder/
+unimplemented markers - zero matches. Per this project's consistent commenting
+practice of always flagging incomplete work, this indicates the core GS write/
+rasterizer path is believed complete by its own authors. The remaining gap is
+upstream of the GS renderer (nothing currently sends a triangle-type GIF packet from
+this boot phase, whether via XGKICK or EE-side code), not a dummy/stub function
+inside GS itself.
+
+**No source fix implemented this round** - diagnostic-only, instrumentation added
+then reverted (`git checkout -- source/hw/vu.c`) after data collection, per this
+project's standing diagnostic-then-revert convention. Regression/Wii-build steps
+correctly skipped for the diagnostic portion (no tracked source changed by it).
+
+**Sandbox-reset recovery note:** mid-round, this sandbox's `/tmp` was wiped, losing
+the git commit objects for Round 572 (`e02218a`) and Round 573 (`c5a2bc6`) - my own
+rsync calls had excluded `.git` from the outputs-mirror sync, contrary to
+`docs/RECOVERY.md`'s documented procedure. File content for both rounds survived
+intact in the outputs mirror (`/sessions/<session>/mnt/outputs/pcsx2-wii/`), so no
+actual work was lost, only the commit-boundary metadata. Recovered by rebuilding
+`/tmp/pcsx2-wii-git` from the outputs mirror, confirming the recovered tree builds
+clean (40/40 host-native objects, 0 errors) and passes the full regression suite
+(23/23, matching the known baseline) and a clean Wii cross-build (0 warnings, 0
+errors), then folding Round 572+573's changes into one consolidated commit - the
+same precedented pattern used for the Round 377-383 loss (see commit `3e80d7e8`).
+Going forward, `.git/` is now included in every outputs rsync so this cannot recur.
+
+**Still open:** task #549 continues - next step is tracing backward from VU1's
+program-load/microprogram-selection point to see whether a *later*, not-yet-reached
+boot phase is the one expected to issue the real triangle XGKICK, or whether OSDSYS's
+diskless splash animation genuinely never draws triangles (only sprites/lines/points)
+by design, in which case triangle-rendering verification should move to the Tekken
+disc-boot path (task #551) instead.

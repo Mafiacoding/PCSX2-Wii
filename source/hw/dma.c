@@ -13,6 +13,16 @@
 static dma_state_t g_dma;
 static uint8_t *g_ee_ram = NULL;
 static uint32_t g_ee_ram_size = 0;
+/* Round 572: bound the same way g_ee_ram is (see dma_bind_ee_ram() /
+ * dma_bind_scratchpad() below) rather than calling ee_core_get_state()
+ * directly - dma.c must stay linkable standalone (several test source
+ * files #include this file directly without linking ee_core.o at all;
+ * a hard call-time dependency on ee_core_get_state() broke every one
+ * of them with an undefined-reference link error the first time this
+ * was tried). ee_core_init() wires this in exactly like it already
+ * does for g_ee_ram. */
+static uint8_t *g_ee_scratch = NULL;
+static uint32_t g_ee_scratch_size = 0;
 static dma_sink_fn g_sinks[DMA_CHANNEL_COUNT];
 
 void dma_init(void)
@@ -39,30 +49,90 @@ void dma_bind_ee_ram(uint8_t *ram, uint32_t ram_size)
     g_ee_ram_size = ram_size;
 }
 
+/* Round 572 (task #536/#547): binds the EE's 16KB on-chip scratchpad
+ * (the SAME buffer ee_core.c's ee_mem_ptr() exposes to CPU loads/
+ * stores at KUSEG 0x70000000-0x70003FFF, ee_state_t.scratch) so
+ * dma_resolve_ptr() can route SPR-flagged DMA addresses (real
+ * hardware's tDMAC_ADDR bit 31 - see dma_resolve_ptr()'s doc comment)
+ * to it instead of misreading them as wild main-RAM offsets. Mirrors
+ * dma_bind_ee_ram() exactly, including the "may never be called"
+ * safety: dma_resolve_ptr() checks g_ee_scratch for NULL before use,
+ * same as every other binding in this file. */
+void dma_bind_scratchpad(uint8_t *scratch, uint32_t scratch_size)
+{
+    g_ee_scratch = scratch;
+    g_ee_scratch_size = scratch_size;
+}
+
 void dma_set_sink(int channel, dma_sink_fn fn)
 {
     if (channel >= 0 && channel < DMA_CHANNEL_COUNT)
         g_sinks[channel] = fn;
 }
 
+#define EE_SCRATCH_SIZE (16u * 1024u)
+
+/* Resolves a raw 32-bit DMA address register value (MADR/TADR, or a
+ * chain tag's own ADDR word) to a host pointer, per real hardware's
+ * tDMAC_ADDR/tDMA_TAG bitfield layout (PCSX2's Dmac.h, vendored at
+ * docs/reference/pcsx2/pcsx2/Dmac.h): bits 0-30 are the real address,
+ * bit 31 is the SPR (scratchpad) selector - "Memory/SPR Address (only
+ * effective for MADR and TADR of non-SPR DMAs)". When SPR is set the
+ * low bits address the EE's 16KB on-chip scratchpad - the SAME buffer
+ * ee_core.c's ee_mem_ptr() already exposes to CPU loads/stores at
+ * KUSEG 0x70000000-0x70003FFF (ee_state_t.scratch) - which is a
+ * completely different memory than main RAM, not an offset within it.
+ *
+ * Round 572 (task #536/#547): found via a live diskless-boot trace
+ * that real BIOS code writes VIF1's TADR as an address with bit 31
+ * set (observed: 0x80002290) mid-chain. Before this fix, every DMA
+ * address (MADR/TADR/tag-ADDR) was used as a flat, unmasked 32-bit
+ * offset straight into g_ee_ram - bit 31 alone is ~2GB, always
+ * failing the g_ee_ram_size (32MB) bound check. The chain-walk loop's
+ * only response to that failure is a silent `break` that leaves the
+ * channel's STR bit set and never signals completion (see
+ * dma_channel_kick()) - so the channel looks "still busy" forever,
+ * and every later MMIO-triggered re-kick just re-fails at the exact
+ * same stuck TADR, doing nothing. This was the actual, precise reason
+ * VIF1's real DMA traffic (tens of thousands of real kicks) never
+ * delivered enough real data to ever reach an MSCAL/MSCNT VIFcode. */
+static int dma_resolve_ptr(uint32_t raw_addr, uint32_t len, uint8_t **out)
+{
+    uint32_t addr = raw_addr & 0x7FFFFFFFu;
+    if (raw_addr & 0x80000000u) {
+        if (!g_ee_scratch)
+            return 0;
+        uint32_t off = addr & (EE_SCRATCH_SIZE - 1u);
+        if (off + len > g_ee_scratch_size || off + len > EE_SCRATCH_SIZE)
+            return 0;
+        *out = g_ee_scratch + off;
+        return 1;
+    }
+    if (!g_ee_ram || addr + len > g_ee_ram_size)
+        return 0;
+    *out = g_ee_ram + addr;
+    return 1;
+}
+
 /* Little-endian-explicit RAM access - same reasoning as ee_core.c and
  * iop_core.c: PS2 memory is little-endian, our Wii/PowerPC build
  * target is big-endian, so this can't be a raw memcpy. */
-static int ram_read32(uint32_t phys_addr, uint32_t *out)
+static int ram_read32(uint32_t raw_addr, uint32_t *out)
 {
-    if (!g_ee_ram || phys_addr + 4 > g_ee_ram_size)
+    uint8_t *p;
+    if (!dma_resolve_ptr(raw_addr, 4, &p))
         return 0;
-    const uint8_t *p = g_ee_ram + phys_addr;
     *out = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
     return 1;
 }
 
-static int ram_ptr(uint32_t phys_addr, uint32_t len, const uint8_t **out)
+static int ram_ptr(uint32_t raw_addr, uint32_t len, const uint8_t **out)
 {
-    if (!g_ee_ram || phys_addr + len > g_ee_ram_size)
+    uint8_t *p;
+    if (!dma_resolve_ptr(raw_addr, len, &p))
         return 0;
-    *out = g_ee_ram + phys_addr;
+    *out = p;
     return 1;
 }
 
@@ -85,8 +155,14 @@ static int transfer_quadwords(int channel, uint32_t addr, uint32_t qwc)
 /* Reads one 64-bit DMA chain tag (2 words: control word with QWC/ID/
  * IRQ, then the ADDR word) from physical address 'tag_addr'. Matches
  * PCSX2's tDMA_TAG bitfield layout (Dmac.h): QWC in bits 0-15, PCE in
- * 26-27, ID in 28-30, IRQ in bit 31 of the control word; ADDR in bits
- * 0-30 of the address word. */
+ * 26-27, ID in 28-30, IRQ in bit 31 of the control word; the ADDR word
+ * is itself a tDMAC_ADDR (ADDR:31, SPR:1 - see dma_resolve_ptr()'s doc
+ * comment above). Round 572: *addr now preserves the raw word
+ * (including bit 31/SPR) instead of masking it away here - a
+ * NEXT-type tag can legitimately continue the chain into scratchpad,
+ * and the caller stores this value straight into ch->tadr, which
+ * dma_resolve_ptr() (via ram_read32()/ram_ptr()) already knows how to
+ * interpret correctly on its own next use. */
 static int read_chain_tag(uint32_t tag_addr, uint32_t *qwc, uint32_t *id,
                            uint32_t *addr, uint32_t *irq)
 {
@@ -97,7 +173,7 @@ static int read_chain_tag(uint32_t tag_addr, uint32_t *qwc, uint32_t *id,
     *qwc  = ctrl & 0xFFFFu;
     *id   = (ctrl >> 28) & 0x7u;
     *irq  = (ctrl >> 31) & 0x1u;
-    *addr = addr_word & 0x7FFFFFFFu;
+    *addr = addr_word;
     return 1;
 }
 

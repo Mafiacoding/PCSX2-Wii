@@ -165,6 +165,7 @@ int dma_mmio_write32(uint32_t addr, uint32_t val);
  * to the 0x1FFFFFFF EE physical range by the caller).
  */
 void dma_bind_ee_ram(uint8_t *ram, uint32_t ram_size);
+void dma_bind_scratchpad(uint8_t *scratch, uint32_t scratch_size); /* Round 572 - see dma.c's dma_resolve_ptr() doc comment */
 
 /* Called by a real (future) consumer - e.g. GIF packet parsing - to
  * receive the quadwords a channel's transfer produces. 'data' points

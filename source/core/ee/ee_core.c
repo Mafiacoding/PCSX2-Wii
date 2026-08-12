@@ -108,6 +108,7 @@
  */
 
 #include "core/ee/ee_core.h"
+#include "core/ee/ee_hle_thread.h"
 #include "core/hw/dma.h"
 #include "core/hw/ee_intc.h"
 #include "core/hw/ee_sio.h"
@@ -2380,6 +2381,7 @@ int ee_core_init(const bios_image_t *bios)
     g_rpc_bind_delay = 0;
     g_rpc_bind_cd_pending = 0;
     memset(g_ee_sema, 0, sizeof(g_ee_sema)); /* task #188: reset semaphore table on (re-)init */
+    ee_hle_thread_init(); /* Round 569: real EE thread/sema scheduler init - see include/core/ee/ee_hle_thread.h */
     mch_init(); /* EE-side MCH_RICM/MCH_DRD RDRAM auto-init registers - see core/hw/mch.h */
 
     g_state.ram = memalign(32, EE_RAM_SIZE);
@@ -2392,6 +2394,7 @@ int ee_core_init(const bios_image_t *bios)
     g_state.ram_size = EE_RAM_SIZE;
 
     dma_bind_ee_ram(g_state.ram, g_state.ram_size); /* chain-mode DMA reads tags/data from here */
+    dma_bind_scratchpad(g_state.scratch, sizeof(g_state.scratch)); /* Round 572: SPR-flagged DMA addresses (real hardware bit 31 of MADR/TADR) route here instead of main RAM */
     gif_init();
     dma_set_sink(DMA_CHANNEL_GIF, gif_process_quadwords); /* GIF DMA transfers now actually get parsed and drawn.
                                                              Round 542: DMA_CHANNEL_GIF(2) == GIF_PATH_3(2) by design
@@ -2892,6 +2895,7 @@ static int ee_step(void)
              * chain-mode register engine, so a no-op/generic-default
              * return is correct emulated behavior, not a stand-in. */
             int32_t sysnum = (int32_t)GPR(3); /* $v1, real EE convention */
+            if (ee_hle_thread_try_handle(st, sysnum, this_pc, in_delay_slot)) return 1; /* Round 569: real EE thread/sema scheduler - see include/core/ee/ee_hle_thread.h */
             if (sysnum == 100 || sysnum == 61 ||
                 sysnum == 120 || sysnum == -120) {
                 GPR(2) = 0; /* generic default return, matching established precedent */

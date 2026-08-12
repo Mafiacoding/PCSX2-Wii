@@ -72,12 +72,31 @@
  * ISWR, B/BAL/JR/JALR/IBEQ/IBNE/IBLTZ/IBGEZ/IBLEZ/IBGTZ, DIV/SQRT/
  * RSQRT) real instructions - `unimplemented_opcodes_seen` now only
  * increments for the instruction pairs (or half-pairs) that didn't
- * match any of these (the R-register RNG family, the FC-, FS-, and FM-family MAC/
- * status/clip flag ops, and a couple of accumulator-broadcast forms
- * whose encoding the source manual rendered ambiguously - all
- * documented in vu_opcodes.h rather than guessed). Real memory sizes,
- * TPC/branch/E-bit/I-bit control flow, and MPG writes (described
- * below) are unchanged from the prior round.
+ * match any of these (the R-register RNG family, the FC-, FS-, and
+ * FM-family MAC/status flag ops, and a couple of accumulator-
+ * broadcast forms whose encoding the source manual rendered
+ * ambiguously - all documented in vu_opcodes.h rather than guessed).
+ * UPDATE (Round 573, task #548): the real accumulator-broadcast
+ * instruction family is now implemented, ground-truthed from real
+ * PCSX2's own _UPPER_FD_bc_TABLE dispatch tables (see vu_opcodes.h's
+ * updated citation) rather than the prior round's ambiguous manual
+ * extraction: ADDAbc/SUBAbc/MADDAbc/MSUBAbc/MULAbc (broadcast forms,
+ * all 4 lanes), ADDAq/MADDAq/ADDAi/MADDAi/SUBAq/MSUBAq/SUBAi/MSUBAi
+ * (Q/I-register forms), MULAq/MULAi, and CLIPw (ported bit-exact from
+ * real PCSX2's _vuCLIP()) - see vu.c for the full citation trail.
+ * Root cause this round: a live diskless-boot trace showed VU1
+ * actually executing SUBAbc(bc=w) and the SUBAq/MSUBAq/SUBAi/MSUBAi
+ * group's SUBAq form 32 times each - real, load-bearing instructions
+ * this project was silently treating as no-op/unimplemented; CLIP
+ * itself turned out not to be hit by this particular microprogram,
+ * but is implemented too since the real table structure is now
+ * unambiguous. A separate, smaller unimplemented-opcode bucket (upper
+ * Class A funct=0x30, 32 hits) was cross-checked against real
+ * PCSX2's own opcode dispatch tables and confirmed to be a genuinely
+ * unknown/invalid encoding on real hardware too (not a modeling gap)
+ * - deliberately left unimplemented. Real memory sizes, TPC/branch/
+ * E-bit/I-bit control flow, and MPG writes (described below) are
+ * unchanged from the prior round.
  */
 
 #define VU1_MEM_SIZE   0x4000u /* 16KB - PCSX2's VU1_MEMSIZE */

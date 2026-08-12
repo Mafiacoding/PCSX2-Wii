@@ -368,6 +368,10 @@ static void vif_process(vif_state_t *vif, const uint8_t *data, uint32_t qwc)
              * this round (real control flow, no real opcode bodies
              * yet - a genuine, narrower step from vif.c's prior total
              * no-op). */
+            /* Round 578b: real diagnostic capture - see vif.h's
+             * mscal_calls/mscal_last_start_byte field comment. */
+            vif->mscal_calls++;
+            vif->mscal_last_start_byte = imm * 8u;
             if (vif->is_vif1)
                 vu1_exec_micro(imm);
             else
@@ -390,6 +394,17 @@ static void vif_process(vif_state_t *vif, const uint8_t *data, uint32_t qwc)
              * instead of resuming where it left off - exactly the real,
              * standard pattern real game code uses to issue one draw
              * call per MSCNT after a single MSCAL. */
+            /* Round 578b: real diagnostic capture - see vif.h's
+             * mscnt_calls/mscnt_last_resume_byte field comment. Read
+             * BEFORE the call so this records where execution actually
+             * resumed FROM, not the (mid-run or post-cap) tpc it ends
+             * up at afterward. */
+            vif->mscnt_calls++;
+            if (vif->is_vif1)
+                vif->mscnt_last_resume_byte = vu1_get_state()->tpc;
+            /* VU0 macro-mode has no exposed tpc accessor - this
+             * diagnostic field is only meaningful on the VIF1/VU1
+             * struct instance, left unset (0) for VIF0. */
             if (vif->is_vif1)
                 vu1_exec_micro_continue();
             else
@@ -447,6 +462,12 @@ static void vif_process(vif_state_t *vif, const uint8_t *data, uint32_t qwc)
                     vu0_micro_write32(ee_core_get_state(), dest_byte + w * 4u, word);
             }
             pos += words;
+            /* Round 578/578b: real diagnostic counters - see vif.h's
+             * mpg_calls/mpg_words_written/mpg_last_dest_byte field
+             * comments. */
+            vif->mpg_calls++;
+            vif->mpg_words_written += words;
+            vif->mpg_last_dest_byte = dest_byte;
         } break;
 
         case VIF_CMD_DIRECT:

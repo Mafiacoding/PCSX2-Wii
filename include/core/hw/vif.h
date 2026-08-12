@@ -139,6 +139,31 @@ typedef struct {
     uint64_t direct_qwords_forwarded; /* via DIRECT/DIRECTHL */
     uint64_t unpack_vectors_written;   /* real vectors written to VU mem via UNPACK */
     uint64_t unsupported_cmds_seen;    /* reserved VN/VL combo, or a VIF1-only cmd issued to VIF0 */
+
+    /* Round 578 (task #536/task #551 pivot): real diagnostic counters,
+     * not hardware registers - count every real MPG (micro-instruction
+     * upload) command processed and the total 32-bit words actually
+     * written to VU micro-instruction memory as a result. Added to
+     * directly answer "does any real microcode ever get uploaded to
+     * VU1 before MSCAL/MSCNT/XGKICK are issued" without extra scratch
+     * instrumentation - see tools/round578-vu1-diag/driver.c. */
+    uint64_t mpg_calls;
+    uint64_t mpg_words_written;
+
+    /* Round 578b (task #536/#551 pivot): real diagnostic counters for
+     * MSCAL/MSCALF/MSCNT dispatch - captures the byte address VU1
+     * actually starts/resumes execution from on every call, plus the
+     * MPG destination byte address of the LAST real micro-instruction
+     * upload (VIF1 side only - this field is meaningless on a VIF0
+     * struct instance). Added to directly answer whether real
+     * uploaded microcode (found via mpg_words_written) and the real
+     * MSCAL/MSCNT start/resume address ever land in the same place -
+     * see tools/round578-vu1-diag/driver.c. */
+    uint64_t mscal_calls;
+    uint32_t mscal_last_start_byte;   /* imm*8 of the most recent MSCAL/MSCALF */
+    uint64_t mscnt_calls;
+    uint32_t mscnt_last_resume_byte;  /* VU1 tpc value BEFORE the most recent MSCNT ran */
+    uint32_t mpg_last_dest_byte;      /* dest_byte of the most recent real MPG upload */
 } vif_state_t;
 
 void vif_init(void);

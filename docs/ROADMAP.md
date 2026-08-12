@@ -10127,3 +10127,30 @@ cross-build both clean. Next: either a much larger instruction budget or a
 checkpoint-based skip-ahead (Round 575's tooling) is needed to actually
 reach Tekken's own thread code and see whether it issues XGKICK once
 reached.
+
+## Round 578 (user pivot: JP BIOS image output first, Tekken deprioritized)
+
+User explicitly redirected priority away from Tekken disc-boot (task #551)
+to the JP BIOS's own boot-animation rendering (task #536/#555), citing
+real PCSX2 GitHub issue #3024 for architecture context and pointing at the
+uploaded ps2sdk-master.zip/pcsx2-master.zip reference source (extracted to
+/tmp/ref/ this round). Added real per-call diagnostic counters for MPG's
+destination address and MSCAL/MSCNT's start/resume address (vif.h/vif.c)
+and re-ran the diskless (no-disc) boot survey. Found a strong, specific
+root-cause candidate: the single real MSCAL call this boot issues has a
+start address (imm*8 = 0x40400) more than 4x larger than VU1's entire 16KB
+micro memory, which silently wraps (masked) down to 0x0400 - the exact
+"dead" resting tpc this project has observed since Round 573, landing in a
+region where no real microcode was ever uploaded. The two real MPG uploads
+(30 words total) also target out-of-range destinations that wrap into two
+disjoint, far-apart regions of VU1 memory. This pattern - MSCAL and both
+MPG destinations all individually out of VU1's valid address range by a
+similar order of magnitude - is much more consistent with a VIF1
+command-stream parsing desync (an earlier VIFcode's word-count being
+computed wrong, causing every later VIFcode in the same packet to be
+misread from the wrong stream offset) than with the real BIOS data
+genuinely containing a 4x-oversized address. Not yet done: cross-check
+vif_unpack()'s consumed-word computation against the real PCSX2
+Vif_Unpack.cpp/Vif_Codes.cpp source to pin down the exact miscount. 26/26
+regression tests and Wii cross-build both clean; no behavioral fix shipped
+this round (diagnostic counters only).

@@ -23945,3 +23945,88 @@ apparently very long-running before handing control to the game) or a
 targeted checkpoint-and-resume approach (using Round 575's checkpoint
 tooling to skip past the slow early segment) to actually reach Tekken's
 own thread code and observe whether it issues XGKICK once it runs.
+
+## Round 578: user pivot to JP BIOS boot-animation image output (task #536/#551 pivot); found real root-cause candidate for the wireframe/no-XGKICK gap
+
+**User directive this round (verbatim, German/English mixed):** "Focus not
+on on Tekken Just now on the JP Bios Image Output not the Lines we should
+do step by step first Bios and then Tekken or other Games." Plus a pointer
+to real PCSX2 GitHub issue #3024 (MTVU/VIF1 architecture discussion) and
+the uploaded `ps2sdk-master.zip`/`pcsx2-master.zip` reference source
+(extracted to `/tmp/ref/` this round, file-listing only - not yet read in
+depth). This explicitly deprioritizes Tekken disc-boot work (task #551)
+until the JP BIOS's OWN boot animation renders correctly on the DISKLESS
+(no-disc) boot path.
+
+**Methodology:** rebuilt a diskless (BIOS-only) survey driver
+(`/tmp/round578-vu1-diag/driver.c`, scratch/disposable) that runs the JP
+BIOS with no disc mounted for a 20-slice/2M-instruction-each budget
+(40M total), logging per-slice VU1 `instructions_executed`/`tpc`, and (new
+this round) real per-call diagnostics for every `VIF_CMD_MPG` and
+`VIF_CMD_MSCAL`/`MSCALF`/`MSCNT` dispatched on VIF1.
+
+**Two new real diagnostic-counter fields added to `vif_state_t`** (see
+`include/core/hw/vif.h`, mirrored in `source/hw/vif.c`'s corresponding
+case bodies - same non-invasive, always-committed counter pattern used by
+Round 577's `gif_path1_transfers` and this round's earlier
+`mpg_calls`/`mpg_words_written`):
+- `mpg_last_dest_byte` - the `dest_byte` (`imm*8`) of the most recent real
+  MPG micro-instruction upload.
+- `mscal_calls` / `mscal_last_start_byte` - count and most recent
+  `imm*8` start address of MSCAL/MSCALF.
+- `mscnt_calls` / `mscnt_last_resume_byte` - count and the VU1 `tpc` value
+  *before* each MSCNT actually ran (captures the real resume point, not
+  wherever the run ends up afterward).
+
+**Finding - the real root-cause candidate:** across the 40M-instruction
+diskless survey, VIF1 dispatches exactly 2 real `MPG` calls (30 words
+total = 15 VU instructions) and exactly 1 real `MSCAL` call. Critically:
+- The MSCAL's captured start address is `imm*8 = 0x40400` - **more than
+  4x larger than VU1's entire 16KB micro-instruction memory
+  (`VU1_MICRO_SIZE` = 0x4000 bytes)**. `vu1_exec_micro()` masks this with
+  `& (VU1_MICRO_SIZE-1)`, silently wrapping it down to `0x0400` - which
+  is exactly the "final tpc" this project's boot survey has been landing
+  on since Round 573. That resting address is provably NOT where any real
+  code was uploaded.
+- The last MPG's destination (`0x4890`) is *also* larger than the 16KB
+  micro memory space and gets masked down to `0x0890` (matching this
+  round's earlier full-memory non-zero-byte scan, which found real
+  content starting at byte 2196 ≈ `0x0894`).
+- A full VU1 micro-memory scan (this round, prior sub-step) found real
+  non-zero content in two disjoint clusters (~byte 2196-2252 and
+  ~byte 10344-10364/`0x2870`-ish) separated by ~8KB of pure zero -
+  consistent with the two MPG calls landing at two different (both
+  out-of-range, both wrap-masked) destinations, NEITHER of which is where
+  MSCAL actually told VU1 to start (`0x0400`, itself a masked-down
+  garbage value).
+
+**Classification:** an `imm` value of `0x8080` (from which `0x40400`
+derives) is nonsensical for a real VU1 MSCAL - real hardware's usable
+address range for a 16KB micro memory is only instruction-pair indices
+`0x000-0x7FF` (11 bits). Getting a 16-bit-field value this far out of
+range on the very first (and only) MSCAL of the whole boot, combined with
+both MPG destinations *also* being out-of-range by roughly the same
+order of magnitude, is much more consistent with **a VIF1 command-stream
+parsing desync** (this project's `vif_process()`/`vif_unpack()` consuming
+the wrong number of words for some earlier VIFcode in the same packet,
+causing every subsequent "VIFcode" - including this MPG and MSCAL - to
+actually be misread from the wrong byte offset in the stream) than with
+the real BIOS data genuinely containing an address 4x larger than VU1
+can hold. This is a materially different, more specific hypothesis than
+Round 572's "VIF1 traffic never dispatches MSCAL/MSCNT" - MSCAL now DOES
+fire, but with a value that cannot be real.
+
+**Not yet done this round:** cross-referencing `vif_unpack()`'s
+`consumed_words` computation (source/hw/vif.c, the fill-mode/`max_read_end`
+logic) against `/tmp/ref/pcsx2-master/pcsx2-master/pcsx2/Vif_Unpack.cpp`
+and `Vif_Codes.cpp`'s real `vifCode_MPG`/`vifCode_MSCAL` implementations,
+which is the concrete next step to confirm/refute the desync hypothesis
+and find the exact word-count bug.
+
+**Verification:** all 26 host-native regression tests that link cleanly
+against the current tree pass unchanged (same baseline as Round 577 - no
+regression). Wii cross-build (devkitPPC/libogc, outputs-mirror-persisted
+toolchain) clean: 0 warnings, 0 errors. No behavioral fix shipped this
+round - `mpg_last_dest_byte`/`mscal_calls`/`mscal_last_start_byte`/
+`mscnt_calls`/`mscnt_last_resume_byte` are pure diagnostic additions, no
+existing code path changed behavior.

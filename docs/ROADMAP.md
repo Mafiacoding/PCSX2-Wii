@@ -10321,3 +10321,27 @@ changed. Recommended next step: a controlled, from-reset, single-step
 ground-truth trace of real hardware via the live PCSX2 session (never
 attempted) instead of further static/dynamic analysis of the resident BIOS
 image, which is now genuinely exhausted across 55 rounds.
+
+## Round 590: live ground-truth trace - real OSDSYS reaches its main menu with zero disc (reproduced twice), but DebugServer bound to a stale process blocked a register-level trace
+Per user's explicit approval ("Yes, do the live trace") of Round 589's
+recommendation. Confirmed only the JP BIOS (scph10000) is present in the
+live PCSX2 install - no US-BIOS risk. Used System > Start BIOS (guaranteed
+empty tray) to perform two independent fresh resets in the live, visible
+PCSX2 window. Both times, real OSDSYS animated its spinning-ring logo and
+reached the full interactive main menu (Browser/System Settings, real
+Circle/Triangle prompts) at 60 FPS/100% speed - the exact screen 55+ rounds
+of task #447 investigation have never reached organically in this
+project's own emulation. This is strong evidence the real escalation past
+the intro animation does NOT depend on any CDVD disc-command exchange
+(there was no disc at all), reframing task #447 away from "needs a real
+N/S-command reply" and toward a timing/frame-pacing gate or another
+independent mechanism. Could not get a register-level trace this round:
+pcsx2_status/pcsx2_connect kept returning the exact same frozen
+pc=0x005189a0 state across both fresh resets, and PCSX2 itself warned of
+"another instance...using this memory card" on both boots - the
+DebugServer/Pine connection is bound to a separate, orphaned, headless
+PCSX2 process left over from an earlier session, not the interactive
+window driven this round. Next step: close the stale background process
+(Task Manager) so DebugServer binds fresh to a new interactive instance,
+then redo the from-reset trace with real breakpoints/watchpoints. No
+tracked source changed; regression/Wii build correctly skipped.

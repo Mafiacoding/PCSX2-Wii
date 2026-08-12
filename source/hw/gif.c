@@ -2197,8 +2197,11 @@ static uint32_t process_one_packet(const uint8_t *p, uint32_t len)
      * already computes/reads, not a fabrication (see gif.h's
      * gif_tag0-3/gif_cnt field comments for the full citation). VUADDR
      * always reads 0: it tracks VU1 micromem write offset during real
-     * PATH1 (XGKICK) transfers, and PATH1 is an honest, documented,
-     * pre-existing gap (vu.c has no XGKICK opcode handling at all). */
+     * PATH1 (XGKICK) transfers; Round 571 implemented real XGKICK
+     * (vu.c) and this project's transfers complete synchronously
+     * within one call here, so there is never a genuine in-flight
+     * offset to report - see gif_path1_transfers (Round 577) for the
+     * real way to observe PATH1 activity instead. */
     g_gif.gif_tag0 = tag_w0;
     g_gif.gif_tag1 = tag_w1;
     g_gif.gif_tag2 = tag_w2;
@@ -2385,6 +2388,12 @@ void gif_process_quadwords(int channel, const uint8_t *data, uint32_t qwc)
      * default comments). */
     s_gif_active_path = (channel == GIF_PATH_1 || channel == GIF_PATH_2 || channel == GIF_PATH_3)
                          ? (uint32_t)channel : GIF_PATH_3;
+
+    /* Round 577 (task #551): real diagnostic counter - see gif.h's
+     * gif_path1_transfers comment. Counts the call, not the quadword
+     * count, matching "one XGKICK = one transfer" semantics. */
+    if (s_gif_active_path == GIF_PATH_1)
+        g_gif.gif_path1_transfers++;
 
     uint32_t len = qwc * 16u;
     uint32_t off = 0;

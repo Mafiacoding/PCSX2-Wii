@@ -1153,7 +1153,7 @@ typedef struct {
      * per-path - see Gif.h, only P3TAG/P3CNT below are PATH3-
      * specific shadow copies). */
     uint32_t gif_tag0, gif_tag1, gif_tag2, gif_tag3;
-    uint32_t gif_cnt;    /* GIF_CNT: LOOPCNT (last tag's NLOOP) / REGCNT (last tag's NREG) / VUADDR (always 0 - VU1 XGKICK/PATH1 unimplemented) */
+    uint32_t gif_cnt;    /* GIF_CNT: LOOPCNT (last tag's NLOOP) / REGCNT (last tag's NREG) / VUADDR (always 0 - real hardware tracks VU1 micromem write offset during an in-flight PATH1 transfer; this project's transfers complete synchronously within one gif_process_quadwords() call, so there is never an in-flight offset to report - see gif_path1_transfers below for the real, non-simplified way to observe PATH1 activity) */
     /* GIF_P3CNT/GIF_P3TAG: PATH3-specific shadow of LOOPCNT/EOP, only
      * updated when the parsed tag arrived via GIF_PATH_3 (real
      * hardware: these two registers exist specifically to let
@@ -1161,6 +1161,15 @@ typedef struct {
      * is using the shared tag latch - see Gif.h's tGIF_P3CNT/
      * tGIF_P3TAG comments). */
     uint32_t gif_p3cnt, gif_p3tag;
+
+    /* Round 577 (task #551): real diagnostic counter, not a hardware
+     * register - counts every gif_process_quadwords(GIF_PATH_1, ...)
+     * call (i.e. every real VU1 XGKICK that actually reached the GIF,
+     * per Round 571's vu.c implementation). Added specifically so
+     * host-native survey drivers can tell, without extra scratch
+     * instrumentation, whether a given boot/run window ever issued a
+     * real XGKICK - see tools/round577-tekken-discboot/driver.c. */
+    uint64_t gif_path1_transfers;
 } gif_state_t;
 
 gif_state_t *gif_get_state(void);

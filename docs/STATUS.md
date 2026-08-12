@@ -23864,3 +23864,84 @@ driver rebuilt from scratch in this recovered sandbox - not yet done this
 round). Next: rebuild the disc-boot survey harness and check whether VU1 now
 reaches an XGKICK when running Tekken's own code, now that MSCNT correctly
 resumes multi-pass microprograms instead of restarting them.
+
+## Round 577 (2026-08-12) - task #551: Tekken disc-boot XGKICK survey (post-Round-576 MSCNT fix)
+
+**Goal:** directly verify whether Round 576's real MSCNT fix lets VU1 reach
+an actual XGKICK when running Tekken Tag Tournament's own disc-mounted game
+code, per the STATUS.md "still open" item left at the end of Round 576.
+
+**Diagnostic tooling added (real, tracked-source change):** `gif_state_t`
+gained a new `gif_path1_transfers` counter (`include/core/hw/gif.h`) -
+incremented once per `gif_process_quadwords(GIF_PATH_1, ...)` call inside
+`source/hw/gif.c`, i.e. once per real VU1 XGKICK that actually reached the
+GIF (Round 571's mechanism). This isn't a hardware register - it's a genuine
+diagnostic counter, analogous to the existing `instructions_executed`/
+`unimplemented_opcodes_seen` counters already on `vu1_state_t`, added so
+host-native survey drivers can directly answer "did XGKICK fire in this
+window" without extra scratch instrumentation. Also corrected two now-stale
+comments in `gif.h`/`gif.c` that still described PATH1/XGKICK as "not
+modeled" - that gap was closed by Round 571; the comments hadn't been
+updated since.
+
+**Survey driver:** `tools/round577-tekken-discboot/driver.c` (host-native
+only, same disposable-scratch-harness convention as every other
+`tools/roundNNN-*` driver) - mounts the reconstructed
+`/tmp/round238_diag/disc.iso` (Tekken Tag Tournament (Europe) (Demo),
+restored from the uploads mount, matching the exact reconstruction
+procedure already used for `bios.bin` earlier this session), loads the JP
+BIOS, and runs the boot in 10M-slice increments, logging EE pc/halted
+state, VU1 `instructions_executed`/`tpc`, and `gif_path1_transfers` at each
+checkpoint.
+
+**Result:** ran the survey to ~1.36 billion EE/IOP interleave slices (17
+checkpoints). VU1 executes real microprogram instructions throughout (up to
+67,356 instructions total, `tpc` cycling through several distinct addresses
+- 0x0140, 0x0400, 0x0940, 0x2870 - consistent with multiple different
+microprograms/MSCAL targets actually running), and `pmode`/`dispfb2` settle
+into the same known-good values as the diskless boot (0x66 / 0x1446). But
+**`gif_path1_transfers` stayed at 0 for the entire run** - VU1 never issued
+a single real XGKICK in this window. The boot also never left BIOS/OSDSYS-
+owned code (`pc` stayed in the 0x0050xxxx/0x8000xxxx ranges throughout) to
+reach Tekken's own previously-documented thread park point
+(`pc=0x00400324`, Round 567's `WaitSema(semid=0)` halt) even after 1.36B
+slices - far more than the ~42M-slice budget that reached that park in
+Round 567-569's drivers.
+
+**Interpretation:** this is the same finding as Round 574's diskless-boot
+survey (VU1 active, XGKICK never fires) now reconfirmed on the disc-boot
+path, and for a much larger instruction budget than previously surveyed.
+Round 576's MSCNT fix is real and correct (ground-truthed against the
+user's ps2sdk citation) but doesn't by itself change this outcome, because
+the microprogram(s) that run during this early boot/animation window
+apparently never reach an XGKICK instruction regardless of whether MSCNT is
+modeled correctly - the gap is upstream of MSCNT, in which microprogram(s)
+get invoked at all during this phase, not in how they're resumed. Whether
+Tekken's *own* game code (once actually reached) issues XGKICK differently
+remains open - this survey's larger budget still didn't reach that thread's
+own code, only OSDSYS/BIOS-owned code, in the time available this round.
+
+**Verification:** all 26 host-native regression tests that link cleanly
+against the current tree (the full GIF/GS/DMA-related subset -
+`test_gif`/`test_gif_triangle`/`test_gif_gouraud`/`test_dma_gif_demo`/
+`test_gif_texture`/`test_gif_stq_sprite`/`test_gif_line`/`test_z_buffer`/all
+`test_gs_*`/`test_dma*`/`test_mch`/`test_bios_loader`/`test_iop_intc`/
+`test_iop_timers`/`test_iop_hle_modules`) pass clean against the changed
+tree. Separately discovered and logged as a new pending item (not fixed
+this round): 62 of the 88 documented `tests/README.md` compile commands are
+stale - they predate several rounds' worth of new source files
+(`ee_timers.c`/`ee_sio.c`/`ipu.c`/`ee_hle_thread.c`/`iop_heap.c` and others)
+and fail to link on the current tree regardless of this round's change
+(confirmed by testing the pristine, unmodified README commands). Wii
+cross-build (devkitPPC/libogc, toolchain restored from the outputs
+mirror's persisted `build/devkitpro/`) clean: 0 warnings, 0 errors.
+
+**No regression, no fix shipped for the disc-boot blocker itself this
+round** - the change shipped (the `gif_path1_transfers` counter) is a pure
+diagnostic addition with no behavioral effect on any existing code path.
+Task #551 remains open. Next: the disc-boot path needs either a much
+larger instruction budget (the organic BIOS/OSDSYS animation loop is
+apparently very long-running before handing control to the game) or a
+targeted checkpoint-and-resume approach (using Round 575's checkpoint
+tooling to skip past the slow early segment) to actually reach Tekken's
+own thread code and observe whether it issues XGKICK once it runs.

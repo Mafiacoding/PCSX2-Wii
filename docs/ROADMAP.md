@@ -10104,3 +10104,26 @@ checkpoint round-trip, diskless-boot baseline all unchanged/passing; Wii
 cross-build clean. Next: re-run the Tekken disc-boot survey (harness needs
 rebuilding in this recovered sandbox) to check whether this unblocks XGKICK
 on the real game path.
+
+## Round 577 (task #551): Tekken disc-boot XGKICK survey - MSCNT fix confirmed correct but insufficient alone
+
+Added a real gif_path1_transfers diagnostic counter (gif.h/gif.c) so survey
+drivers can directly detect whether a real XGKICK reached the GIF. Rebuilt
+the Tekken disc-boot survey harness (tools/round577-tekken-discboot/driver.c)
+against the recovered tree and ran it to ~1.36 billion EE/IOP slices - far
+past the ~42M-slice budget that previously reached Tekken's own WaitSema(0)
+park (Round 567-569). Result: VU1 stays active (up to 67,356 instructions,
+cycling through several microprogram addresses) but gif_path1_transfers
+stayed at 0 the entire run, and the boot never left BIOS/OSDSYS-owned code
+to reach Tekken's own thread. Same qualitative finding as Round 574's
+diskless-boot survey, now reconfirmed on disc-boot at much larger scale -
+Round 576's MSCNT fix is real and correct but doesn't change this outcome,
+since the gap is upstream (which microprogram(s) run at all during this
+phase never reach XGKICK, independent of MSCNT semantics). Also found
+tests/README.md's documented compile commands have drifted stale (62/88
+fail to link against the current tree, unrelated to this round - logged as
+a new pending item). Regression suite (26/26 linkable tests) and Wii
+cross-build both clean. Next: either a much larger instruction budget or a
+checkpoint-based skip-ahead (Round 575's tooling) is needed to actually
+reach Tekken's own thread code and see whether it issues XGKICK once
+reached.

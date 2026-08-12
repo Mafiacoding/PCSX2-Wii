@@ -24476,3 +24476,94 @@ definitely-graphics VIF1 kick (e.g. once a real game disc + boot animation
 is actually rendering) is found to show a genuine VIFcode-stream mismatch
 against real hardware - that would need a fresh live trace at that later
 point, not a re-analysis of this same early-boot sample.
+
+## Round 586 (task #536/#560/#561): survey confirms VU1/XGKICK infra is sound but never fires during our diskless boot; real hardware screenshot identifies the actual target content
+
+**Context.** The user asked directly: fix the issue blocking the boot
+animation from showing. Round 583 fixed the real MSCALF/MSCNT opcode swap;
+this round tests whether that fix, combined with the already-implemented
+XGKICK (Round 571) and VU1 opcode set (Round 573), is actually sufficient to
+produce real triangle-based graphics output during our diskless JP BIOS
+boot - the concrete, measurable definition of "the boot animation showing
+up" (vs. the wireframe/sprite-only state characterized back in Round 570).
+
+**Method.** Built a scratch survey driver (unmodified current tree, JP
+BIOS, diskless) instrumented to report VIF1 mscal/mscnt/mpg counts, VU1
+tpc/running/instruction counts, and GIF's real counters - crucially
+`gif_path1_transfers` (Round 577) and `triangles_drawn`/`sprites_drawn`/
+`lines_drawn`/`points_drawn` (pre-existing GS coverage counters). Chained
+the run via `checkpoint_save`/`checkpoint_load` across multiple ~42M-slice
+calls (this sandbox's tool-call wall-clock budget caps a single call around
+100-170s) out to 1.68 billion EE instructions total.
+
+**Findings.**
+1. Confirmed live: exactly one distinct VU1 microprogram gets invoked
+   repeatedly (MSCAL count climbed 1->3->8->10 while MPG - fresh microcode
+   loads - only climbed 1->3->5, meaning most calls re-entered
+   already-loaded code at a different start address, not fresh programs).
+   Every single invocation ends at the same tpc (0x28c0 or, after the
+   program apparently got reloaded slightly differently, 0x0940) via a
+   legitimate E-bit halt. **`gif_path1_transfers` stayed at 0 across all 10
+   invocations and the entire 1.68B-instruction run.** XGKICK (Round 571)
+   never fires once. `triangles_drawn` stayed at 0 throughout; only
+   `sprites_drawn`/`lines_drawn`/`points_drawn` (EE-CPU-authored, per Round
+   570) climbed.
+2. Root-caused the one non-fatal VU1 "unimplemented opcode" hit (1 per run)
+   live: added a per-hit debug print (scratch-only, not shipped) and
+   decoded the failing upper-instruction word - `funct6=0x30`. Cross-checked
+   against real PCSX2's own `_UPPER_OPCODE[64]` dispatch table
+   (`VUops.cpp`): index 0x30 is real hardware's own `unknown` entry too, not
+   a gap in our decoder. This VU1 microprogram is NOT the source of the
+   "no XGKICK" symptom - it's a real hardware "reserved encoding" hit that
+   both sides handle the same way (silently continue). Ruled out.
+3. By ~336M EE instructions the whole system (EE, IOP - which fully halts
+   around this point) settles into a genuine steady idle loop: continuing
+   another 1.34 BILLION further EE instructions produced zero additional
+   VIF1/VU1/GIF activity of any kind - not a stall, a real quiescent state.
+4. **Live cross-check, the key new finding this round.** The user's live
+   `pcsx2-qt.exe` instance (still connected from Round 585) was paused at
+   EE pc=0x005189a0 both at the start of this round's live investigation
+   and again after letting it run freely in real time and re-pausing -
+   real hardware itself settles into the identical idle PC, corroborating
+   this project's own settle-into-steady-state finding rather than
+   contradicting it. Took a screenshot of the live PCSX2 window at that
+   paused state (with the user's `request_access` grant) to see what real
+   hardware is actually displaying: **a genuine lit, shadowed, textured 3D
+   cube** (the real PS2 BIOS "PlayStation または PlayStation 2 規格の
+   ディスクではありません" / "not a PlayStation or PlayStation 2 format
+   disc" error screen), not a 2D idle animation. This is real, unambiguous
+   confirmation that the real hardware content this whole VU1/XGKICK/GIF
+   effort (Rounds 570-586) has been aimed at reproducing genuinely does
+   render via triangles with texturing/lighting - the project's target is
+   correctly scoped, this is not a wild goose chase.
+
+**Why no source fix ships this round.** The live PCSX2 session has
+something occupying its virtual disc tray (the BIOS is showing a
+disc-*format*-rejection message, not a disc-*absence* message) - this is
+subtly different from this project's own diskless (nothing in the tray at
+all) boot scenario, so it is not a strict apples-to-apples comparison. What
+IS a clean, load-bearing conclusion: reaching ANY such disc-tray-reactive
+3D visual (whether "please insert a disc" or "wrong format disc") requires
+the boot sequence to actually execute real disc/tray-status-check code
+first - and this project's own, long-standing, still-open task #447
+("OSDSYS disc-browser escalation - `dispatch_ncmd()` never fires") already
+documents, across 50+ rounds, that our own diskless boot trace never
+issues a real CDVD N-command to check the tray at all. **This round's
+finding directly connects task #536 (no boot animation) to task #447 (no
+disc-command dispatch): the VU1 microprogram that would draw the real
+disc-tray-reactive cube almost certainly only gets invoked from the same
+disc-status code path task #447 has been chasing - our trace can't reach
+the animation because it never reaches the code that would decide to draw
+it.** Implementing a fix here means resolving task #447's root cause, not
+a small isolated VIF/VU1 change - forcing something narrower this round
+would not be an evidenced fix, just a guess, which the project's standing
+discipline (see every prior round's classify-before-fix pattern) rules out.
+
+**Verification.** No source changed - survey-only round. Regression suite
+and Wii rebuild correctly skipped per the docs-only-round exception.
+
+**Disposition.** Task #536 stays open, now explicitly linked to task #447
+as likely the same root cause. Recommended next step: resume task #447 with
+this round's evidence in hand (real hardware confirmed to render actual
+triangle content once disc-status code executes - a concrete, verifiable
+target to check progress against once #447's dispatch gap is closed).

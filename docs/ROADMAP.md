@@ -10257,3 +10257,24 @@ init, not a real VU1 graphics kick. Not a VIF-parsing bug. Task #561's
 "packet content mystery" closed as a mischaracterization; task #560's real
 MSCALF/MSCNT fix (Round 583) stands unaffected. See `docs/STATUS.md` Round
 585 for full trace evidence.
+
+## Round 586: VU1/XGKICK infra confirmed sound but never fires; real-hardware screenshot IDs the target, links task #536 to #447
+Docs-only. Checkpoint-chained survey (JP BIOS, diskless) out to 1.68B EE
+instructions: VU1 gets kicked repeatedly (mscal 1->10) but `gif_path1_transfers`
+stays 0 the entire run - XGKICK infra (Round 571) is correct but the BIOS-
+internal microprogram invoked during our boot never calls it; `triangles_drawn`
+stays 0 throughout. The one VU1 "unimplemented opcode" hit (funct=0x30) is
+confirmed, via real PCSX2's own `_UPPER_OPCODE[64]` table, to be a genuine
+reserved encoding on real hardware too - not our bug. System settles into a
+real steady idle loop by ~336M instructions with zero further VIF1/VU1/GIF
+activity for the next 1.3B+ instructions - not a stall, a real quiescent
+state. Live cross-check: the user's `pcsx2-qt.exe` (still connected) idles at
+the identical EE pc (0x005189a0) after running freely - and a screenshot at
+that pause shows the real PS2 BIOS's actual "not a PS/PS2 format disc" error
+screen, a genuine lit/textured/shadowed 3D cube. Confirms the project's
+target (real triangle-based GS output) is correctly scoped and reachable in
+principle, and strongly suggests task #536's blocker IS task #447 (OSDSYS's
+disc-browser/`dispatch_ncmd()` never firing in our own trace) - our boot
+never executes the disc-status code path that would decide to draw this
+content in the first place. No safe, evidenced source fix this round; next
+step is resuming task #447 with this round's real-hardware target confirmed.

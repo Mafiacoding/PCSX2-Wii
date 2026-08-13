@@ -9,6 +9,15 @@
 
 static gif_state_t g_gif;
 
+/* Round 542: which real GIF_PATH_1/2/3 value is driving the packet
+ * currently being parsed by process_one_packet() - set by
+ * gif_process_quadwords() before its parse loop runs (a single call
+ * always processes one caller-supplied buffer from exactly one path,
+ * so a module-static "current path" is equivalent to threading an
+ * extra parameter through process_one_packet() without touching its
+ * existing signature/call sites elsewhere in this file). */
+static uint32_t s_gif_active_path = GIF_PATH_3;
+
 void gif_init(void)
 {
     memset(&g_gif, 0, sizeof(g_gif));
@@ -30,6 +39,17 @@ void gif_init(void)
     g_gif.prmode = 0u;
     g_gif.colclamp = 1u; /* Round 101: default CLAMP=1 - safety gate, matches pre-existing hardcoded behavior */
     g_gif.colclamp_configured = 0;
+
+    /* Round 542: real GIF register block. memset() above already
+     * zeroed gif_ctrl/gif_mode/gif_tag0-3/gif_cnt/gif_p3cnt/gif_p3tag,
+     * which is the real documented reset state for every one of them
+     * (Gif.h's ResetRegs(): CTRL/MODE/STAT all reset to 0; TAG0-3/CNT/
+     * P3CNT/P3TAG have no independent reset semantics - they simply
+     * hold whatever the last-parsed tag was, and 0 is a perfectly
+     * valid "no tag parsed yet" value). No explicit assignment needed;
+     * this comment documents that the all-zero state is intentional,
+     * not an oversight.
+     */
     g_gif.dthe = 0u; /* Round 102: default "not performed" - safety gate */
     memset(g_gif.dimx, 0, sizeof(g_gif.dimx));
 }
@@ -2168,6 +2188,33 @@ static uint32_t process_one_packet(const uint8_t *p, uint32_t len)
     uint32_t nreg  = (tag_w1 >> 28) & 0xFu;
     uint32_t pre   = (tag_w1 >> 14) & 0x1u;
     uint32_t prim  = (tag_w1 >> 15) & 0x7FFu;
+    uint32_t eop   = (tag_w0 >> 15) & 0x1u; /* real tGIF_TAG0::EOP, bit 15 - see Gif.h */
+
+    /* Round 542: real GIF_TAG0-3/GIF_CNT register snapshot. Real
+     * hardware latches the just-parsed tag's raw 128 bits into
+     * GIF_TAG0-3 and derives GIF_CNT's LOOPCNT/REGCNT fields from it -
+     * this is a genuine, direct 1:1 mapping of values this function
+     * already computes/reads, not a fabrication (see gif.h's
+     * gif_tag0-3/gif_cnt field comments for the full citation). VUADDR
+     * always reads 0: it tracks VU1 micromem write offset during real
+     * PATH1 (XGKICK) transfers; Round 571 implemented real XGKICK
+     * (vu.c) and this project's transfers complete synchronously
+     * within one call here, so there is never a genuine in-flight
+     * offset to report - see gif_path1_transfers (Round 577) for the
+     * real way to observe PATH1 activity instead. */
+    g_gif.gif_tag0 = tag_w0;
+    g_gif.gif_tag1 = tag_w1;
+    g_gif.gif_tag2 = tag_w2;
+    g_gif.gif_tag3 = tag_w3;
+    g_gif.gif_cnt = (nloop & 0x7FFFu) | ((nreg & 0xFu) << 16);
+    if (s_gif_active_path == GIF_PATH_3) {
+        /* GIF_P3CNT/GIF_P3TAG: PATH3-only shadow registers (real
+         * hardware dedicates these specifically to PATH3 progress
+         * monitoring - see Gif.h's tGIF_P3CNT/tGIF_P3TAG and gif.h's
+         * gif_p3cnt/gif_p3tag field comment). */
+        g_gif.gif_p3cnt = nloop & 0x7FFFu;
+        g_gif.gif_p3tag = (nloop & 0x7FFFu) | (eop << 15);
+    }
 
     if (pre) {
         g_gif.prim = prim;
@@ -2333,7 +2380,21 @@ static uint32_t process_one_packet(const uint8_t *p, uint32_t len)
 
 void gif_process_quadwords(int channel, const uint8_t *data, uint32_t qwc)
 {
-    (void)channel;
+    /* Round 542: `channel` is now a real GIF_PATH_1/2/3 selector (see
+     * gif.h) - clamp defensively to PATH_3 for any out-of-range value
+     * a future caller might pass, rather than silently mis-tagging
+     * PATH3-shadow-register updates (this project's established
+     * safety-gate convention - see e.g. gif_init()'s colclamp/prim
+     * default comments). */
+    s_gif_active_path = (channel == GIF_PATH_1 || channel == GIF_PATH_2 || channel == GIF_PATH_3)
+                         ? (uint32_t)channel : GIF_PATH_3;
+
+    /* Round 577 (task #551): real diagnostic counter - see gif.h's
+     * gif_path1_transfers comment. Counts the call, not the quadword
+     * count, matching "one XGKICK = one transfer" semantics. */
+    if (s_gif_active_path == GIF_PATH_1)
+        g_gif.gif_path1_transfers++;
+
     uint32_t len = qwc * 16u;
     uint32_t off = 0;
 
@@ -2344,5 +2405,73 @@ void gif_process_quadwords(int channel, const uint8_t *data, uint32_t qwc)
         off += used;
         if (used < 16)
             break; /* incomplete packet - safety, shouldn't normally happen */
+    }
+}
+
+/* Round 542: real GIF MMIO register block (0x10003000-0x100030A0).
+ * See gif.h's field comments (gif_ctrl/gif_mode/gif_tag0-3/gif_cnt/
+ * gif_p3cnt/gif_p3tag) for the full per-register citation/rationale;
+ * this is just the bus-facing read/write dispatch, following the
+ * exact same shape as dma_mmio_read32/write32 (dma.c) and every other
+ * *_mmio_read32/write32 handler in this codebase. */
+int gif_mmio_read32(uint32_t addr, uint32_t *out_val)
+{
+    switch (addr) {
+    case GIF_CTRL_ADDR:
+        *out_val = g_gif.gif_ctrl & 0x8u; /* only PSE (bit 3) is real readable state - RST self-clears, never stored */
+        return 1;
+    case GIF_MODE_ADDR:
+        *out_val = g_gif.gif_mode & 0x5u; /* M3R (bit 0) / IMT (bit 2) - the only two real writable MODE bits */
+        return 1;
+    case GIF_STAT_ADDR: {
+        /* Derived, not stored - see gif.h's gif_ctrl/gif_mode/(absence
+         * of a gif_stat field) comment. M3R/IMT mirror MODE live;
+         * PSE mirrors CTRL live; M3P and every dynamic APATH/OPH/DIR/
+         * IP3/PxQ/FQC bit read 0 (documented gaps / genuine idle
+         * state - see gif.h). */
+        uint32_t m3r = g_gif.gif_mode & 0x1u;
+        uint32_t imt = (g_gif.gif_mode >> 2) & 0x1u;
+        uint32_t pse = (g_gif.gif_ctrl >> 3) & 0x1u;
+        *out_val = m3r | (imt << 2) | (pse << 3);
+        return 1;
+    }
+    case GIF_TAG0_ADDR: *out_val = g_gif.gif_tag0; return 1;
+    case GIF_TAG1_ADDR: *out_val = g_gif.gif_tag1; return 1;
+    case GIF_TAG2_ADDR: *out_val = g_gif.gif_tag2; return 1;
+    case GIF_TAG3_ADDR: *out_val = g_gif.gif_tag3; return 1;
+    case GIF_CNT_ADDR:  *out_val = g_gif.gif_cnt;  return 1;
+    case GIF_P3CNT_ADDR: *out_val = g_gif.gif_p3cnt; return 1;
+    case GIF_P3TAG_ADDR: *out_val = g_gif.gif_p3tag; return 1;
+    default: return 0;
+    }
+}
+
+int gif_mmio_write32(uint32_t addr, uint32_t val)
+{
+    switch (addr) {
+    case GIF_CTRL_ADDR:
+        /* RST (bit 0): real hardware resets CTRL/MODE/STAT themselves
+         * (Gif_Unit.h's ResetRegs(): "gifRegs.stat.reset();
+         * gifRegs.ctrl.reset(); gifRegs.mode.reset();") but explicitly
+         * does NOT touch TAG0-3/CNT/P3CNT/P3TAG - cross-checked and
+         * cited in gif.h's Key Technical Concepts. It's a one-shot
+         * action, not stored state, so gif_ctrl only ever retains PSE. */
+        if (val & 0x1u) {
+            g_gif.gif_ctrl = 0;
+            g_gif.gif_mode = 0;
+            /* gif_stat is derived, nothing to reset there directly. */
+        } else {
+            g_gif.gif_ctrl = val & 0x8u; /* PSE only - bits 1-2/4-31 are reserved/unwritable */
+        }
+        return 1;
+    case GIF_MODE_ADDR:
+        g_gif.gif_mode = val & 0x5u; /* M3R (bit 0) / IMT (bit 2) only - bit 1/3-31 reserved */
+        return 1;
+    /* GIF_STAT/TAG0-3/CNT/P3CNT/P3TAG are real hardware read-only
+     * registers (Gif.h defines no software-write path for any of
+     * them) - fall through to "not a GIF register" for a write,
+     * same policy this codebase already uses for other read-only
+     * MMIO (e.g. DMA channel STAT-only fields). */
+    default: return 0;
     }
 }

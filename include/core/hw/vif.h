@@ -34,17 +34,22 @@
  *   MSCAL/MSCNT/MSCALF - now call into the real VU0/VU1 microcode
  *   interpreter (`include/core/hw/vu.h`, added alongside this round's
  *   VU0/VU1 micro-instruction memory work): this synchronously runs
- *   the microprogram at the VIFcode's IMM address until a real E-bit-
- *   flagged instruction retires (with the real one-more-instruction
- *   delay - see vu.h) or a safety cap is hit. MSCNT is treated
- *   identically to MSCAL (both start at IMM) rather than modeling
- *   MSCNT's real "start at the current TPC instead" distinction - an
- *   honest simplification, noted here rather than silently, since
- *   this project's vu0_exec_micro()/vu1_exec_micro() always take an
- *   explicit start address. Because MSCAL/MSCNT/MSCALF now run
- *   synchronously to completion, FLUSHE never actually has anything
- *   left to wait for by the time it's reached - a correct no-op given
- *   that, not a shortcut. See vu.h for the important caveat that no
+ *   the microprogram until a real E-bit-flagged instruction retires
+ *   (with the real one-more-instruction delay - see vu.h) or a safety
+ *   cap is hit. MSCAL/MSCALF start at the VIFcode's IMM address
+ *   (`vu0_exec_micro()`/`vu1_exec_micro()`); MSCNT resumes from the
+ *   VU's own current TPC instead, ignoring IMM (`vu0_exec_micro_
+ *   continue()`/`vu1_exec_micro_continue()`, Round 576/task #551) -
+ *   ground-truthed against ps2sdk's packet2_utils_vu_add_continue_
+ *   program(), the real standard way game code re-invokes an already-
+ *   started VU1 program once per subsequent draw call. Before Round
+ *   576 this project treated MSCNT identically to MSCAL, silently
+ *   restarting from address 0 (a real MSCNT VIFcode's IMM field is
+ *   unused/reserved, so it was always ~0) on every "continue" instead
+ *   of resuming - see vu.c's citation for the full writeup. Because
+ *   MSCAL/MSCNT/MSCALF now run synchronously to completion, FLUSHE
+ *   never actually has anything left to wait for by the time it's
+ *   reached - a correct no-op given that, not a shortcut. See vu.h for the important caveat that no
  *   real per-opcode VU instruction body is decoded yet (real control
  *   flow only) - this is a genuine, narrower step forward, not a full
  *   VU implementation.
@@ -105,13 +110,18 @@
  *     register layout from `writeXYZW`), and STMOD-driven row
  *     accumulate/chain modes (modes 0-3, real `writeXYZW` switch).
  *
- * NOT implemented: a partial UNPACK payload split across multiple DMA
- * calls (real hardware/PCSX2 buffer this via `nVifStruct::buffer` -
- * this project's `vif_process()` only ever sees one contiguous
- * transfer at a time and assumes the full UNPACK payload is present
- * in it, silently truncating early via the existing bounds-checked
- * reads if it isn't - flagged here, not guessed at, matching this
- * project's established pattern for narrow first increments).
+ * Round 580 (task #536/#557): a partial UNPACK payload split across
+ * multiple DMA calls is now handled for real, closing the gap flagged
+ * above in earlier rounds. Ported from PCSX2's `Vif_Unpack.cpp`
+ * (`nVifUnpack<idx>()`'s buffer-then-process pattern) and
+ * `vifUnpackSetup<idx>()`'s closed-form upfront payload-size formula
+ * (`nVifT[16]` gsize table x STCYCL CL/WL, skipping-write vs
+ * filling-write cases) - see `vif.c`'s `vif_unpack_needed_bytes()`
+ * and `vif_state_t`'s `unpack_pending`/`unpack_buffer` fields for the
+ * full citation trail. This is the direct UNPACK-side counterpart of
+ * Round 579's MPG cross-DMA-chunk continuation fix, found by
+ * following the same "does this command have the identical gap"
+ * question that MPG turned out to have.
  */
 
 typedef struct {
@@ -134,6 +144,88 @@ typedef struct {
     uint64_t direct_qwords_forwarded; /* via DIRECT/DIRECTHL */
     uint64_t unpack_vectors_written;   /* real vectors written to VU mem via UNPACK */
     uint64_t unsupported_cmds_seen;    /* reserved VN/VL combo, or a VIF1-only cmd issued to VIF0 */
+
+    /* Round 578 (task #536/task #551 pivot): real diagnostic counters,
+     * not hardware registers - count every real MPG (micro-instruction
+     * upload) command processed and the total 32-bit words actually
+     * written to VU micro-instruction memory as a result. Added to
+     * directly answer "does any real microcode ever get uploaded to
+     * VU1 before MSCAL/MSCNT/XGKICK are issued" without extra scratch
+     * instrumentation - see tools/round578-vu1-diag/driver.c. */
+    uint64_t mpg_calls;
+    uint64_t mpg_words_written;
+
+    /* Round 578b (task #536/#551 pivot): real diagnostic counters for
+     * MSCAL/MSCALF/MSCNT dispatch - captures the byte address VU1
+     * actually starts/resumes execution from on every call, plus the
+     * MPG destination byte address of the LAST real micro-instruction
+     * upload (VIF1 side only - this field is meaningless on a VIF0
+     * struct instance). Added to directly answer whether real
+     * uploaded microcode (found via mpg_words_written) and the real
+     * MSCAL/MSCNT start/resume address ever land in the same place -
+     * see tools/round578-vu1-diag/driver.c. */
+    uint64_t mscal_calls;
+    uint32_t mscal_last_start_byte;   /* imm*8 of the most recent MSCAL/MSCALF */
+    uint64_t mscnt_calls;
+    uint32_t mscnt_last_resume_byte;  /* VU1 tpc value BEFORE the most recent MSCNT ran */
+    uint32_t mpg_last_dest_byte;      /* dest_byte of the most recent real MPG upload */
+
+    /* Round 579 (task #536/#556): real MPG partial-transfer state,
+     * persisted ACROSS separate vif_process() calls - matches real
+     * hardware's vifStruct.tag.addr/tag.size + vifX.cmd/pass fields
+     * (PCSX2's vifCode_MPG "Partial Transfer" vs "Full Transfer"
+     * path, Vif_Codes.cpp). Ground-truthed this round: a real VU1
+     * microprogram upload can span MULTIPLE separate VIF1 DMA
+     * transfers (chain links), and real hardware resumes writing
+     * from where a truncated MPG left off on the NEXT transfer,
+     * rather than re-reading a fresh VIFcode at that offset. This
+     * project's vif_process() previously had no such state (see the
+     * older, still-accurate UNPACK-specific version of this same gap
+     * documented in this struct's own header comment above) - MPG
+     * had the identical gap, undocumented until this round's
+     * diagnostic counters (mscal_last_start_byte/mpg_last_dest_byte)
+     * caught it in the act: a 2-call, 30-word-total upload where real
+     * BIOS data plausibly spans far more than that, with the leftover
+     * continuation words silently misparsed as fresh VIFcodes on the
+     * following DMA chain link. mpg_pending is nonzero while a
+     * partial MPG transfer is outstanding; mpg_pending_addr/_words
+     * track the destination byte and words remaining. */
+    int      mpg_pending;
+    uint32_t mpg_pending_addr;
+    uint32_t mpg_pending_words;
+
+    /* Round 580 (task #536/#557): real UNPACK partial-transfer state -
+     * the UNPACK-equivalent of Round 579's MPG fix, matching real
+     * hardware's nVifStruct::buffer accumulate-then-unpack semantics
+     * (Vif_Unpack.cpp's nVifUnpack<>/vifUnpackSetup<> - see vif.c's
+     * citation trail). Architecturally DIFFERENT from MPG's
+     * incremental-write-and-resume approach: real hardware BUFFERS
+     * raw payload bytes across truncated DMA transfers and only runs
+     * the actual per-vector unpack loop once the FULL expected
+     * payload has accumulated (buffer capped at 4096 bytes = 256*16,
+     * matching nVifStruct::buffer's real size, Vif_Dynarec.h - and
+     * matching this project's own vif_unpack_needed_bytes() worst
+     * case: num=256, gsize=16 -> exactly 4096 bytes, never more).
+     * unpack_pending is nonzero while a partial UNPACK transfer is
+     * outstanding; unpack_code/unpack_cmd are the original VIFcode
+     * that started it (needed to replay the unpack loop - address/
+     * NUM/USN/FLG bits - once complete); unpack_needed_bytes/
+     * unpack_have_bytes track the total payload size (computed
+     * upfront via the real vifUnpackSetup<> closed-form formula, see
+     * vif_unpack_needed_bytes()) and how much has been buffered so
+     * far. KNOWN SIMPLIFICATION (documented, not silently swept
+     * under the rug): the destination VU-mem base address for a
+     * FLG-relative (VIF1 TOPS-relative) UNPACK is recomputed from the
+     * CURRENT vif->tops at buffer-completion time, not latched at
+     * command-issue time like real hardware's tag.addr - a real gap
+     * only if TOPS itself changes mid-transfer, an edge case not
+     * expected to matter for the BIOS-boot upload this fix targets. */
+    int      unpack_pending;
+    uint32_t unpack_code;
+    uint32_t unpack_cmd;
+    uint32_t unpack_needed_bytes;
+    uint32_t unpack_have_bytes;
+    uint8_t  unpack_buffer[4096];
 } vif_state_t;
 
 void vif_init(void);

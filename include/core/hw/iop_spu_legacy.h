@@ -63,6 +63,24 @@
 #define IOP_SPU_LEGACY_BASE 0x1F801C00u
 #define IOP_SPU_LEGACY_SIZE 0x0200u
 
+/*
+ * Round 523/524 addition (task #490): real, cited named offsets for
+ * the Voice-Flags and Control/Status registers, needed to implement
+ * real KON-clears-ENDX and CTRL[5:0]->STATUS[5:0] semantics (see
+ * iop_spu_legacy.c). Source: psx-spx
+ * (https://psx-spx.consoledev.net/soundprocessingunitspu/), which
+ * documents this exact PS1 SPU register block that PS2's IOP keeps
+ * present for backward compatibility (see file header above). All
+ * five registers below are real 32-bit-wide fields per psx-spx's own
+ * "Voice 0..23 Flags (six 1bit flags per voice)" description of the
+ * 0x1F801D88-0x1F801D9F region (24 bits used, one per voice).
+ */
+#define SPU_LEGACY_KON     0x188u /* 1F801D88h, Key ON  (W) - offset from base */
+#define SPU_LEGACY_KOFF    0x18Cu /* 1F801D8Ch, Key OFF (W) - offset from base */
+#define SPU_LEGACY_ENDX    0x19Cu /* 1F801D9Ch, ENDX status (R) - offset from base */
+#define SPU_LEGACY_CTRL    0x1AAu /* 1F801DAAh, SPUCNT control (R/W) - offset from base */
+#define SPU_LEGACY_STATUS  0x1AEu /* 1F801DAEh, SPUSTAT status (R) - offset from base */
+
 void iop_spu_legacy_init(void);
 
 /* Same convention as every other *_mmio_read/write helper in this

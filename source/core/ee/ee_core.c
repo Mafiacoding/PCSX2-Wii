@@ -108,10 +108,12 @@
  */
 
 #include "core/ee/ee_core.h"
+#include "core/ee/ee_hle_thread.h"
 #include "core/hw/dma.h"
 #include "core/hw/ee_intc.h"
 #include "core/hw/ee_sio.h"
 #include "core/hw/ee_timers.h" /* Round 87 (127th finding) */
+#include "core/hw/ipu.h" /* Round 521/522 (task #487) */
 #include "core/hw/gs.h"
 #include "core/hw/gif.h"
 #include "core/hw/vif.h"
@@ -1140,10 +1142,13 @@ uint32_t ee_mem_read32(ee_state_t *st, uint32_t addr)
 {
     /* Hardware register window (0x10000000-0x1000FFFF): DMA controller,
      * SIF mailbox registers, and friends. Other addresses in this
-     * window (timers, INTC, GIF/VIF/IPU control regs) still fall
-     * through to the silent-no-op RAM/BIOS path below, which returns
-     * 0. See docs/ROADMAP.md. (SIO, 0x1000F100-0x1000F1C0, is now
-     * modeled for real - see ee_sio.c, Round 392.) */
+     * window (GIF/VIF control regs) still fall through to the
+     * silent-no-op RAM/BIOS path below, which returns 0. See
+     * docs/ROADMAP.md. (SIO, 0x1000F100-0x1000F1C0, is modeled for
+     * real - see ee_sio.c, Round 392. IPU_CMD/CTRL/BP/TOP,
+     * 0x10002000-0x10002038, is modeled for real as of Round 521/522,
+     * task #487 - see ipu.c; real decode logic is still a later,
+     * evidence-driven round, see ipu.h's scope note.) */
     uint32_t hw_val;
     uint32_t hw_addr = ee_hw_mmio_addr(addr);
     if (dma_mmio_read32(hw_addr, &hw_val))
@@ -1157,6 +1162,10 @@ uint32_t ee_mem_read32(ee_state_t *st, uint32_t addr)
     if (ee_timers_mmio_read32(hw_addr, &hw_val)) /* Round 87 (127th finding) */
         return hw_val;
     if (ee_sio_mmio_read32(hw_addr, &hw_val)) /* Round 392 */
+        return hw_val;
+    if (ipu_mmio_read32(hw_addr, &hw_val)) /* Round 521/522 (task #487) */
+        return hw_val;
+    if (gif_mmio_read32(hw_addr, &hw_val)) /* Round 542 (task #510) */
         return hw_val;
 
     uint8_t *p = ee_mem_ptr(st, addr, 4);
@@ -1223,6 +1232,10 @@ void ee_mem_write32(ee_state_t *st, uint32_t addr, uint32_t val)
     if (ee_timers_mmio_write32(hw_addr_w, val)) /* Round 87 (127th finding) */
         return;
     if (ee_sio_mmio_write32(hw_addr_w, val)) /* Round 392 */
+        return;
+    if (ipu_mmio_write32(hw_addr_w, val)) /* Round 521/522 (task #487) */
+        return;
+    if (gif_mmio_write32(hw_addr_w, val)) /* Round 542 (task #510) */
         return;
 
     uint8_t *p = ee_mem_ptr(st, addr, 4);
@@ -1710,6 +1723,133 @@ static int sif_loadfile_elf_load(ee_state_t *st, const char *romname, uint32_t *
     return 1;
 }
 
+/* Round 554 (task #521/#522): raw byte-range disc reader for ELF
+ * program-header parsing (mirrors ee_fio_disc_read_bytes()'s own
+ * sector-spanning walk, but into a plain buffer instead of EE RAM -
+ * program headers need to be inspected by this function itself
+ * before any RAM write happens). */
+static uint32_t sif_loadfile_disc_read_raw(uint32_t base_lba, uint32_t file_byte_offset, uint8_t *dst, uint32_t n)
+{
+    uint32_t copied = 0u;
+    while (copied < n) {
+        uint8_t sbuf[ISO_SECTOR_SIZE];
+        uint32_t abs_byte = file_byte_offset + copied;
+        uint32_t sector_index = abs_byte / ISO_SECTOR_SIZE;
+        uint32_t sector_off = abs_byte % ISO_SECTOR_SIZE;
+        uint32_t chunk = ISO_SECTOR_SIZE - sector_off;
+        uint32_t remaining = n - copied;
+        uint32_t k;
+        if (chunk > remaining) chunk = remaining;
+        if (iop_cdvd_disc_read_sector(base_lba + sector_index, sbuf) != 0) break; /* real read failure - stop, honest partial */
+        for (k = 0; k < chunk; k++) dst[copied + k] = sbuf[sector_off + k];
+        copied += chunk;
+    }
+    return copied;
+}
+
+/* Round 554 (task #521/#522): real cdrom0:/cdrom1: counterpart to
+ * sif_loadfile_elf_load() above. Root-caused this round via a live
+ * syscall-dispatch + RPC-payload trace: EELOAD's own real fast-boot
+ * code (Round 552's patched "cdrom0:\SCED_500.41;1" path string)
+ * sends its LF_F_ELF_LOAD RPC_CALL request through this SAME generic
+ * SIF_SID_LOADFILE service that rom0:OSDSYS already uses (syscall 119
+ * / sceSifSetDma DOES fire, with a real 2-descriptor SIF_CMD_RPC_CALL
+ * packet whose rpc_number==1) - but until this round, the handler
+ * only ever knew how to resolve a name via romdir_lookup() (the BIOS
+ * ROM's own rom0: filesystem), so any cdrom0:/cdrom1: request
+ * silently failed (0 return, left un-replied, an "honest gap" per
+ * that function's own comment). That silent failure is exactly why
+ * the real WaitSema() this RPC's REND reply should unblock never
+ * resolved (Round 552/553's "frozen at 0x000836C4" WaitSema(0) block)
+ * - confirmed by this round's own host-native verification: with this
+ * fix, sif_loadfile_elf_load_disc() succeeds (real epc=0x003572A0,
+ * the actual game ELF's entry point), the REND reply is delivered,
+ * WaitSema resolves, and execution proceeds tens of millions of
+ * instructions past the previous freeze point.
+ *
+ * This project already has a real, tested, standalone ISO9660 reader
+ * (iso_loader.c) wired to the disc via iop_cdvd_disc_find_file() /
+ * iop_cdvd_disc_read_sector() (Round 367, already proven correct for
+ * real cdrom0:/cdrom1: FIO_F_OPEN/FIO_F_READ game-data traffic) - this
+ * function is a thin reuse of that SAME real mechanism for ELF
+ * loading, not a new disc parser. Follows the same "translate the
+ * segment base once, apply a fixed delta across the whole segment,
+ * write raw physical RAM bytes directly" pattern as
+ * sif_loadfile_elf_load() above, for consistency with that
+ * already-established, already-working ELF-segment-copy discipline. */
+static int sif_loadfile_elf_load_disc(ee_state_t *st, const char *discname, uint32_t *out_epc, uint32_t *out_gp)
+{
+    uint32_t base_lba, file_size;
+    if (!iop_cdvd_disc_find_file(discname, &base_lba, &file_size)) {
+        /* Real ISO9660 directory entries store the ";N" version
+         * suffix as part of the stored name (iso_loader.h's own
+         * documented caller convention, already relied on by the
+         * FIO_F_OPEN handler above) - same ";1" fallback established
+         * there, kept here for consistency even though real EELOAD
+         * path strings observed so far already include it. */
+        char with_ver[64];
+        int vk;
+        for (vk = 0; vk < 58 && discname[vk]; vk++) with_ver[vk] = discname[vk];
+        with_ver[vk] = 0;
+        if (vk == 0 || strchr(with_ver, ';')) return 0;
+        with_ver[vk] = ';'; with_ver[vk + 1] = '1'; with_ver[vk + 2] = 0;
+        if (!iop_cdvd_disc_find_file(with_ver, &base_lba, &file_size)) return 0;
+    }
+    if (file_size < 52u) return 0;
+
+    uint8_t hdr[ISO_SECTOR_SIZE];
+    if (iop_cdvd_disc_read_sector(base_lba, hdr) != 0) return 0;
+    if (hdr[0] != 0x7Fu || hdr[1] != 'E' || hdr[2] != 'L' || hdr[3] != 'F') return 0;
+
+    uint32_t e_entry = elfld_rd_le32(hdr + 24u);
+    uint32_t e_phoff = elfld_rd_le32(hdr + 28u);
+    uint16_t e_phentsize = elfld_rd_le16(hdr + 42u);
+    uint16_t e_phnum = elfld_rd_le16(hdr + 44u);
+    uint32_t i;
+
+    for (i = 0; i < (uint32_t)e_phnum; i++) {
+        uint8_t phbuf[32];
+        uint32_t ph_off = e_phoff + i * (uint32_t)e_phentsize;
+        uint32_t got = sif_loadfile_disc_read_raw(base_lba, ph_off, phbuf, 32u);
+        uint32_t p_type, p_offset, p_vaddr, p_filesz, p_memsz;
+        uint32_t phys_base;
+        int64_t delta;
+        uint32_t copied;
+        if (got < 32u) break;
+        p_type = elfld_rd_le32(phbuf + 0u);
+        p_offset = elfld_rd_le32(phbuf + 4u);
+        p_vaddr = elfld_rd_le32(phbuf + 8u);
+        p_filesz = elfld_rd_le32(phbuf + 16u);
+        p_memsz = elfld_rd_le32(phbuf + 20u);
+        if (p_type != 1u) continue; /* PT_LOAD only, matches sif_loadfile_elf_load() above */
+
+        phys_base = sif_loadfile_translate_base(st, p_vaddr);
+        delta = (int64_t)phys_base - (int64_t)p_vaddr;
+
+        copied = 0u;
+        while (copied < p_filesz) {
+            uint8_t sbuf[ISO_SECTOR_SIZE];
+            uint32_t abs_byte = p_offset + copied;
+            uint32_t sector_index = abs_byte / ISO_SECTOR_SIZE;
+            uint32_t sector_off = abs_byte % ISO_SECTOR_SIZE;
+            uint32_t chunk = ISO_SECTOR_SIZE - sector_off;
+            uint32_t remaining = p_filesz - copied;
+            uint32_t k;
+            if (chunk > remaining) chunk = remaining;
+            if (iop_cdvd_disc_read_sector(base_lba + sector_index, sbuf) != 0) break; /* honest partial on real read failure */
+            for (k = 0; k < chunk; k++)
+                sif_loadfile_ram_write8_delta(st, p_vaddr + copied + k, delta, sbuf[sector_off + k]);
+            copied += chunk;
+        }
+        for (; copied < p_memsz; copied++)
+            sif_loadfile_ram_write8_delta(st, p_vaddr + copied, delta, 0u); /* BSS zero-fill, same fixed delta */
+    }
+
+    *out_epc = e_entry;
+    *out_gp = 0u; /* real IOP-side elf_load_all_section() hardcodes this reply field to 0 - see citation above */
+    return 1;
+}
+
 /* task #192 (68th finding): synthesizes the real IOP's SIF_CMD_RPC_END
  * (REND) reply to a SIF_CMD_RPC_BIND request - see sif.h for the full
  * citation trail (byte-exact match to real sceSifBindRpc()/
@@ -1856,9 +1996,73 @@ static int sif_loadfile_elf_load(ee_state_t *st, const char *romname, uint32_t *
 static void sif_cmd_iop_write_private_queue_copy(ee_state_t *st, uint32_t cd_ptr, uint32_t inner_cid)
 {
     uint32_t queue_ptr = ee_mem_read32(st, 0x0046D618u);
-    if (!queue_ptr || queue_ptr < 0x00100000u)
-        return; /* not yet populated / not a plausible real pointer - stay silent, no guessing */
+    /* Round 562 (task #530 continuation): the original guard below only
+     * rejected values under 1MB, with no upper bound - so any "plausible-
+     * looking" garbage above that (e.g. a value EELOAD's own unrelated
+     * code transiently left at this address before OSDSYS has even run)
+     * was trusted as a real pointer and dereferenced. Caught via direct
+     * instrumentation on the cdrom0:/disc fast-boot path (Round 554/561):
+     * at the exact moment this deferred write fires (rel~5180 past the
+     * LF_F_ELF_LOAD anchor, ~200 cycles after ee_arm_rpc_call_pending()),
+     * MEM[0x0046D618] holds 0x0E910E5C - not a coincidence-free real
+     * pointer, but a value EELOAD's own code at pc=0x00083A68 had just
+     * written to that address moments earlier (rel=4979, confirmed via
+     * a value-change watch) for reasons unrelated to this function's
+     * "real queue buffer" assumption. The organic (rom0:) path never
+     * exhibits this: MEM[0x0046D618] stays exactly 0 for the entire
+     * observed window, since OSDSYS's own code - the only real writer
+     * of a genuine queue pointer here - hasn't started running yet this
+     * early in boot (confirmed: OSDSYS's own resident code, 0x00200000+,
+     * isn't entered until instruction offset +9146 past this same
+     * anchor per Round 561, versus this deferred write firing at +5180
+     * - OSDSYS simply cannot have written a real pointer here yet). The
+     * resulting dereference (writing to queue_ptr+0x00 through +0x2C)
+     * hit an unmapped address and raised a real TLB-refill (store)
+     * exception, this project's own EE_EXC_CODE_TLBS (ee_core.c line
+     * ~377) - the exact, previously-unexplained fork point Round 561
+     * pinpointed between the organic and patched boot trajectories.
+     * Fix: add a real, already-established upper bound - EE_RAM_SIZE
+     * (32MB, the actual modeled PS2 main RAM size, already used
+     * elsewhere in this file, e.g. the stack-pointer-fallback
+     * computation) - since no genuine RAM pointer can legitimately
+     * exceed it. 0x0E910E5C (~233MB) fails this trivially; any value
+     * OSDSYS's real code would plausibly write here (a pointer into
+     * its own loaded RAM image) passes it. This does not attempt to
+     * guess the "correct" value or synthesize a fake one - it only
+     * makes the existing "not yet populated / not plausible" silent
+     * no-op path (already present, already the documented safe
+     * fallback for this exact scenario) trigger correctly for genuinely
+     * implausible values, matching organic's own already-safe
+     * behavior.
+     *
+     * Round 565 correction (task #537, git-bisected regression): Round
+     * 562's upper-bound check above compared the RAW pre-mask queue_ptr
+     * against EE_RAM_SIZE. That's wrong for any real pointer that isn't
+     * already a small physical offset - this project's own convention
+     * (see the qbuf computation immediately below, and
+     * sif_loadfile_translate_base()) is that real EE addresses arrive
+     * in a mapped/virtual form and must be masked with 0x1FFFFFFF to
+     * get the physical RAM offset. A genuine, real queue pointer this
+     * project itself produces organically - confirmed via direct
+     * instrumentation (/tmp/r565_watch, true diskless boot) - is
+     * 0x2046D540 (masked: 0x0046D540, a perfectly ordinary ~4.6MB
+     * physical offset, well inside the real 32MB RAM). Checked as a
+     * raw value, 0x2046D540 (~545MB) trivially exceeds EE_RAM_SIZE and
+     * was being silently rejected by Round 562's guard - which git-
+     * bisection (task #537) proved is exactly what broke organic
+     * (diskless) boot's forward progress: this function's suppressed
+     * side-effect write was the real signal this project's own
+     * WaitSema(semid=0) trampoline (0x00210F84) needed, so blocking it
+     * introduced a permanent early park (~30.9M instructions,
+     * pmode/GS never configured) that did not exist before Round 562.
+     * Fix: compute qbuf (the masked physical address) first, and check
+     * *that* against EE_RAM_SIZE instead of the raw queue_ptr. This
+     * still correctly rejects Round 562's original garbage case
+     * (0x0E910E5C masks to itself, still ~244MB, still fails), while
+     * correctly accepting real pointers like 0x2046D540. */
     uint32_t qbuf = queue_ptr & 0x1FFFFFFFu; /* real vaddr -> phys, same convention as sif_loadfile_translate_base() */
+    if (!queue_ptr || queue_ptr < 0x00100000u || qbuf >= EE_RAM_SIZE)
+        return; /* not yet populated / not a plausible real pointer - stay silent, no guessing */
     ee_mem_write32(st, qbuf + 0x00u, 0x30u);        /* psize=48 low byte doubles as the real byte-count gate (see citation above) */
     ee_mem_write32(st, qbuf + 0x04u, 0u);
     ee_mem_write32(st, qbuf + 0x08u, SIF_CMD_RPC_END);
@@ -2177,6 +2381,7 @@ int ee_core_init(const bios_image_t *bios)
     g_rpc_bind_delay = 0;
     g_rpc_bind_cd_pending = 0;
     memset(g_ee_sema, 0, sizeof(g_ee_sema)); /* task #188: reset semaphore table on (re-)init */
+    ee_hle_thread_init(); /* Round 569: real EE thread/sema scheduler init - see include/core/ee/ee_hle_thread.h */
     mch_init(); /* EE-side MCH_RICM/MCH_DRD RDRAM auto-init registers - see core/hw/mch.h */
 
     g_state.ram = memalign(32, EE_RAM_SIZE);
@@ -2189,11 +2394,18 @@ int ee_core_init(const bios_image_t *bios)
     g_state.ram_size = EE_RAM_SIZE;
 
     dma_bind_ee_ram(g_state.ram, g_state.ram_size); /* chain-mode DMA reads tags/data from here */
+    dma_bind_scratchpad(g_state.scratch, sizeof(g_state.scratch)); /* Round 572: SPR-flagged DMA addresses (real hardware bit 31 of MADR/TADR) route here instead of main RAM */
     gif_init();
-    dma_set_sink(DMA_CHANNEL_GIF, gif_process_quadwords); /* GIF DMA transfers now actually get parsed and drawn */
+    dma_set_sink(DMA_CHANNEL_GIF, gif_process_quadwords); /* GIF DMA transfers now actually get parsed and drawn.
+                                                             Round 542: DMA_CHANNEL_GIF(2) == GIF_PATH_3(2) by design
+                                                             (see gif.h) - the channel value dma.c passes through here
+                                                             IS already the correct real transfer-path selector, no
+                                                             wrapper/translation needed. */
     vif_init();
     dma_set_sink(DMA_CHANNEL_VIF0, vif0_process_quadwords); /* VIF0/VIF1 DMA transfers now walk real VIFcode streams - see vif.h */
     dma_set_sink(DMA_CHANNEL_VIF1, vif1_process_quadwords);
+    ipu_init();
+    dma_set_sink(DMA_CHANNEL_TOIPU, ipu_process_quadwords); /* Round 521/522 (task #487): real input FIFO fill tracking, no decode yet - see ipu.h */
 
     /* (Round 449 note: the three dma_set_sink() calls above register
      * HOST C FUNCTION POINTERS into dma.c's static g_sinks[] table -
@@ -2274,9 +2486,10 @@ int ee_core_init(const bios_image_t *bios)
  * Round 449. */
 void ee_core_rebind_dma_sinks(void)
 {
-    dma_set_sink(DMA_CHANNEL_GIF, gif_process_quadwords);
+    dma_set_sink(DMA_CHANNEL_GIF, gif_process_quadwords); /* Round 542: DMA_CHANNEL_GIF(2) == GIF_PATH_3(2) - see gif.h */
     dma_set_sink(DMA_CHANNEL_VIF0, vif0_process_quadwords);
     dma_set_sink(DMA_CHANNEL_VIF1, vif1_process_quadwords);
+    dma_set_sink(DMA_CHANNEL_TOIPU, ipu_process_quadwords); /* Round 521/522 (task #487) - same stale-function-pointer-after-checkpoint-restore concern as the 3 sinks above, see this function's own header comment */
 }
 
 static void halt(const char *reason)
@@ -2370,6 +2583,30 @@ void vu0_exec_micro(ee_state_t *st, uint32_t start_addr)
      * a sensible live value, same real register slot round 12's
      * generic CTC2/CFC2 dispatch already exposes. */
     st->cop2_ctrl[26] = (start_addr << 3) & (uint32_t)(sizeof(st->vu0_micro) - 1u);
+    st->vu0_running = 1;
+
+    for (uint32_t i = 0; i < VU0_EXEC_STEP_CAP; i++) {
+        int stopped = vu_micro_step(st->vu0_vf, st->cop2_ctrl, st->vu0_acc,
+                                     st->vu0_mem, (uint32_t)(sizeof(st->vu0_mem) - 1u),
+                                     st->vu0_micro, (uint32_t)(sizeof(st->vu0_micro) - 1u),
+                                     &st->cop2_ctrl[26], &st->vu0_branch_delay, &st->vu0_branch_target,
+                                     &st->vu0_ebit_delay,
+                                     &st->vu0_instructions_executed, &st->vu0_unimplemented_opcodes_seen);
+        if (stopped)
+            break;
+    }
+
+    st->vu0_running = 0;
+}
+
+/* Round 576 (task #551): real MSCNT semantics for VU0 macro mode - see
+ * vu.c's vu1_exec_micro_continue() citation for the full real-hardware
+ * ground-truthing (ps2sdk's packet2_utils_vu_add_continue_program()).
+ * Resumes from cop2_ctrl[26] (VU0's real TPC register) AS-IS, instead
+ * of resetting it from a caller-supplied address like vu0_exec_micro()
+ * does for MSCAL/MSCALF. */
+void vu0_exec_micro_continue(ee_state_t *st)
+{
     st->vu0_running = 1;
 
     for (uint32_t i = 0; i < VU0_EXEC_STEP_CAP; i++) {
@@ -2682,9 +2919,132 @@ static int ee_step(void)
              * chain-mode register engine, so a no-op/generic-default
              * return is correct emulated behavior, not a stand-in. */
             int32_t sysnum = (int32_t)GPR(3); /* $v1, real EE convention */
+            if (ee_hle_thread_try_handle(st, sysnum, this_pc, in_delay_slot)) return 1; /* Round 569: real EE thread/sema scheduler - see include/core/ee/ee_hle_thread.h */
             if (sysnum == 100 || sysnum == 61 ||
                 sysnum == 120 || sysnum == -120) {
                 GPR(2) = 0; /* generic default return, matching established precedent */
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
+            if (sysnum == 5 || sysnum == 8 || sysnum == 9) {
+                /* Round 493 - 5 (ResumeIntrDispatch), 8
+                 * (ResumeT3IntrDispatch), 9 (RFU009). Real ps2sdk
+                 * syscallnr.h (fetched Round 492, docs/reference/
+                 * ps2sdk/ee/kernel/include/syscallnr.h) labels 5 and 8
+                 * "Arbitrarily named" - neither is a documented public
+                 * API (not in kernel.h's public extern block); both
+                 * are internal continuation points used only by the
+                 * real BIOS's OWN kernel-patch-installation mechanism
+                 * (fetched alarm.c's InitAlarm() patches syscalls
+                 * 0xFC-0xFF/0x08/0x12C, tlbfunc.c's InitTLBFunctions()
+                 * patches 0x54-0x59) to resume the original dispatch
+                 * chain after a patch's own handler runs. This project
+                 * doesn't install BIOS kernel patches via that
+                 * mechanism, so a guest ELF has no legitimate reason to
+                 * issue these directly. 9 (RFU009) is "Reserved For
+                 * (future) Use" by the real syscallnr.h's own naming -
+                 * an intentionally-unused slot. Same generic-default
+                 * treatment as the 100/61/120/-120 group above. */
+                GPR(2) = 0; /* generic default return, matching established precedent */
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
+            if (sysnum == 4) {
+                /* Round 493 - 4 (KExit). Real ps2sdk kernel.h (fetched
+                 * Round 492): "extern void KExit(s32 exit_code)
+                 * __attribute__((noreturn));" - a genuine, real,
+                 * program-requested EE termination syscall (the raw
+                 * kernel primitive Exit()/ExitThread()/etc. ultimately
+                 * funnel into). This project's existing halt()
+                 * primitive (ee_state_t's halted/halt_reason fields)
+                 * is exactly this: "stop EE execution, record why."
+                 * $a0 (GPR(4)) carries the real exit_code per the
+                 * signature above; recorded in halt_reason for
+                 * diagnostics since this project has no host process
+                 * to actually exit() into. */
+                halt("KExit syscall (4) - guest program requested EE termination");
+                st->pc = this_pc + 4u;
+                st->next_pc = this_pc + 8u;
+                return 1;
+            }
+            if (sysnum == 1) {
+                /* Round 493 - 1 (ResetEE). Real ps2sdk kernel.h
+                 * (fetched Round 492): "extern void ResetEE(u32
+                 * init_bitfield);" with real bit constants INIT_DMAC=
+                 * 0x01, INIT_VU1=0x02, INIT_VIF1=0x04, INIT_GIF=0x08,
+                 * INIT_VU0=0x10, INIT_VIF0=0x20, INIT_IPU=0x40. Real
+                 * ExecPS2.c (fetched Round 492, docs/reference/ps2sdk/
+                 * ee/kernel/src/osdsrc/src/ExecPS2.c)'s own
+                 * SoftPeripheralEEReset() calls p_ResetEE(0x7F) - ALL
+                 * bits set - as part of every real program launch, so
+                 * this project only needs to honor the bitfield
+                 * generally, not any specific partial-bitfield caller.
+                 *
+                 * INIT_DMAC: dma_init() (source/hw/dma.c) memset()s
+                 * g_dma AND g_sinks[] together, which would silently
+                 * destroy the GIF/VIF0/VIF1 DMA sink-callback bindings
+                 * ee_core_rebind_dma_sinks() installs - so that rebind
+                 * call is required immediately after, same as the
+                 * existing Round 449 checkpoint-resume citation for
+                 * why rebinding is needed post-dma_init().
+                 *
+                 * INIT_VIF0/INIT_VIF1: real vif_init() (source/hw/
+                 * vif.c) resets both g_vif0 and g_vif1 together in one
+                 * call with no per-instance granularity, unlike the
+                 * real bitfield's separate bits. Since the one real
+                 * call site this project has ever cited (ExecPS2.c's
+                 * 0x7F) always sets both bits together anyway, this is
+                 * an honest, evidenced simplification: either VIF bit
+                 * resets both VIFs.
+                 *
+                 * INIT_GIF: gif_init() (source/hw/gif.c).
+                 * INIT_VU1: vu1_init() (source/hw/vu.c).
+                 *
+                 * INIT_VU0: no dedicated vu0 reset function exists in
+                 * this codebase - VU0 "macro mode" is modeled directly
+                 * as ee_state_t fields (cop2_ctrl[32], vu0_vf[32][4],
+                 * vu0_mem[4096], vu0_micro[4096], per include/core/ee/
+                 * ee_core.h) rather than through a separate hw/ .c
+                 * module like VU1/GIF/VIF have. Cleared inline here.
+                 *
+                 * INIT_IPU: no IPU hardware model exists anywhere in
+                 * this codebase yet (confirmed via grep across source/
+                 * hw/ .c - real hardware's Image Processing Unit,
+                 * MPEG2/DVD macroblock decoding, is unimplemented).
+                 * Documented no-op for this bit only, honest about the
+                 * gap rather than silently ignoring it. */
+                uint32_t init_bits = GPR(4); /* $a0, real init_bitfield */
+                if (init_bits & 0x01u) { /* INIT_DMAC */
+                    dma_init();
+                    ee_core_rebind_dma_sinks();
+                }
+                if (init_bits & 0x02u) { /* INIT_VU1 */
+                    vu1_init();
+                }
+                if (init_bits & 0x04u) { /* INIT_VIF1 */
+                    vif_init();
+                }
+                if (init_bits & 0x08u) { /* INIT_GIF */
+                    gif_init();
+                }
+                if (init_bits & 0x10u) { /* INIT_VU0 */
+                    memset(st->cop2_ctrl, 0, sizeof(st->cop2_ctrl));
+                    memset(st->vu0_vf, 0, sizeof(st->vu0_vf));
+                    memset(st->vu0_mem, 0, sizeof(st->vu0_mem));
+                    memset(st->vu0_micro, 0, sizeof(st->vu0_micro));
+                    st->vu0_vf[0][3] = 0x3F800000u; /* VF00 hardwired to
+                        (0,0,0,1.0f) - same real-hardware fact cited by
+                        this project's own vu1_init() for VF00. */
+                }
+                if (init_bits & 0x20u) { /* INIT_VIF0 - see comment
+                    above: real vif_init() resets both VIF instances
+                    together, no per-instance granularity exists. */
+                    vif_init();
+                }
+                /* 0x40 (INIT_IPU): documented no-op, no IPU model exists. */
+                GPR(2) = 0; /* real ResetEE has no meaningful return value used by callers */
                 st->pc = this_pc + 4u;
                 st->next_pc = this_pc + 8u;
                 return 1;
@@ -4131,21 +4491,32 @@ static int ee_step(void)
                                  * i=0, count=2, never i+1). */
                                 uint32_t payload_base = dmat_ptr + (i - 1u) * 16u;
                                 uint32_t payload_src = ee_mem_read32(st, payload_base + 0u);
+                                char devname[64];
                                 char romname[64];
                                 int pk;
                                 for (pk = 0; pk < 63; pk++) {
                                     uint8_t b = ee_mem_read8(st, payload_src + 8u + (uint32_t)pk);
-                                    if (b == 0u || b == ':') break; /* stop at "rom0:" separator or NUL */
-                                    romname[pk] = (char)b;
+                                    if (b == 0u || b == ':') break; /* stop at the device-name separator or NUL */
+                                    devname[pk] = (char)b;
                                 }
+                                devname[pk < 63 ? pk : 63] = 0;
                                 /* real path strings observed are
-                                 * "rom0:NAME" - this project's own
-                                 * ROMDIR entries are stored by NAME
-                                 * only (no device prefix), so skip
-                                 * past the device-name colon rather
-                                 * than searching for "rom0:OSDSYS" as
-                                 * a literal ROMDIR entry name (which
-                                 * would never match). */
+                                 * "DEVICE:NAME" (e.g. "rom0:OSDSYS"
+                                 * or, per Round 552/554 (task
+                                 * #521/#522), "cdrom0:\SCED_500.41;1")
+                                 * - this project's own rom0: ROMDIR
+                                 * entries are stored by NAME only (no
+                                 * device prefix), so skip past the
+                                 * device-name colon rather than
+                                 * searching for the whole
+                                 * "DEVICE:NAME" string as a literal
+                                 * ROMDIR entry name (which would never
+                                 * match); the real ISO9660 cdrom0:/
+                                 * cdrom1: path (Round 554) keeps a
+                                 * leading backslash convention this
+                                 * project's own FIO_F_OPEN handler
+                                 * above already strips - kept, not
+                                 * guessed, for consistency. */
                                 if (pk > 0 && payload_src != 0u) {
                                     uint8_t colon = ee_mem_read8(st, payload_src + 8u + (uint32_t)pk);
                                     if (colon == ':') {
@@ -4164,7 +4535,27 @@ static int ee_step(void)
                                 }
                                 if (romname[0] != 0) {
                                     uint32_t elf_epc = 0u, elf_gp = 0u;
-                                    if (sif_loadfile_elf_load(st, romname, &elf_epc, &elf_gp)) {
+                                    int r554_ok = 0;
+                                    if (strcmp(devname, "rom0") == 0) {
+                                        r554_ok = sif_loadfile_elf_load(st, romname, &elf_epc, &elf_gp);
+                                    } else if (strcmp(devname, "cdrom0") == 0 || strcmp(devname, "cdrom1") == 0) {
+                                        /* Round 554 (task #521/#522,
+                                         * the real fix): route real
+                                         * disc ELF loads (e.g. the
+                                         * actual game's own
+                                         * SCED_500.41 executable)
+                                         * through the real ISO9660
+                                         * mechanism instead of the
+                                         * BIOS-only romdir_lookup()
+                                         * path above - see
+                                         * sif_loadfile_elf_load_disc()'s
+                                         * own citation for the full
+                                         * grounding. */
+                                        const char *disc_name = romname;
+                                        if (disc_name[0] == '\\') disc_name++;
+                                        r554_ok = sif_loadfile_elf_load_disc(st, disc_name, &elf_epc, &elf_gp);
+                                    }
+                                    if (r554_ok) {
                                         /* Real result data (t_ExecData-style epc/gp,
                                          * per the real, fetched _SifLoadElfPart()) is
                                          * delivered directly into the caller's own

@@ -249,6 +249,7 @@ void     ee_mem_write64(ee_state_t *st, uint32_t addr, uint64_t val);
  * MSCALF handling. */
 void vu0_micro_write32(ee_state_t *st, uint32_t addr, uint32_t value);
 void vu0_exec_micro(ee_state_t *st, uint32_t start_addr);
+void vu0_exec_micro_continue(ee_state_t *st); /* Round 576: real MSCNT semantics - see ee_core.c citation */
 
 /* VU0 local DATA memory (see ee_core.c for the full comment) - called
  * from vif.c's VIF0 UNPACK handling. */

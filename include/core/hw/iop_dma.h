@@ -184,4 +184,18 @@ void iop_dma_signal_channel_done(int channel);
  */
 int iop_dma_channel_write_bytes(int channel, const uint8_t *data, uint32_t nbytes);
 
+/*
+ * Round 511 (task #470): counts real, completed IOP-RAM-to-EE-RAM SIF2
+ * transfers (channel 2, real "GPU"/SIF2 dual-purpose channel per the
+ * user's own uploaded real sifman.c/dmacman.h source - see
+ * iop_dma_sif2_try_transfer()'s doc comment in iop_dma.c for the full
+ * citation). Same hit-counter diagnostic convention already used
+ * throughout this project (dispatch_ncmd() count,
+ * iop_sio2_get_pad_command_count(), etc.) - lets a boot survey
+ * empirically confirm whether real guest IOP code ever actually
+ * issues this kick, independent of whether the transfer function
+ * itself is correct.
+ */
+uint32_t iop_dma_get_sif2_transfer_count(void);
+
 #endif

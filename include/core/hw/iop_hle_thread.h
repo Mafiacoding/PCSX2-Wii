@@ -366,8 +366,58 @@ const iop_hle_thread_stats_t *iop_hle_thread_get_stats(void);
 int iop_hle_thread_get_thread_count(void);
 int iop_hle_thread_get_current_thread_id(void);
 uint32_t iop_hle_thread_get_status(int thid);
+/* Round 513: current priority number (thbase.h convention - lower
+ * number is more urgent; HIGHEST_PRIORITY=1, LOWEST_PRIORITY=126).
+ * Returns 0 for an unused/invalid thid, matching get_status's own
+ * 0-for-invalid convention (0 is not a valid real priority value). */
+uint32_t iop_hle_thread_get_priority(int thid);
 int iop_hle_thread_get_sema_count(void);
 int iop_hle_thread_get_evf_count(void);
 int iop_hle_thread_get_alarm_count(void);
+
+/* Round 514 follow-up: a TCB's original CreateThread() entry point
+ * and its live/saved pc (whichever thread is current, this is its
+ * real register file's pc; for a non-current thread it's the last
+ * pc it was saved at) - used to identify which real module created
+ * a given thread and where it currently sits. Returns 0 for an
+ * invalid/unused thid, matching this file's existing convention. */
+uint32_t iop_hle_thread_get_entry(int thid);
+uint32_t iop_hle_thread_get_pc(int thid);
+
+/* Round 518: what a WAIT-status thread is actually blocked on (task
+ * #447 follow-up - see Round 515's docs/STATUS.md finding). Returns
+ * IOP_TSW_* wait_type (0 if not waiting / invalid thid) and the
+ * associated sema/evf id (meaningful only for TSW_SEMA/TSW_EVENTFLAG;
+ * 0 otherwise, matching this file's 0-for-N/A convention). */
+int iop_hle_thread_get_wait_type(int thid);
+int iop_hle_thread_get_wait_id(int thid);
+
+/* Round 514: real integration between iop_module_loader.c's own
+ * task #179 idle mechanism (g_iop.idle, CPU-core level) and this
+ * file's THREADMAN scheduler (Round 389+, TCB level) - see Round
+ * 513's docs/STATUS.md finding for the full evidence trail. Before
+ * this fix the two mechanisms never talked to each other: the
+ * synthetic "implicit root thread" (TCB slot 1, bridging the
+ * module loader's own sequential dispatch - see ensure_root_
+ * thread()'s header comment) stayed in THS_RUN status forever at
+ * its uncited default priority (64), permanently outranking any
+ * real, module-created worker thread with a numerically-larger
+ * (less urgent) priority, even after the module loader itself
+ * correctly recognized boot-dispatch was exhausted and asked the
+ * CPU core to idle. Call this exactly once, at the same one-shot
+ * moment iop_module_loader.c's own trap handler first recognizes
+ * that transition (mirroring every other one-shot fix at that same
+ * call site, e.g. the Status.IEc/exception_pending corrections).
+ * Retires the current thread (if any) out of the runnable pool
+ * (THS_DORMANT - its job, running the fixed module-dispatch
+ * sequence, is genuinely finished, matching a real ExitThread-style
+ * handoff) and re-invokes the scheduler's own real priority pick:
+ * a real, previously-READY worker thread with better (or any)
+ * priority is dispatched for real - loading its actual saved
+ * context from when it was created via CreateThread/StartThread -
+ * or, if genuinely nothing else is ready, the scheduler's own
+ * pre-existing "nothing ready" fallback correctly re-enters the
+ * same idle state on its own (no special-casing needed here). */
+void iop_hle_thread_retire_root_thread(iop_state_t *st);
 
 #endif

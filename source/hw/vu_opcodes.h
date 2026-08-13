@@ -105,21 +105,38 @@ enum {
  * small, internally-consistent family sharing one fd-slot value. Each
  * group below is solid (the manual shows an unambiguous, fully-
  * enumerated 4-way split by bc for every group actually implemented
- * here). Some *A-accumulator combinations found in the source
- * (ADDAbc, SUBAbc, MADDAbc, MSUBAbc, the AI, and AQ) reuse fd-slot values in a
- * way the manual's own diagrams don't cleanly resolve (e.g. ADDAI and
- * MADDAI show the identical fd-slot value with different bc, which is
- * plausible, but several other combinations look like a genuine
- * table-linearization casualty) - those are deliberately NOT
- * implemented here (left unimplemented rather than guessed). */
+ * here).
+ *
+ * UPDATE (Round 573, task #548): the *A-accumulator groups this
+ * project's manual extraction couldn't cleanly resolve were replaced
+ * with GROUND TRUTH this round - real PCSX2's own macro-generated
+ * dispatch tables (docs/reference/pcsx2/pcsx2/VUops.cpp,
+ * `_UPPER_FD_00_TABLE`/`_01_TABLE`/`_10_TABLE`/`_11_TABLE`, one real
+ * 32-entry table per bc value 00/01/10/11 i.e. per broadcast lane
+ * x/y/z/w) rather than the ambiguous manual. Reading straight down
+ * each table at a fixed sub (fd-slot) index across all 4 bc-tables
+ * gives the real, unambiguous 4-way instruction family for that sub -
+ * transcribed below. This superseded the old "ADDAbc/SUBAbc/MADDAbc/
+ * MSUBAbc reuse fd-slot values ambiguously" note - they don't; they
+ * are simply sub=0x00/0x01/0x02/0x03 respectively, cleanly separate
+ * from the non-broadcast ADDA/MADDA (sub=0x0A) and SUBA/MSUBA/OPMULA/
+ * NOP (sub=0x0B) groups this project already had right (cross-checked
+ * against the same real tables and confirmed correct, unchanged). */
 #define VU_SPEC_SUBOP(w) VU_U_FD(w) /* bits 10-6 when SPECIAL */
 
 enum {
-    VUS_FD_SUBA_GROUP = 0x0B, /* bc: 00=SUBA 01=MSUBA 10=OPMULA 11=NOP */
-    VUS_FD_ADDA_GROUP = 0x0A, /* bc: 00=ADDA 01=MADDA (10/11 not in source) */
-    VUS_FD_ABSCLIP    = 0x07, /* bc: 01=ABS   11=CLIPw (00/10 not in source) */
-    VUS_FD_ITOF       = 0x04, /* bc: 00=ITOF0 01=ITOF4 10=ITOF12 11=ITOF15 */
-    VUS_FD_FTOI       = 0x05  /* bc: 00=FTOI0 01=FTOI4 10=FTOI12 11=FTOI15 */
+    VUS_FD_ADDABC_GROUP  = 0x00, /* real _UPPER_FD_bc_TABLE[0]: bc 00/01/10/11 = ADDAx/y/z/w - ACC = Fs + Ft[bc] */
+    VUS_FD_SUBABC_GROUP  = 0x01, /* table[1]: SUBAx/y/z/w - ACC = Fs - Ft[bc] */
+    VUS_FD_MADDABC_GROUP = 0x02, /* table[2]: MADDAx/y/z/w - ACC = ACC + Fs*Ft[bc] */
+    VUS_FD_MSUBABC_GROUP = 0x03, /* table[3]: MSUBAx/y/z/w - ACC = ACC - Fs*Ft[bc] */
+    VUS_FD_MULABC_GROUP  = 0x06, /* table[6]: MULAx/y/z/w - ACC = Fs*Ft[bc] */
+    VUS_FD_SUBA_GROUP = 0x0B, /* bc: 00=SUBA 01=MSUBA 10=OPMULA 11=NOP (real table[11], confirmed) */
+    VUS_FD_ADDA_GROUP = 0x0A, /* bc: 00=ADDA 01=MADDA (real table[10]; 10=MULA/11=unknown not implemented) */
+    VUS_FD_ABSCLIP    = 0x07, /* real table[7]: 00=MULAq(ACC=Fs*Q) 01=ABS 10=MULAi(ACC=Fs*I) 11=CLIPw */
+    VUS_FD_ITOF       = 0x04, /* bc: 00=ITOF0 01=ITOF4 10=ITOF12 11=ITOF15 (real table[4], confirmed) */
+    VUS_FD_FTOI       = 0x05, /* bc: 00=FTOI0 01=FTOI4 10=FTOI12 11=FTOI15 (real table[5], confirmed) */
+    VUS_FD_ADDAQI_GROUP = 0x08, /* real table[8]: 00=ADDAq(ACC=Fs+Q) 01=MADDAq(ACC=ACC+Fs*Q) 10=ADDAi(ACC=Fs+I) 11=MADDAi(ACC=ACC+Fs*I) */
+    VUS_FD_SUBAQI_GROUP = 0x09  /* real table[9]: 00=SUBAq(ACC=Fs-Q) 01=MSUBAq(ACC=ACC-Fs*Q) 10=SUBAi(ACC=Fs-I) 11=MSUBAi(ACC=ACC-Fs*I) */
 };
 
 /* ---------------- lower word field extraction ---------------- */
@@ -170,6 +187,8 @@ enum {
     VULS_FD_DIVQ_GROUP  = 0x0E, /* bc: 00=DIV 01=SQRT 10=RSQRT 11=WAITQ */
     VULS_FD_MTIR_GROUP  = 0x0F, /* bc: 00=MTIR 01=MFIR 10=ILWR 11=ISWR */
     VULS_FD_R_GROUP     = 0x10, /* bc: 00=RNEXT 01=RGET 10=RINIT 11=RXOR - NOT implemented (needs a real LFSR model) */
+    VULS_FD_XTOP_GROUP   = 0x1A, /* bc: 00=XTOP 01=XITOP (10/11 not in source) - NOT implemented (needs real VIF1 TOP register plumbing) */
+    VULS_FD_XGKICK_GROUP = 0x1B, /* bc: 00=XGKICK only (single value, no bc-variant family per source) - round 571, task #536/#545 */
     VULS_FD_WAITP       = 0x1E  /* bc==11 only value found */
 };
 

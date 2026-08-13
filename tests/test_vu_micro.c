@@ -271,6 +271,56 @@ int main(void)
     vu1 = vu1_get_state();
     CHECK(vu1->vi[3] == 123, "VU1: real IADD computes vi[rd] = vi[rs] + vi[rt]");
 
+    /* --- Round 581 (task #559): real IADDIU/ISUBIU, unsigned 15-bit
+     * immediate packed as ((code>>10)&0x7800)|(code&0x7ff) - i.e. the
+     * lower-instruction "dest" nibble (code bits 21-24, normally a
+     * per-lane write mask for other lower ops) is repurposed as the
+     * immediate's high 4 bits, and the existing 11-bit imm field
+     * supplies the low 11 bits, ground-truthed from PCSX2's own
+     * _vuIADDIU()/_vuISUBIU() (VUops.cpp). This exact opcode (real
+     * lower opc=0x08) was caught live as one of only two unimplemented
+     * opcodes reached by the JP-BIOS diskless-boot VU1 microprogram
+     * that halts at tpc=0x28c0 (Round 581 diagnostic). */
+    vu1_init();
+    vu1 = vu1_get_state();
+    vu1->vi[1] = 100;
+    {
+        uint32_t imm15 = 5000; /* fits in 15 bits, well within range */
+        uint32_t dest_hi = (imm15 >> 11) & 0xFu;
+        int32_t  imm11_lo = (int32_t)(imm15 & 0x7FFu);
+        put_vu1_instr(0, enc_lower_direct(VUL_IADDIU, dest_hi, 2, 1, imm11_lo), 0); /* vi2 = vi1 + 5000 */
+        put_vu1_instr(8, 0, enc_upper_a(1, 0, 0, 0, 0, 0));
+        put_vu1_instr(16, 0, 0);
+    }
+    vu1_exec_micro(0);
+    vu1 = vu1_get_state();
+    CHECK(vu1->vi[2] == 5100, "VU1: real IADDIU computes vi[It] = vi[Is] + real 15-bit unsigned immediate (100+5000=5100)");
+
+    vu1_init();
+    vu1 = vu1_get_state();
+    vu1->vi[1] = 100;
+    {
+        uint32_t imm15 = 30;
+        uint32_t dest_hi = (imm15 >> 11) & 0xFu;
+        int32_t  imm11_lo = (int32_t)(imm15 & 0x7FFu);
+        put_vu1_instr(0, enc_lower_direct(VUL_ISUBIU, dest_hi, 3, 1, imm11_lo), 0); /* vi3 = vi1 - 30 */
+        put_vu1_instr(8, 0, enc_upper_a(1, 0, 0, 0, 0, 0));
+        put_vu1_instr(16, 0, 0);
+    }
+    vu1_exec_micro(0);
+    vu1 = vu1_get_state();
+    CHECK(vu1->vi[3] == 70, "VU1: real ISUBIU computes vi[It] = vi[Is] - real 15-bit unsigned immediate (100-30=70)");
+
+    vu1_init();
+    vu1 = vu1_get_state();
+    vu1->vi[4] = 999;
+    put_vu1_instr(0, enc_lower_direct(VUL_IADDIU, 0, 0, 4, 123), 0); /* vi0 = vi4 + 123, but It==0 must be a no-op */
+    put_vu1_instr(8, 0, enc_upper_a(1, 0, 0, 0, 0, 0));
+    put_vu1_instr(16, 0, 0);
+    vu1_exec_micro(0);
+    vu1 = vu1_get_state();
+    CHECK(vu1->vi[0] == 0, "VU1: real IADDIU with It=vi0 is correctly a no-op (real hardware's vi0 hardwired-zero guard)");
+
     /* --- real LQ/SQ round-trip through VU1 data memory --- */
     vu1_init();
     vu1 = vu1_get_state();

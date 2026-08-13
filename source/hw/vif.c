@@ -25,8 +25,26 @@
 #define VIF_CMD_FLUSH    0x11 /* VIF1 only */
 #define VIF_CMD_FLUSHA   0x13 /* VIF1 only */
 #define VIF_CMD_MSCAL    0x14
-#define VIF_CMD_MSCALF   0x17
-#define VIF_CMD_MSCNT    0x15
+#define VIF_CMD_MSCALF   0x15 /* Round 583 (task #560): was 0x17 - see fix note below */
+#define VIF_CMD_MSCNT    0x17 /* Round 583 (task #560): was 0x15 - see fix note below */
+/* Round 583 (task #560) FIX: MSCALF and MSCNT were swapped versus
+ * real hardware. Re-checked directly against real PCSX2's
+ * Vif_Codes.cpp vifCmdHandler[] dispatch table (both VIF0 and VIF1
+ * arrays), which lists, starting at index 0x10: FlushE, Flush, Null,
+ * FlushA, MSCAL, MSCALF, Null, MSCNT - i.e. real MSCAL=0x14,
+ * MSCALF=0x15, MSCNT=0x17. This file previously had MSCALF=0x17 and
+ * MSCNT=0x15 (the two swapped), despite the header comment above
+ * claiming this table was cross-checked against that same dispatch
+ * table - it wasn't, for these two entries. Effect of the bug: any
+ * real MSCALF VIFcode (0x15) arriving on the wire was dispatched to
+ * this file's MSCNT case (a "resume at current tpc" no-restart path)
+ * instead of the MSCAL/MSCALF case (a "start microprogram at IMM"
+ * path, which is also where mscal_calls is incremented - see below).
+ * This exactly explains task #560's "mscal_calls stays at 1 despite
+ * thousands of ongoing per-frame VIF1 DMA transfers" symptom: the
+ * real per-frame VU1 kick VIFcode is standard real-hardware MSCALF
+ * (flush PATH3 then call), which this project's swapped constant was
+ * silently routing into the wrong handler every single frame. */
 #define VIF_CMD_STMASK   0x20
 #define VIF_CMD_STROW    0x30
 #define VIF_CMD_STCOL    0x31
@@ -153,6 +171,80 @@ static void vif_unpack_write_lane(vif_state_t *vif, uint32_t dest_addr, int lane
  * combination (stops the caller from processing the rest of the
  * stream, same "stop rather than guess" philosophy as every other
  * out-of-scope code in this file). */
+/* Round 580 (task #536/#557): upfront payload-size calculation for an
+ * UNPACK VIFcode, BEFORE any data is read. Real hardware computes
+ * this via PCSX2's `Vif_Unpack.cpp` `vifUnpackSetup<idx>()` closed-
+ * form formula, but THIS project's own `vif_unpack()` fast path
+ * (below) determines its consumed-byte count a different way: by
+ * tracking the furthest byte offset any loop iteration actually
+ * dereferences (`max_read_end`), not via a closed-form CL/WL
+ * formula - a deliberate choice (see vif_unpack()'s own comment)
+ * that also, as a side effect, sidesteps a degenerate case in the
+ * textbook formula (CL=WL=0, this project's un-STCYCL'd default -
+ * see vif.c's `wl_eff = cycle_wl ? cycle_wl : 256u` convention -
+ * makes the real formula's "filling write" branch collapse to n=0,
+ * i.e. 0 bytes needed, which is wrong). To guarantee this function
+ * always agrees EXACTLY with what the fast path would itself compute
+ * (the property that actually matters - consistency between the
+ * single-call and split-across-calls paths, not textbook fidelity in
+ * isolation), this is a "dry run" of vif_unpack()'s own cursor/
+ * read-span loop: same is_fill/cl_eff/wl_eff/block_pos stepping, same
+ * per-VN/VL read_span sizing, same max_read_end tracking and final
+ * (+3)/4-rounded-up-to-words sizing - just without ever touching
+ * `data` (the read spans are pure functions of vn/vl/num/cycle state,
+ * not of the actual bytes present, so this needs no data pointer).
+ * Returns bytes (0 for a reserved VN/VL combo, matching vif_unpack()'s
+ * own gsize==0 check so callers can share that "unsupported"
+ * classification). */
+static uint32_t vif_unpack_needed_bytes(vif_state_t *vif, uint32_t cmd, uint32_t num)
+{
+    uint32_t vn = (cmd >> 2) & 0x3u;
+    uint32_t vl = cmd & 0x3u;
+    uint32_t gsize = VIF_UNPACK_SIZE[vn * 4u + vl];
+    if (gsize == 0u)
+        return 0u;
+
+    uint32_t cl_eff = vif->cycle_cl;
+    uint32_t wl_eff = vif->cycle_wl ? vif->cycle_wl : 256u;
+    int is_fill = (cl_eff < wl_eff);
+    uint32_t component_width = (vl == 0u) ? 4u : (vl == 1u) ? 2u : (vl == 2u) ? 1u : 2u;
+
+    uint32_t src_cursor = 0u;
+    uint32_t max_read_end = 0u;
+    uint32_t block_pos = 0u;
+
+    for (uint32_t v = 0; v < num; v++) {
+        uint32_t read_span;
+        if (vn == 3u && vl == 3u)
+            read_span = 2u; /* V4-5 */
+        else if (vn == 0u)
+            read_span = component_width; /* S */
+        else if (vn == 1u)
+            read_span = 2u * component_width; /* V2 */
+        else
+            read_span = 4u * component_width; /* V3 (real over-read quirk) or V4 */
+
+        uint32_t this_end = src_cursor + read_span;
+        if (this_end > max_read_end)
+            max_read_end = this_end;
+
+        block_pos++;
+        if (is_fill) {
+            if (block_pos <= cl_eff)
+                src_cursor += gsize;
+            else if (block_pos == wl_eff)
+                block_pos = 0;
+        } else {
+            src_cursor += gsize;
+            if (block_pos >= wl_eff)
+                block_pos = 0;
+        }
+    }
+
+    uint32_t words = (max_read_end + 3u) / 4u;
+    return words * 4u;
+}
+
 static int vif_unpack(vif_state_t *vif, uint32_t code, uint32_t cmd, const uint8_t *data, uint32_t total_words, uint32_t *pos)
 {
     uint32_t total_bytes = total_words * 4u;
@@ -286,6 +378,57 @@ static void vif_process(vif_state_t *vif, const uint8_t *data, uint32_t qwc)
     uint32_t total_words = qwc * 4u;
     uint32_t pos = 0; /* in 32-bit words */
 
+    /* Round 579 (task #536/#556): resume a real MPG upload left
+     * outstanding by a PRIOR vif_process() call (a real VIF1 DMA
+     * chain link boundary that landed mid-microprogram-upload) BEFORE
+     * reading any fresh VIFcode from this call's buffer - see vif.h's
+     * mpg_pending field comment. Matches real hardware's vifCode_MPG
+     * "Partial Transfer" -> resume-on-next-transfer semantics
+     * (Vif_Codes.cpp), which this project previously had no
+     * equivalent of at all. */
+    if (vif->mpg_pending) {
+        uint32_t avail = total_words - pos;
+        uint32_t words = (vif->mpg_pending_words < avail) ? vif->mpg_pending_words : avail;
+        for (uint32_t w = 0; w < words; w++) {
+            uint32_t word = vif_rd_le32(data + (pos + w) * 4u);
+            if (vif->is_vif1)
+                vu1_micro_write32(vif->mpg_pending_addr + w * 4u, word);
+            else
+                vu0_micro_write32(ee_core_get_state(), vif->mpg_pending_addr + w * 4u, word);
+        }
+        pos += words;
+        vif->mpg_pending_addr += words * 4u;
+        vif->mpg_pending_words -= words;
+        vif->mpg_words_written += words;
+        if (vif->mpg_pending_words == 0u)
+            vif->mpg_pending = 0;
+    }
+
+    /* Round 580 (task #536/#557): resume a real UNPACK payload left
+     * outstanding by a PRIOR vif_process() call - see vif.h's
+     * unpack_pending field comment. Unlike MPG's incremental-write-
+     * and-resume approach, this buffers raw bytes and only replays
+     * the actual unpack loop once vif_unpack_needed_bytes() worth of
+     * payload has fully accumulated (real hardware's nVifStruct::
+     * buffer semantics). */
+    if (vif->unpack_pending) {
+        uint32_t need = vif->unpack_needed_bytes - vif->unpack_have_bytes;
+        uint32_t avail = (total_words - pos) * 4u;
+        uint32_t take = (need < avail) ? need : avail;
+        memcpy(vif->unpack_buffer + vif->unpack_have_bytes, data + pos * 4u, take);
+        vif->unpack_have_bytes += take;
+        pos += take / 4u;
+
+        if (vif->unpack_have_bytes >= vif->unpack_needed_bytes) {
+            uint32_t local_pos = 0;
+            uint32_t local_total_words = vif->unpack_needed_bytes / 4u;
+            vif_unpack(vif, vif->unpack_code, vif->unpack_cmd, vif->unpack_buffer, local_total_words, &local_pos);
+            vif->unpack_pending = 0;
+            vif->unpack_have_bytes = 0;
+            vif->unpack_needed_bytes = 0;
+        }
+    }
+
     while (pos < total_words) {
         uint32_t code = vif_rd_le32(data + pos * 4u);
         pos++;
@@ -297,8 +440,36 @@ static void vif_process(vif_state_t *vif, const uint8_t *data, uint32_t qwc)
 
         if ((cmd & 0x60u) == 0x60u) {
             /* UNPACK (0x60-0x7F) - see vif.h/vif_unpack() for the
-             * full scope. vif_unpack() advances pos itself past
-             * whatever payload it consumed. */
+             * full scope. Round 580 (task #536/#557): check upfront
+             * (via vif_unpack_needed_bytes(), the real vifUnpackSetup<>
+             * formula) whether this call's remaining stream actually
+             * holds the FULL payload this UNPACK needs. If it does,
+             * fast-path exactly as before (vif_unpack() advances pos
+             * itself past whatever payload it consumed). If it
+             * doesn't, this is a real cross-DMA-chunk split (the
+             * UNPACK-side twin of Round 579's MPG fix) - buffer what's
+             * available now and finish it on a later vif_process()
+             * call (see the unpack_pending resume block above). */
+            uint32_t unpack_num = (code >> 16) & 0xFFu;
+            if (unpack_num == 0u)
+                unpack_num = 256u;
+            uint32_t needed_bytes = vif_unpack_needed_bytes(vif, cmd, unpack_num);
+            uint32_t avail_bytes = (total_words - pos) * 4u;
+
+            if (needed_bytes != 0u && needed_bytes > avail_bytes) {
+                uint32_t take = avail_bytes;
+                if (take > sizeof(vif->unpack_buffer))
+                    take = (uint32_t)sizeof(vif->unpack_buffer); /* defensive; needed_bytes is always <=4096 by construction */
+                memcpy(vif->unpack_buffer, data + pos * 4u, take);
+                vif->unpack_pending = 1;
+                vif->unpack_code = code;
+                vif->unpack_cmd = cmd;
+                vif->unpack_needed_bytes = needed_bytes;
+                vif->unpack_have_bytes = take;
+                pos += take / 4u;
+                continue;
+            }
+
             if (!vif_unpack(vif, code, cmd, data, total_words, &pos))
                 return;
             continue;
@@ -362,22 +533,53 @@ static void vif_process(vif_state_t *vif, const uint8_t *data, uint32_t qwc)
             break;
 
         case VIF_CMD_MSCAL:
-        case VIF_CMD_MSCNT:
         case VIF_CMD_MSCALF: {
             /* Real hardware: MSCAL/MSCALF start the microprogram at
-             * IMM (MSCNT starts it at the CURRENT TPC instead - not
-             * modeled distinctly this round, since this project's
-             * vu0/vu1_exec_micro() always take an explicit start
-             * address; MSCNT is treated the same as MSCAL, an honest
-             * simplification noted here rather than silently). See
-             * include/core/hw/vu.h for what "execute" actually means
+             * IMM. See include/core/hw/vu.h for what "execute" means
              * this round (real control flow, no real opcode bodies
              * yet - a genuine, narrower step from vif.c's prior total
              * no-op). */
+            /* Round 578b: real diagnostic capture - see vif.h's
+             * mscal_calls/mscal_last_start_byte field comment. */
+            vif->mscal_calls++;
+            vif->mscal_last_start_byte = imm * 8u;
             if (vif->is_vif1)
                 vu1_exec_micro(imm);
             else
                 vu0_exec_micro(ee_core_get_state(), imm);
+        } break;
+
+        case VIF_CMD_MSCNT: {
+            /* Round 576 (task #551): real MSCNT resumes the VU's
+             * microprogram from its CURRENT TPC, ignoring IMM (a real
+             * MSCNT VIFcode's IMM field is unused/reserved - ground-
+             * truthed against ps2sdk's own
+             * packet2_utils_vu_add_continue_program(), which issues
+             * FLUSH+MSCNT with NO address argument at all, unlike
+             * packet2_utils_vu_add_start_program()'s FLUSH+MSCAL(addr)
+             * - see vu.c's vu1_exec_micro_continue() citation). This
+             * project previously treated MSCNT identically to MSCAL
+             * (passing IMM, almost always 0, as a fresh start address
+             * every time), which would silently restart any multi-
+             * draw-call microprogram from address 0 on every "continue"
+             * instead of resuming where it left off - exactly the real,
+             * standard pattern real game code uses to issue one draw
+             * call per MSCNT after a single MSCAL. */
+            /* Round 578b: real diagnostic capture - see vif.h's
+             * mscnt_calls/mscnt_last_resume_byte field comment. Read
+             * BEFORE the call so this records where execution actually
+             * resumed FROM, not the (mid-run or post-cap) tpc it ends
+             * up at afterward. */
+            vif->mscnt_calls++;
+            if (vif->is_vif1)
+                vif->mscnt_last_resume_byte = vu1_get_state()->tpc;
+            /* VU0 macro-mode has no exposed tpc accessor - this
+             * diagnostic field is only meaningful on the VIF1/VU1
+             * struct instance, left unset (0) for VIF0. */
+            if (vif->is_vif1)
+                vu1_exec_micro_continue();
+            else
+                vu0_exec_micro_continue(ee_core_get_state());
         } break;
 
         case VIF_CMD_FLUSH:
@@ -419,9 +621,9 @@ static void vif_process(vif_state_t *vif, const uint8_t *data, uint32_t qwc)
              * the data is actually written there instead of just
              * being skipped over. */
             uint32_t num = (code >> 16) & 0xFFu;
-            uint32_t words = (num ? num : 256u) * 2u;
-            if (words > total_words - pos)
-                words = total_words - pos;
+            uint32_t requested_words = (num ? num : 256u) * 2u;
+            uint32_t avail_words = total_words - pos;
+            uint32_t words = (requested_words > avail_words) ? avail_words : requested_words;
             uint32_t dest_byte = imm * 8u;
             for (uint32_t w = 0; w < words; w++) {
                 uint32_t word = vif_rd_le32(data + (pos + w) * 4u);
@@ -431,6 +633,25 @@ static void vif_process(vif_state_t *vif, const uint8_t *data, uint32_t qwc)
                     vu0_micro_write32(ee_core_get_state(), dest_byte + w * 4u, word);
             }
             pos += words;
+            /* Round 578/578b: real diagnostic counters - see vif.h's
+             * mpg_calls/mpg_words_written/mpg_last_dest_byte field
+             * comments. */
+            vif->mpg_calls++;
+            vif->mpg_words_written += words;
+            vif->mpg_last_dest_byte = dest_byte;
+            /* Round 579: real hardware's "Partial Transfer" case -
+             * this DMA chain link ended before the full requested
+             * upload was written. Persist the remainder so the NEXT
+             * vif_process() call resumes writing it instead of the
+             * leftover words being misread as fresh VIFcodes - see
+             * vif.h's mpg_pending field comment. Since this consumes
+             * the rest of the current buffer, the outer while loop
+             * exits naturally (pos == total_words). */
+            if (words < requested_words) {
+                vif->mpg_pending = 1;
+                vif->mpg_pending_addr = dest_byte + words * 4u;
+                vif->mpg_pending_words = requested_words - words;
+            }
         } break;
 
         case VIF_CMD_DIRECT:
@@ -451,7 +672,15 @@ static void vif_process(vif_state_t *vif, const uint8_t *data, uint32_t qwc)
                                  * more DMA data; we just forward what
                                  * we actually have this call. */
             if (words > 0) {
-                gif_process_quadwords(DMA_CHANNEL_GIF, data + pos * 4u, words / 4u);
+                /* Round 542: this is real hardware PATH2 (VIF1 DIRECT/
+                 * DIRECTHL forwarding straight to GIF, bypassing the
+                 * GIF DMA channel entirely) - was previously mislabeled
+                 * as DMA_CHANNEL_GIF (a DMA-channel constant, not a
+                 * transfer-path one) purely because gif_process_quadwords()
+                 * ignored its channel argument. Now that the argument
+                 * drives real GIF_TAG/CNT/P3CNT/P3TAG register state
+                 * (see gif.c), it must be the correct real path. */
+                gif_process_quadwords(GIF_PATH_2, data + pos * 4u, words / 4u);
                 vif->direct_qwords_forwarded += words / 4u;
             }
             pos += words;

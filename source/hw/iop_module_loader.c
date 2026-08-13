@@ -193,6 +193,20 @@ void iop_module_loader_reset(void)
 
 iop_module_loader_stats_t *iop_module_loader_get_stats(void) { return &g.stats; }
 
+int iop_module_loader_get_module_count(void) { return g.modlist_count; }
+
+const char *iop_module_loader_get_module_name(int index)
+{
+    if (index < 0 || index >= g.modlist_count) return NULL;
+    return g.modlist[index];
+}
+
+uint32_t iop_module_loader_get_module_entry(int index)
+{
+    if (index < 0 || index >= g.modlist_count) return 0u;
+    return g.entry_points[index];
+}
+
 static inline uint32_t rd_le32(const uint8_t *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
@@ -1138,6 +1152,7 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
         st->idle = 1;
         st->cop0[12] |= 0x1u; /* Status.IEc = 1 */
         st->exception_pending = 0;
+        /* Round 519: disabled - see iop_hle_thread.c header comment on iop_hle_thread_retire_root_thread() */
         strncpy(st->halt_reason, panic_msg, sizeof(st->halt_reason) - 1);
         st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';
         return 1;
@@ -1244,6 +1259,7 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
         st->idle = 1;
         st->cop0[12] |= 0x1u; /* Status.IEc = 1 */
         st->exception_pending = 0;
+        /* Round 519: disabled - see iop_hle_thread.c header comment on iop_hle_thread_retire_root_thread() */
         strncpy(st->halt_reason, trap_msg, sizeof(st->halt_reason) - 1);
         st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';
         return 1;
@@ -1265,6 +1281,7 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
         st->idle = 1;
         st->cop0[12] |= 0x1u; /* Status.IEc = 1 */
         st->exception_pending = 0;
+        /* Round 519: disabled - see iop_hle_thread.c header comment on iop_hle_thread_retire_root_thread() */
         strncpy(st->halt_reason, reg_panic_msg, sizeof(st->halt_reason) - 1);
         st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';
         return 1;
@@ -1387,6 +1404,8 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
      * clearing it here makes that already-decided design intent
      * actually work. */
     st->exception_pending = 0;
+
+    /* Round 519: disabled - see iop_hle_thread.c header comment on iop_hle_thread_retire_root_thread() */
 
     strncpy(st->halt_reason, msg, sizeof(st->halt_reason) - 1);
     st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';

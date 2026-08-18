@@ -193,6 +193,20 @@ uint32_t ee_hle_thread_get_priority(int thid);
 uint32_t ee_hle_thread_get_wait_type(int thid);
 uint32_t ee_hle_thread_get_wait_id(int thid);
 
+/* Round 613 (task #536 continuation): same rationale/convention as
+ * the Round 612 wait_type/wait_id accessors - expose already-tracked
+ * internal TCB fields (entry point, saved PC, pending wakeup_count)
+ * to host-native diagnostic drivers, to identify WHICH real BIOS
+ * function each parked thread belongs to (by entry point) and
+ * whether any thread already has a queued-but-unconsumed wakeup
+ * (wakeup_count>0 would mean a WakeupThread call already happened
+ * but SleepThread hasn't been called yet - see kernel.h's real
+ * wakeupCount@0x2C field this project's WaitSema/WakeupThread pairing
+ * already correctly implements, per Round 612's citation). */
+uint32_t ee_hle_thread_get_entry(int thid);
+uint32_t ee_hle_thread_get_saved_pc(int thid);
+uint32_t ee_hle_thread_get_wakeup_count(int thid);
+
 /* Round 597 (task #447/#536): forced preemption. Call once per genuine
  * instruction boundary from ee_step() (same convention as
  * ee_check_timer_interrupt()/ee_check_intc_interrupt()/

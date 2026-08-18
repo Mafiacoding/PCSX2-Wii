@@ -707,6 +707,25 @@ uint32_t ee_hle_thread_get_wait_id(int thid)
     return t ? (uint32_t)t->wait_id : 0u;
 }
 
+/* Round 613 (task #536): see header comment - expose entry/pc/wakeup_count
+ * for host-native diagnostic drivers, to identify which real BIOS
+ * function each parked thread belongs to. */
+uint32_t ee_hle_thread_get_entry(int thid)
+{
+    ee_tcb_t *t = tcb(thid);
+    return t ? t->entry : 0u;
+}
+uint32_t ee_hle_thread_get_saved_pc(int thid)
+{
+    ee_tcb_t *t = tcb(thid);
+    return t ? t->pc : 0u;
+}
+uint32_t ee_hle_thread_get_wakeup_count(int thid)
+{
+    ee_tcb_t *t = tcb(thid);
+    return t ? t->wakeup_count : 0u;
+}
+
 /* Round 597 (task #447/#536, following Round 596's finding): forced
  * preemption. This project's reschedule() is otherwise only invoked
  * from specific HLE syscall handlers above (StartThread/WakeupThread/

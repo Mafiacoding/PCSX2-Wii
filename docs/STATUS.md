@@ -25070,3 +25070,56 @@ code tied to the actual on-screen menu, not a guess.
 
 No source change - docs-only round. Regression suite and Wii rebuild correctly
 skipped.
+
+## Round 606 (task #447/#589) - BREAKTHROUGH: live-captured the first genuine, reproducible +0x450 state transition in this project's entire history (5 <-> 8, Browser <-> Memory Card device screen), by actually pressing real buttons on the live OSDSYS menu
+
+Direct continuation of Round 605. Used PCSX2's Settings > Controllers > Controller Port 1 panel to
+get the REAL keyboard-to-pad bindings (never previously checked - all prior "pad" experiments in
+this project's history were synthetic/host-native, never live real-button presses against a real
+running BIOS): Circle=L, Cross=K, Triangle=I, Square=J, D-Pad=Arrows, Start=Return.
+
+With the live connection still up (survived a third consecutive round), focused the real PS2 BIOS
+(Japan) window and pressed the real Circle key (confirm) while the screen showed the interactive
+Browser/System Settings main menu. Screenshot confirmed a genuine screen transition: OSDSYS
+navigated into a real "MEMORY CARD / 1" device screen (memory-card slot icons, X=Back/O=Confirm
+prompts). This is the first time this project has driven the real BIOS through an actual menu
+transition via real input, rather than observing it in a fixed idle state.
+
+Immediately re-read 0x001C0440-0x1C0460: +0x450 = 8 (was 5 on the Browser screen). Pressed Cross
+(back) - screenshot confirmed the view returned to the Browser main screen - re-read: +0x450 = 5
+again. Repeated the whole Circle round-trip a second time with identical results (5 -> 8 -> 5,
+clean and reproducible). This is the first genuine, repeatable, real-hardware-observed write to
+this field this project has ever captured - after Rounds 590-605 could only ever observe it
+sitting motionless at one value or another.
+
+Two major consequences:
+
+1. Task #447's field is confirmed to be a real, live, responsive "current OSDSYS panel/device"
+   indicator, not a one-shot "escalation gate" that fires once and stays fired. Value 8 (Memory
+   Card device screen) is one of the exact three raw constants (5/6/8) Round 594's static
+   disassembly already found written by three small init functions inside OSDSYS's own ELF -
+   this round proves those same functions are genuinely re-invoked live, on real hardware, when
+   the user navigates into a device screen, not just once during early boot as previously assumed.
+   Value 5 = Browser (top-level) screen; value 8 = Memory Card device screen; value 6's screen is
+   still unidentified; value 9 (Round 594's original "escalation" hypothesis) was never produced by
+   any navigation available in this session, because no disc is currently mounted - the Browser
+   screen only ever showed the Memory Card device (the sole device the emulator currently has
+   attached). The natural next test: mount a real disc via Change Disc, then navigate to whatever
+   new device icon appears, and see if THAT screen is the one that writes 9. This is now a
+   concrete, testable prediction rather than an open-ended search.
+
+2. Methodology correction with real teeth: `pcsx2_boot_analyzer(mode="status")` and
+   `pcsx2_list_watchpoints` BOTH still reported 0 hits on 0x001C0450 through this entire
+   experiment, despite two independently-confirmed real writes (5->8 and 8->5) captured via direct
+   `pcsx2_read_memory` polling immediately after each button press. This means the DebugServer's
+   "onchange" watchpoint hit-counting mechanism does not reliably fire while the VM runs freely
+   (unpaused) via this project's tooling - it may only evaluate at certain check-in points, not
+   continuously. This retroactively explains EVERY prior round's "0 watchpoint hits" result
+   (Rounds 591, 594, 596, 603, 604, 605, and others) as likely a tooling blind spot, not
+   necessarily evidence the field never changes. Direct polling reads (as done this round) are the
+   only currently-verified-reliable technique for observing this field; watchpoint hit-counts on
+   it should be treated as unreliable/inconclusive going forward, not as confirmation of "never
+   changes."
+
+No source change - docs-only round (this is a live-hardware investigation round, not a tracked-code
+change). Regression suite and Wii rebuild correctly skipped.

@@ -179,6 +179,19 @@ int ee_hle_thread_get_current_thread_id(void);
 uint32_t ee_hle_thread_get_status(int thid);
 uint32_t ee_hle_thread_get_priority(int thid);
 
+/* Round 597 (task #447/#536): forced preemption. Call once per genuine
+ * instruction boundary from ee_step() (same convention as
+ * ee_check_timer_interrupt()/ee_check_intc_interrupt()/
+ * ee_check_dmac_interrupt()). Switches to a READY thread only if its
+ * priority is strictly better (numerically lower) than the currently-
+ * RUNNING thread's own priority - a no-op otherwise, and a no-op
+ * entirely before this project's own scheduler has been engaged
+ * (thread_count==0). See ee_hle_thread.c's own definition for the
+ * full rationale (Round 596 found a real, higher-priority, already-
+ * woken thread that was never getting scheduled because reschedule()
+ * is otherwise only invoked from specific syscall handlers). */
+void ee_hle_thread_check_preempt(ee_state_t *st);
+
 /* Round 575 (task #550): opaque state-blob accessor for host-native
  * checkpoint/resume tooling. Unlike gs_get_state()/vif0_get_state()/
  * etc. (typed pointers, for callers needing field-level access), this

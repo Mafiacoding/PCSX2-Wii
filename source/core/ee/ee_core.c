@@ -9391,6 +9391,16 @@ static int ee_step(void)
          * ee_intc_pending()/dma_dmac_interrupt_pending() each time). */
         ee_check_intc_interrupt(st, st->pc);
         ee_check_dmac_interrupt(st, st->pc);
+        /* Round 597 (task #447/#536): forced preemption - see
+         * ee_hle_thread_check_preempt()'s own definition for the full
+         * rationale (Round 596 found a real, higher-priority, already-
+         * woken OSDSYS thread that was never getting CPU time because
+         * this project's HLE scheduler only reschedules from inside
+         * specific syscall handlers). Same instruction-boundary gating
+         * as the three interrupt checks immediately above - a cheap
+         * no-op until this project's own EE thread scheduler has been
+         * engaged at all. */
+        ee_hle_thread_check_preempt(st);
     }
 
     return 0;

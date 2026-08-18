@@ -694,3 +694,56 @@ uint32_t ee_hle_thread_get_priority(int thid)
     ee_tcb_t *t = tcb(thid);
     return t ? t->priority : 0u;
 }
+
+/* Round 597 (task #447/#536, following Round 596's finding): forced
+ * preemption. This project's reschedule() is otherwise only invoked
+ * from specific HLE syscall handlers above (StartThread/WakeupThread/
+ * SleepThread/ChangeThreadPriority/RotateThreadReadyQueue/thread-exit/
+ * SignalSema/WaitSema) - so a thread that never itself calls one of
+ * those specific syscalls can starve a higher-priority READY thread
+ * indefinitely, even after that thread has been made READY and even
+ * signaled via a real WakeupThread() call. Round 596 found exactly
+ * this: OSDSYS's real disc-browser dispatcher thread (entry=
+ * 0x00204308, identified by disassembly) sits READY with a real,
+ * better kernel priority than the currently-RUNNING animation-loop
+ * thread, already woken (wakeup_count=1 at the point of discovery),
+ * but never actually scheduled because nothing re-checks the ready
+ * queue between syscalls. Real EE hardware avoids this via kernel-
+ * level forced preemption on interrupt return (the real kernel's
+ * exception/interrupt-return path always re-checks the ready queue
+ * before restoring context) - this project's own C-level HLE
+ * scheduler (Round 569) never had an equivalent, since it only ever
+ * reacts to the specific syscalls above.
+ *
+ * Called once per genuine instruction boundary from ee_core.c's
+ * ee_step(), in the exact same `if (!st->branch_pending)` block and
+ * calling convention already used for ee_check_timer_interrupt()/
+ * ee_check_intc_interrupt()/ee_check_dmac_interrupt() - a cheap
+ * O(thread_count) scan (thread_count capped at
+ * EE_HLE_THREAD_MAX_THREADS==32) that is a no-op until this project's
+ * own scheduler has been engaged at all (thread_count==0, matching
+ * every other check function's existing no-op-until-armed
+ * convention).
+ *
+ * Deliberately conservative: only switches when the best real ready
+ * priority is STRICTLY better (numerically lower) than the currently-
+ * RUNNING thread's own priority - never merely because a same-or-
+ * lower-priority thread is ready, so FIFO ordering among equal-
+ * priority threads (pick_next_ready()'s own tiebreak) is never
+ * disturbed by this function. This mirrors a real priority-preemptive
+ * kernel's exact behavior (strictly-higher-priority-preempts, ties
+ * don't), just checked far more frequently than real hardware's own
+ * timer-tick granularity - an intentional, honest simplification
+ * given this project has no cycle-accurate timing model (same
+ * established precedent as e.g. ee_step()'s own COP0 Count-advances-
+ * by-1-per-instruction comment immediately above in ee_core.c). */
+void ee_hle_thread_check_preempt(ee_state_t *st)
+{
+    if (g.thread_count == 0 || g.current_thread_id == 0) return;
+    ee_tcb_t *cur = tcb(g.current_thread_id);
+    if (!cur || cur->status != EE_THS_RUN) return;
+    int best = pick_next_ready();
+    if (best == 0 || best == g.current_thread_id) return;
+    ee_tcb_t *bt = tcb(best);
+    if (bt && bt->priority < cur->priority) reschedule(st);
+}

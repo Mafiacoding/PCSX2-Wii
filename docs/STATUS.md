@@ -24827,3 +24827,28 @@ Direct continuation of task #585's "modeling first" direction (research real CD_
 **Classification.** No tracked-source fix implemented this round - the one concrete, real bug found (STATUS's `1`-catch-all mislabeling) is confirmed inert/unreachable on the current trace, and speculatively "fixing" a value nothing currently reads would be an unfounded, unverifiable change, against this project's own established "fix what's observed" discipline (explicitly cited in the Round 303 catch-all's own comment). Regression suite and Wii cross-build correctly skipped (docs-only round, no tracked source changed).
 
 **Disposition.** Task #585's "modeling first" direction is answered for this round: no new missing-protocol-step lead was found on the S-command side. The `CD_SCMD_STATUS` mislabeling remains a real, minor, independently-worth-fixing protocol-completeness gap for a future round (low priority - confirmed dead code on the current path), separate from task #447's still-open core question. The other half of task #585 (live PCSX2 ground truth on what `0x001C0450` reads at the moment a real console escalates) remains the most promising remaining lead, still blocked on live PCSX2 connectivity.
+
+## Round 602 (task #447/#586 continuation)
+
+User supplied a link to the real ps2sdk `scmd.c` source
+(https://israpps.github.io/ps2sdk/scmd_8c_source.html). Fetched it: confirms
+Round 601's `CD_SCMD_CMDS` enum exactly, and shows the EE-side RPC client
+wrappers (`sceCdReadClock`, `sceCdStatus`, `sceCdTrayReq`, etc.) that call
+`sceSifCallRpc(&clientSCmd, CD_SCMD_*, ...)` against `CD_SERVER_SCMD`
+(0x80000593) - the IOP-side S-command server. This is the caller side of
+the mechanism Round 601 already instrumented on the callee side.
+
+Doxygen's cross-reference sidebar showed `sceCdStatus`, `sceCdTrayReq`,
+`sceCdGetDiskType`, `sceCdBreak`, `sceCdMmode` also "defined" in `cdi.c`,
+which looked promising as a possible alternate/direct dispatch path bypassing
+the RPC S-command mechanism entirely. Fetched cdi.c
+(https://israpps.github.io/ps2sdk/cdi_8c_source.html) and found it is
+`iop/arcade/accdvd/src/cdi.c` - the arcade PS2 (System 246-class hardware)
+CDVD driver (`cdc_stat()`, `cdc_tray()`, `cdc_medium()` etc. against a
+`cdi_softc` struct), NOT part of the retail PS2/OSDSYS boot path this
+project models. Doxygen merges the two files' functions in its index only
+because both declare against the same public header (`libcdvd-common.h`);
+they are otherwise unrelated implementations for different hardware.
+Ruled out as a lead - no new information for task #447.
+
+No source change. Regression suite and Wii rebuild correctly skipped.

@@ -694,6 +694,18 @@ uint32_t ee_hle_thread_get_priority(int thid)
     ee_tcb_t *t = tcb(thid);
     return t ? t->priority : 0u;
 }
+/* Round 612 (task #536): see header comment - read-only accessors for
+ * the TCB's own already-tracked wait_type/wait_id fields. */
+uint32_t ee_hle_thread_get_wait_type(int thid)
+{
+    ee_tcb_t *t = tcb(thid);
+    return t ? (uint32_t)t->wait_type : 0u;
+}
+uint32_t ee_hle_thread_get_wait_id(int thid)
+{
+    ee_tcb_t *t = tcb(thid);
+    return t ? (uint32_t)t->wait_id : 0u;
+}
 
 /* Round 597 (task #447/#536, following Round 596's finding): forced
  * preemption. This project's reschedule() is otherwise only invoked

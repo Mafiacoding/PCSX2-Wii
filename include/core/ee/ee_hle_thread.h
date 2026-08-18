@@ -179,6 +179,20 @@ int ee_hle_thread_get_current_thread_id(void);
 uint32_t ee_hle_thread_get_status(int thid);
 uint32_t ee_hle_thread_get_priority(int thid);
 
+/* Round 612 (task #536, user-supplied real ps2sdk kernel.h confirms
+ * ee_thread_status_t really has waitType@0x24/waitId@0x28 - this
+ * project's own TCB already tracks the identical fields internally
+ * (wait_type/wait_id, set by WaitSema/SleepThread, cleared by
+ * SignalSema/WakeupThread - see ee_hle_thread.c) and already exposes
+ * them to GUEST code via ReferThreadStatus's 0x24/0x28 writes, but
+ * had no HOST-native accessor for this project's own diagnostic
+ * drivers - added to directly answer "what is thread N blocked on"
+ * instead of inferring it from indirect symptoms. Returns EE_TSW_NONE
+ * (0) for an invalid thid, matching get_status()/get_priority()'s
+ * existing safe-default convention. */
+uint32_t ee_hle_thread_get_wait_type(int thid);
+uint32_t ee_hle_thread_get_wait_id(int thid);
+
 /* Round 597 (task #447/#536): forced preemption. Call once per genuine
  * instruction boundary from ee_step() (same convention as
  * ee_check_timer_interrupt()/ee_check_intc_interrupt()/

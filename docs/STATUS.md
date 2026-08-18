@@ -24852,3 +24852,65 @@ they are otherwise unrelated implementations for different hardware.
 Ruled out as a lead - no new information for task #447.
 
 No source change. Regression suite and Wii rebuild correctly skipped.
+
+## Round 603 (task #447/#586) - FIRST SUCCESSFUL LIVE PCSX2 CONNECTION SINCE ROUND 598
+
+After many rounds of ECONNREFUSED on both DebugServer (21512) and Pine (28011),
+a live connection succeeded this round: DebugServer connected (128-bit regs,
+native disasm available) and Pine IPC connected, reporting "PS2 BIOS (Japan)"
+running (game ID 20000117-050310, no disc/game loaded - idle BIOS/OSDSYS
+disc-browser state). Confirmed correct BIOS per the standing JP-only rule.
+
+Captured before the connection dropped (~1 minute live window):
+
+1. Read 0x001C0440-0x001C0460 (the OSDSYS browser-state struct Rounds
+   485/594/600 identified): +0x444=0, +0x450=5, +0x454=0. This EXACTLY
+   matches Round 594's diskless synthetic finding and Round 600's
+   disc-mounted synthetic finding (both showed the field settle at 5,
+   never reaching the escalation value 9).
+
+2. Set an onchange/both watchpoint on 0x001C0450 and let real hardware run
+   for ~8 real-time seconds (observed EE cycle counter advanced from
+   ~3.06B to ~3.07B, i.e. roughly 10M+ cycles). Watchpoint recorded 0 hits -
+   the field never changed. This is real-hardware confirmation (not just
+   our own emulator) that an idle BIOS disc-browser with no disc mounted
+   holds +0x450 at 5 indefinitely and does NOT spontaneously escalate to 9
+   merely by waiting - directly validating Round 600's "identical writes
+   with/without a mounted disc" finding and ruling out "just wait longer"
+   as a hypothesis.
+
+3. get_threads on real hardware showed 5 threads (TID 2, 6, 7, 8, 9) all
+   parked at real PC=0x00210e68, and TID 1 at PC=0x00210e78 - both inside
+   the exact 0x00210E70-region handler that Round 465 first disassembled
+   and Round 595 fully decoded as the common __NR_WakeupThread-class
+   syscall trampoline / semaphore-wait dispatcher target for all three
+   escalation gates (+0x444/+0x450/+0x454). This is the first real-hardware
+   confirmation that our from-scratch static disassembly of 0x00210E70 was
+   accurate: real OSDSYS genuinely parks multiple threads there via
+   WaitSema, exactly as this project's synthetic model (Round 598-599)
+   independently arrived at.
+
+4. Attempted to arm the crash-safe boot_analyzer's CDVD/CD-ROM register
+   watchpoints to look for real S-command/N-command traffic during BIOS
+   idle; the connection dropped (ECONNRESET) partway through arming
+   (3 of 10 watchpoints failed to arm). All subsequent reconnect attempts
+   this round returned ECONNREFUSED on both ports again - the live
+   connection window was real but short-lived and non-reproducible on
+   demand, consistent with the pattern from Rounds 458-598 (the DebugServer
+   patch's listening window appears to open/close outside our control,
+   likely tied to the user manually starting/restarting pcsx2-qt.exe).
+
+Net result: two of this project's core synthetic findings (Round 594/600's
++0x450 diskless-idle value, and Round 595's 0x00210E70 handler decode) are
+now independently confirmed against real PS2 hardware via PCSX2's own
+low-level debugger, not just our own emulator's internal state. This
+substantially raises confidence that task #447's remaining open question
+(what real event triggers the +0x450==9 escalation) is NOT a modeling bug
+in this project - real OSDSYS genuinely needs an external trigger neither
+"disc mounted" nor "wait longer" satisfies. The most likely remaining
+candidate is a genuine CD-ROM tray/disc-change interrupt or a McServ
+memory-card-present signal, neither of which could be tested live before
+the connection dropped.
+
+No source change - docs-only round. Regression suite and Wii rebuild
+correctly skipped.

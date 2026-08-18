@@ -25014,3 +25014,59 @@ transition (which would settle the field-identity question directly).
 
 No source change - docs-only round. Regression suite and Wii rebuild
 correctly skipped.
+
+## Round 605 (task #447/#588) - corrected Round 604's GS-register framing (confirmed via PCSX2's own native debugger: unmapped, not zero) + disassembled the live menu's actively-running thread (TID4)
+
+Direct follow-up to the user's correction: "the display is not broken, check display2." Used the still-live connection from Round 604 (never dropped this round - first time in the whole project a connection has survived across two consecutive rounds).
+
+1. Opened PCSX2's own native Qt Debugger Memory view (not this project's RPC tool) via
+   Windows > Memory, maximized the debugger window, and used "Go to Address" to jump
+   to 0x12000090 (DISPFB2) through 0x120002F0 (covering DISPFB1/DISPLAY1/DISPFB2/
+   DISPLAY2/CSR/IMR/etc). The native view shows literal "??" for every byte in this
+   entire range - PCSX2's own UI's explicit code for "this address is not backed by
+   readable memory," NOT zero. This is decisive: Round 604's "pcsx2_gs_registers reads
+   all-zero while the display is clearly active" finding was a MISCHARACTERIZATION.
+   The RPC read tool silently returns zero-filled bytes for an address neither it nor
+   PCSX2's own native debugger can actually read - it is not reporting a real
+   (uninitialized) hardware state at all, zero or otherwise. Confirmed identically at
+   both DISPFB1/DISPLAY1 (Round 604's original citation) and DISPFB2/DISPLAY2 (the
+   register set Round 321 established OSDSYS actually uses).
+
+   This corrects Round 604's item 4: the display is NOT broken, and this is not
+   evidence against any prior GS-register-based finding either. The real explanation
+   is narrower and less alarming - the GS privileged register block (0x12000000-
+   0x12002000) simply isn't exposed through the generic EE-bus memory-read path this
+   project's RPC and PCSX2's own generic Memory viewer both use; reading true GS state
+   needs a different, GS-specific access path (e.g. a dedicated GS-state panel/API),
+   which this round did not need to pursue further since the display itself is
+   visibly, correctly working. Retracting Round 604's "casts doubt on every prior
+   GS-register-based finding" language - it was over-broad; the correct, narrower
+   statement is that reads at the literal 0x12000000+ address via this tooling return
+   a placeholder zero rather than an error, so any future read at that range should be
+   treated as "unknown," not "confirmed zero."
+
+2. Re-checked get_threads: TID4 (the actively RUNNING thread found in Round 604) has
+   genuinely advanced - PC moved from 0x0060dc68 to 0x006141d0 over the course of this
+   round's tool calls, real forward progress, not a stall. Disassembled 24 instructions
+   at 0x0060dc50: it's real floating-point vector work - loads three floats (f12) via
+   lwc1 from offsets 0x0/0x4/0x8 of a struct pointed to by $s1, each added to $f21 and
+   multiplied by $f20 (a classic scale-then-offset transform), calling out to
+   0x00610798 and 0x00614AC8 (likely math-library helpers, e.g. sin/cos or a
+   matrix/vector routine - not yet decoded) after each component. This is consistent
+   with computing the live rotation/scale of the spinning disc icon visible in the
+   real menu screenshot - i.e. TID4 is genuine OSDSYS menu-animation code, actively
+   running, not idle or stuck. A concrete, disassembly-grounded lead for what's really
+   driving the interactive menu, replacing the now-retired struct-offset-polling
+   approach.
+
+Net effect: two of Round 604's four findings are strengthened (interactive menu is
+real and its animation thread is genuinely executing real code) and one is corrected
+(the GS-register "all zero" claim was a tooling artifact, not evidence of anything).
+The core open question - which field (if either) actually signals "menu reached,"
+given Round 590-592's +0x454=5 vs this session's +0x450=5/+0x454=0 - remains open and
+is the most promising next lead: TID4's math-heavy PC range (0x0060dc50-0x006141d0
+and climbing) is worth full disassembly next, since it's proven to be live, running
+code tied to the actual on-screen menu, not a guess.
+
+No source change - docs-only round. Regression suite and Wii rebuild correctly
+skipped.

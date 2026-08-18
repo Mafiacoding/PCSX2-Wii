@@ -24914,3 +24914,103 @@ the connection dropped.
 
 No source change - docs-only round. Regression suite and Wii rebuild
 correctly skipped.
+
+## Round 604 (task #447/#587) - MAJOR: real interactive OSDSYS menu reached with +0x450 still at 5, contradicting BOTH Round 594's magic-value-9 model AND Round 590-592's own +0x454=5 "ground truth"; GS-register read path also found unreliable
+
+Followed the user's corrected relaunch procedure exactly: fresh pcsx2-qt.exe
+launch, Debug > Open Debugger opened first, System > Start BIOS to get a
+genuinely running (non-paused) JP BIOS boot, then pcsx2_connect. Connected
+cleanly on the first attempt this time (DebugServer + Pine IPC both up,
+"PS2 BIOS (Japan)" 20000117-050310) - no errors, no crash.
+
+Armed all 13 boot_analyzer watchpoints successfully (previous rounds only
+managed partial arming before a crash). Opened the System menu to begin the
+planned Change-Disc-while-watching experiment (task #587) - but the
+background game view had already progressed, unprompted, to the real
+interactive OSDSYS main menu: Japanese "ブラウザ" (Browser) / "システム設定"
+(System Settings) text with live O="決定" (Confirm) / Triangle="本体設定"
+(System Settings) button prompts and a spinning disc icon, rendering at
+640x448 D3D12, 60 FPS, 100% speed. Screenshotted for the record. Pressed
+Escape to close the System menu without touching Change Disc, to preserve
+this state for inspection.
+
+Four findings from inspecting this live, confirmed-interactive menu state:
+
+1. 0x001C0440-0x1C045F reads: +0x444=0, +0x450=5, +0x454=0. +0x450 is
+   IDENTICAL to Round 594 (diskless synthetic) and Round 603 (live,
+   pre-menu idle) - the menu is fully interactive on screen while this
+   project's Round 594 model says +0x450 must equal 9 to reach it. That
+   model is now directly contradicted by real hardware while looking at
+   the actual menu, not just an idle/animation state.
+
+2. +0x454=0 here ALSO contradicts this project's own OLDER live ground
+   truth from Round 590-592, which stated (three times, independently
+   reconfirmed) that "+0x001C0454 = 5 at the real interactive main menu"
+   and treated that as a settled fact ("state 5 = interactive main menu
+   active"). This round's capture, also explicitly at the real interactive
+   menu, shows +0x454=0. Two live-hardware captures, both labeled "at the
+   real menu," disagree on this field. Possible explanations not yet
+   distinguished: (a) Round 590-592 mislabeled/misread the offset, (b) the
+   field is sub-state-dependent (Browser view vs System Settings view,
+   or timing relative to a Reset vs a fresh Start BIOS), or (c) genuine
+   nondeterminism in which of several similar-looking counter/flag fields
+   in this struct region happens to hold 5 at any given sampling moment.
+   This means NEITHER +0x450 nor +0x454 can currently be trusted as "the"
+   menu-reached indicator - this project has now recorded contradictory
+   live-hardware evidence for both.
+
+3. boot_analyzer status showed 0 hits on all 13 tracked fields (all 7 RAM
+   struct offsets, GS_PMODE/DISPFB1/DISPLAY1, and the 3 IOP CDVD/CD-ROM
+   command registers) despite the menu being fully rendered and receiving
+   input prompts. Either the transition into this state happened before
+   watchpoints were armed (plausible - the menu may already have been
+   showing at the moment of connection, since Start BIOS was launched
+   before pcsx2_connect per the user's instructed sequence) or it happens
+   via a mechanism/address entirely outside this project's current
+   13-field tracked set.
+
+4. pcsx2_gs_registers (direct read of the real GS privileged register file
+   at physical 0x12000000+, PMODE/DISPFB1/DISPLAY1/CSR/etc.) returned
+   ALL ZERO across every register, while the emulator was simultaneously,
+   visibly rendering real video output for the menu (640x448 D3D12 @ 60fps,
+   100% speed - confirmed via screenshot). A genuinely active display
+   cannot have PMODE=0/DISPFB1=0/DISPLAY1=0 on real hardware; this is
+   strong evidence that the debug memory-read path used by this tool for
+   the 0x12000000 GS-privileged-register range does not reflect true
+   hardware/GS-internal state (these registers likely require a different
+   access mode than a plain address-space read, e.g. privileged/uncached
+   access or GS-internal state not exposed at that literal address via
+   this RPC). This calls into question EVERY prior GS-register-based
+   finding in this project's history that relied on pcsx2_gs_registers or
+   equivalent reads at 0x12000000+ (e.g. Round 321's DISPFB2/DISPLAY2
+   circuit-2 finding, Round 232/238/240/347/458's zero-GS-state citations)
+   - those may have always read zero regardless of the real display state,
+   not because the boot genuinely hadn't configured a display path. This
+   is a new, unresolved methodology-reliability concern, not a one-off.
+
+5. get_threads showed the previously-confirmed kernel-parked set unchanged
+   (TID 1 @ 0x00210e78, TID 2/6/7/8/9 @ 0x00210e68 - matches Round 603
+   exactly) PLUS three new threads not seen in any prior diskless-idle
+   capture: TID 3 (PC=0x00518428, status=4/waitType=1, waiting), TID 4
+   (PC=0x0060dc68, status=1, RUNNING), TID 5 (PC=0x007c45e8, status=4/
+   waitType=1, waiting). This is the first live capture of the actual
+   OSDSYS browser application's own thread footprint, distinct from the
+   kernel dispatcher threads - TID 4's running PC (0x0060dc68) is a new,
+   disassembly-worthy lead for what code is actually driving the live menu.
+
+Net effect: this round does NOT resolve task #447 - it complicates it in a
+useful way. Two different live-hardware sessions, both captured "at the
+real interactive OSDSYS menu," disagree on which struct field (if either)
+signals that state, and a previously load-bearing measurement tool
+(GS register reads) is now suspect. Recommended next steps (not yet done):
+(a) disassemble around TID 4's live PC 0x0060dc68 to find what's actually
+driving the menu, instead of continuing to poll struct offsets; (b)
+root-cause the GS-register read-zero issue (try an uncached-address variant
+or PCSX2's own memory-view API instead of the current debug RPC) before
+trusting any future GS-based finding; (c) if the connection survives,
+re-read 0x1C0440-0x1C0460 again after navigating the live menu with a
+real pad press, to see whether either field changes on a real state
+transition (which would settle the field-identity question directly).
+
+No source change - docs-only round. Regression suite and Wii rebuild
+correctly skipped.

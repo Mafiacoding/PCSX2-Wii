@@ -25123,3 +25123,57 @@ Two major consequences:
 
 No source change - docs-only round (this is a live-hardware investigation round, not a tracked-code
 change). Regression suite and Wii rebuild correctly skipped.
+
+## Round 607 (task #447/#590) - MAJOR SYNTHESIS: real hardware confirms disc-auto-boot completely bypasses the interactive OSDSYS Browser/+0x450 struct - task #447's "does the Browser ever reach 9" question is moot for actual game-boot purposes
+
+Direct continuation of Round 606, following the plan to mount a real disc and test whether
+navigating to a Disc device icon on the live Browser screen produces +0x450=9. Found the live
+PCSX2 window had - between Round 606 ending and this round starting - already progressed on its
+own into full real gameplay: window title "Tekken Tag Tournament [Demo] (SCED-50041)", pcsx2_status
+confirming the same, and a screenshot showing genuine in-game 3D combat rendering (character
+models, fire particle effects, real-time animation). 0x001C0440-0x1C0460 (the OSDSYS browser-state
+struct) now contained garbage/game data, not BIOS structure - confirming OSDSYS's browser state
+machine is no longer resident; the game has fully taken over that RAM region.
+
+To get a clean, watched capture of the actual boot transition (with the disc still mounted from
+whatever prior action loaded it), performed System > Reset via the real PCSX2-Qt UI. Result,
+captured immediately and unambiguously:
+
+- Immediately after reset, get_threads showed only 2 threads (TID 0 kernel idle, TID 1 running at
+  real game code PC 0x004002f8) - NOT the familiar 10-thread OSDSYS/Browser signature (TID 0-9,
+  five parked at 0x00210e68 etc.) that every single prior diskless-boot round in this project's
+  history (590, 594, 596, 600, 603-606) has always shown.
+- Within ~2 seconds, screenshots showed the real Sony/Namco splash sequence playing, then genuine
+  Tekken Tag Tournament gameplay rendering (fighters, particle effects, real-time animation),
+  confirmed at 49-50 FPS, Direct3D 12, 640x512.
+- The interactive Browser screen (ブラウザ/システム設定, the screen Round 606 navigated through
+  with real Circle/Cross presses) was NEVER shown at any point during this reset-to-gameplay
+  sequence. Not one frame of it.
+
+Conclusion: on real hardware, when a valid disc is mounted at power-on/reset, OSDSYS auto-boots
+directly into the game via a completely separate code path (the EELOAD/_LoadExecPS2/SYSTEM.CNF
+dispatch chain this project has already extensively investigated across Rounds 457-563) and NEVER
+populates or touches the interactive Browser's thread/struct machinery at all. The Browser screen
+(and its 0x001C0450 field, whose live behavior Round 606 finally decoded: 5=Browser, 8=Memory Card
+device screen) is reached ONLY when there is no disc to auto-boot - it is a fallback/management UI,
+not a step on the path to launching a game. This means:
+
+1. Task #447's original framing - "OSDSYS's disc-browser thread needs to escalate via +0x450==9
+   to launch the game" - was very likely a mischaracterization from the start. Real hardware does
+   not launch games through the interactive Browser's escalation gate at all. Value 9 may exist for
+   some other rarely-exercised Browser sub-screen (a network/USB device slot, or a disc ALREADY
+   browsed-to-but-not-auto-launched scenario), but it is NOT a required step for normal disc boot.
+2. This retroactively validates the project's large, separate body of work on the EELOAD/
+   _LoadExecPS2/SYSTEM.CNF direct-dispatch chain (Rounds 457-563, task #530/#551 etc.) as the
+   CORRECT path to pursue for actually booting Tekken/any real game - not the Browser-escalation
+   angle this specific task (#447/#586-590) has been chasing since Round 480. The two lines of
+   investigation were probably never meant to converge on the same mechanism; conflating them
+   likely cost significant effort across many rounds.
+3. Recommend closing out task #447's Browser-escalation angle as answered (not a live bug to fix
+   in tracked source - it's a real-hardware UI-only path this project's own emulator doesn't need
+   to model for game-boot purposes) and redirecting any further "why won't Tekken boot/render"
+   effort fully onto the already-substantial EELOAD-chain body of work and task #551's rendering
+   pipeline questions, where the real leverage is.
+
+No source change - docs-only round (major synthesis/re-scoping, not a code fix). Regression suite
+and Wii rebuild correctly skipped.

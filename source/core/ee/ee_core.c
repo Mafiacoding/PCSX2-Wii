@@ -706,6 +706,91 @@ static void ee_check_boot_unblock_selfloop(ee_state_t *st)
     fired = 1;
 }
 
+/*
+ * Round 610 (task #536, direct continuation of the user's "both" request
+ * after Round 609's live ground truth): PRAGMATIC, NOT PROVEN-AUTHENTIC
+ * COMPROMISE FIX - same explicit-labeling convention as Round 161's
+ * ee_check_boot_unblock_selfloop() above ("just applied to a hardware
+ * register instead of a syscall"), extended to a real OSDSYS BIOS-RAM
+ * struct field instead of an INTC register.
+ *
+ * Context. Task #447's 55+-round investigation (Rounds 335-609)
+ * exhaustively confirmed: (1) real OSDSYS's Browser main menu is the
+ * correct diskless-boot target content (Round 609 - a genuinely
+ * diskless `Start BIOS` boot on real hardware reaches this exact
+ * screen); (2) real hardware's own `0x001C0454` struct field holds
+ * `5` at that screen (Rounds 590-592/606/609, confirmed 5+ independent
+ * times live); (3) this project's own emulation always leaves that
+ * field at its honest, correctly-modeled init value of `0` (Round 593
+ * disassembled BOTH real write sites for this field down to the
+ * instruction level - both are legitimate, unconditional `sw $zero`
+ * BIOS init/ack code, not a bug); (4) a full, now file-complete static
+ * scan of every byte of OSDSYS's real loaded ELF segment (Round 593's
+ * original 0x200000-0x280000 scan, extended this round to the exact
+ * real p_filesz boundary 0x200000-0x28D1EC - see this round's docs
+ * entry for the extraction/validation methodology) finds NO further
+ * instruction anywhere in the real, currently-loaded code that could
+ * write anything but `0` to this field - the real producer code is
+ * either never loaded into this trace's window at all, or reachable
+ * only through a currently-unidentified indirect/IOP-side path.
+ *
+ * Given this exhaustive, evidence-based dead end, and per the user's
+ * standing tolerance ("even if it crashes i dont care atleast it
+ * boots") plus this round's explicit instruction to try both continued
+ * root-cause investigation AND a pragmatic workaround: this function
+ * force-writes the real, live-confirmed value (`5`) into the real
+ * struct field (`0x001C0454`) once boot has run long enough to
+ * plausibly correspond to real hardware's own observed ~1-3-second
+ * Start-BIOS-to-menu transition (Rounds 590/606/609) - approximated
+ * here as 120 real EE_CYCLES_PER_FRAME_NTSC-sized frames (~2 seconds
+ * of real PS2 time, the middle of that observed window, using this
+ * project's own already-real, already-frame-accurate VBLANK cycle
+ * model rather than a fabricated instruction count), and ONLY when no
+ * disc is mounted (iop_cdvd_get_disc_type() == IOP_CDVD_TYPE_NODISC) -
+ * this must never fire on a disc-mounted boot, since Round 607 already
+ * proved real disc-mounted boots use a completely separate EELOAD/
+ * _LoadExecPS2 dispatch chain that never touches this struct at all,
+ * and firing here would be pure interference with that already-working
+ * path. Same defensive "don't fight a real write" guard as Round 161's
+ * precedent: only overwrites the field if it is still exactly the
+ * known, disassembly-confirmed init value 0 - if real (or future,
+ * evidenced) code has already written something else, this backs off
+ * rather than clobbering it.
+ *
+ * Explicitly unverified/honest scope note: this does NOT claim to be
+ * the real trigger mechanism, and does NOT by itself guarantee OSDSYS's
+ * own per-tick dispatcher (0x00204308, Round 482-484's citation) will
+ * successfully render the interactive menu once this field changes -
+ * that depends on whatever else the real dispatcher's escalation
+ * handler (0x00210E70 chain, Round 594-595) needs that this project's
+ * emulation may also be missing. This is a deliberate, clearly-labeled
+ * compromise to give the real, already-loaded BIOS dispatcher code a
+ * chance to pick up the transition and run itself, in place of
+ * continuing to block on an unresolved 55+-round root-cause search -
+ * a future round that finds the actual real trigger should replace
+ * this, exactly per Round 161's own precedent and rationale. Only
+ * fires once per boot (static latch), matching every other one-shot
+ * shortcut in this file. */
+#define EE_BROWSER_ESCALATION_FIELD_ADDR   0x001C0454u
+#define EE_BROWSER_ESCALATION_REAL_VALUE   0x00000005u
+#define EE_BROWSER_ESCALATION_FRAME_DELAY  120u /* ~2s real PS2 time */
+
+static void ee_check_browser_menu_escalation_heuristic(ee_state_t *st)
+{
+    static int fired = 0;
+    if (fired)
+        return;
+    if (st->instructions_executed < (uint64_t)EE_BROWSER_ESCALATION_FRAME_DELAY * EE_CYCLES_PER_FRAME_NTSC)
+        return; /* not yet at the real ~2s-equivalent point */
+    if (iop_cdvd_get_disc_type() != IOP_CDVD_TYPE_NODISC)
+        return; /* diskless-only heuristic - never touch the real, already-working disc-mounted EELOAD path (Round 607) */
+    uint32_t current = ee_mem_read32(st, EE_BROWSER_ESCALATION_FIELD_ADDR);
+    if (current != 0)
+        return; /* real (or future evidenced) code already wrote something else - don't interfere */
+    ee_mem_write32(st, EE_BROWSER_ESCALATION_FIELD_ADDR, EE_BROWSER_ESCALATION_REAL_VALUE);
+    fired = 1;
+}
+
 /* Round 279 (task #423 continuation, 320th finding) shipped a shortcut
  * here (ee_check_pollsema_vblank_unblock()) that force-enabled the
  * VBLANK_START/END INTC mask bits at a live-traced PollSema spin,
@@ -3330,6 +3415,7 @@ static int ee_step(void)
                         ee_latch_timer_interrupt(st);
                         ee_check_vblank(st);
                         ee_check_boot_unblock_selfloop(st); /* Round 161 */
+                        ee_check_browser_menu_escalation_heuristic(st); /* Round 610 (task #536) */
                         ee_check_boot_unblock_sbus_wait(st); /* Round 178 (task #344) - EXPERIMENTAL BRANCH ONLY */
                         ee_check_gs_vsync(st); /* Round 87 (127th finding) */
                         ee_timers_tick(); /* Round 87 (127th finding): EE peripheral timers T0-T3 */
@@ -9388,6 +9474,7 @@ static int ee_step(void)
      * instruction boundary. */
     ee_check_vblank(st);
     ee_check_boot_unblock_selfloop(st); /* Round 161 */
+    ee_check_browser_menu_escalation_heuristic(st); /* Round 610 (task #536) */
     ee_check_boot_unblock_sbus_wait(st); /* Round 178 (task #344) - EXPERIMENTAL BRANCH ONLY */
     ee_check_gs_vsync(st); /* Round 87 (127th finding) */
     ee_timers_tick(); /* Round 87 (127th finding): EE peripheral timers T0-T3 */

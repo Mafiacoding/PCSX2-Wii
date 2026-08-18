@@ -739,6 +739,43 @@ uint32_t ee_hle_thread_get_priority(int thid)
  * by-1-per-instruction comment immediately above in ee_core.c). */
 void ee_hle_thread_check_preempt(ee_state_t *st)
 {
+    /* Round 598 (task #447/#536 follow-up, real regression fix): a real,
+     * confirmed-via-user-supplied-disc regression was found in Round 597's
+     * original version of this function - it had no guard against
+     * preempting while the CPU is genuinely mid-hardware-exception
+     * (COP0 Status.EXL or Status.ERL set). ee_check_timer_interrupt()/
+     * ee_check_intc_interrupt()/ee_check_dmac_interrupt() immediately
+     * above this function's own call site in ee_core.c's ee_step() all
+     * correctly refuse to raise a NEW interrupt while EXL/ERL is set
+     * (real MIPS semantics - exceptions do not nest by default), but
+     * this function had no equivalent check, so it could - and, per
+     * Round 598's host-native evidence against the real Tekken Tag
+     * Tournament (Europe) (Demo) disc image, DID - swap out the "current
+     * thread"'s live register file (including pc) while that thread's
+     * CPU state actually belonged to a real EE interrupt handler
+     * (Status.EXL=1, COP0 EPC holding the real interrupted return
+     * address). A real interrupt-return sequence (ERET) assumes it will
+     * resume exactly the context that was live when the exception was
+     * taken; this function silently substituting a DIFFERENT thread's
+     * saved context in between corrupts that assumption - the newly-
+     * loaded thread's code then runs with EXL still set (interrupts
+     * effectively masked) and no correct path back to the original
+     * caller, which is exactly the symptom Round 598 measured: the real
+     * Tekken disc-boot animation thread (tid 3) permanently trapped
+     * cycling through EE kernel interrupt-dispatch code
+     * (0x8000CC00-0x8000FA00) with zero further VU1/GS activity for
+     * over a billion further instructions, instead of baseline's
+     * (pre-Round-597) behavior of continuing to render real frames.
+     * The fix mirrors the exact same EXL/ERL gating convention already
+     * used by this file's three sibling interrupt-check functions -
+     * simply refuse to switch threads while genuinely inside a hardware
+     * exception; the CPU will still be re-checked on every subsequent
+     * instruction boundary once ERET clears EXL, so the disc-browser-
+     * dispatcher-starvation fix Round 597 was written for is preserved
+     * (see this file's own header/definition comments for that
+     * original rationale), just no longer firing during the one window
+     * where doing so is unsafe. */
+    if (st->cop0[12] & 0x6u) return; /* Status.EXL (bit 1) or Status.ERL (bit 2) set - genuinely mid-exception, never preempt here */
     if (g.thread_count == 0 || g.current_thread_id == 0) return;
     ee_tcb_t *cur = tcb(g.current_thread_id);
     if (!cur || cur->status != EE_THS_RUN) return;

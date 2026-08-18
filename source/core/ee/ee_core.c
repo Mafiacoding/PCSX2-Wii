@@ -6855,6 +6855,19 @@ static int ee_step(void)
                     }
                     st->pc = target;
                     st->next_pc = target + 4;
+                    /* Round 598 (task #447/#536): forced preemption now
+                     * fires here, right after a real interrupt/exception
+                     * return, instead of on every instruction (see the
+                     * long comment at this function's other former call
+                     * site in ee_step()'s epilogue for the full Round 598
+                     * regression writeup). This is the one point where
+                     * real EE hardware's own kernel-level forced
+                     * preemption genuinely happens - the interrupt-return
+                     * path re-checking the ready queue before restoring
+                     * a thread's context - so this is a strictly more
+                     * hardware-faithful integration point, not just a
+                     * regression workaround. */
+                    ee_hle_thread_check_preempt(st);
                     break;
                 }
                 case 0x38: /* EI - ported from PCSX2's COP0::EI(). Gated
@@ -9391,16 +9404,34 @@ static int ee_step(void)
          * ee_intc_pending()/dma_dmac_interrupt_pending() each time). */
         ee_check_intc_interrupt(st, st->pc);
         ee_check_dmac_interrupt(st, st->pc);
-        /* Round 597 (task #447/#536): forced preemption - see
-         * ee_hle_thread_check_preempt()'s own definition for the full
-         * rationale (Round 596 found a real, higher-priority, already-
-         * woken OSDSYS thread that was never getting CPU time because
-         * this project's HLE scheduler only reschedules from inside
-         * specific syscall handlers). Same instruction-boundary gating
-         * as the three interrupt checks immediately above - a cheap
-         * no-op until this project's own EE thread scheduler has been
-         * engaged at all. */
-        ee_hle_thread_check_preempt(st);
+        /* Round 597/598 (task #447/#536): forced preemption used to be
+         * called unconditionally right here, on every single genuine
+         * instruction boundary - see ee_hle_thread_check_preempt()'s
+         * own definition for the original Round 596/597 rationale.
+         * Round 598 found a real, confirmed regression from that
+         * per-instruction granularity: it let a thread get preempted
+         * at literally any point in its own code, not just at real
+         * hardware's actual integration point (kernel-level forced
+         * preemption specifically on interrupt RETURN, i.e. ERET).
+         * Against the real, user-supplied Tekken Tag Tournament
+         * (Europe) (Demo) disc image, this measurably and permanently
+         * trapped the OSDSYS animation thread inside EE kernel
+         * interrupt-dispatch code after the first VBLANK - baseline
+         * (pre-Round-597) kept rendering real frames (VU1 instruction
+         * count climbing) across the same instruction window; the
+         * per-instruction-preempt tree never executed another VU1
+         * instruction again. The call has been moved to fire only from
+         * the real ERET handler below (case 0x18), immediately after
+         * Status.EXL/ERL is cleared and normal thread-level execution
+         * resumes - the same "only re-check the ready queue on
+         * interrupt return" moment Round 596's own docs already
+         * identified as real hardware's actual mechanism. This still
+         * fully answers Round 596's original finding (a WakeupThread'd
+         * higher-priority READY thread now gets scheduled the next
+         * time any real interrupt returns, which happens roughly every
+         * EE_CYCLES_PER_FRAME_NTSC instructions via ee_check_vblank()),
+         * just without ever firing mid-instruction inside a thread's
+         * own non-interrupt code. */
     }
 
     return 0;

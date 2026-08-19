@@ -26567,3 +26567,64 @@ it to `0x51b680`, and determine whether that's a genuine emulator bug (most like
 how specific and code-region-adjacent the address is) or reflects some other still-unidentified real
 buffer-address computation this project has not yet modeled correctly.
 
+
+## Round 645: D_TADR=0x51b680 confirmed NOT a bug - real, well-formed, self-terminating VIF1 DMA source chain (task #536/#634, closes the Round 643/644 thread)
+
+**Method:** instrumented all 5 real VIF1 DMA MMIO registers (CHCR/MADR/QWC/TADR/SADR at
+`0x10009000/0x10/0x20/0x30/0x80`) in `ee_mem_write32()` with PC-tagged logging, then ran a 150M-slice
+diskless JP BIOS boot survey. Captured 351,047 total VIF1 register writes.
+
+**Finding 1 - D_TADR=0x51b680 is written exactly once, deliberately, by real executing code.** Across
+the entire run, `TADR` is written 117,010 times total, but only ONE of those writes sets it to
+`0x0051b680` - all 117,009 others alternate between two unrelated steady-state values (`0x80002290`
+and `0x80000520`, ~58,505 times each), clearly a separate, repeating, steady-state VIF1 transfer
+pattern unrelated to the address under investigation. The single `0x51b680` write happens at
+`pc=0x00506c84`, immediately preceded by `QWC=0` (pc=0x00506c7c, correct/expected for chain mode) and
+immediately followed by `CHCR=0x00000145` (pc=0x00506cb4), which decodes as DIR=1 (source chain),
+MOD=01 (chain mode), STR=1 (start) - a completely well-formed, legitimate chain-mode DMA kickoff.
+Critically, `pc=0x00506c84` itself lies inside the same `0x00500000-0x0051ba00` decompressed blob
+Round 644 examined - meaning this is the decompressed code's OWN deliberate action, not a stray or
+uninitialized register write.
+
+**Finding 2 - the target region is a real, well-formed, self-terminating DMA source chain, not
+garbage.** Round 644's capture window (`0x500000-0x51ba00`) was too small to hold the transfer -
+widened it to `0x500000-0x530000` and re-ran. Decoding the real PS2 DMAtag structure (not a GIFtag -
+this is the *DMA chain descriptor*, consumed by the DMA controller itself before the GS ever sees
+anything) at each address the walk visits:
+
+```
+tag#0 @0051b680: QWC=115 ID=1(CNT)  -> 115 qwords (1840 bytes) of real transfer data follow immediately
+tag#1 @0051bdc0: QWC=23  ID=2(NEXT) -> 23 qwords follow, then jump to next_addr=0x0051bf40
+tag#2 @0051bf40: QWC=106 ID=1(CNT)  -> 106 qwords (1696 bytes) of real transfer data follow immediately
+tag#3 @0051c5f0: QWC=0   ID=7(END) -> chain terminates cleanly
+```
+
+Every tag decodes to a valid, in-spec DMA tag ID (CNT/NEXT/END only - no invalid IDs), every `QWC`
+is a small sane value, the `NEXT` tag's jump target lands exactly on another valid tag, and the chain
+terminates with a proper `END` tag rather than running off into uninitialized memory or looping. All
+bytes in this entire span are `touched` (i.e. were genuinely written by the EE decompressor, not
+zero-fill/uncaptured). This is not consistent with "the decompressor produced garbage here and we
+happened to land on it" - it is consistent with a correctly decompressed, correctly chained, 244-qword
+real VIF1 DIRECT transfer.
+
+**Conclusion - both Round 643 and Round 644 were partial, and this round reconciles them.** Round 643
+was right that this data ultimately feeds a real DMA transfer; Round 644 was right that the region
+also contains real, executing MIPS code earlier in the same blob. Neither is a bug: the decompressed
+`0x500000-0x51ba00+` blob is a legitimate combined loader-stub-plus-payload structure (common in real
+PS2 BIOS/homebrew) - a short span of code that runs to completion (reaching `pc=0x506c84`), then
+kicks off a DMA source chain whose descriptor and payload live later in the very same blob. Our
+decompressor, our DMA chain-tag walker, and our VIF1 MMIO register handling are all functioning
+correctly on this specific path - none of the three is the bug task #536 has been hunting since
+Round 642.
+
+**This closes the D_TADR=0x51b680 investigation.** Task #634/#536's VIF1-buffer-corruption thread
+(Rounds 642-645) is now fully resolved as a false lead: the mechanism that was suspected of being
+broken is, on rigorous byte-level and structural inspection, correct. The real remaining gap toward
+"a picture, not just lines/text" (per the user's standing goal) lies elsewhere in the pipeline and
+should be re-scoped fresh next round with a direct look at the current live-rendered frame, rather
+than continuing to dig into this now-cleared VIF1/decompressor path.
+
+**Status:** no tracked source changed this round - pure diagnostics on the `/tmp` scratch tree only
+(widened capture window in the scratch copy's `ee_core.c`/`driver_r642.c`, never committed).
+Regression suite and Wii cross-build correctly skipped per the docs-only precedent used for Rounds
+642-644.

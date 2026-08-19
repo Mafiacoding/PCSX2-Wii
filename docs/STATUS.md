@@ -25958,3 +25958,53 @@ remains untouched. The rendered text's exact content/positioning hasn't been cro
 character-by-character against a real BIOS reference screenshot - worth a follow-up pass, though the
 repeated, stable, multi-row structure is already strong evidence the fix is correct rather than
 coincidental.
+## Round 637 (task #536/#613/#622): pinpointed the exact pad-to-message gap - RAM[0x0028AA10] is never written
+
+Direct continuation of the user's request to "get everything ready to get the OSD Menu going," now
+that Round 636 fixed glyph-level text rendering. Resumed task #613's other still-open half: Round
+631 found thread 9's message-dispatcher never receives a message; this round pinned down exactly
+where that breaks.
+
+**Disassembled the real dispatcher.** `0x00206538` (capstone, MIPS64+LE this time - correcting the
+"MIPS64+BE" label used in earlier round summaries, which was imprecise; the actual working mode
+this project's scratch tooling has always used is little-endian) is OSDSYS's real panel-event
+dispatcher. On entry it immediately overwrites its own `a2` argument with
+`lw $a2, -0x5ef0($v0)` where `$v0 = 0x290000`, i.e. it reads a fixed global at
+**RAM[0x0028AA10]** - not the caller-supplied argument - and uses that value (0-5) to select one of
+six real handler cases via a jump table. Case 1 registers Browser-panel labels (matches Round 632's
+already-confirmed label-registration code); case 2 calls the real heartbeat function `0x00214778`
+(Round 481's citation). Each case clears RAM[0x0028AA10] back to 0 after consuming it - this is a
+real, working single-slot mailbox, not a stub.
+
+Traced back to thread 9's own body (`0x00205DC0`-`0x00205E90`): it calls `0x206538` in the
+`CancelWakeupThread`/`SleepThread` retry loop Round 631 already found, and only proceeds to its own
+7-way `beq`-chain dispatch (Round 631's "0x0028BA00 area" jump table - now confirmed at
+`0x0028BA20`) when `0x206538`'s return value is nonzero AND the type it wrote back is 2.
+
+**Direct write-watchpoint confirms the exact gap.** Instrumented `ee_mem_write8`/`ee_mem_write32`
+(scratch build only) to log every write into RAM[0x0028A9E0-0x0028AA40] - a window covering the
+mailbox field and its immediate neighbors - across a 100M-slice diskless boot survey, with a real
+Circle-button press synthesized (`iop_sio2_pad_press`/`release`) at slices 60M-65M to give the real
+input path every chance to fire. Result: 9 total writes in that whole window, all either one-time
+init-sentinel writes (`0x0028A9E0`-`0x0028A9F0`, values `0xFFFFFFFF`/`0`, from a startup routine at
+`0x0020D5A0`-`0x0020D700`) or unrelated adjacent globals (`0x0028AA38`/`0x0028AA3C`, already-cited
+semaphore/counter fields from Rounds 355/430). **Not one write ever touches RAM[0x0028AA10] itself**
+- not during the button press, not at any other point in the run. This directly and precisely
+confirms Round 631's finding at the exact byte level: the real OSDSYS code that should translate a
+pad press into a mailbox message is never reached by our current boot trace, full stop - this isn't
+a parameter-passing bug or a timing issue in already-running code, it's an entire code path that
+never executes.
+
+**What's still needed (next round).** Find what real OSDSYS function is SUPPOSED to write
+RAM[0x0028AA10] in response to pad input, and why it's never reached. Leading candidates not yet
+checked: (1) a dedicated pad-polling thread/callback this project's boot trace hasn't spawned or
+run far enough to reach - none of threads 3/6/9 (the only threads confirmed active) contain this
+write, so it likely lives in a not-yet-surveyed thread body or an interrupt-driven PADMAN callback;
+(2) a real SIO2/PADMAN "input changed" IOP-to-EE signal (SIF-RPC or interrupt) that this project's
+IOP-side pad handling doesn't yet forward to the EE the way real hardware would. Both are concrete,
+checkable next steps.
+
+**Disposition.** No tracked-source change this round - the write-watchpoint instrumentation was
+scratch-only (never applied to `ee_core.c` in the tracked repo), consistent with this being a pure
+diagnostic round. Regression suite and Wii rebuild correctly skipped. Docs/commit/rsync/leak-check
+done; no bundle (diagnostic round, no shipped fix, per the user's standing bundle rule).

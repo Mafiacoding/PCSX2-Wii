@@ -10501,3 +10501,14 @@ now shows legible, stable, repeated text (consistent with real BIOS branding/lab
 over the wireframe animation - the first round with genuine readable glyph-level text on screen.
 Next: character-by-character cross-check against a real BIOS reference, and task #613's still-open
 pad-to-message-translation half (Round 631).
+## Round 637 (task #536/#613/#622)
+
+Pinpointed task #613's pad-to-message gap to the exact byte: OSDSYS's real panel-event dispatcher
+(`0x00206538`) reads its message type from a fixed global, RAM[0x0028AA10], not from its caller's
+argument - and a direct write-watchpoint survey (100M slices, with a real synthesized Circle-button
+press held at slices 60M-65M) confirms nothing ever writes that address. The mailbox mechanism
+itself is real, working OSDSYS code (six real handler cases, including label registration and the
+already-known heartbeat call); what's missing is entirely upstream - whatever real code is supposed
+to translate a pad press into that mailbox write is never reached by our boot trace at all. Next
+round: find that sender code, likely in a not-yet-surveyed thread body or a PADMAN IOP-to-EE signal
+this project doesn't yet forward. Docs-only round (scratch instrumentation only); no bundle.

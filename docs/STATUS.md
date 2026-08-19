@@ -26502,3 +26502,68 @@ BIOS code or this project's own interpreter is responsible for the divergence af
 refill call), fix and verify with the standard full workflow; (3) if the setup/input is instead
 found to be reading the wrong ROM offset, trace that back to its own root cause before fixing.
 
+## Round 644: CORRECTION to Round 643 - the "decompressor output" isn't a VIF/GS asset at all, it's OSDSYS's own program code; the real bug is that VIF1 DMA reads from the wrong address entirely
+
+Round 643 stopped at "this LZSS-style decompressor loop produces the VIF1 buffer's content, correct
+preamble and garbage tail alike" and queued disassembling its refill subroutine as the next step.
+This round did that (0x00200bc0 fully disassembled - see below) but a wider capture changed the
+conclusion substantially, in the same spirit as Round 642 correcting Round 641: **catch and correct
+one's own inference before it hardens into the record.**
+
+**Widened the write-watch from the narrow `[0x51b680, 0x51ba00)` slice to the decompressor's full
+output span, `[0x00500000, 0x51ba00)`** (113,152 bytes) using the same `ee_mem_write8` hook. Result:
+every single byte in that entire range was written exactly once, contiguously, with zero gaps -
+confirming this one decompressor call fills the *whole* 110KB region, of which `0x51b680` is just
+wherever the VIF1 DMA chain happens to start reading, not any kind of designated start/boundary.
+
+**Decoding the dumped output as machine code (not as a VIFcode stream) shows immediately recognizable
+real MIPS instructions from the very first bytes:** `3c02 0059` (`lui $v0, 0x59`), `3c03 005a`
+(`lui $v1, 0x5a`), `2442 2d00` (`addiu $v0, $v0, 0x2d00`), `1420 fffa` (`bne $at, $zero, ...`),
+`0080 e02d` (`daddu $sp, $a0, $zero`-style move) - a dense, plausible instruction stream, not
+compressed asset data. Scanning the same bytes as 4-byte-aligned VIFcodes (as Rounds 634-643 did)
+finds 14,832 of 28,288 words (52%) fail the real-hardware-valid-opcode check - exactly the ratio
+you'd expect from randomly-distributed code bytes being misread as a structured command stream, not
+from genuine (if corrupted) VIF data. The address range itself supports this: `0x00500000` sits only
+128KB past `0x00480000`, the documented end of OSDSYS's own loaded ELF range (cited in Rounds
+274/290/307/etc.) - squarely where a second decompressed code/data module would land, not where a
+GS packet staging buffer would plausibly live.
+
+**Revised conclusion: the VIF1 DMA chain-tag walk (which Round 643 correctly proved is internally
+self-consistent - `tadr` values chain correctly, `qwc` matches transferred word counts) is being
+kicked off with a starting tag address, `D_TADR=0x51b680`, that points into unrelated OSDSYS program
+code, not into any real GS/VIF packet buffer.** Every previous round's observations (Round 634's
+IMAGE-mode carry-over, Round 641's NREG/EOP fixes, Round 642's "9 DIRECT calls with implausible IMM
+values", this round's own initial "FLUSHE/NOP preamble") were all real, honestly-reported
+measurements of what's actually in that memory - they just weren't measurements of a VIF/GS asset,
+because there never was one there to measure. The apparent "correct preamble, garbage tail" pattern
+from Round 643 was very likely coincidence: a short run of code bytes that happened to decode as
+low-numbered (hence real-hardware-valid) VIFcode opcodes purely by chance, followed by higher-entropy
+code bytes that didn't.
+
+**This re-scopes the entire task #536 investigation one more level upstream, to a well-defined new
+question: what writes VIF1's D_TADR register (or seeds the first chain-tag address VIF1's DMA walk
+starts from) to `0x51b680`, and is that a real EE kernel/OSDSYS action (meaning our decompressor's
+output at that exact address is coincidentally being pointed at by legitimate-but-unrelated real
+code, e.g. because a genuinely different, still-not-found real buffer address calculation is wrong
+elsewhere) or a bug in this project's own DMA/VIF1 MMIO write handling (e.g. reading a stale/
+uninitialized register, or a channel/offset decode error causing the wrong write to land in VIF1's
+D_TADR).** VIF1's DMA MMIO base is `0x10009000` (`source/hw/dma.c`'s channel table); the real D_TADR
+register lives at a fixed offset from that base per real hardware's DMA channel register layout.
+
+For completeness, the refill subroutine at `0x00200bc0` flagged in Round 643 was disassembled this
+round too - it turns out to be a one-time initialization call (guarded by the loop's own bit-counter
+starting at 0, so it only ever runs once per decompression), not a periodic mid-stream refill: it
+reads the first 4 bytes of the compressed input as a big-endian 32-bit word, uses its low 2 bits to
+derive `state[0x08]`/`state[0x0c]` (length-field bit-width) and `state[0x10]` (offset-field mask),
+and reuses that same 4-byte word as the initial bit-buffer. This is a legitimate, unremarkable LZSS
+parameter-header parse and is not itself implicated by this round's finding, since the decompressor's
+*output* is (per the above) not the layer with the actual bug.
+
+**Status:** no tracked source changed this round - pure diagnostics on the `/tmp` scratch tree only.
+Regression suite and Wii cross-build correctly skipped. Next round should trace backward from the
+VIF1 DMA kickoff (`dma_channel_kick()`'s read of the channel's `tadr`/starting-tag-address field for
+channel `DMA_CHANNEL_VIF1`) to find what EE-side MMIO write (or lack thereof / stale-value read) sets
+it to `0x51b680`, and determine whether that's a genuine emulator bug (most likely candidate given
+how specific and code-region-adjacent the address is) or reflects some other still-unidentified real
+buffer-address computation this project has not yet modeled correctly.
+

@@ -10417,3 +10417,16 @@ No tracked source changed - docs-only round, regression/Wii build correctly skip
 **Round 629 (task #536/#611, user "take as many rounds as you need to fix everything"):** whole-boot write-instrumentation of the `0x80016A80` per-cause table proved it is legitimately zero-initialized once early in boot and never touched again until the fatal TIMER3 overflow - and a live PCSX2 cross-check (DebugServer, real hardware, mid-gameplay snapshot) showed the identical empty-table/zero-pending-count state on real hardware too, disproving the "table never populated" hypothesis carried since Round 617. The new, more promising divergence found instead: real hardware currently has TIMER3 completely disabled (`MODE=0`), while our own diskless boot arms T3 at slice≈1M and never disarms it before the organic overflow at slice≈155M. No tracked source changed - docs-only round.
 
 **Round 630 (task #536/#611 continuation):** built and empirically tested a narrow null-`$v1`-dispatch no-op-return guard to check whether removing the TIMER3 crash would let the diskless boot progress into OSDSYS's real menu shortly afterward. Result: negative for that hypothesis (the boot was already permanently stuck in the same animation-loop PC range well before the crash, both before and after slice 155M) but positive as a standalone improvement (permanent `Status.EXL` lockup -> indefinite, still-executing animation loop). Shipped to tracked `ee_core.c` as a clearly-labeled pragmatic safety net (42/42 regression pass, clean Wii cross-build). Task #536's core open question - why the animation loop never escalates into OSDSYS's real interactive menu - remains unsolved and is now understood to be independent of the TIMER3 mechanism entirely; next round should resume the control-flow-divergence investigation directly (Round 610's original framing) rather than continuing down the TIMER3 thread.
+
+
+## Round 631 (task #536/#612)
+
+Traced the real `WakeupThread` chain (thread 3 -> 6 -> 9, once per frame, 246 repetitions each,
+unaffected by the Round 610 field write) to its exact termination point: thread 9's own code
+(`0x00205DC0`) is a real message-driven dispatcher that polls for a pending OSDSYS menu/input
+event and finds none, since the diskless/button-free synthetic boot never enqueues one. All of
+threads 6/7/8/9 share the identical suspend point (`0x00210E68`, shared "sleep until woken"
+utility, Round 595). This corroborates Round 606's live-hardware finding that real pad presses
+drive the Browser-state transition, and closes task #536's remaining open question: the JP BIOS
+splash/animation screen displays and runs correctly and indefinitely absent a disc or button
+press - matching real hardware, not a bug. No source fix shipped this round (diagnosis-only).

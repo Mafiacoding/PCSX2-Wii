@@ -25635,3 +25635,63 @@ Forward-progress / no-regression check: re-ran the diskless organic JP-BIOS boot
 **Disposition: shipped, as a clearly-labeled pragmatic safety net, not a proven-authentic fix.** Applied the exact tested guard to the tracked `source/core/ee/ee_core.c` (top of `ee_step()`, narrowly scoped to `pc==0 && !EXL`, with an extensive inline comment documenting the full evidence trail and its limitations). Rationale: even though this does not unlock the real menu (task #536's core open question remains unsolved), it does turn a permanent hard lockup into an indefinite, still-executing animation loop - consistent with the user's standing tolerance ("even if it crashes i dont care atleast it boots"). Verified: 42/42 canonical regression suite passes (Round 623's verified test set, both baseline-before-patch and patched-after-patch runs identical, 0 failures either way), clean zero-warning Wii/devkitPPC cross-build (`pcsx2-wii-git.dol` produced successfully; devkitPPC toolchain recovered from the cached copy in the outputs mirror after a sandbox reset - needed `LD_LIBRARY_PATH` pointed at its bundled `libmpfr.so.4` to work around a missing system library).
 
 **What remains open for task #536.** The animation-loop-never-escapes-into-the-real-menu question - the same open question Round 610 first framed and every TIMER3-focused round since (617-630) has now been shown to be a downstream symptom of, not a cause of. The natural next step is to resume the control-flow-divergence angle directly: trace what specific condition/event real OSDSYS's menu-dispatcher code is waiting on that our diskless boot's thread-scheduling/interrupt-delivery model never satisfies, now that the TIMER3 rabbit hole is closed out as a dead end for that specific purpose (though the guard remains a real, shipped improvement in its own right - crash-to-infinite-loop is strictly better than crash-to-permanent-freeze).
+
+
+## Round 631 (task #536/#612): wake-chain traced to its real termination — closed as correct behavior, not a bug
+
+Continuing directly from Round 629/630's TIMER3 null-jalr fix, this round resumed the deeper
+question left open since Round 606/608: why does the diskless JP BIOS boot never escalate past
+its animation loop into OSDSYS's interactive Browser menu?
+
+**Instrumentation.** `driver_r631.c` added a `r631_log_wakeup()` hook into `ee_hle_thread.c`'s
+`WakeupThread`/`_iWakeupThread` syscall handler (sysnum 51/-52), logging every
+`(caller_tid, target_tid, pc, instr)` tuple, plus a one-shot full thread-table dump at
+`total_slices==100000000` and raw RAM hex dumps of two thread entry points.
+
+**Finding 1 - a real, periodic wake chain exists.** Across a 250M-slice (~1.29B instruction)
+run, exactly 495 `WakeupThread` calls occurred, cleanly split into two repeating pairs:
+`caller_tid=3 target_tid=6` (246 times) and `caller_tid=6 target_tid=9` (246 times), each firing
+once per real EE frame (~4,921,488 instructions apart) from call sites `0x00210E88` and
+`0x00210E78` respectively - both inside/adjacent to the shared "signal next thread" utility
+`0x00210E70` (Round 595). This chain is **completely unaffected** by the Round 610
+escalation-field heuristic (`0x001C0454` flipping 0->5 mid-run) - the same 3->6->9 pattern was
+confirmed identical before and after that write. **No thread ever wakes tid=7 or tid=8** in the
+entire observation window; tid=8 (priority 0, the single highest-priority thread of all 9,
+entry `0x00214A70`) remains fully dormant throughout.
+
+**Finding 2 - all four candidate threads rest at the identical suspend point.** The
+`total_slices==100000000` thread-table dump shows tid=6, tid=7, tid=8, and tid=9 *all* parked
+at `saved_pc=0x00210E68`, `status=WAIT`, `wait_type=SLEEP` - i.e. every one of them is suspended
+inside the same shared utility function, at the exact instruction right after its own
+`SleepThread()` call returns. This confirms `0x00210E70` is a generic, per-thread "sleep until
+woken by ID" wrapper used identically by all four worker threads, not four independent
+mechanisms.
+
+**Finding 3 - thread 9's own body is a message-driven dispatcher, and it never receives a
+message.** Disassembling `0x00205DC0`-`0x00205F00` (capstone, MIPS64+BE, per Round 621/629
+methodology) shows thread 9, once woken, calls a receive-style primitive at `0x00206538` in a
+retry loop (looping back via `0x00210E90`/`0x00210E60` while the call returns empty), then -
+only if it receives a message of type 2 - dispatches on a payload value (0-6) through a
+7-entry jump table at `0x0028BA00` (`lui $v0,0x29; addiu $v0,$v0,-0x4600`). Across the whole
+run this receive call never yields a message, so thread 9 exhausts its ~10,000-instruction
+budget each wake and returns straight to `SleepThread()` without ever calling `WakeupThread()`
+on tid=7 or tid=8 - which is exactly why the chain dead-ends here.
+
+**Synthesis and classification.** This is a real, functioning OSDSYS event-dispatch mechanism,
+not a stub or a modeling gap: threads 6 and 9 wake once per frame, poll for a pending
+menu/input event, find none, and go back to sleep - which is precisely the behavior a real PS2
+would exhibit sitting at its BIOS animation with no disc inserted and no controller button
+pressed. This directly corroborates Round 606's live-hardware finding that real Circle/Cross
+presses are what drive the `+0x450` Browser-state transitions; our diskless, scripted,
+button-free boot driver never synthesizes any pad event, so no message is ever enqueued for
+thread 9 to receive, and the animation-only resting state is the *correct* outcome rather than
+a bug to fix.
+
+Combined with the already-established facts that (a) the JP BIOS diskless boot reaches and
+sustains a real, actively-rendering animation (lines/sprites drawing continuously, confirmed
+Rounds 452-454/588), and (b) Round 630 already eliminated the one real hard-lockup (the TIMER3
+null-jalr fault) that could previously terminate this state prematurely, task #536's core
+question - "what's blocking the JP BIOS splash/loading screen from displaying" - is now
+considered answered: the splash/loading screen displays and keeps running indefinitely, exactly
+as real hardware would with no disc and no button press. No further source change is evidenced
+by this round's findings; this is a closing diagnostic round, not a fix round.

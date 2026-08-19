@@ -10512,3 +10512,14 @@ already-known heartbeat call); what's missing is entirely upstream - whatever re
 to translate a pad press into that mailbox write is never reached by our boot trace at all. Next
 round: find that sender code, likely in a not-yet-surveyed thread body or a PADMAN IOP-to-EE signal
 this project doesn't yet forward. Docs-only round (scratch instrumentation only); no bundle.
+## Round 638 (task #536/#613/#622/#623)
+
+Both of thread 9's still-unfed mailbox (RAM[0x0028AA10], Round 637) and a newly-disassembled sibling
+mechanism - thread 7's 24-way dispatch on RAM[0x1C0444], and thread 8 (the single highest-priority
+thread in the whole scheduler) parked after what looks like a real callback-registration call - trace
+to one common root cause: the raw SIO2 pad-read command is never issued anywhere in our diskless boot
+trace. Re-verified this directly (`iop_sio2_get_pad_command_count()` stays 0 across a full 100M-slice
+survey with a synthesized Circle press), confirming Round 510's much earlier finding still holds on
+the current, far-improved tree. Per the user's steer, pad-input work now pauses here in a documented
+state; focus shifts to finishing display/rendering correctness first (task #536), since Round 636
+already landed the first readable on-screen text. Docs-only round; no bundle.

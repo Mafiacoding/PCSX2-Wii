@@ -26008,3 +26008,51 @@ checkable next steps.
 scratch-only (never applied to `ee_core.c` in the tracked repo), consistent with this being a pure
 diagnostic round. Regression suite and Wii rebuild correctly skipped. Docs/commit/rsync/leak-check
 done; no bundle (diagnostic round, no shipped fix, per the user's standing bundle rule).
+
+## Round 638 (task #536/#613/#622/#623): both escalation mailboxes trace to the same root cause - pad-read is never issued at all
+
+Direct continuation of Round 637. Widened the write-watchpoint window (0x0028A800-0x0028AC00,
+with per-write thread-id tagging) and dumped the full 9-thread table mid-run. Confirmed
+RAM[0x0028AA10] still never gets written even in the wider window, and that thread 7
+(prio=4, entry=0x00203D78) and thread 8 (prio=0, the single highest-priority thread in the
+whole scheduler, entry=0x00214A70) both remain parked in WAIT at `saved_pc=0x00210E68`
+(inside SleepThread) for the entire 100M-slice run.
+
+**Disassembled thread 7 and thread 8's real entry code for the first time.** Thread 7
+(`0x00203D78`) is a 24-way dispatch on RAM[0x1C0444] (struct+0x444, the same "browser
+navigation state" field Round 485/632 already established thread 6 writes/checks) to real
+handler functions (0x200fb8, 0x201068, 0x201120, ... continuing past case 13) - i.e. thread
+6/thread 7 form a producer/consumer pair over RAM[0x1C0444], directly parallel to the
+thread 6/thread 9 pair over RAM[0x0028AA10] found in Round 637. Thread 8's entry calls
+`GetThreadId` (syscall 0x2f, confirmed via the real syscall-stub table at 0x00210e30), then
+what reads as a real callback/handler-registration sequence (`a1=0x80000603`,
+`a2=0x00214AD8` pointing at its own local 6-case dispatch table literally defined a few
+bytes later, `a3=0x00470240`) before returning and going dormant - consistent with a
+PADMAN/SIF-RPC-style "register and wait for an event" primitive that never gets a real
+event to consume.
+
+**Decisive new check: the raw SIO2 pad-command counter never fires either.** Round 510
+(many rounds ago, before the Round 597-598 scheduler fix and the Round 606-608
+disc-boot-vs-diskless distinction existed) had already found the shared IOP idle loop never
+issues a real pad-read SIO2 command. That finding carried a "may be stale" flag in this
+project's own task list, since it predated several major fixes. Re-checked it directly on
+the current tree: `iop_sio2_get_pad_command_count()` (incremented inside the real
+`pad_process_command()` handler) stays at exactly 0 across the entire 100M-slice organic
+diskless-boot survey, even with a synthesized Circle press held for 5M slices. This
+re-confirms Round 510's conclusion is still correct on the current, much-improved tree -
+it was not stale.
+
+**Synthesis.** All three angles converge on the same single root cause: no code path in our
+diskless BIOS boot trace ever issues a real low-level SIO2 pad-read command in the first
+place. Both downstream mailboxes (RAM[0x1C0444]->thread 7, RAM[0x0028AA10]->thread 9) are
+correctly-implemented, working consumers that are starved because the real pad-polling
+producer code is never reached - matching the same shape as task #447's long-documented
+disc-command-dispatch gap (dispatch_ncmd()=0), not a bug in any code we've touched
+(GIF/GS rendering, message dispatch, or the scheduler itself).
+
+**Disposition.** No tracked-source change this round - purely diagnostic, confirms and
+narrows rather than fixes. Regression suite and Wii rebuild correctly skipped. Per the
+user's Round 638 redirect, pad-input work is paused here in a well-documented state so
+focus can move to finishing display/rendering correctness (where real visible progress -
+readable glyph text - already landed in Round 636). Docs/commit/rsync/leak-check done; no
+bundle (diagnostic round, no shipped fix).

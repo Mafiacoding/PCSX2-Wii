@@ -26056,3 +26056,59 @@ user's Round 638 redirect, pad-input work is paused here in a well-documented st
 focus can move to finishing display/rendering correctness (where real visible progress -
 readable glyph text - already landed in Round 636). Docs/commit/rsync/leak-check done; no
 bundle (diagnostic round, no shipped fix).
+
+## Round 639 (task #536): root-caused the garbled/overlapping text visual - GS base-pointer address-space collision
+
+Direct continuation of the user's redirect ("make the display work first... we have some letters already, get
+everything together now"). Investigated why the label text visible since Round 636's fix looks garbled/
+overlapping rather than a single clean line of text, and why the framebuffer is a perfectly static, frozen
+frame from slice 40M through at least 150M (byte-identical PPM dumps at both).
+
+**The frame is static because nothing new draws after ~15M slices.** Instrumented `gif_state_t`'s existing
+`sprites_drawn/triangles_drawn/lines_drawn/points_drawn` counters plus a new per-transfer TRXDIR watchpoint.
+Across a 45M-slice survey: `lines_drawn` and `points_drawn` jump from 0 to their final values (2129 and 124)
+somewhere in the 10M-15M slice window and then never increase again for the rest of the run; `triangles_drawn`
+stays 0 for the entire run; `sprites_drawn` keeps slowly climbing (56 by 45M) but **every single sprite drawn
+in the whole survey is the same off-screen, untextured, zero-height rectangle** (`x0=0 y0=-1936..-1937 x1=640
+y1=y0`, `textured=0`) - almost certainly a background-clear no-op that never actually paints anything visible.
+So the wireframe grid is drawn once (lines/points) during the boot animation's setup and then the screen is
+never touched again - fully consistent with the entire task #447/#536 finding arc (OSDSYS's disc-browser/
+animation escalation never advances past its initial resting state in diskless boot) - this frame IS the
+correct single static boot-animation frame, not a symptom of a new bug.
+
+**The "text" is not drawn by any sprite or triangle at all - it's a direct memory-aliasing artifact.**
+Instrumented every real `GS_REG_TRXDIR` activation (the trigger for an IMAGE-mode host-to-local texture
+upload) and logged its destination page/buffer-width/size. Found exactly 18 uploads in the whole survey,
+each a small (64x64 to 256x64) glyph/label texture, each going to its own distinct destination base pointer
+(`dbp` 13440 through 14816) - genuinely separate real GS register values, not a repeated/duplicate write.
+None of their `dbp` values equal the current draw target's `fbp` (0) - so on real hardware these would land
+in completely separate, non-overlapping VRAM pages from the visible framebuffer. **But in this project's
+current `gs_mem.c` addressing model, they don't stay separate.** `gs_mem_read/write_psmct32()`'s
+`pixel_offset()` computes a flat byte offset as `bp * 4 + (y*bw+x)*4` - treating the real GS `BP` field
+(whose whole real-hardware purpose is a *page index*, one unit = one 64x32-pixel/8192-byte PSMCT32 page,
+confirmed via this file's own already-implemented-but-never-called `gs_mem_read/write_psmct32_swizzled()` and
+its `GS_SWZ_PAGE_BYTES` constant = 8192) as if it were already a raw 4-byte-per-unit word offset - a roughly
+2048x under-scale. With the framebuffer at `fbp=0, fbw=640` occupying flat byte range `[0, 573440)`, a texture
+upload to `dbp=13440, dbw=256` (a real, unremarkable field value - only 13440 out of a possible 16383) lands
+at flat byte range `[53760, 118784)` under the current (wrong) scaling - squarely inside the framebuffer's own
+byte range, just reinterpreted at a different row stride (256px instead of 640px). That stride mismatch is
+exactly what produces the smeared, overlapping, multi-copy "garbled text" appearance: the label's pixel data
+is real and correctly reconstructed (Round 636's fix), but it's landing partially on top of the framebuffer's
+existing wireframe content at the wrong effective (x,y) position instead of in its own isolated VRAM page.
+
+**This is a real, generic gap, not specific to labels.** Every base-pointer field this project parses off a
+GS register (`FRAME.FBP`, `ZBUF.ZBP`, `TEX0.TBP0/CBP`, `TEX1.MIPTBP*`, `BITBLTBUF.DBP/SBP`) is stored as the
+raw register field with no scaling, then fed into the same under-scaled `pixel_offset()`. Any two of these
+that happen to differ by less than roughly `(4MB / 4) / 640` ~= 1638 page-units, at typical buffer widths,
+can alias into each other's memory today. The already-written `*_swizzled()` pair in `gs_mem.c` is the
+correct, real-hardware-accurate answer (proper 8192-byte pages, page/block-swizzled within a page) but
+appears to have been added at some earlier round and never actually wired into `gif.c`'s draw/transfer paths,
+which still call the plain (non-swizzled) `gs_mem_read/write_psmct32()` throughout.
+
+**Disposition.** No tracked-source fix implemented this round - this is a foundational, cross-cutting
+addressing convention used by every GS read/write in the whole rendering pipeline, so switching it needs a
+careful, single, fully-verified change (either wiring in the existing swizzled functions, or a simpler
+uniform page-scale fix that still fits the 4MB buffer) plus a full visual re-check against Round 636's
+glyph-rendering fix and every prior round's rendering-correctness findings, matching the standing "go slow"
+one-verified-change-at-a-time rule. Regression suite and Wii rebuild correctly skipped (diagnostic only, no
+tracked source changed). Docs/commit/rsync/leak-check done this round; no bundle (diagnosis, no shipped fix).

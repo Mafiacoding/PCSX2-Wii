@@ -10523,3 +10523,17 @@ survey with a synthesized Circle press), confirming Round 510's much earlier fin
 the current, far-improved tree. Per the user's steer, pad-input work now pauses here in a documented
 state; focus shifts to finishing display/rendering correctness first (task #536), since Round 636
 already landed the first readable on-screen text. Docs-only round; no bundle.
+## Round 639 (task #536)
+
+Root-caused the garbled/overlapping-text visual: the frame is static (nothing draws after ~slice 15M -
+consistent with the well-documented task #447 idle-loop finding), and the "text" itself is not a sprite or
+triangle draw at all - it's a memory-aliasing artifact. `gs_mem.c`'s active linear addressing model scales
+GS base-pointer register fields (FBP/DBP/TBP0/ZBP/etc.) by only 4 bytes/unit instead of real hardware's 8192
+bytes/page (confirmed via this file's own existing-but-unused `*_swizzled()` functions and `GS_SWZ_PAGE_BYTES`
+constant), so a real, unremarkable label-texture upload destination (dbp=13440) physically lands inside the
+framebuffer's own byte range at a mismatched row stride, smearing the correctly-reconstructed glyph pixels
+(Round 636) across the wireframe instead of staying isolated in its own VRAM page. This is a real, generic,
+cross-cutting gap (affects every GS base-pointer field, not just labels) - fixing it means switching the whole
+draw/transfer pipeline to real page-based (ideally the already-written swizzled) addressing, which needs a
+careful single change plus full re-verification against every prior rendering-correctness finding. Docs-only
+round (diagnostic, no tracked source changed); no bundle.

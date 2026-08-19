@@ -26795,3 +26795,95 @@ cross-build, forward-progress check (no regression, no picture yet), docs (this 
 rsync, leak-check follow. No bundle this round - real correctness fix shipped, but the user's
 core "picture" goal remains unmet, so packaging is premature per the standing bundle-only-on-
 significant-progress rule.
+
+
+## Round 649: fixed checkpoint.c's missing GS local memory block, then used the fix to confirm real picture content exists in GS memory (task #637)
+
+**User instruction this round:** "if you find any trigger points implement or fix it and dont
+forget the Checkpoint because the sandbox gets always wiped." Both halves of this instruction
+turned out to be the same fix.
+
+**Investigation.** Task #637 opened to find out whether VU1 XGKICK/VIF1 DMA activity ever
+actually fires deep enough into a diskless JP BIOS boot to draw anything, continuing Round 648's
+open question. Round 648's own 60M-slice survey budget was too short (Round 645 documented that
+the real D_TADR=0x51b680 kickoff needs on the order of ~150M+ slices to reach). To survey that far
+within this session's per-call wall-clock limits, the scratch driver was extended to use this
+project's own `checkpoint_save()`/`checkpoint_load()` mechanism to chain multiple bash calls
+together into one continuous emulation run - directly using "the Checkpoint" as the user's message
+called out.
+
+Chaining forward past ~270-330M cumulative slices, `xgkick_calls` went from its permanent `0`
+baseline to `11` for the first time in this project's history - a genuine milestone. But every
+attempt to then dump the resulting framebuffer via `gs_mem_get()` came back completely empty
+(`nonzero_bytes_in_first_4MB=0`), even though `gif_state_t`'s own cumulative draw counters
+(`sprites_drawn`, `lines_drawn`, etc.) showed substantial historical activity. That mismatch -
+real draw counters, but zero backing memory - was the tell.
+
+**Root cause.** `source/core/checkpoint.c` saved/restored `gif_state_t` (`GIF0` block) and
+`gs_state_t` (`GS00` block) - the small register structs - but never touched `source/hw/gs_mem.c`'s
+separate 4MB linear GS memory buffer (`GS_MEM_SIZE`), which is where actual pixel/texture bytes
+live (`gs_mem_get()`). Every `checkpoint_load()` in the chained survey was silently zeroing the
+entire framebuffer while correctly restoring the draw counters that describe what *should* be in
+it - a real, previously-undiscovered bug in a component (`checkpoint.c`) that Round 449 built and
+several later rounds relied on without ever exercising a long-enough resume chain to notice the
+gap. Doubly relevant given `include/core/checkpoint.h`'s own leak-prevention module comment already
+flags checkpoint files as BIOS-derived-content artifacts that must stay out of the tracked repo -
+this bug meant that safety property was accidentally true of the *framebuffer* for the wrong
+reason (it was empty, not because it was excluded, but because it was silently dropped).
+
+**Fix.** `source/core/checkpoint.c`: added a new `"GSM0"` block, written right after the existing
+`GS00` block in `checkpoint_save()` (`write_block(f, "GSM0", gs_mem_get(), GS_MEM_SIZE)`), and
+restored symmetrically in `checkpoint_load()` (new `gsm_scratch` buffer, `EXPECT("GSM0", ...)`,
+applied via `memcpy(gs_mem_get(), gsm_scratch, GS_MEM_SIZE)` only when the block's on-disk size
+matches exactly, with `gsm_scratch` folded into the existing alloc-check/free cleanup paths). Full
+comment citing the discovery added at the write site.
+
+**Verification.**
+- Dedicated round-trip test (`/tmp/r649_ckpt_test.c`, scratch-only): wrote sentinel bytes into
+  `gs_mem_get()` at offsets 100/2000000/4194303, called `checkpoint_save()`, explicitly zeroed the
+  entire 4MB buffer to rule out coincidence, called `checkpoint_load()`, re-read the same offsets -
+  `[PASS] gs_mem round-trip survived checkpoint save/load`, all three sentinel bytes intact.
+- Host-native regression suite: 42/42 pass, no change from baseline.
+- Wii/devkitPPC cross-build: clean, zero errors, `pcsx2-wii-git.elf` (2,841,460 bytes) /
+  `pcsx2-wii-git.dol` (505,024 bytes).
+
+**Then re-verified the original picture question with the fix in place.** Started a fresh,
+GSM0-format-compatible checkpoint chain from a clean reset (all pre-fix `.ckpt` files were
+incompatible with the fixed loader's `EXPECT("GSM0", ...)` validation and correctly rejected
+rather than silently misread) and chained it forward across several bash calls to 360M cumulative
+slices, saving/resuming every 30M slices along the way. A fresh dump at that point:
+
+```
+[R649GS_MEM] nonzero_bytes_in_first_4MB=2573941 first_nonzero_offset=0x3
+[R649GIF] sprites_drawn=1401 triangles_drawn=19 lines_drawn=2538 points_drawn=278
+          draw_fbp=0x46 draw_fbw=640 ctx2_fbp=0x0 ctx2_fbw=640
+[R649GIF] dumped active fbp=0x46 fbw=640 non_bg_pixels=56375 (52323 after normalization)
+[R649GIF] dumped ctx2   fbp=0x0  fbw=640 non_bg_pixels=56435 (52313 after normalization)
+```
+
+Inspecting the dumped PPM (640x448 PSMCT32) confirmed this is **real, structured picture content,
+not noise**: 157 unique colors (a random/garbage buffer would spread across many thousands), and
+visually the frame shows a dense field of straight lines converging from origin points on a dark
+background - directly consistent with the `lines_drawn=2538`/`points_drawn=278` counters and with
+this project's own Round 454 research into the real PS2 BIOS's line-based intro animation. Both the
+active draw-context buffer and the ctx2 buffer independently show the same structure (expected,
+since both currently resolve to overlapping/adjacent gs_mem regions per Round 639's addressing
+work). The debug PNG used for this visual check was inspected inline only and was not written to
+any persisted or rsync'd location, consistent with the standing leak-prevention rule for
+GS-memory/BIOS-derived image dumps.
+
+**Conclusion for task #637.** The original framing ("why does xgkick_calls stay 0") is answered:
+it does not stay 0 at sufficient survey depth - it reaches 11 by ~270-330M slices. And this
+round's own "no picture" observations *during* that same investigation are now understood to have
+been an artifact of the just-fixed checkpoint bug, not evidence of a real rendering gap - once
+verified through a checkpoint chain that actually preserves GS memory, real structured line-drawing
+content is present and consistent with the draw counters. This does not yet confirm that XGKICK's
+11 calls specifically are what produced these particular lines (they could equally be the
+already-working GIF/sprite pipeline from Rounds 634-641) - that attribution is a good next step -
+but it does confirm, for the first time with a trustworthy methodology, that this project's
+diskless JP BIOS boot produces real on-screen picture content deep into the boot animation.
+
+**Status.** One tracked source file changed (`source/core/checkpoint.c`, GSM0 block). Full
+mandatory workflow: regression, Wii cross-build, docs (this entry), commit, rsync, leak-check.
+Given both the shipped bug fix and the confirmed picture-content milestone, this round is offered
+as bundle-worthy per the standing "only bundle on important progress" rule.

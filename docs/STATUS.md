@@ -26385,3 +26385,120 @@ is lost or a wrong source address is used.
 No tracked source changed this round (diagnostic instrumentation lived entirely in a `/tmp` scratch
 copy, never touched the tracked tree) - regression suite and Wii cross-build correctly skipped per
 the standing workflow rule for docs-only rounds.
+
+## Round 643: MAJOR FINDING - the "corrupted" VIF1 DIRECT source buffer is not a DMA/VIF/GIF bug at all; it's the direct, byte-for-byte output of a real EE-side decompressor loop at 0x00200C80-0x00200D4C, now fully disassembled
+
+Continuing Round 642's narrowing ("upstream of `vif_process()`'s VIFcode loop, likely the VIF1
+DMA chain-feed layer"), this round instrumented `dma.c`'s VIF1 chain-tag walk (`read_chain_tag()`
+call site in `dma_channel_kick()` and the `transfer_quadwords()` payload copy) end to end.
+
+**DMA chain-tag walker cleared.** The captured chain is fully self-consistent and matches real
+DMA chain-tag semantics exactly: tag `tadr=0x51b680 qwc=115 id=1(CNT)` transfers 460 words from
+`0x51b690`; tag `tadr=0x51bdc0 qwc=23 id=2(NEXT) addr=0x51bf40` transfers 92 words from `0x51bdd0`
+and correctly chains to the next tag's own `tadr`; tag `tadr=0x51bf40 qwc=106 id=1(CNT)` continues;
+tag `tadr=0x51c5f0 qwc=0 id=7(END)` terminates. Every `qwc` matches the transferred word count
+exactly and every `NEXT` address matches the next tag's real location. This rules out the DMA
+chain-tag walker as the corruption source - Round 642's hypothesis was wrong too.
+
+**Traced the buffer content to its true origin: real EE CPU execution, not any transport layer.**
+Since the chain-tag walk is provably correct, the only remaining explanation is that the *content*
+already in EE RAM at `0x51b680` onward is itself wrong. To settle this for good, this round added
+a byte-level write-watchpoint directly inside `ee_core.c`'s two real memory-store primitives
+(`ee_mem_write32` - the real SW/SWC1/SD opcode path - and `ee_mem_write8` - the real SB opcode
+path, both confirmed by reading their call sites to be the actual instruction-execution memory
+writers, not HLE-only helpers) for the address range `[0x51b680, 0x51ba00)`.
+
+Result: **zero hits on the 32-bit watch across a full 150M-slice survey**, but **896 hits on the
+8-bit watch**, covering the *entire* range `0x51b680-0x51b9ff` contiguously, byte by byte, with
+zero gaps - a pattern only a byte-oriented copy loop produces. Logging the EE program counter at
+each hit pinned every single write to three instructions: `pc=0x00200cec`, `0x00200d08`,
+`0x00200d20` - squarely inside the **0x00200C80-0x00200D4C region that no fewer than four earlier
+rounds (Round 458, 459, 460, 461, 462) flagged as "identify the real asset decompressed by this
+loop" and never actually resolved.** This round finally disassembled it in full (raw words pulled
+directly from EE RAM and decoded by hand against the MIPS-I encoding table):
+
+```
+00200c80: bne  $s1, $zero, 0x00200c94      ; refill check
+00200c84: addiu $a3, $s4, -11320           ; a3 = decompressor state struct
+00200c88: jal  0x00200bc0                  ; refill bitbuf from compressed stream
+00200c8c: addiu $s1, $zero, 30             ; reset bit counter to 30
+00200c90: addiu $a3, $s4, -11320
+00200c94: lw   $a1, 20($a3)                ; a1 = state->readptr
+00200c98: lw   $v0, 4($a3)                 ; v0 = state->bitbuf
+00200c9c: lbu  $a2, 0($a1)                 ; a2 = *readptr
+00200ca0: addiu $a1, $a1, 1
+00200ca4: and  $v0, $v0, $s5               ; s5 = 0x80000000 - test top bit of bitbuf
+00200ca8: beq  $v0, $zero, 0x00200d1c      ; bit==0 -> literal-byte path
+00200cac: sw   $a1, 20($a3)
+00200cb0: lbu  $a0, 0($a1)                 ; bit==1 -> match path: read 2nd code byte
+00200cb4: sll  $a2, $a2, 8
+00200cb8: lw   $v1, 16($a3)                ; state->offset_mask
+00200cbc: addiu $v0, $a1, 1
+00200cc0: or   $a2, $a2, $a0               ; a2 = 16-bit match code
+00200cc4: sw   $v0, 20($a3)
+00200cc8: and  $a0, $a2, $v1               ; a0 = match offset field
+00200ccc: lw   $v0, 12($a3)                ; state->length_shift
+00200cd0: addiu $a0, $a0, 1
+00200cd4: subu $a1, $s0, $a0               ; a1 = output_ptr - offset (back-reference source)
+00200cd8: lbu  $v1, 0($a1)
+00200cdc: srlv $a0, $a2, $v0               ; a0 = match length field
+00200ce0: addiu $a0, $a0, 2                ; +2 = real match length
+00200ce4: addiu $a1, $a1, 1
+00200ce8: sb   $v1, 0($s0)                 ; store first match byte
+00200cec: beq  $a0, $zero, 0x00200d24
+00200cf0: addiu $s0, $s0, 1                ; output_ptr++
+  ; -- match-copy loop (0x200cf8-0x200d10): copy remaining (length-1) bytes
+  ; from back-reference source to output, both pointers advancing by 1 --
+00200d1c: sb   $a2, 0($s0)                 ; literal-byte path: store the single input byte
+00200d20: addiu $s0, $s0, 1
+00200d24: lw   $v1, -11320($s3)            ; state->output_limit
+00200d28: subu $v0, $s0, $s2               ; v0 = bytes written so far
+00200d2c: beq  $v0, $v1, 0x00200d50        ; done when output_limit reached -> exit
+00200d34: sltu $v0, $v1, $v0                ; overrun safety check -> exit
+00200d3c: addiu $s1, $s1, -1               ; bit counter--
+00200d44: sll  $v0, $v0, 1                  ; consume tested bit: bitbuf <<= 1
+00200d48: b    0x00200c80                   ; loop
+```
+
+This is a textbook bit-oriented LZSS/LZ77 decompressor: a control bit selects between a literal
+byte and a back-reference match (offset+length packed into a 16-bit code, offset/length field
+widths read from the state struct at runtime), with a 32-bit bit-buffer refilled via a sibling
+subroutine (`0x00200bc0`) every 30 bits. `$s0` is confirmed live as the output write pointer -
+it equals `0x51b680` (captured directly via register dump: `s0=0x0051b680 s2=0x00500000
+s3=s4=0x00290000`) at the exact moment of the first watched write, proving beyond doubt that this
+loop - not any DMA/VIF/GIF layer - is what produces the "textured draw" buffer's content, correct
+preamble and garbage tail alike.
+
+The decompressor's input pointer (`state[0x14]`, read live) was `0x0100f926` at the same moment,
+with real EE RAM bytes there reading
+`30 05 17 73 22 33 50 00 e5 4a 00 00 01 10 ff 02 22 04 00 02 88 42 85 57 10 07 16 00 03 10 07 c5
+00 0f 42 08 07 3c 03 00 80 08 07 08`. The very first byte written to the output (`0x73`) matches
+input offset +3, and the recognizable `00 00 01 10 ff 02 00 00` FLUSHE/NOP sequence documented in
+Round 641/642 appears verbatim at input offset +12 - both consistent with the algorithm initially
+taking the literal-byte path (confirmed: `state[4]` bitbuf `=0x60220000`, whose top bit is 0).
+
+**This re-localizes the entire task #536 investigation (Rounds 634-643) one layer deeper than any
+prior round reached.** Every previously-ruled-out layer (GIF tag parsing, VU1 XGKICK, VIF1 DMA
+chain-tag walking, VIFcode dispatch) really was innocent, exactly as each round concluded - the
+actual bug (or, alternatively, entirely correct-but-misinterpreted behavior) lives inside this
+one, now fully-mapped, ~50-instruction real EE decompression routine and/or its refill subroutine
+at `0x00200bc0`, and/or the state-initialization code that set up the struct at `a3` before this
+loop first ran. This closes off an entire class of previously-plausible hypotheses with direct
+register-level and disassembly-level evidence rather than guesswork, and gives the very next round
+a single, concrete, fully-understood function to either fix (if our EE core's bit-shift/state-init
+sequencing is subtly wrong) or clear (if the true bug is in the caller's setup of the state struct
+or `state[0x14]`'s initial value, i.e. this project reads the wrong ROM offset as the compressed
+input).
+
+**Status:** no tracked source changed this round - this was a pure diagnostic round; all
+instrumentation (`ee_mem_write32`/`ee_mem_write8` watchpoints, register/state dumps, code dumps)
+lived in a `/tmp` scratch copy of the tree and was never applied to the tracked source. Regression
+suite and Wii cross-build correctly skipped per the standing workflow rule for docs-only rounds.
+Next round should: (1) disassemble the refill subroutine at `0x00200bc0` and the code that
+initializes the decompressor state struct (particularly `state[0x14]`'s starting value and
+`state[0x00]`/`state[0x0c]`/`state[0x10]`'s field-width constants) to determine whether real Sony
+BIOS code or this project's own interpreter is responsible for the divergence after the first
+~24 output bytes; (2) if a genuine interpreter bug is found (e.g. in `SRLV`, `SLL`, or the bitbuf
+refill call), fix and verify with the standard full workflow; (3) if the setup/input is instead
+found to be reading the wrong ROM offset, trace that back to its own root cause before fixing.
+

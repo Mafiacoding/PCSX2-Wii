@@ -25750,3 +25750,54 @@ separately (Round 631's finding) that no synthetic pad press currently reaches t
 queue to drive any panel transition. Both threads need to be pulled further before "press a
 button, see a real rendered menu" is achievable end-to-end. No tracked-source change this round
 (pure disassembly/instrumentation); regression suite and Wii rebuild correctly skipped.
+
+
+## Round 633 (task #536/#614): traced the GS-draw path all the way to a concrete bug candidate - PRIM register decodes as "reserved" type 7 during label rendering
+
+Direct continuation of Round 632's finding (thread 6's Browser-panel label-registration code,
+0x204D68, runs correctly and calls a real function six times with real string data). This round
+asked: does that registered data ever actually reach the GS as pixels?
+
+**Framebuffer comparison: no.** Dumped the real DISPFB2 framebuffer to PPM at three checkpoints
+(slices 40M/100M/140M, well after thread 6's one-time setup pass). Non-zero pixel counts stayed
+flat (46387/46445/46387) and visually identical - only the already-documented (Round 452-454)
+wireframe animation lines are present; no panel/label/icon content ever appears.
+
+**GS-traffic instrumentation isolates exactly where it's lost.** Added per-instruction hit
+counters plus a `gif_state_t` snapshot at each 10M-slice checkpoint. Two numbers tell the story:
+`quadwords_seen` grows steadily and only from the ongoing animation traffic (thread 3), while
+`unsupported_prims_seen` jumps from 0 to a fixed 126 within the first 10-20M slices - exactly
+once, during thread 6's one-time setup window - and never changes again. 126 = 6 x 21, matching
+the six label-registration calls found in Round 632 suspiciously well (21 draw-primitive attempts
+per label).
+
+**Root cause candidate found: PRIM register decodes as reserved type 7.** Instrumented the
+`unsupported_prims_seen` increment site (`source/hw/gif.c`, in `apply_xyz2_kick()`) to log the
+raw PRIM value on each hit. All 15 captured hits show the *identical* state: `prim_raw=0x3FF`
+(bits 0-9 all set - decodes to `ptype=7`, the value real hardware's GS Users Manual reserves and
+never legitimately produces, since valid PRIM types are 0-6), `ctxt=1`, plus a real-looking
+texture setup (`tbp0=15855`, `tw=10`, `th=13`) and vertex coordinates pinned at the field's
+absolute maximum (`x=4095`, `y=4095` - a 12-bit all-ones pattern). Every field associated with
+this packet looks like either genuinely-set texture parameters or a classic uninitialized-source
+/all-ones garbage pattern - not six distinct per-glyph draws with varying position, which is what
+real font/label rendering would produce. The likely real cause is either (a) a masking/decode bug
+in the packed-mode `GIF_REG_PRIM` case (`g_gif.prim = w0;`, `source/hw/gif.c` ~line 2332 - stores
+the raw 32-bit packet word with no masking, unlike real hardware's 11-bit register), or (b) this
+project's GIF packet-tag parser misaligning which word in the packet it treats as the PRIM value
+for this specific label-drawing DMA chain, landing on padding/unrelated bytes instead of the real
+PRIM word BIOS intended (which most likely encodes SPRITE, type 6 - the one type we already
+support and that would plausibly render font glyphs as textured rectangles).
+
+**Where this leaves things.** This is now a concrete, well-evidenced bug candidate rather than an
+open question - the exact function (`apply_xyz2_kick`/`GIF_REG_PRIM` handling in
+`source/hw/gif.c`) and the exact anomalous value (`0x3FF`/type 7, constant across all six labels)
+are both pinned down. Confirming which of the two hypotheses is correct (register-masking bug vs.
+packet-tag misalignment) requires tracing the specific DMA chain thread 6's label-registration
+call issues, back from `apply_xyz2_kick` through the GIF tag parser to the source packet bytes in
+EE RAM - a focused follow-up task, not yet attempted this round. No tracked-source fix implemented
+yet (the instrumentation lives only in a scratch copy of `gif.c`); regression suite and Wii
+rebuild correctly skipped for this docs-only investigative round.
+
+**Task #536/#613's other half (pad-to-message translation, Round 631's finding) remains
+open and untouched this round** - this round focused entirely on the GS-draw side per the user's
+explicit request to start there.

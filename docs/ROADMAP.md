@@ -10442,3 +10442,17 @@ string data) that executes correctly. Escalation-dispatch chain (0x2047CC, 24-wa
 device index) confirmed inert given current idle field values - correct, not a bug. Next: trace
 forward from the registered label table to the actual GS-draw call, and separately find/wire the
 real pad-to-message translation Round 631 identified as missing. No source change this round.
+
+
+## Round 633 (task #536/#614)
+
+Traced the GS-draw side of the "labels register but don't render" gap to a concrete bug
+candidate: every one of the 126 "unsupported primitive" events during thread 6's one-time
+Browser-panel setup shows PRIM decoding to type 7 (reserved on real hardware - valid types
+are 0-6) with vertex coordinates pinned at their 12-bit maximum (x=y=4095) - a garbage/
+uninitialized-looking pattern, not six real per-glyph draws. Two candidate root causes
+identified: `apply_ad_write()`'s packed-mode `GIF_REG_PRIM` case stores the raw 32-bit packet
+word unmasked (`source/hw/gif.c` ~line 2332), or the GIF tag parser misaligns which packet word
+it treats as PRIM for this specific DMA chain. Next: trace the exact DMA chain back to source
+bytes in EE RAM to confirm which hypothesis is right and implement the fix. Separately, task
+#613's pad-to-message-translation half (Round 631) remains open, not touched this round.

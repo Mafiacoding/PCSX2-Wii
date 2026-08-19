@@ -9,6 +9,15 @@
 
 static gif_state_t g_gif;
 
+/* Round 635 (task #536/#614): upper bound on how many qwords an
+ * IMAGE-mode carry-over is allowed to track (see gif.h's
+ * image_carry_remaining_qwords comment). 4096 qwords = 64KB - several
+ * times larger than any single BIOS menu label/glyph texture observed
+ * so far (Round 633's captured transfer needed well under 1KB), so
+ * legitimate transfers are never affected, while a bogus/mis-decoded
+ * NLOOP can never turn into a large, slow-to-drain carry. */
+#define GIF_IMAGE_CARRY_MAX_QWORDS 4096u
+
 /* Round 542: which real GIF_PATH_1/2/3 value is driving the packet
  * currently being parsed by process_one_packet() - set by
  * gif_process_quadwords() before its parse loop runs (a single call
@@ -2330,35 +2339,46 @@ static uint32_t process_one_packet(const uint8_t *p, uint32_t len)
          * prim_raw=0x3FF/type-7 ("reserved" - not a real primitive
          * type), x=y=4095 (both pinned at the 12-bit max) - textbook
          * "raw pixel bytes reinterpreted as tag/vertex fields"
-         * symptoms, not a real BIOS bug.
+         * symptoms, not a real BIOS bug. Round 634 fixed the
+         * corruption statelessly (write what fits, discard the rest,
+         * return len) after an unbounded carry-over prototype was
+         * measured to occasionally desync unrelated later traffic
+         * forever once trx_active went false with owed_qwords still
+         * outstanding (every subsequent call's ENTIRE buffer got
+         * swallowed as phantom carry-over, freezing all further GS
+         * output - caught in testing before shipping).
          *
-         * Fix: write whatever qwords DO fit as real pixels (best
-         * effort, same trx_active/gs_mem_write_psmct32 path as
-         * before), then treat this call's ENTIRE REMAINING BUFFER as
-         * consumed - i.e. return len, not consumed. This guarantees
-         * the caller's outer loop ends cleanly with off==len, so
-         * there is nothing left in this call's buffer to misparse.
-         * A cross-call carry-over (remembering the exact shortfall
-         * and resuming the same rectangle write on the NEXT call) was
-         * prototyped and measured to occasionally desync unrelated
-         * later traffic when a transfer's declared NLOOP doesn't
-         * cleanly match how the emulated DMA feed chunks its calls -
-         * once desynced, every subsequent real primitive in that
-         * chunk gets silently swallowed as phantom "carry-over"
-         * pixels instead of parsed, freezing all further GS output.
-         * This stateless version can't do that: at worst it drops
-         * the tail of one oversized IMAGE transfer (same real-world
-         * outcome as before this fix for that specific transfer's
-         * last few pixels), but it can never corrupt or block
-         * unrelated later packets, which is the safer trade given
-         * this project's "even if it crashes, at least it boots"
-         * priority over pixel-perfect texture reconstruction. */
+         * Round 635 (task #536/#614) re-enables reconstruction, but
+         * bounded and self-healing this time: only start a carry-over
+         * when the shortfall is small (<=GIF_IMAGE_CARRY_MAX_QWORDS -
+         * generous for a single BIOS menu label/glyph texture, nowhere
+         * near enough to matter if a runaway/bogus NLOOP ever occurs);
+         * gif_process_quadwords() (see below) unconditionally zeroes
+         * the carry counter the instant trx_active reads false, rather
+         * than continuing to consume future calls' bytes - this is
+         * the exact bug the Round 634 writeup identified in the
+         * discarded prototype, now fixed at its root instead of
+         * avoided by dropping reconstruction entirely. */
         if (consumed + skip_bytes > len) {
             uint32_t avail_bytes = (len > consumed) ? (len - consumed) : 0u;
             uint32_t avail_qwords = avail_bytes / 16u;
+            uint32_t shortfall_qwords = skip_qwords - avail_qwords;
 
             if ((flg == 2 || flg == 3) && g_gif.trx_active && avail_qwords > 0)
                 image_write_pixel_qwords(p + consumed, avail_qwords);
+
+            if ((flg == 2 || flg == 3) && g_gif.trx_active &&
+                shortfall_qwords <= GIF_IMAGE_CARRY_MAX_QWORDS) {
+                g_gif.image_carry_remaining_qwords = shortfall_qwords;
+            } else {
+                /* either not a real host-to-local pixel write, the
+                 * transfer already completed mid-write, or the
+                 * shortfall is implausibly large (likely a bogus/
+                 * mis-decoded NLOOP) - fall back to the safe Round 634
+                 * behavior for this packet: drop the tail, don't carry
+                 * anything forward. */
+                g_gif.image_carry_remaining_qwords = 0;
+            }
 
             return len; /* fully consumed - nothing left in this buffer to misparse as a fresh tag */
         }
@@ -2452,6 +2472,40 @@ void gif_process_quadwords(int channel, const uint8_t *data, uint32_t qwc)
 
     uint32_t len = qwc * 16u;
     uint32_t off = 0;
+
+    /* Round 635 (task #536/#614): drain any bounded IMAGE-mode
+     * carry-over owed from a prior call BEFORE parsing this buffer as
+     * tags - this buffer's leading bytes may be genuine continuation
+     * pixel data from a transfer that didn't fit in the previous call
+     * (see process_one_packet()'s IMAGE-mode branch and gif.h's
+     * image_carry_remaining_qwords comment).
+     *
+     * Safety property (this is what Round 634's discarded unbounded
+     * prototype got wrong): the moment trx_active reads false - the
+     * transfer legitimately completed mid-drain, OR was reset/
+     * cancelled by something else since the shortfall was recorded -
+     * the carry counter is unconditionally zeroed right here, THIS
+     * call, before it can consume any more bytes. There is no path
+     * left where a stale non-zero counter can keep swallowing future
+     * calls' data. Combined with the bounded shortfall cap at the
+     * point the carry is created, this makes the carry-over
+     * self-limiting in both size and duration. */
+    if (g_gif.image_carry_remaining_qwords > 0) {
+        if (!g_gif.trx_active) {
+            g_gif.image_carry_remaining_qwords = 0;
+        } else {
+            uint32_t owed_qwords = g_gif.image_carry_remaining_qwords;
+            uint32_t avail_qwords = len / 16u;
+            uint32_t take_qwords = (owed_qwords < avail_qwords) ? owed_qwords : avail_qwords;
+
+            image_write_pixel_qwords(data, take_qwords);
+            g_gif.image_carry_remaining_qwords = owed_qwords - take_qwords;
+            off = take_qwords * 16u;
+
+            if (!g_gif.trx_active)
+                g_gif.image_carry_remaining_qwords = 0; /* rectangle filled mid-drain (real NLOOP overstated it) - nothing left to reconstruct */
+        }
+    }
 
     while (off < len) {
         uint32_t used = process_one_packet(data + off, len - off);

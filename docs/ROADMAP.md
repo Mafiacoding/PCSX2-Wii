@@ -10475,3 +10475,16 @@ render" gap - real label/glyph pixels still weren't observed this round (the fix
 corruption, doesn't guarantee the split transfer's first-call tag-decode was otherwise correct).
 Next: task #613's other half (pad-to-message translation, Round 631's finding) remains open.
 
+## Round 635 (task #536/#614)
+
+Re-enabled IMAGE-mode GIF texture reconstruction (dropped by Round 634's safe-but-lossy stateless
+fix) with a bounded, self-healing carry-over: capped shortfall size (4096 qwords) plus unconditional
+carry-counter reset the instant `trx_active` goes false, directly patching the exact freeze bug an
+earlier unbounded prototype had. Verified safe via the same 150M-slice survey that caught the prior
+regression (no freeze, `unsupported_prims_seen` stays 0) and verified working: the framebuffer now
+shows a new, stable solid-white bar not present in any prior round's dump - the first visible content
+beyond the wireframe animation. Not yet full label/glyph text (likely missing the follow-up
+textured-sprite draw with real UV coordinates). All 42 regression tests pass, Wii cross-build clean.
+Next: confirm/fix the sprite-draw side so the reconstructed texture renders as actual glyphs, and
+separately tackle task #613's pad-to-message-translation half (Round 631), still untouched.
+

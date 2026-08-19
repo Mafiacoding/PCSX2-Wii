@@ -25876,3 +25876,43 @@ pixels were observed in this round's framebuffer dumps; the fix's job was narrow
 untouched this round** - per the user's "do both, start with the gs draw" instruction, this
 completes the GS-draw side; the pad-to-message side is next.
 
+## Round 635 (task #536/#614): re-enabled IMAGE-mode texture reconstruction with a bounded, self-healing carry-over - first new visible content beyond the wireframe animation
+
+Direct continuation of Round 634. That round's stateless fix stopped the stream-desync corruption
+(garbage `prim_raw=0x3FF`/type-7 data) but deliberately dropped the un-fit tail of any oversized
+IMAGE-mode transfer rather than reconstructing it, since an earlier stateful prototype was found to
+risk a permanent freeze. This round re-implements reconstruction, this time bounded and
+self-healing so it can't repeat that regression.
+
+**The two safety properties added.** (1) A carry-over is only ever started when the real shortfall
+is small (`shortfall_qwords <= GIF_IMAGE_CARRY_MAX_QWORDS`, set to 4096 qwords/64KB - many times
+larger than any BIOS menu label texture observed so far, small enough that even a worst-case bogus
+NLOOP can't create a slow-draining backlog). (2) `gif_process_quadwords()`'s drain step
+unconditionally zeroes the carry counter the instant `trx_active` reads false - whether because the
+transfer legitimately finished mid-drain or was reset by something else - rather than continuing to
+consume future calls' bytes. This directly patches the exact bug identified in Round 634's discarded
+prototype: there, a stale non-zero counter with `trx_active` already false kept silently swallowing
+every subsequent call's entire buffer forever, freezing all further GS output. With this round's
+fix, that failure mode is closed at its root instead of avoided by dropping reconstruction.
+
+**Verified safe.** Re-ran the same 150M-slice diskless JP-BIOS boot survey used to catch Round 634's
+regression: `unsupported_prims_seen` stays 0 the entire run, `quadwords_seen` grows steadily
+throughout (0 to 6306, no freeze), `fbp` correctly alternates 70/0/70 across the three framebuffer
+checkpoints. All 42 host-native regression tests pass. Wii cross-build clean.
+
+**Verified working - new content.** The dumped framebuffer now shows a solid white horizontal bar
+in the upper-right area, present and pixel-identical at all three checkpoints (40M/100M/140M
+slices) - content that was never present in any prior round's dump (Round 633's baseline, Round
+634's stateless-only fix). Total non-zero pixel count rose slightly (~24022-24028 vs Round 634's
+~23798-23804), consistent with a small amount of additional, correctly-reconstructed texture data
+now landing in GS memory and actually being displayed, on top of the pre-existing wireframe
+animation. This is the first round where anything beyond the wireframe animation has appeared on
+screen.
+
+**What this isn't yet.** The new element is a solid bar, not visibly readable label/glyph text -
+most likely the texture upload itself now lands correctly, but whatever SPRITE/textured draw is
+supposed to sample it with per-glyph UV coordinates either isn't happening yet or is falling back
+to a flat fill. Confirming and fixing that is a natural next step, but wasn't attempted this round
+(scope was narrowly the carry-over safety fix). Task #536/#613's other half (pad-to-message
+translation, Round 631's finding) also remains open.
+

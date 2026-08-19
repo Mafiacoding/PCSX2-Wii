@@ -742,6 +742,28 @@ typedef struct {
     int trx_active;
     uint32_t trx_cur_x, trx_cur_y;
 
+    /* Round 635 (task #536/#614): bounded, safe IMAGE-mode cross-call
+     * carry-over. Round 634 shipped a stateless fix for the stream-
+     * desync bug (garbage GIFtag parsed from a split transfer's
+     * continuation bytes) that DROPS the un-fit tail of an oversized
+     * IMAGE transfer rather than reconstructing it - safe, but means
+     * multi-call texture uploads (e.g. BIOS menu label glyphs) never
+     * fully land in GS memory. This field re-enables reconstruction,
+     * but bounded: process_one_packet() only sets it when the real
+     * shortfall is <= GIF_IMAGE_CARRY_MAX_QWORDS (see gif.c) AND
+     * trx_active is genuinely still set; gif_process_quadwords()
+     * immediately zeroes it (abandoning the carry, not endlessly
+     * consuming future calls' bytes) the moment trx_active reads
+     * false, whether because the transfer legitimately completed or
+     * was reset by something else. This directly patches the exact
+     * bug an earlier unbounded version of this carry-over had: once
+     * trx_active went false with a large/bogus owed_qwords still
+     * outstanding, every subsequent call's ENTIRE buffer got silently
+     * swallowed as phantom carry-over forever, freezing all further
+     * GS output (caught in host-native testing before shipping,
+     * documented in Round 634's writeup). 0 = no carry-over active. */
+    uint32_t image_carry_remaining_qwords;
+
     /* Z-buffer / depth-test state (task #89). zbp is the Z buffer's
      * base pointer, in OUR gs_mem bp convention (see gs_mem.h) - real
      * hardware's ZBUF register (GIFRegZBUF: ZBP:9, PSM:6, ZMSK:1) has

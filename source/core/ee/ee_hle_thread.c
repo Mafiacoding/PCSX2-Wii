@@ -807,6 +807,55 @@ void ee_hle_thread_check_preempt(ee_state_t *st)
      * original rationale), just no longer firing during the one window
      * where doing so is unsafe. */
     if (st->cop0[12] & 0x6u) return; /* Status.EXL (bit 1) or Status.ERL (bit 2) set - genuinely mid-exception, never preempt here */
+    /* Round 625 (task #536/#607, following Round 624's live-hardware-
+     * verified findings): never freeze a thread's context while its PC
+     * sits inside the real, fixed generic ERET-glue thread-start
+     * trampoline - the exact 5-instruction body this project has fully
+     * disassembled and byte-verified twice, independently, against the
+     * real BIOS ROM (Round 467's "0x00081FE0 is a fixed generic kernel
+     * thread-start trampoline; real entry point travels through $v1,
+     * not $a0" finding; Round 619's byte-exact confirmation:
+     *   0x00081FE0: lui   $sp, 8
+     *   0x00081FE4: jalr  $v1        ; delay slot below
+     *   0x00081FE8: addiu $sp, $sp, 0x1fc0
+     *   0x00081FEC: addiu $v1, $zero, -5
+     *   0x00081FF0: syscall
+     * ). $v1 here is a real MIPS calling-convention register: the
+     * trampoline's ONLY caller-supplied argument, which must already
+     * hold a valid target address by the time control reaches
+     * 0x00081FE0 - the trampoline body itself performs no load, no
+     * null-check, and no guard of any kind before `jalr $v1` (Round
+     * 619's own conclusion, quoted in STATUS.md: "There is no branch,
+     * no zero-check, no guard of any kind between the trampoline's
+     * entry and the jalr $v1"). Real EE hardware never has a problem
+     * with this: an interrupt landing here is always followed by a
+     * full, faithful, immediate context restore on return, so $v1
+     * (already set by the real caller a few instructions earlier)
+     * survives untouched. This project's OWN software scheduler is
+     * different in one specific, consequential way - once
+     * save_context() freezes a thread here, nothing guarantees WHEN
+     * (or whether, for a very long time) load_context() will resume
+     * it, unlike real hardware's effectively-instantaneous interrupt
+     * round-trip. Round 622's own live-instrumented conclusion
+     * ("$ra=0x800027AC... a leftover register value from BEFORE the
+     * 2,000,000-slice observation window... set by a real call more
+     * than ~154,500,000 slices earlier and never overwritten since")
+     * and Round 624's direct RAM comparison (TIMER3's real per-cause
+     * handler-table slot is genuinely unregistered/count=0, and the
+     * real 0x80001630 dispatcher's own intact blez-guard would never
+     * reach this trampoline for it at all) together rule out "the real
+     * BIOS dispatch code is buggy" as the explanation - the evidence
+     * instead points at exactly this window: this project's own forced
+     * preemption (introduced Round 597, moved to fire only on real
+     * ERET in Round 598) can still freeze whichever thread happens to
+     * be mid-handoff here, for however long its priority keeps it off
+     * the ready queue, and later resume it with $v1 stale/zero. The
+     * fix is narrow and conservative - defer preemption by the few
+     * instructions it takes the CPU to clear this window on its own,
+     * exactly the same "genuinely unsafe software-yield point, unlike
+     * real hardware which needs no such carve-out" reasoning as the
+     * Status.EXL/ERL check immediately above. */
+    if (st->pc >= 0x00081FE0u && st->pc < 0x00081FF0u) return;
     if (g.thread_count == 0 || g.current_thread_id == 0) return;
     ee_tcb_t *cur = tcb(g.current_thread_id);
     if (!cur || cur->status != EE_THS_RUN) return;

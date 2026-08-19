@@ -2798,10 +2798,61 @@ static inline void set_lane_b(ee_reg128_t *r, int n, uint8_t val) {
     *p = (*p & mask) | ((uint64_t)val << sh);
 }
 
+/* Round 630 (task #536/#611) experimental safety-net counter - see the
+ * guard's own comment below for full rationale. Exposed non-static so
+ * host-native tests/tools can observe it if useful; intentionally NOT
+ * declared in a header since this is a narrow, self-contained probe. */
+long g_ee_null_jalr_guard_hits = 0;
+
 static int ee_step(void)
 {
     ee_state_t *st = &g_state;
     uint32_t pc = st->pc;
+
+    /* Round 630 (task #536/#611): narrow, clearly-labeled pragmatic
+     * safety net, NOT a proven-authentic real-hardware fix (see
+     * docs/STATUS.md Round 630 for the full evidence trail).
+     *
+     * Real EE kernel code dispatches through the fixed 0x00081FE0
+     * generic thread-start trampoline via `jalr $ra,$v1` (Round 467).
+     * On the diskless-boot path, TIMER3's real Alarm dispatcher
+     * (0x80002650, decoded Round 629) eventually reads an empty
+     * table slot ($v1==0) and this unconditionally faults at
+     * instruction address 0, which - given this project's existing
+     * TLB-refill/exception-recovery path - leaves Status.EXL stuck
+     * at 1 forever (Round 610-626: a permanent CPU lockup).
+     *
+     * Round 629 proved the empty table itself is NOT a bug (live
+     * PCSX2 read of real hardware shows the identical empty
+     * table/pending_count=0 state, even mid-gameplay) - so the real
+     * divergence is elsewhere (TIMER3 arming/disarming timing,
+     * per Round 629's live-hardware comparison), not yet fully
+     * root-caused. Round 630 built and tested this exact guard as a
+     * diagnostic: treat the null-$v1 dispatch as a no-op return
+     * (as if a trivial "jr $ra" stub existed at the target) instead
+     * of letting it corrupt Status/EXL permanently.
+     *
+     * Empirical result (Round 630, 400M-slice diskless survey): the
+     * guard fires exactly once (~slice 156M, matching the previously
+     * -documented fault point), Status.EXL is correctly NOT left
+     * stuck afterward, and execution continues looping in the same
+     * animation-loop PC range it was already in since slice ~20M -
+     * i.e. this does NOT unlock further progress into OSDSYS's real
+     * menu-dispatcher code (that remains task #536's open problem),
+     * but it DOES turn a permanent hard lockup into an indefinite,
+     * still-responsive animation loop - consistent with the user's
+     * standing tolerance ("even if it crashes i dont care atleast it
+     * boots"). Kept intentionally narrow (exact pc==0 && EXL==0
+     * signature only) so it cannot mask any other, unrelated fault
+     * class. */
+    if (pc == 0 && !(st->cop0[12] & 0x2u)) {
+        g_ee_null_jalr_guard_hits++;
+        uint32_t ra = (uint32_t)st->gpr[31].ud0;
+        st->pc = ra;
+        st->next_pc = ra + 4;
+        st->branch_pending = 0;
+        return 0;
+    }
 
     /* Capture + clear the delay-slot flag the PREVIOUS instruction may
      * have left for us (see branch_pending's comment in ee_core.h),

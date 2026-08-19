@@ -26944,3 +26944,59 @@ rounds of confirmed, evidenced picture-content progress (Round 649's fix + first
 picture, this round's colored-triangle attribution), this is offered to the user as continued
 bundle-worthy progress; a bundle was already built and delivered for Round 649's commit
 (`pcsx2-wii-round649.bundle`) per the user's explicit request this session.
+
+
+## Round 651: picture content confirmed stable through 720M cumulative slices, no crash; flagged next candidate lead
+
+**Continuing the chained checkpoint survey** (task #638 follow-up) past Round 650's 600M mark to
+720M cumulative slices (5,759,975,468 EE instructions) to see whether the newly-confirmed triangle
+content keeps growing or whether more distinct picture content appears.
+
+**Result: stable, not growing further.** `triangles_drawn` stayed flat at 23 from 480M through
+720M (no new XGKICK-driven triangle kicks in that window), and the framebuffer's `non_bg_pixels`
+count stayed exactly flat at 71374 across the same range - the colored polygon content Round 650
+found is a one-time draw that persists correctly (consistent with Round 649's checkpoint fix
+working as intended) rather than an ongoing animation. `sprites_drawn` kept climbing (3136 by
+720M), consistent with the already-documented Round 452 sprite-growth animation loop continuing
+independently. No crash, no halt, no new exception across the full 720M-slice/5.76B-instruction
+span - a genuine stability data point at nearly 5x the depth Round 645 originally needed just to
+reach the first VIF1 DMA kickoff.
+
+**Candidate lead for a future round.** The 600-720M window's `r642_dump_kick()` captures included
+several GIFtags that look more like uninitialized/stale VU1 memory than legitimate draw data - e.g.
+kick #3's tag (`w0=360cccee w1=175f6daf w2=f7a7789d w3=a2df37b4`, `nloop=19694`) has no plausible
+real-world register/loop-count relationship and doesn't correspond to any known real asset. This is
+flagged, not yet investigated - worth checking in a future round whether these represent a real
+VU1-program-state or GIFtag-parsing gap, or are simply what a real, not-yet-drawing VU1
+micro-program legitimately produces when its own logic hasn't set up a valid kick (real hardware
+VU1 programs can and do issue garbage XGKICKs under some conditions, so this is not automatically a
+bug).
+
+**Status.** No tracked source changed this round (continued investigation only, no new evidence for
+a fix); regression/Wii build correctly skipped per established convention. All checkpoints/PPM
+dumps remain `/tmp`-scratch-only, never committed or rsync'd.
+
+## Outputs-folder leak-prevention audit (this session)
+
+Per user request, audited the full outputs folder (not just the tracked `pcsx2-wii/` mirror
+subfolder the per-round leak-check already covers) and found two real, standing violations of this
+project's own leak-prevention rule, both left over from earlier sessions:
+
+1. **27 stray PNG framebuffer dumps** (Rounds 470-638) sitting in the outputs root - BIOS-boot-
+   screen-derived image renders that should never have persisted outside an inline chat view, per
+   the same rule this project has followed all session for `.ppm`/`.png` scratch dumps.
+2. **`pcsx2-wii-round581-checkpoint.bin`** (35MB) - a real checkpoint file whose own README
+   explicitly documented it contains "real Sony BIOS boot code," generated in Round 581 per an
+   earlier explicit user request but left in the persistent outputs folder ever since, directly
+   contradicting `checkpoint.h`'s own leak-prevention module comment.
+3. **`dolphin_sdcard_bundle.zip` and its duplicate `ziubBv66`** - both contained
+   `dolphin_sdcard/pcsx2/bios/SCPH10000.bin`, a 4,194,304-byte file matching the real PS2 BIOS ROM's
+   exact size - i.e. two copies of what is almost certainly the actual raw BIOS ROM itself, the
+   single most serious category this project's standing rule exists to prevent.
+
+All of the above were removed from the outputs folder this session with the user's explicit
+confirmation. This does not affect the tracked git repository (`/tmp/pcsx2-wii-git`), which was
+never the source of the leak and remains clean per every prior round's `git ls-files` leak-check.
+Recommending this broader, whole-outputs-folder sweep (not just the `pcsx2-wii/` subfolder) become
+a periodic addition to the standing leak-check going forward, since it caught real violations the
+narrower per-round scope had been missing.

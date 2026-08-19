@@ -19,6 +19,13 @@
 #include "core/hw/gif.h"
 #include "core/hw/gs_mem.h"
 
+/* Round 640: seed texture/CLUT data via the _blk (real 256-bytes/unit
+ * BITBLTBUF/TEX0-style) addressing helper, matching gif.c's gs_sample_
+ * texel()/gs_sample_clut() which now read TBP0/CBP through the same
+ * _blk scale. Framebuffer output reads below stay on the plain,
+ * unchanged gs_mem_read_psmct32() - FBP/output addressing is untouched
+ * by this round's fix. See docs/STATUS.md Round 639/640. */
+
 static int failures = 0;
 #define CHECK(cond, msg) do { \
     if (!(cond)) { printf("FAIL: %s\n", msg); failures++; } \
@@ -69,7 +76,7 @@ static uint32_t sample_decal_pixel(int write_texa)
     uint32_t tex_bp = 3200, tex_bw = 64;
     for (uint32_t y = 0; y < 11; y++)
         for (uint32_t x = 0; x < 11; x++)
-            gs_mem_write_psmct32(tex_bp, tex_bw, x, y, ((0x40u + x + y) << 24) | (y * 10u << 8) | (x * 10u));
+            gs_mem_write_psmct32_blk(tex_bp, tex_bw, x, y, ((0x40u + x + y) << 24) | (y * 10u << 8) | (x * 10u));
 
     uint8_t buf[16 * 24];
     memset(buf, 0, sizeof(buf));

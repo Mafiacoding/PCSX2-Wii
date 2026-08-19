@@ -166,13 +166,17 @@ static uint32_t gs_sample_clut(uint32_t index)
     uint32_t flat = g_gif.tex_csa * CLUT_CSA_UNIT + index;
     uint32_t cx = flat % CLUT_ROW_WIDTH;
     uint32_t cy = flat / CLUT_ROW_WIDTH;
-    return gs_mem_read_psmct32(g_gif.tex_cbp, CLUT_ROW_WIDTH, cx, cy);
+    /* Round 640: CBP is TEX0.CBP - real unit is 256 bytes (Address/64
+     * words), not the plain functions' 4-byte-word assumption. */
+    return gs_mem_read_psmct32_blk(g_gif.tex_cbp, CLUT_ROW_WIDTH, cx, cy);
 }
 
 static uint32_t gs_sample_texel(int32_t tex_x, int32_t tex_y)
 {
-    uint32_t raw = gs_mem_read_psmct32(g_gif.tex_tbp0, g_gif.tex_tbw,
-                                        (uint32_t)tex_x, (uint32_t)tex_y);
+    /* Round 640: TBP0 is TEX0.TBP0 - real unit is 256 bytes (Address/64
+     * words), not the plain functions' 4-byte-word assumption. */
+    uint32_t raw = gs_mem_read_psmct32_blk(g_gif.tex_tbp0, g_gif.tex_tbw,
+                                            (uint32_t)tex_x, (uint32_t)tex_y);
     if (g_gif.tex_psm == TEX_PSM_PSMT8) {
         uint32_t idx = raw & 0xFFu;
         uint32_t swizzled = (idx & 0xE7u) | ((idx & 0x08u) << 1) | ((idx & 0x10u) >> 1);
@@ -2223,10 +2227,17 @@ static void image_write_pixel_qwords(const uint8_t *q, uint32_t n_qwords)
         px[2] = rd_le32(qq + 8);
         px[3] = rd_le32(qq + 12);
         for (int k = 0; k < 4 && g_gif.trx_active; k++) {
-            gs_mem_write_psmct32(g_gif.trx_dbp, g_gif.trx_dbw,
-                                  g_gif.trx_dsax + g_gif.trx_cur_x,
-                                  g_gif.trx_dsay + g_gif.trx_cur_y,
-                                  px[k]);
+            /* Round 640: DBP is BITBLTBUF.DBP - real unit is 256 bytes
+             * (Address/64 words), not the plain functions' 4-byte-word
+             * assumption. This is the fix for the VRAM-aliasing collision
+             * documented in docs/STATUS.md Round 639/640 (legitimate
+             * texture-upload dbp values like 13440 were landing inside the
+             * framebuffer's own byte range under the old, under-scaled
+             * addressing). */
+            gs_mem_write_psmct32_blk(g_gif.trx_dbp, g_gif.trx_dbw,
+                                      g_gif.trx_dsax + g_gif.trx_cur_x,
+                                      g_gif.trx_dsay + g_gif.trx_cur_y,
+                                      px[k]);
             g_gif.trx_cur_x++;
             if (g_gif.trx_cur_x >= g_gif.trx_rrw) {
                 g_gif.trx_cur_x = 0;

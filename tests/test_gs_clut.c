@@ -21,6 +21,13 @@
 #include "hw/gs_mem.c"
 #include "hw/gif.c"
 
+/* Round 640: seed texture/CLUT data via the _blk (real 256-bytes/unit
+ * BITBLTBUF/TEX0-style) addressing helper, matching gif.c's gs_sample_
+ * texel()/gs_sample_clut() which now read TBP0/CBP through the same
+ * _blk scale. Framebuffer output reads below stay on the plain,
+ * unchanged gs_mem_read_psmct32() - FBP/output addressing is untouched
+ * by this round's fix. See docs/STATUS.md Round 639/640. */
+
 static int failures = 0;
 #define CHECK(cond, msg) do { \
     if (!(cond)) { printf("FAIL: %s\n", msg); failures++; } \
@@ -43,7 +50,7 @@ static void append_ad(uint8_t *buf, int *off, uint32_t data_lo, uint32_t data_hi
  * CLUT_ROW_WIDTH-wide row convention (see gif.h). */
 static void fill_clut_entry(uint32_t cbp, uint32_t flat_index, uint32_t rgba)
 {
-    gs_mem_write_psmct32(cbp, CLUT_ROW_WIDTH, flat_index % CLUT_ROW_WIDTH, flat_index / CLUT_ROW_WIDTH, rgba);
+    gs_mem_write_psmct32_blk(cbp, CLUT_ROW_WIDTH, flat_index % CLUT_ROW_WIDTH, flat_index / CLUT_ROW_WIDTH, rgba);
 }
 
 /* Fills a solid rectangle of raw palette-index values into gs_mem, at
@@ -54,7 +61,7 @@ static void fill_texture_index(uint32_t bp, uint32_t bw, uint32_t w, uint32_t h,
 {
     for (uint32_t y = 0; y < h; y++)
         for (uint32_t x = 0; x < w; x++)
-            gs_mem_write_psmct32(bp, bw, x, y, index);
+            gs_mem_write_psmct32_blk(bp, bw, x, y, index);
 }
 
 /* Draws a single flat, DECAL-textured triangle sampling exactly one

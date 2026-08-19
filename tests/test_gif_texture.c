@@ -11,6 +11,13 @@
 #include "hw/gs_mem.c"
 #include "hw/gif.c"
 
+/* Round 640: seed texture/CLUT data via the _blk (real 256-bytes/unit
+ * BITBLTBUF/TEX0-style) addressing helper, matching gif.c's gs_sample_
+ * texel()/gs_sample_clut() which now read TBP0/CBP through the same
+ * _blk scale. Framebuffer output reads below stay on the plain,
+ * unchanged gs_mem_read_psmct32() - FBP/output addressing is untouched
+ * by this round's fix. See docs/STATUS.md Round 639/640. */
+
 static int failures = 0;
 #define CHECK(cond, msg) do { \
     if (!(cond)) { printf("FAIL: %s\n", msg); failures++; } \
@@ -39,7 +46,7 @@ static void fill_texture_solid(uint32_t bp, uint32_t bw, uint32_t w, uint32_t h,
 {
     for (uint32_t y = 0; y < h; y++)
         for (uint32_t x = 0; x < w; x++)
-            gs_mem_write_psmct32(bp, bw, x, y, rgba);
+            gs_mem_write_psmct32_blk(bp, bw, x, y, rgba);
 }
 
 int main(void)
@@ -140,9 +147,9 @@ int main(void)
         uint32_t col_red   = 0xFF0000FFu;
         uint32_t col_green = 0xFF00FF00u;
         uint32_t col_blue  = 0xFFFF0000u;
-        gs_mem_write_psmct32(tex_bp, tex_bw, 0, 0, col_red);
-        gs_mem_write_psmct32(tex_bp, tex_bw, 5, 0, col_green);
-        gs_mem_write_psmct32(tex_bp, tex_bw, 10, 0, col_blue);
+        gs_mem_write_psmct32_blk(tex_bp, tex_bw, 0, 0, col_red);
+        gs_mem_write_psmct32_blk(tex_bp, tex_bw, 5, 0, col_green);
+        gs_mem_write_psmct32_blk(tex_bp, tex_bw, 10, 0, col_blue);
 
         uint8_t buf[16 * (1 + 4 + 3 * 3)]; /* tag + FRAME_1/XYOFFSET_1/TEX0_1/PRIM + 3*(RGBAQ+UV+XYZ2) */
         memset(buf, 0, sizeof(buf));

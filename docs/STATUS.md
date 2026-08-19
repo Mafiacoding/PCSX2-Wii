@@ -26165,3 +26165,83 @@ by a properly-scoped addressing fix (likely reusing the existing swizzled functi
 but only after confirming real field semantics) - not a guess. Regression suite and Wii rebuild correctly
 skipped (diagnostic only). Docs/commit/rsync/leak-check done this round; no bundle (refines a diagnosis,
 ships no fix).
+
+## Round 640 (task #536/#625): fixed the GS VRAM-aliasing bug - real per-register base-pointer scaling implemented and shipped
+
+Direct follow-up to Round 639's root-cause finding and this same round's earlier refinement (only 5/18 logged
+texture uploads actually write pixel data; a naive single-constant bp rescale can't work). This round finished
+the job: obtained primary-source confirmation of the real per-register-type addressing unit, implemented a
+differentiated fix, and verified it end-to-end.
+
+**Primary-source confirmation.** Three web searches converged on: `FRAME.FBP`/`ZBUF.ZBP` use "Address/2048
+words" (8192 bytes/unit, one VRAM "page"); `BITBLTBUF.SBP`/`DBP` and `TEX0.TBP0`/`CBP` use "Address/64 words"
+(256 bytes/unit, one VRAM "block") - a 64x finer granularity. Cross-verified against this project's own
+`docs/reference/pcsx2/pcsx2/GS/GSRegs.h` (pulled Round 543): `FBP`/`ZBP` are 9-bit fields with an explicit
+`Block() { return FBP << 5; }` page-scale helper; `SBP`/`DBP`/`TBP0`/`CBP` are 14-bit fields with no such
+helper. The field-width math confirms this is exactly right: 9 bits x 8192B = 4MB, 14 bits x 256B = 4MB - both
+exactly span real PS2 GS's 4MB eDRAM, which is why Sony sized the fields the way they did.
+
+**The fix.** `gs_mem.c`'s existing `gs_mem_read/write_psmct32()` (bp*4-bytes/unit, "word offset" convention)
+stays completely unchanged - it's still correct for `FRAME.FBP`/`ZBUF.ZBP`, which this project's own bp*4
+model tracks closely enough that no aliasing was ever observed for that register pair specifically. Two new
+thin wrapper functions were added to `gs_mem.h`/`gs_mem.c` - `gs_mem_read_psmct32_blk()`/
+`gs_mem_write_psmct32_blk()` - that pre-multiply `bp` by 64 (converting a real block-granularity bp into the
+plain functions' word-offset unit) before calling straight through to the unchanged plain functions. `gif.c`'s
+3 real block-scale call sites were switched to the new wrappers: `gs_sample_clut()`'s CBP read (line ~169),
+`gs_sample_texel()`'s TBP0 read (line ~174), and `image_write_pixel_qwords()`'s DBP write inside the IMAGE-mode
+transfer path (line ~2226) - this last one is the direct fix for Round 639's collision (real texture uploads
+like dbp=13440 now land at byte offset 13440*256=3,440,640, not 13440*4=53,760 inside the framebuffer). All 8
+FBP/ZBP call sites in `gif.c` and `gs_wii_output.c`'s DISPFB-sourced blit are untouched. Also corrected a
+stale/inaccurate header comment in `gs_mem.h` that had claimed the plain functions use `bp*256` (they've
+always used `bp*4` - a documentation-only mismatch, unrelated to actual behavior, now fixed to match reality).
+
+**New regression test.** `tests/test_gs_blk_addressing.c` directly reproduces this round's exact scenario:
+a framebuffer at fbp=0 and a real texture-upload dbp=13440 no longer alias once dbp is routed through
+`_blk`, plus basic round-trip and bounds-safety checks for the new wrapper functions.
+
+**Existing test-suite fallout (expected and fixed).** 11 existing GS/GIF test files seed texture/CLUT data
+directly via `gs_mem_write_psmct32()` at arbitrary bp values (Round 25's own documented pattern - values like
+2000, 5000, 10200 picked only to avoid collision under the old model, not real hardware pointers), then sample
+that data back through `gif.c`'s now-fixed `gs_sample_texel()`/`gs_sample_clut()`. Their seed-writes needed the
+same `_blk` scale to stay consistent with the read side: `test_gs_clamp.c`, `test_gs_clut.c`,
+`test_gs_colclamp.c`, `test_gs_context2_mipmap.c`, `test_gs_mipmap.c`, `test_gs_mipmap_triangle.c`,
+`test_gs_tex2.c`, `test_gs_texa.c`, `test_gs_texclut.c`, `test_gif_texture.c`, `test_gif_stq_sprite.c` - all 11
+switched to `gs_mem_write_psmct32_blk()` for their texture/CLUT seed writes; their framebuffer-output read
+calls (always bp=0-class, FBP addressing) were correctly left untouched.
+
+**One genuine pre-existing test bug found and fixed along the way.** `test_gs_context2_mipmap.c`'s
+context-2 `GS_REG_FRAME_2` write encoded `(20u << 9)` intending FBP=20, but per `gif.c`'s actual FRAME_2 case
+(FBP is bits 0-8, FBW is bits 9-14, confirmed by direct code read), this actually wrote FBP=0/FBW=1280 - a
+latent bug that happened to stay invisible under the old bp*4-for-everything addressing (an incidental
+FBW-stride separation kept the two contexts' draws from colliding, and the test's own bp=20 readback
+coincidentally exercised a different-but-then-still-correct code path). This round's differentiated TBP0/CBP
+fix changed downstream memory layout enough to expose it as a real, reproducible check failure. Root-caused
+via isolated reduction (reverting just the test's write-helper change while keeping the source fix flipped
+which check failed, proving the bug was pre-existing and independent of this round's real fix) and fixed by
+correcting the write to plain `20u`. Verified: all 6 checks in that file pass cleanly after the correction.
+
+**Verified safe.** Full regression suite: all 42 current-style (`-Iinclude -Isource`) compile+run pairs from
+`tests/README.md` pass, plus the 5 multi-source-file GS tests and the new `test_gs_blk_addressing.c` (47 test
+binaries total, 0 failures). Wii/devkitPPC cross-build rebuilds clean with 0 warnings, 0 errors (produces
+`pcsx2-wii-git.dol`/`.elf`).
+
+**Verified working - the collision is gone.** Built matching PPM-framebuffer-dump drivers against both the
+pre-fix and post-fix trees, ran identical 100M-slice diskless JP BIOS boot surveys against each (same BIOS,
+same slice budget, same checkpoints at 40M/100M slices), and diffed the resulting framebuffers pixel-by-pixel.
+Both runs reach the identical EE instruction count (799,996,184) and halt PC (0x00510240) - confirming zero
+change to boot progress/control flow, exactly as expected for an addressing-only fix. 2,657 of 143,360 pixels
+(1.85%) differ between the two runs, concentrated in framebuffer rows 22-43 - precisely the byte range Round
+639/640 identified as the collision zone (dbp=13440 landing at byte offset 53,760 under the old bp*4 scale,
+which falls in that row range for a 640-wide PSMCT32 framebuffer). In the pre-fix dump, that region contains
+spurious grayscale/white pixel values (0x080808, 0x202020, 0xFFFFFF - consistent with glyph-rendering colors
+bleeding through from the misaddressed texture upload). In the post-fix dump, the exact same region is clean
+black background (0x000000) - the previously-colliding texture data is now correctly relocated to its real
+address ~3.4MB into the 4MB GS memory buffer, well outside the framebuffer's own range. The post-fix
+framebuffer also has fewer unique colors overall (95 vs 131) and fewer non-zero pixels (23,126 vs 24,893),
+consistent with removing spurious aliased content rather than adding any.
+
+**What's still open.** The rendered label text's exact visual quality/glyph correctness hasn't been checked
+against a real BIOS reference screenshot (Round 636 flagged this as a follow-up, still open). Task #536/#613's
+pad-to-message-translation half (Round 638's finding: no code path ever issues a real SIO2 pad-read command)
+remains paused per the user's explicit prioritization ("make display work first... get everything together
+now") - ready to resume once the user confirms display work is sufficiently complete.

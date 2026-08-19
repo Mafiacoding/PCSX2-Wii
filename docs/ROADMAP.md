@@ -10550,3 +10550,18 @@ general problem. Real hardware avoids all of this via page-indexed addressing (t
 them ~100MB+ out of range - a strong sign the real BITBLTBUF.DBP field layout/units need primary-source
 verification before any addressing change, not a guess. Docs-only round; no bundle; next step is that
 citation work, then a properly-scoped fix (task #536/#625 continuation).
+
+## Round 640: GS VRAM-aliasing bug fixed (task #536/#625)
+
+Primary-source-confirmed real PS2 GS addressing units: FRAME.FBP/ZBUF.ZBP = 8192 bytes/unit ("page"),
+BITBLTBUF.SBP/DBP and TEX0.TBP0/CBP = 256 bytes/unit ("block", 64x finer) - cross-checked against this
+project's own pulled `GSRegs.h` reference source (field widths + `Block()<<5` helpers match exactly).
+Implemented as additive `gs_mem_read/write_psmct32_blk()` wrappers (pre-scale bp by 64, call through to the
+existing unchanged plain functions) wired into gif.c's 3 real block-scale call sites (CLUT read, texture read,
+IMAGE-mode transfer write) - the FBP/ZBP call sites and gs_mem.c itself are untouched. 11 existing test files'
+texture/CLUT seed-writes updated to match; one genuine pre-existing test bug (mis-encoded FRAME_2 FBP field)
+found and fixed along the way. New regression test added. Full 47-binary regression suite passes, Wii
+cross-build clean. Verified via before/after PPM framebuffer diff on an identical 100M-slice diskless boot
+survey: the exact collision zone (framebuffer rows 22-43) goes from spurious grayscale/white aliased pixel
+data to clean black background, with zero change to boot progress (identical EE instruction count and halt
+PC in both runs). Docs, commit, rsync, leak-check done.

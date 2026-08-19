@@ -9,6 +9,13 @@
 #include "hw/gs_mem.c"
 #include "hw/gif.c"
 
+/* Round 640: seed texture/CLUT data via the _blk (real 256-bytes/unit
+ * BITBLTBUF/TEX0-style) addressing helper, matching gif.c's gs_sample_
+ * texel()/gs_sample_clut() which now read TBP0/CBP through the same
+ * _blk scale. Framebuffer output reads below stay on the plain,
+ * unchanged gs_mem_read_psmct32() - FBP/output addressing is untouched
+ * by this round's fix. See docs/STATUS.md Round 639/640. */
+
 static int failures = 0;
 #define CHECK(cond, msg) do { \
     if (!(cond)) { printf("FAIL: %s\n", msg); failures++; } \
@@ -38,7 +45,7 @@ static uint32_t float_bits(float f)
 static void fill_texture_gradient_red(uint32_t bp, uint32_t bw, uint32_t w)
 {
     for (uint32_t x = 0; x < w; x++)
-        gs_mem_write_psmct32(bp, bw, x, 0, ((uint32_t)0xFFu << 24) | (x * 20u)); /* r=x*20, rest 0, a=255 */
+        gs_mem_write_psmct32_blk(bp, bw, x, 0, ((uint32_t)0xFFu << 24) | (x * 20u)); /* r=x*20, rest 0, a=255 */
 }
 
 int main(void)
@@ -157,7 +164,7 @@ int main(void)
         uint32_t tex_bp = 3200, tex_bw = 64;
         for (uint32_t y = 0; y < 11; y++)
             for (uint32_t x = 0; x < 11; x++)
-                gs_mem_write_psmct32(tex_bp, tex_bw, x, y, ((uint32_t)0xFFu << 24) | (y * 10u << 8) | (x * 10u));
+                gs_mem_write_psmct32_blk(tex_bp, tex_bw, x, y, ((uint32_t)0xFFu << 24) | (y * 10u << 8) | (x * 10u));
 
         uint8_t buf[16 * (1 + 4 + 2 * 3)]; /* tag + FRAME_1/XYOFFSET_1/TEX0_1/PRIM + 2*(RGBAQ+UV+XYZ2) */
         memset(buf, 0, sizeof(buf));

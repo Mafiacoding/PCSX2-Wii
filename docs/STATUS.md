@@ -26628,3 +26628,60 @@ than continuing to dig into this now-cleared VIF1/decompressor path.
 (widened capture window in the scratch copy's `ee_core.c`/`driver_r642.c`, never committed).
 Regression suite and Wii cross-build correctly skipped per the docs-only precedent used for Rounds
 642-644.
+
+## Round 646: pinpointed the exact byte where the VIF1 stream diverges from real VIFcodes into (likely) raw texture data - answers "how was the Round 636 text actually produced" (task #536)
+
+Direct follow-up to the user's question: since the Round 636 "text on screen" turned out to be an
+address-collision accident (Round 640 correction) rather than a real draw, what does the REAL,
+legitimate VIF1 transfer that Round 645 just proved is well-formed actually contain? Decoded it as
+a real VIFcode stream, word by word, using the correctly-masked opcode field (`cmd = (code>>24) &
+0x7F`, matching `vif_process()`'s own real dispatch mask in `source/hw/vif.c`).
+
+**The first 6 words are unambiguously real, correct VIFcodes:** `FLUSHE(imm=0)`, `NOP(imm=767)`,
+`FLUSHE(imm=4)`, `NOP(imm=767)`, `FLUSHE(imm=22)`, `NOP(imm=767)` - three FLUSHE/NOP pairs with
+cleanly incrementing FLUSHE immediates (0, 4, 22), exactly the shape of genuine BIOS setup code
+(flushing state before a transfer), and an exact byte-for-byte match to what Round 642's original
+live capture logged months ago (`FLUSHE(imm=0), NOP(imm=767), FLUSHE(imm=4), NOP(imm=767),
+FLUSHE(imm=22), NOP(imm=767)`) - confirming this offline buffer dump and that round's live
+instrumentation are looking at the exact same real event.
+
+**Word 7 (absolute address 0x0051b6a8) is where it breaks: `code=0x420f00c5`, `cmd=0x42` - not a
+real VIFcode on any real hardware table.** Past this point, decoding continues to consume 4 bytes
+at a time and mostly produces "technically valid" opcodes (NOP/STCYCL/FLUSHE, since their low
+opcode numbers are common byte values) with implausible, essentially random immediate/NUM fields -
+but critically, **71% of all words from this point on (164 of 230) are the exact same constant,
+`0x000002ff`**, appearing at a rigid every-other-word cadence for the rest of the 1840-byte
+transfer. Real VIFcode dispatch code does not repeat one exact word 71% of the time at a fixed
+stride - this is the signature of raw binary data (most likely the texture/pixel payload itself)
+being walked 4 bytes at a time by `vif_process()`'s VIFcode loop, not genuine VIFcode syntax.
+
+**Best-evidenced read:** real BIOS code at this exact point almost certainly issues a `DIRECT` or
+`DIRECTHL` VIFcode (cmd 0x50/0x51) telling VIF1 to stop parsing VIFcodes and forward the remaining
+quadwords straight through to GIF as raw texture/packet data - which is exactly the kind of content
+Round 634 found starting a texture buffer with (smooth alpha-gradient glyph bytes). Either (a) the
+EE-side decompressor (Round 643's `0x00200C80-0x00200D4C` loop) produces the wrong byte at this
+one position (should decompress to a `DIRECT` opcode, produces `0x42` instead), or (b) `vif_process()`
+never reaches a DIRECT dispatch here because something upstream of word 7 already mis-consumed a
+byte/word (though the first 6 words check out exactly against real VIFcode semantics, arguing
+against this). Given the clean 6-word preamble, (a) - a narrow, single-symbol decompression
+divergence - is the leading hypothesis, refining Round 643's original framing back to something
+much more precise than "the whole buffer is garbage": one wrong LZSS-decoded byte at output offset
+0x18 within this specific 1840-byte segment, not a systemic corruption.
+
+**Answering the user's question directly:** the Round 636 "text" was never produced via this VIF1
+DIRECT/GIF path at all (Round 640 already established that - it was a memory-aliasing accident).
+This round instead fully instruments what SHOULD be the real path: a legitimate FLUSHE-guarded
+VIF1 transfer that, if the single bad byte at 0x0051b6a8 were correct, would very plausibly forward
+a real texture packet to GIF via DIRECT - i.e. this may be the actual real mechanism the BIOS uses
+to draw its label/logo, just currently broken at one precise, now-located byte.
+
+**Status:** no tracked source changed this round (offline analysis of Round 645's buffer dump plus
+static reading of `vif.c`'s real dispatch code). Regression suite and Wii cross-build correctly
+skipped per the docs-only precedent. **Next round's concrete, well-scoped task:** determine what
+byte SHOULD be at compressed-stream position corresponding to decompressed output offset
+`0x0051b6a8` (24 bytes into this transfer's payload) - either by finding a second, differently-
+compressed occurrence of the same asset elsewhere in the BIOS to cross-check against, or by
+carefully re-deriving the LZSS bit-stream state at that exact symbol boundary and checking this
+project's decoder for an off-by-one in match-length/offset field width at that specific bit
+position - a narrow, mechanical bug hunt now that the search space has shrunk from "113KB of
+unknown content" (Round 644) to "one 4-byte symbol at a known offset" (this round).

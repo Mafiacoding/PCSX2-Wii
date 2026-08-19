@@ -8,6 +8,24 @@
  * All fixed with the same established exception-raise pattern used
  * throughout this session. This test covers every number from that
  * fresh audit that Round 193 added.
+ *
+ * ROUND 623 CORRECTION (task #554/#603 investigation): -38
+ * (iTerminateThread), -42 (iChangeThreadPriority), and -44
+ * (iRotateThreadReadyQueue) were originally asserted here as
+ * generic-exception-vectoring numbers, matching
+ * Round 193's own audit. Round 569 (task #543) later shipped a real
+ * EE HLE thread/semaphore scheduler (ee_hle_thread_try_handle(),
+ * called as the very first check in ee_core.c's case 0x0C body) that
+ * legitimately claims both of these numbers in its own real, cited
+ * handled[] list and handles them directly in software (same real
+ * thread-management model as sysnum 37/41's non-interrupt siblings),
+ * never reaching the older exception-vectoring code at all. This
+ * file was never updated after Round 569 shipped. Verified via live
+ * diagnostic instrumentation (see STATUS.md Round 623) that execution
+ * for -38/-42 is legitimately intercepted earlier, not a bug. Moved
+ * both numbers out of the generic-exception sweep list below and into
+ * their own HLE-path regression check, mirroring the existing
+ * CreateSema(64) regression block already in this file.
  */
 #include <stdio.h>
 #include <string.h>
@@ -72,7 +90,7 @@ int main(void) {
         107, 108, 109, 114, 115, 116, 117, 123,
         125, 126, 127, 128, 131, 133, 134, 135,
         -26, -27, -28, -29,
-        -38, -42, -44, -46, -47, -49, -52, -54, -56, -58,
+        -46, -56, -58,
         -70, -72, -73
     };
     int n = sizeof(nums)/sizeof(nums[0]);
@@ -97,6 +115,39 @@ int main(void) {
         ee_core_step();
         ee_core_step();
         CHECK(st->halted == 0, "CreateSema(64) regression: not halted");
+    }
+
+    /* Round 623: -38 (iTerminateThread) and -42 (iChangeThreadPriority)
+     * are claimed by the real Round 569 HLE thread scheduler, not the
+     * generic exception-vectoring code - verify the real HLE-path
+     * behavior (halted==0, NOT vectored as a Syscall exception, pc
+     * advances past the SYSCALL by +4) rather than the old exception
+     * assertion. -44 (iRotateThreadReadyQueue) was found to have the
+     * same issue during verification and is included here too. */
+    {
+        int32_t hle_nums[] = { -38, -42, -44 };
+        const char *hle_labels[] = { "iTerminateThread (-38)", "iChangeThreadPriority (-42)", "iRotateThreadReadyQueue (-44)" };
+        for (int i = 0; i < 3; i++) {
+            bios_image_t bios = make_bios();
+            uint8_t *p = bios.data;
+            int pc = 0;
+            wle32(p+pc, enc_addiu(3, 0, (int16_t)hle_nums[i])); pc += 4;
+            uint32_t syscall_pc = pc;
+            wle32(p+pc, enc_syscall()); pc += 4;
+            wle32(p+pc, 0x0u); pc += 4;
+            ee_core_init(&bios);
+            ee_state_t *st = ee_core_get_state();
+            uint32_t base_pc = st->pc;
+            ee_core_step();
+            ee_core_step();
+            char msg[160];
+            snprintf(msg, sizeof(msg), "%s [Round 569 HLE thread scheduler]: halted must remain 0", hle_labels[i]);
+            CHECK(st->halted == 0, msg);
+            snprintf(msg, sizeof(msg), "%s [Round 569 HLE thread scheduler]: NOT vectored as a Syscall exception", hle_labels[i]);
+            CHECK((st->cop0[13] & 0x7Cu) != EE_EXC_CODE_SYS, msg);
+            snprintf(msg, sizeof(msg), "%s [Round 569 HLE thread scheduler]: pc advances past SYSCALL by +4", hle_labels[i]);
+            CHECK(st->pc == base_pc + syscall_pc + 4u, msg);
+        }
     }
 
     printf("Total numbers tested: %d\n", n);

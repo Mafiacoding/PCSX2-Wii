@@ -27000,3 +27000,57 @@ never the source of the leak and remains clean per every prior round's `git ls-f
 Recommending this broader, whole-outputs-folder sweep (not just the `pcsx2-wii/` subfolder) become
 a periodic addition to the standing leak-check going forward, since it caught real violations the
 narrower per-round scope had been missing.
+
+
+## Round 652: characterized the "garbage GIFtag" XGKICK content - VUL_SQ ruled out, real cause still open (task #639)
+
+**Continuing directly from Round 651's flagged lead** (per explicit user request: "keep pushing for
+more display output... the garbage gif tag whatever helps") - some XGKICK-triggered GIFtags in the
+480-720M slice window decode to implausible field values (e.g. `nloop=19694`, far beyond VU1's
+1024-quadword addressable range). This round adds real diagnostic instrumentation and narrows the
+cause.
+
+**New instrumentation** (scratch-only, `/tmp/r642/driver_r642.c`): `r642_dump_kick()` now also
+reports `vu1_tpc`/`vu1_running` (the VU1 program counter and run state at the moment of each kick)
+and a period-16-byte-repetition check across the 512 bytes following the kick's tag.
+
+**Finding 1 - the "garbage" is a real, reproducible structural signature, not random noise.**
+Manually inspecting kick #3's raw data (addr=0x0080, captured live) found **32/32 consecutive
+quadwords sharing an identical 14-of-16-byte tail**, with only the first 2 bytes varying between
+quadwords - e.g. `be 00 [0c 36 af 6d 5f 17 9d 78 a7 f7 b4 37 df a2]`, `be 61 [same 14 bytes]`,
+`27 7d [same 14 bytes]`, `ac 01 [same 14 bytes]`. Dumping the FULL 16KB VU1 memory at the 480M
+checkpoint and scanning for this period-16 pattern found it accounts for **essentially all of VU1
+memory's nonzero content**: only 22.4% of the 16KB is nonzero at all, and 21.4% of the total 16KB
+is covered by period-16-repeating runs of 4+ quadwords - i.e. almost none of the "garbage" is
+actually random; it is a specific, narrow, repeating structure.
+
+**Finding 2 - `VUL_SQ` (the store-quadword instruction, `source/hw/vu.c` line ~405) is correctly
+implemented and ruled out as the cause.** Checked whether SQ applies a `dest` lane mask (which
+would explain a bug where only some vector lanes update per iteration, leaving stale bytes from a
+previous write in the others) - it does not, by design: `case VUL_SQ` unconditionally writes all
+4 lanes of `vf[rs]` with no masking, matching real VU hardware's documented SQ semantics (unlike
+arithmetic ops, VU memory load/store instructions have no per-lane dest field on real hardware).
+This is correct as implemented; the repeating-content signature is not explained by a masked-store
+bug here.
+
+**Finding 3 - these garbage kicks are confirmed harmless to the picture confirmed in Round 650.**
+Round 651's own data already showed the framebuffer's `non_bg_pixels` count staying byte-for-byte
+identical (71374) across the entire 480M-720M window, despite several of these implausible-tag
+kicks firing during that exact span. Whatever these kicks do get parsed as (REGLIST/PACKED register
+writes with mostly-repeating content) does not visibly corrupt or contribute to the confirmed
+triangle content - reassuring, but also meaning fixing this wouldn't currently change what's on
+screen; it would only matter once VU1 starts producing more/different real geometry.
+
+**Root cause still open.** The period-16 structure most likely comes from a real VU1 micro-program
+loop repeatedly storing a mostly-constant vector (one lane genuinely varying, e.g. an integer
+loop-counter register, the other three carrying content that isn't being freshly computed each
+iteration) - but attributing this precisely (a real VU1 opcode-emulation bug vs. this simply being
+non-geometry VU1 scratch/index data that this project's XGKICK address computation is
+mis-identifying as a real render packet) requires disassembling the actual VU1 micro-program
+instructions executing around `vu1_tpc=0x01d8`/`0x10e8` (captured this round, not yet decoded) -
+a substantially larger task than this round's scope, flagged as the concrete next step.
+
+**Status.** No tracked source changed this round - `VUL_SQ` was audited and found correct, not
+fixed (nothing to fix there), and no other evidenced bug was found. Regression suite and Wii
+cross-build correctly skipped per this project's established docs-only-round precedent. The
+scratch driver's new `vu1_tpc`/period-16 instrumentation remains `/tmp`-only.

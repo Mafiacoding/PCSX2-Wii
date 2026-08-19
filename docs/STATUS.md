@@ -26340,3 +26340,48 @@ transfer-boundary issue - a concrete, well-defined next step for a future round.
 **Verified safe.** Full regression suite: all 42 current-style compile+run pairs from
 `tests/README.md` pass, 0 failures. Wii/devkitPPC cross-build rebuilds clean, produces
 `pcsx2-wii-git.dol`/`.elf` with no reported errors.
+
+## Round 642: corrected Round 641's premise - XGKICK never fires in this trace at all; corruption traced to VIF1 PATH2 (DIRECT command), not VU1
+
+Continuing task #536/#631 (why no textured draw ever completes), this round instrumented
+`vu.c`'s XGKICK handler directly to dump VU1 local memory at the exact moment of every kick,
+expecting to distinguish "corruption already in VU1 memory" from "corruption introduced during
+GIF parsing." Result: **XGKICK never fires at all** - `r642_xgkick_calls=0` across a full
+150M-slice survey. Round 641's entire narrative (VU1's intentionally-oversized post-kick qwc
+running into stale VU1 memory) was built on an unverified assumption and does not apply to this
+trace - GIF PATH1 is never used here. This is a correction to Round 641's diagnosis, not merely
+an extension of it.
+
+Tracing the real source of the 809 PRIM writes / 682 TEX0 writes / 8018 A+D writes documented in
+Round 641: all of it flows through **GIF PATH_2** - `vif.c`'s `VIF_CMD_DIRECT`/`DIRECTHL` handler,
+which forwards VIF1 DMA-chain payload straight to `gif_process_quadwords()`. Instrumenting this
+call site found only 9 DIRECT invocations in the entire 150M-slice trace, and **every single one**
+requests an implausible quadword count relative to what's actually available: `imm=10250` (41,000
+words requested) against `avail=15` words in a 32-word DMA-chain-link buffer; `imm=2580`,
+`imm=32896` similarly oversized. A real BIOS menu-label/glyph upload would need at most a few
+hundred quadwords, not tens of thousands - these IMM values are not plausible real content.
+
+Backing up further, instrumenting every VIFcode dispatched (not just DIRECT) in the buffer leading
+up to the first bad DIRECT command found: `FLUSHE(imm=0)`, `NOP(imm=767)`, `FLUSHE(imm=4)`,
+`NOP(imm=767)`, `FLUSHE(imm=22)`, `NOP(imm=767)`, then **`cmd=0x42`** - a VIF opcode with no
+defined real-hardware meaning at all (cross-checked against `docs/reference/pcsx2/pcsx2/Vif_Codes.cpp`'s
+real dispatch table: the entire 0x40-0x47 row is `vifCode_Null` on real hardware). Real Sony BIOS
+code would never legitimately emit an undefined VIFcode mid-stream. The preceding six codes
+(3x FLUSHE/NOP pairs) all decode as syntactically valid per real hardware's own opcode table and
+this project's handlers for both correctly consume exactly one word each with zero payload (verified
+by reading the source - neither has a data-skip path), so the desync is not caused by a mishandled
+FLUSHE/NOP. This points the bug upstream of `vif_process()`'s own per-VIFcode dispatch loop - most
+likely in how the VIF1 DMA chain-tag itself is parsed/fed (the `data`/`total_words` arguments
+`vif_process()` receives), not in VIFcode-level parsing, and not in `gif.c`'s tag parsing (Round
+641's focus) or `vu.c`'s XGKICK (never reached).
+
+**Status:** no fix implemented this round - the exact DMA chain-tag bug has not yet been pinpointed
+(only narrowed to "upstream of vif_process()'s VIFcode loop, likely the VIF1 DMA chain-feed layer").
+This is a genuine, evidenced correction/narrowing of task #536's open question, not a guess. Next
+round should instrument the VIF1 DMA channel's own chain-tag walk (wherever it computes the
+address/length handed to `vif_process()` for each chain link) to find where the real chain length
+is lost or a wrong source address is used.
+
+No tracked source changed this round (diagnostic instrumentation lived entirely in a `/tmp` scratch
+copy, never touched the tracked tree) - regression suite and Wii cross-build correctly skipped per
+the standing workflow rule for docs-only rounds.

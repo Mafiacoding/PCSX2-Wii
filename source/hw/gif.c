@@ -2261,6 +2261,40 @@ static uint32_t process_one_packet(const uint8_t *p, uint32_t len)
     uint32_t nloop = tag_w0 & 0x7FFFu;
     uint32_t flg   = (tag_w1 >> 26) & 0x3u;
     uint32_t nreg  = (tag_w1 >> 28) & 0xFu;
+    /* Round 641 (task #536): real GS hardware's NREG field uses the
+     * same "0 means max" convention as NLOOP's siblings elsewhere in
+     * this file - NREG=0 in the tag means 16 registers per loop, not
+     * zero. Confirmed against PCSX2's own real GIFTagBits::EnableAlgo
+     * parsing (docs/reference/pcsx2/pcsx2/GS/GSRegs.h:1140,
+     * "nreg = (b & 0xf0000000) ? (b >> 28) : 16") - this project's
+     * gif_tag0/gif_cnt raw-register snapshots above still report the
+     * raw 4-bit field unchanged (real GIF_CNT.REGCNT also reads the
+     * raw, un-substituted field per the manual), only the *parsing*
+     * below needs the 16-substitution. Before this fix, a REGLIST- or
+     * PACKED-mode tag with a real NREG=0 (16) fell through into the
+     * IMAGE-mode/degenerate-skip branch below instead (guarded by
+     * "|| nreg == 0"), silently misinterpreting real register-list
+     * draw data (PRIM/RGBAQ/XYZ2/TEX0 writes) as raw pixel bytes to
+     * skip. This is a genuine, real-hardware-cited correctness fix,
+     * kept on that basis - but Round 641's own live instrumentation
+     * (see docs/STATUS.md) found it empirically INERT against this
+     * project's captured boot trace: nreg==0 was observed occurring
+     * only when flg==2 (already IMAGE mode, where NREG is unused/
+     * irrelevant), never in the flg==0/1 misrouting scenario this
+     * fix targets. The garbled PRIM values described below (reserved
+     * TYPE=7, high-entropy attribute bits, repeated 0x7ff) are still
+     * observed live with this fix applied - see gif.h's gif_last_eop
+     * comment and gif_process_quadwords() below for the transfer-
+     * boundary fix that was ALSO tried and ALSO found insufficient
+     * alone; the real source of the corruption is still open as of
+     * Round 641 and is narrowed to a within-packet NLOOP/NREG or
+     * upstream VU1-content desync, not a transfer-boundary or
+     * NREG-substitution issue. Do not re-claim this fix (or the EOP
+     * fix) as "the" root cause without fresh empirical confirmation -
+     * both were disproven by direct instrumentation after initially
+     * being written up with this over-confident claim. */
+    uint32_t nreg_raw = nreg;
+    if (nreg_raw == 0) nreg = 16;
     uint32_t pre   = (tag_w1 >> 14) & 0x1u;
     uint32_t prim  = (tag_w1 >> 15) & 0x7FFu;
     uint32_t eop   = (tag_w0 >> 15) & 0x1u; /* real tGIF_TAG0::EOP, bit 15 - see Gif.h */
@@ -2290,6 +2324,11 @@ static uint32_t process_one_packet(const uint8_t *p, uint32_t len)
         g_gif.gif_p3cnt = nloop & 0x7FFFu;
         g_gif.gif_p3tag = (nloop & 0x7FFFu) | (eop << 15);
     }
+    /* Round 641: unconditionally mirror EOP (not gated on PATH_3 like
+     * gif_p3cnt/gif_p3tag above) for gif_process_quadwords()'s real
+     * transfer-boundary stop check below - see gif.h's gif_last_eop
+     * comment for the full citation/rationale. */
+    g_gif.gif_last_eop = eop;
 
     if (pre) {
         g_gif.prim = prim;
@@ -2318,7 +2357,7 @@ static uint32_t process_one_packet(const uint8_t *p, uint32_t len)
      * already-documented A+D XYZ2 simplification (no real Z - see
      * apply_ad_write's own GS_REG_XYZ2 case) for REGLIST-mode XYZ2
      * writes too - a consistent, not a new, limitation. */
-    if (flg == 1 /* REGLIST */ && nreg != 0) {
+    if (flg == 1 /* REGLIST */) {
         uint32_t total_regs = nloop * nreg;
         for (uint32_t i = 0; i < total_regs; i++) {
             uint32_t qword_idx = i / 2;
@@ -2340,7 +2379,7 @@ static uint32_t process_one_packet(const uint8_t *p, uint32_t len)
         return consumed + total_qwords * 16u;
     }
 
-    if (flg == 2 || flg == 3 /* IMAGE (3 is the reserved/disabled variant, treated the same) */ || nreg == 0) {
+    if (flg == 2 || flg == 3 /* IMAGE (3 is the reserved/disabled variant, treated the same) */) {
         /* IMAGE mode: NLOOP qwords of completely raw pixel data - no
          * register interpretation, no REGS descriptor involved at
          * all (byte accounting was already correct before this
@@ -2549,6 +2588,34 @@ void gif_process_quadwords(int channel, const uint8_t *data, uint32_t qwc)
         off += used;
         if (used < 16)
             break; /* incomplete packet - safety, shouldn't normally happen */
+        /* Round 641 (task #536): real hardware terminates a GIF
+         * transfer at the first tag with EOP=1, on every path - see
+         * gif.h's gif_last_eop comment for the full citation. This
+         * matters most for PATH1 (VU1 XGKICK, vu.c): that caller
+         * intentionally passes a generous upper-bound qwc (everything
+         * from the kick address to the end of VU1's 16KB local
+         * memory, matching real hardware's own "doesn't know the
+         * real length in advance either" XGKICK model) and relies on
+         * this loop to stop at the real transfer's actual end. This
+         * is a genuine, real-hardware-cited correctness fix (kept on
+         * that basis alone), but Round 641's own live verification
+         * driver found it did NOT restore textured sprite/triangle
+         * rendering: sprite_textured/tri_textured stayed at 0 across
+         * a full 150M-slice survey, byte-for-byte identical dumped
+         * framebuffers before/after, and garbled PRIM values
+         * (reserved TYPE=7, high-entropy attribute bits, repeated
+         * 0x7ff) are STILL observed live with this fix applied - see
+         * docs/STATUS.md Round 641 for the full writeup. The
+         * remaining corruption is narrowed to something that
+         * produces bad NLOOP/NREG/FLG fields WITHIN a single, already
+         * EOP-bounded transfer (or from bad VU1 source content
+         * upstream of GIF parsing entirely) - not an unbounded
+         * transfer running past its real end, which is what this fix
+         * addresses. Left in place because it is independently
+         * correct per the manual and causes no regression, not
+         * because it was confirmed to fix the visible bug. */
+        if (g_gif.gif_last_eop)
+            break;
     }
 }
 

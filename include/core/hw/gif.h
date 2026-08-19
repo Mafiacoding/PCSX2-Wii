@@ -1184,6 +1184,24 @@ typedef struct {
      * tGIF_P3TAG comments). */
     uint32_t gif_p3cnt, gif_p3tag;
 
+    /* Round 641 (task #536): internal (non-hardware-register) flag -
+     * mirrors the EOP (End Of Packet) bit of the most recently parsed
+     * GIF tag, on ANY path. Real hardware terminates a PATH1/2/3
+     * transfer at the first tag with EOP=1, regardless of how much
+     * more buffer/qwc the caller made available - see Gif.h's
+     * tGIF_TAG0::EOP and PCSX2's own GIF unit transfer loop, which
+     * checks tag.EOP after every packet. Added because vu.c's XGKICK
+     * handler (Round 571) intentionally passes a generous upper-bound
+     * qwc (everything from the kick address to the end of VU1 local
+     * memory - real hardware doesn't know the real length in advance
+     * either) and relies on the GIF-side parser to stop at the real
+     * transfer's actual end. Before this round, gif_process_quadwords()
+     * had no such stop condition and kept parsing tag after tag
+     * through whatever unrelated/stale data happened to sit in VU1
+     * memory past the real transfer's end, corrupting later register
+     * writes (see docs/STATUS.md Round 641 for the full writeup). */
+    uint32_t gif_last_eop;
+
     /* Round 577 (task #551): real diagnostic counter, not a hardware
      * register - counts every gif_process_quadwords(GIF_PATH_1, ...)
      * call (i.e. every real VU1 XGKICK that actually reached the GIF,

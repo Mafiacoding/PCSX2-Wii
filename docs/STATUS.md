@@ -26274,3 +26274,69 @@ survey to date - most likely blocked by the same "boot never escalates past its 
 state" root cause documented across task #447/#536/Round 638-639 (OSDSYS's disc-browser/animation
 escalation logic is never reached in diskless boot). This is now the concrete, well-defined next
 step for restoring visible text, tracked as a continuation of task #536.
+
+## Round 641: investigated the "no textured draw ever fires" gap - two real-hardware-cited fixes shipped, neither restores a picture (honest negative result)
+
+Following directly from Round 640's identified next step, this round instrumented the GIF/GS
+pipeline at multiple levels (PRIM-write logging, rasterizer call-site counters, raw GIFtag
+NLOOP/NREG/FLG capture) against fresh 45M-150M-slice diskless JP BIOS boot surveys, cross-checked
+against this project's own pulled real PCSX2 reference source (`docs/reference/pcsx2/pcsx2/GS/GSRegs.h`,
+`Gif_Unit.h`).
+
+**Fix #1 - NREG "0 means 16" (source/hw/gif.c, `process_one_packet()`):** real GS hardware's NREG
+tag field uses the same "0 means max" convention as NLOOP's siblings - NREG=0 means 16 registers,
+not zero, per PCSX2's own `GIFTagBits` parsing (`GSRegs.h:1140`). This project's REGLIST/PACKED
+branch guards previously treated `nreg==0` as a degenerate case and routed it into IMAGE-mode
+byte-skipping instead. Implemented the substitution and corrected the guards. **Verified empirically
+INERT**: live instrumentation (`r641_nreg0_count`) found `nreg==0` only ever occurs when `flg==2`
+(already IMAGE mode, where NREG is unused) in this project's actual boot trace - the misrouting
+scenario this fix targets never actually happens here. Kept in the tree because it is still a
+genuine, real-hardware-cited correctness fix and causes no regression, but it is NOT what's
+blocking textured rendering.
+
+**Fix #2 - GIF transfer EOP-boundary stop (`gif_last_eop` field + `gif_process_quadwords()` loop):**
+real hardware terminates a GIF transfer (any path) at the first tag with EOP=1, regardless of how
+much more buffer the transfer mechanism made available. VU1's XGKICK handler (`vu.c`, Round 571)
+intentionally passes a generous "rest of VU1 local memory" upper-bound qwc, matching real
+hardware's own uncertainty about the real transfer length, and relies on the GIF-side parser to
+stop at the real end. Before this fix, `gif_process_quadwords()`'s main loop had no such stop
+condition. Implemented `gif_last_eop` (mirrors the EOP bit of the most recently parsed tag,
+independent of the existing PATH3-only `gif_p3tag`) and an `if (g_gif.gif_last_eop) break;` check.
+**Verified empirically INSUFFICIENT**: a fresh, dedicated verification driver
+(`rasterize_sprite()`/`rasterize_triangle()` instrumented with `textured` counters) ran a full
+150M-slice survey against the tree with both fixes applied. Result: `sprite_total=226
+sprite_textured=0 tri_total=0 tri_textured=0` - identical to the pre-fix baseline. The dumped
+framebuffer PPMs at the 40M/100M/150M-slice checkpoints are visually and pixel-count identical
+(23,126/23,124/23,126 non-black pixels respectively) to the pre-Round-641 image - same wireframe
+lines, no text, no picture.
+
+**Why the EOP fix didn't help - narrowed further.** Deeper instrumentation (counting every PRIM/
+TEX0/PRMODECONT/PRMODE register write, and logging the actual decoded value of every PRIM write
+that carries TME=1) found: TEX0 (texture setup) *is* written 682 times in a 150M-slice trace, and
+PRIM *is* written with TME=1 277 times - so texture state is being configured, and "draw textured"
+requests are genuinely being issued somewhere in the stream. But every one of those 277 TME=1 PRIM
+writes decodes to nonsense: `ptype` cycling through all 8 values (including the reserved TYPE=7)
+with no discernible pattern, and the raw PRIM value itself repeatedly reading `0x7ff` - literally
+every relevant bit set to 1, a textbook "raw data byte reinterpreted as a register value" signature,
+not a legitimate primitive. This is the exact same corruption signature Round 634 first identified
+(reserved TYPE=7, high-entropy attribute bits) - and it is **still present with the EOP fix
+applied**, which rules out Round 641's original hypothesis (an unbounded transfer running past its
+real end into unrelated VU1 memory). The corruption must instead originate either (a) from a bad
+NLOOP/NREG field within a single, already-EOP-bounded packet - i.e. the *current* tag's own header
+is corrupted before we even start consuming its data, so bounding the *next* tag's start doesn't
+help - or (b) further upstream, from incorrect content actually written into VU1 local memory by
+the VU1 microprogram or `vif_unpack()` before XGKICK ever fires. `packed_pkts=80` vs `ad_writes=8018`
+(~100 registers/packet average) for the same 45M-slice window is consistent with either explanation
+and doesn't yet distinguish them.
+
+**Status:** both fixes are real-hardware-correct per their citations and are being kept, but their
+in-source comments have been corrected (they originally overclaimed "root cause of every textured
+draw command silently vanishing" before this round's own verification driver disproved that claim -
+flagging and correcting one's own over-confident claims, the same standard the user required after
+Round 640). No picture yet. Task #536/#626's "why no textured draw call ever fires" question remains
+open and is now narrowed to intra-packet tag corruption or bad VU1 source content, not a
+transfer-boundary issue - a concrete, well-defined next step for a future round.
+
+**Verified safe.** Full regression suite: all 42 current-style compile+run pairs from
+`tests/README.md` pass, 0 failures. Wii/devkitPPC cross-build rebuilds clean, produces
+`pcsx2-wii-git.dol`/`.elf` with no reported errors.

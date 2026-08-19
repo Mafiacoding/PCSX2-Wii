@@ -2142,10 +2142,34 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
         g_gif.trx_dsay = (data_hi >> 16) & 0x7FFu;
     } break;
     case GS_REG_TRXREG:
-        /* GIFRegTRXREG: word0 = RRW:12(0-11), RRH:12(16-27) - the
-         * transfer rectangle's width/height in pixels. word1 unused. */
+        /* GIFRegTRXREG (Round 636 fix, task #536/#614): real GS
+         * register layout (confirmed against pcsx2 reference source's
+         * GSRegs.h REG64_ macro, which packs every GS A+D register as
+         * two 32-bit words - word0 = bits[0:31], word1 = bits[32:63]
+         * of the 64-bit register) is:
+         *   word0 (data_lo): RRW:12(0-11), pad:20
+         *   word1 (data_hi): RRH:12(0-11), pad:20
+         * The PREVIOUS code read RRH from data_lo's bits[16:27] -
+         * that's word0's padding region, which real hardware always
+         * leaves 0. This made trx_rrh always 0, so every IMAGE-mode
+         * host-to-local transfer's rectangle height collapsed to 0:
+         * gif.c's image_write_pixel_qwords()/trx_cur_y wrap logic
+         * checks "trx_cur_y >= trx_rrh" after each row, and with
+         * rrh=0 that's true after the very FIRST row (rrw pixels),
+         * silently ending the transfer there - regardless of how
+         * many rows of real texture data NLOOP actually described.
+         * This is the root cause of Round 635's "solid bar instead
+         * of glyphs" finding: every multi-row glyph/label texture
+         * upload was being truncated to exactly 1 pixel row before
+         * ever reaching row 2, so distinct glyph shapes never had a
+         * chance to form - confirmed via direct instrumentation
+         * showing trx_rrh=0 on every real TRXREG write captured
+         * during a 100M-slice diskless boot survey. Fix: read RRH
+         * from data_hi's bits[0:11], matching real hardware and the
+         * TRXPOS handler's own already-correct high/low word split
+         * just above. */
         g_gif.trx_rrw = data_lo & 0xFFFu;
-        g_gif.trx_rrh = (data_lo >> 16) & 0xFFFu;
+        g_gif.trx_rrh = data_hi & 0xFFFu;
         break;
     case GS_REG_TRXDIR: {
         /* GIFRegTRXDIR: word0 = XDIR:2(0-1). Writing this register is

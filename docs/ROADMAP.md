@@ -10488,3 +10488,16 @@ textured-sprite draw with real UV coordinates). All 42 regression tests pass, Wi
 Next: confirm/fix the sprite-draw side so the reconstructed texture renders as actual glyphs, and
 separately tackle task #613's pad-to-message-translation half (Round 631), still untouched.
 
+## Round 636 (task #536/#614/#621)
+
+Root-caused and fixed Round 635's "solid bar, not glyphs" open question: `GS_REG_TRXREG`'s RRH
+field was being read from the wrong 32-bit word (low-word padding bits, always 0 on real hardware)
+instead of the high word, per the real register layout confirmed against the project's own pulled
+pcsx2 reference source (`GSRegs.h`). This silently capped every IMAGE-mode texture transfer's height
+to a single pixel row before it could reach row 2 - a one-line register-parsing fix
+(`data_hi & 0xFFFu` instead of `(data_lo >> 16) & 0xFFFu`). All 42 regression tests pass, same
+150M-slice safety survey shows no regression vs Round 635, Wii cross-build clean. The framebuffer
+now shows legible, stable, repeated text (consistent with real BIOS branding/label content) layered
+over the wireframe animation - the first round with genuine readable glyph-level text on screen.
+Next: character-by-character cross-check against a real BIOS reference, and task #613's still-open
+pad-to-message-translation half (Round 631).

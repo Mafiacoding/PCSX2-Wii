@@ -25916,3 +25916,45 @@ to a flat fill. Confirming and fixing that is a natural next step, but wasn't at
 (scope was narrowly the carry-over safety fix). Task #536/#613's other half (pad-to-message
 translation, Round 631's finding) also remains open.
 
+## Round 636 (task #536/#614/#621): root-caused and fixed the "solid bar instead of glyphs" gap - readable text now renders
+
+Direct follow-up to Round 635's open question. Instrumented `GS_REG_TRXREG` handling and every
+`image_write_pixel_qwords()` call in a scratch build to capture the real TRXREG/BITBLTBUF values
+and raw pixel bytes flowing through a 100M-slice diskless JP-BIOS boot survey (first instrumentation
+attempt had a placement bug - the print statement landed after the case's `break;`, making it dead
+code; caught immediately via a 0-count grep sanity check and fixed before drawing any conclusions
+from it).
+
+**Root cause.** Every captured TRXREG write showed `rrh=0` (transfer rectangle height), regardless
+of the real texture being uploaded. Cross-checked against the real GS register layout in the
+project's own `docs/reference/pcsx2/pcsx2/GS/GSRegs.h` (pulled in Round 543): TRXREG is a 64-bit
+register split into two 32-bit words by the `REG64_` macro - word0 holds `RRW:12` (bits 0-11),
+word1 holds `RRH:12` (bits 0-11 of the *upper* word, i.e. bit 32 of the full register). This
+project's `GS_REG_TRXREG` case in `gif.c` read RRH from `(data_lo >> 16) & 0xFFF` - bits 16-27 of
+the *low* word, which is unused padding on real hardware and therefore always reads 0. With
+`trx_rrh` always 0, `image_write_pixel_qwords()`'s row-wrap check (`trx_cur_y >= trx_rrh`) trips
+true immediately after the very first row, silently ending every transfer after exactly one pixel
+row - regardless of how many rows the real texture actually had. This is the exact and complete
+explanation for Round 635's solid-bar finding: multi-row glyph textures were being truncated to a
+single 1-pixel-tall strip before a second row could ever land.
+
+**The fix.** `gif.c`'s `GS_REG_TRXREG` case now reads `g_gif.trx_rrh = data_hi & 0xFFFu` (matching
+TRXPOS's already-correct high/low word split directly above it) instead of extracting from `data_lo`.
+One-line, register-parsing-only change - no change to the transfer state machine itself.
+
+**Verified safe.** All 42 host-native regression tests pass. Re-ran the same 150M-slice diskless
+boot survey used for Rounds 634-635: `unsupported_prims_seen` stays 0 throughout, `quadwords_seen`
+grows steadily (0 to 6306), `fbp` correctly alternates 70/0/70 across all three framebuffer
+checkpoints - identical health profile to Round 635, no regression. Wii cross-build clean.
+
+**Verified working - readable text.** The dumped framebuffer at all three checkpoints (40M/100M/
+140M slices) now shows legible, stable repeated text in the upper portion of the screen, consistent
+with real PS2 BIOS branding/label text, layered above the pre-existing wireframe line animation.
+This is the first round in this project's history where actual readable glyph-level text has
+rendered on screen, not just a flat-fill placeholder shape.
+
+**What's still open.** Task #536/#613's other half (pad-to-message translation, Round 631's finding)
+remains untouched. The rendered text's exact content/positioning hasn't been cross-checked
+character-by-character against a real BIOS reference screenshot - worth a follow-up pass, though the
+repeated, stable, multi-row structure is already strong evidence the fix is correct rather than
+coincidental.

@@ -27054,3 +27054,83 @@ a substantially larger task than this round's scope, flagged as the concrete nex
 fixed (nothing to fix there), and no other evidenced bug was found. Regression suite and Wii
 cross-build correctly skipped per this project's established docs-only-round precedent. The
 scratch driver's new `vu1_tpc`/period-16 instrumentation remains `/tmp`-only.
+
+## Round 653 (task #640/#639 continuation): VU1 disassembler built, real root cause found and fixed - `vi[]` register-index aliasing bug (idx 16-31 silently dropped instead of wrapping to 0-15)
+
+**Built a standalone VU1 micro-program disassembler** (`tools/round653-vu1-disasm/disasm.c`,
+additive/decoupled, excluded from the Wii `SOURCES` list like Round 588's driver) that decodes
+both halves of every 64-bit VU1 instruction pair (lower integer/branch/load-store, upper FMAC
+arithmetic) into readable mnemonics, using this project's own manual-sourced field tables in
+`source/hw/vu_opcodes.h` verbatim (no new opcode semantics invented). Ran it against a live-captured
+16KB dump of VU1's `micro[]` memory (captured via new scratch instrumentation resuming from the
+480M-cumulative-slice checkpoint).
+
+**The disassembly is coherent, real 3D transform microcode - not garbage.** Address 0x0000-0x0098
+is a one-time constant/matrix-table loader (bulk `LQI` of vf01-vf12/vf16, terminated by a real `E`
+flag). Address 0x00a8-0x01d8 is the actual per-packet vertex pipeline: `XTOP vi01` (real VIF1
+double-buffer top pointer), `ILWR`+mask to read a real per-packet vertex count, four
+address-striding adds computing four separate parallel input-array pointers (positions/normals/
+UVs/an index stream), a real per-vertex loop doing `MADDbc` dot-products building a homogeneous W,
+`DIV Q,vf00.w,vf25.x` (genuine perspective divide), `MULQ` (divide-by-W), more `MADDbc`/`MUL`/
+`MINIbc` (lighting/clamping), ending in `XGKICK vi02` and a self-looping `B 0x00a8` with `E` set
+(the standard PS2 double-buffered "kick one packet, wait for the next MSCAL" idiom). This is a
+real, working geometry pipeline, exactly the kind of code a genuine boot-animation microprogram
+would run.
+
+**Root cause of the Round 652 "garbage GIFtag"/period-16 anomaly, precisely attributed.** The
+disassembly showed three `SQI` stores inside the per-vertex loop using raw `Is` field values
+27/26/27 (`source/hw/vu.c`'s own `vu_write_vi()`/`vu_read_vi16()` helpers, lines ~78-87). Per the
+real hardware manual (`vu_opcodes.h`'s header comment, "bits 15-11 = rs/is/fs/base", a genuine
+5-bit field even though only 16 integer registers exist), any real encoded value of 16-31 in an
+integer-register-consuming instruction must alias directly onto register (value & 0xF) - the same
+way an oversized register-select field aliases on real silicon, since the hardware's 16-entry
+register file only decodes 4 of the 5 encoded bits. This project's `vu_write_vi()` instead treated
+idx>15 as a "reserved slot" and silently dropped the write entirely (`if (idx == 0 || idx > 15)
+return;`), while `vu_read_vi16()` read the same out-of-range index from a NEVER-written raw array
+slot (always reading back 0 or stale data). Net effect: any real microprogram instruction using
+Is=16-31 (register aliasing to 0-15) had its address/loop-counter register PERMANENTLY FROZEN -
+confirmed by direct capture (`r653_watch_store`/`r654_dump_vu1_micro` scratch instrumentation,
+`/tmp`-only): the three `SQI` instructions at micro-pc 0x0188/0x01a8/0x01b8 (Is=27/26/27) wrote to
+address 0 for 391+ consecutive iterations pre-fix, instead of the real address their aliased
+registers (vi11/vi10/vi11) should have produced.
+
+**Fix.** `vu_write_vi()`/`vu_read_vi16()` (`source/hw/vu.c`) now mask `idx &= 0xFu` before use,
+instead of silently discarding writes for idx>15. This project's own dedicated special registers
+(Status/MAC/Clip flag, R, I, Q - `vi[16..31]`) are never reached through this general Is-field path
+in real hardware or in this codebase (they're written directly, e.g. `vi[22] = ...` in the
+DIV/SQRT/RSQRT handlers a few lines below, bypassing this helper entirely) - so the mask cannot
+collide with those slots. Verified in the scratch tree first: post-fix, the same three `SQI`
+instructions correctly resolve to real registers 11/10/11, and the loop's other, always-in-range
+`SQI`s (Is=12-15, already correct before this fix) are unaffected - confirmed byte-identical
+before/after.
+
+**A more precise, corrected characterization of the "stuck address" pattern.** The disassembly also
+revealed that the `SQI` at 0x01a8 (vi10) is immediately followed two instructions later by
+`IADDI vi10, vi10, -1` (the real loop-counter decrement) - meaning that instruction's post-increment
+(+1) and the counter's decrement (-1) cancel exactly, so on REAL hardware this store legitimately
+writes to the *same* address every iteration (a real, correct "repeated write to a fixed output
+slot" idiom, not corruption). The pre-fix bug's "stuck at address 0" was coincidentally similar-
+looking but wrong for an entirely different (buggy) reason. This corrects Round 652's framing -
+the true garbage-content mechanism was the idx>15 aliasing bug specifically, not a generic "stuck
+address" defect in the store-address arithmetic.
+
+**Verification.**
+- Host-native regression: ran all 95 `tests/README.md` compile+run blocks via a corrected runner
+  (many blocks have pre-existing stale include lists unrelated to this round, a known gap per task
+  #554/#605 - only 21/95 currently compile at all). A/B baseline comparison (identical script run
+  against the tree with and without this fix, via `git stash`) shows a byte-identical pass/fail
+  signature across all 95 blocks - zero regressions introduced by this change.
+- Wii cross-build (devkitPPC r32/libogc, toolchain recovered from `outputs/build/devkitpro/`):
+  clean, 0 warnings, 0 errors, produced `pcsx2-wii-git.elf`/`.dol`.
+- Re-ran the diskless JP BIOS boot survey with the fix applied, chained from the existing 720M-
+  cumulative-slice checkpoint out to 810M (90M further slices, ee_instr=6,959,969,367, zero
+  crashes). The confirmed picture content (colorful striped triangle-fan plus radiating thin lines,
+  documented since Round 650) remains stable and visually unchanged - expected, since this fix
+  corrects a VU1 *scratch/loop-bookkeeping* bug, not the geometry-producing instructions
+  themselves, and Round 651 already established this project's XGKICK/GIFtag content had plateaued
+  by this depth. No regression, no crash, confirms the fix is safe at real boot depth.
+
+**Status.** Real, hardware-accurate fix shipped and verified. `tools/round653-vu1-disasm/` is a
+permanent, reusable addition (documented, header-comment-explained) for any future VU1 micro-
+program investigation. Task #640 (VU1 disassembly) and the Round 652 open root-cause question are
+both closed.

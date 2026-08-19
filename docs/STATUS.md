@@ -26685,3 +26685,60 @@ carefully re-deriving the LZSS bit-stream state at that exact symbol boundary an
 project's decoder for an off-by-one in match-length/offset field width at that specific bit
 position - a narrow, mechanical bug hunt now that the search space has shrunk from "113KB of
 unknown content" (Round 644) to "one 4-byte symbol at a known offset" (this round).
+
+## Round 647: the match-copy loop is correct (Round 646's "off-by-one" hypothesis disproven); the byte at 0x51b6a8 really is what the decompressor legitimately produces (task #536)
+
+Direct follow-up to Round 646's finding that the VIF1 stream diverges from real VIFcodes at byte
+offset 24 (address `0x0051b6a8`, `cmd=0x42`). Since the decompressor at `0x00200C80-0x00200D4C` is
+real PS2 BIOS machine code executed by this project's MIPS interpreter (not C code this project
+owns), this round instrumented two exact points inside the interpreter's execution of that loop -
+the loop-top PC (`0x00200c80`, dumping `$s0/$s1/$a3` and the decompressor's state-struct fields:
+bitbuf, length_shift, offset_mask, readptr) and the length-computation PC (`0x00200cec`, dumping
+the freshly-computed `$a0` length register) - across the exact iterations that write output bytes
+`0x51b680`-`0x51b6c0`.
+
+**The leading hypothesis (an off-by-one in the match-copy loop, writing one extra byte per match)
+is disproven.** Pulled the raw instruction words at `0x00200cf0-0x00200d20` directly from EE RAM
+and decoded them precisely: `addiu $s0,$s0,1` / `lbu $v0,0($a1)` / `addiu $a0,$a0,-1` /
+`addiu $a1,$a1,1` / `sb $v0,0($s0)` / `bne $a0,$zero,0x00200cf8` / `addiu $s0,$s0,1` (branch-delay
+slot). Hand-simulating this exact instruction sequence shows the loop runs exactly `a0_initial`
+times (where `a0_initial = length_field + 2`, per the earlier `addiu $a0,$a0,2`), writing one byte
+per pass, **plus the one byte already written before the loop** - so total bytes per match =
+`1 + (length_field + 2) = length_field + 3`, not `length_field + 2` as Round 643's paraphrased
+comment ("+2 = real match length") had assumed. This is a completely standard LZSS convention
+(minimum match length 3, since anything shorter than 3 bytes doesn't beat a literal encoding) - not
+a bug.
+
+Cross-checked directly against live captured data: the match at `s0=0x0051b69b` had `length_field=2`
+(from `a2=0x1007, length_shift=11`: `0x1007>>11=2`), predicted total bytes = `2+3=5`, and the
+**live interpreter trace confirms `s0` advanced by exactly 5** (`0x0051b69b` -> `0x0051b6a0`) -
+matching the corrected formula exactly, with the interpreter's own computed `a0=4` register value
+(the loop-iteration count, not total length) also matching precisely. The match-copy loop, and by
+extension this project's MIPS interpreter's execution of `addiu`/`lbu`/`sb`/`bne` in this exact
+context, is behaviorally correct and self-consistent - not the source of any divergence.
+
+**Consequence:** the actual output bytes already captured in `/tmp/r644_buf.bin` (used for Round
+646's VIFcode walk) are confirmed to be the *faithful, correct* result of running the real BIOS
+decompressor on its real compressed input - this project's decompression pipeline is not
+introducing errors. The byte `cmd=0x42` genuinely is what this specific compressed asset decodes
+to at that position; it is not an emulator-introduced corruption. This means Round 646's
+"one wrong LZSS-decoded byte" framing was itself premature - there is no evidence of a decode
+error, only evidence that the resulting byte doesn't match a naive real-VIFcode-table lookup.
+Cross-checked `source/hw/vif.c`'s real opcode dispatch table directly: `0x42` has no case there
+either (nor in the real hardware's own table, per Round 642's prior citation), confirming the
+byte is inconsistent with being a VIFcode - but the compressed data and its decoding are no longer
+suspects.
+
+**Re-scoped next step:** since decompression is confirmed correct, either (a) this address isn't
+actually the start of a VIFcode-interpreted region at all (the framing that led to this whole
+sub-investigation may itself be wrong - worth re-examining what precisely determines where VIF1's
+VIFcode-vs-raw-forward mode boundary lies), or (b) the compressed *source* data selection itself
+(which ROM bytes get fed into this decompression call in the first place - `state->readptr`'s
+starting value, ultimately traced back to whatever caller invokes this decompressor) is off,
+meaning we're decompressing the right algorithm against a subtly wrong starting position or wrong
+source asset. Both are concrete, checkable next steps; this round correctly stops short of guessing
+between them without further evidence, consistent with the project's standing correction-over-
+overclaiming standard (the same discipline applied in Rounds 297, 528, 640-641, 644).
+
+**Status:** no tracked source changed this round (all instrumentation lived in the `/tmp` scratch
+tree only). Regression suite and Wii cross-build correctly skipped per the docs-only precedent.

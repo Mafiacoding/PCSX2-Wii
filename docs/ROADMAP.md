@@ -10537,3 +10537,16 @@ cross-cutting gap (affects every GS base-pointer field, not just labels) - fixin
 draw/transfer pipeline to real page-based (ideally the already-written swizzled) addressing, which needs a
 careful single change plus full re-verification against every prior rendering-correctness finding. Docs-only
 round (diagnostic, no tracked source changed); no bundle.
+## Round 640 (task #536)
+
+Refined Round 639: only 5 of the 18 logged texture uploads actually collide with the framebuffer (the other
+13 use an unrecognized dpsm=8 destination format that this project's IMAGE-mode writer already correctly
+no-ops on). Worked the numbers on the proposed "just scale bp up" fix and found it doesn't cleanly work: a
+constant big enough to separate these 5 uploads from each other would push legitimate existing-test-suite bp
+values past the 4MB GS_MEM_SIZE buffer (silently dropping data instead of aliasing it - a regression risk to
+Round 636's text-rendering fix), while a smaller constant only fixes the framebuffer collision, not the
+general problem. Real hardware avoids all of this via page-indexed addressing (this project's own unwired
+`*_swizzled()` functions), but naively applying that unit size to the raw dbp values observed here would put
+them ~100MB+ out of range - a strong sign the real BITBLTBUF.DBP field layout/units need primary-source
+verification before any addressing change, not a guess. Docs-only round; no bundle; next step is that
+citation work, then a properly-scoped fix (task #536/#625 continuation).

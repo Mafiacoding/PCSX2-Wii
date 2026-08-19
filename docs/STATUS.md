@@ -26112,3 +26112,56 @@ uniform page-scale fix that still fits the 4MB buffer) plus a full visual re-che
 glyph-rendering fix and every prior round's rendering-correctness findings, matching the standing "go slow"
 one-verified-change-at-a-time rule. Regression suite and Wii rebuild correctly skipped (diagnostic only, no
 tracked source changed). Docs/commit/rsync/leak-check done this round; no bundle (diagnosis, no shipped fix).
+
+## Round 640 (task #536): refined the Round 639 finding, and found the naive fix doesn't actually work
+
+Went to implement Round 639's proposed fix (scale up the GS base-pointer unit in `gs_mem.c`'s linear
+`pixel_offset()` so distinct buffers stop aliasing) and discovered two things that change the plan.
+
+**First, only 5 of the 18 uploads actually collide - the other 13 are already correctly no-ops.**
+Re-checked `g_gif.trx_dpsm` (the TRXDIR destination pixel format) against each of Round 639's 18 logged
+transfers: `image_write_pixel_qwords()`'s `trx_active` flag (`gif.c`, GS_REG_TRXDIR case) is only set for
+`trx_dpsm == TEX_PSM_PSMCT32` (0x00) - by design, since this project's IMAGE-mode writer only understands
+PSMCT32 destinations. 13 of the 18 logged transfers have `dpsm=8` (not a real PSM value in this project's own
+`TEX_PSM_*` table - PSMT8 is 0x13, not 8 - so likely a still-unidentified/unsupported real encoding), meaning
+`trx_active` never gets set for them and their IMAGE payload is safely byte-skipped, never touching `gs_mem`
+at all. Only 5 transfers (`dbp` 13440, 14496, 14560, 14752, 14816, all `dpsm=0`) actually write real pixel
+data. All 5 do land inside the framebuffer's `[0, 573440)` byte range under the current `bp*4` scaling,
+confirming Round 639's diagnosis - just for 5 uploads, not 18.
+
+**Second, and more importantly: a simple "scale bp up by a bigger constant" fix cannot cleanly solve this.**
+Worked the actual numbers before touching any code. Scaling every `bp` unit up by a constant `k` is provably
+safe in one direction (any two buffers with different `bp` that don't collide under the current `k=4` still
+won't collide under a larger `k`, since only their gap grows, never shrinks) - but the reverse doesn't hold:
+these 5 real `dbp` values are only 64-1056 raw units apart from each other, while each texture's own footprint
+is up to 65536 bytes (256x64 PSMCT32). Separating them from EACH OTHER (not just from the framebuffer) would
+need `k` on the order of 1024+, and `k=1024` applied to the largest real `dbp` values seen in this project's
+own existing 15+-file GS test suite (Round 25's writeup cites values up to ~10200) would push some legitimate
+writes past `GS_MEM_SIZE` (4MB) entirely, silently dropping them via the existing bounds check - trading one
+kind of corruption (aliasing) for another (missing data), and in the worst case could re-truncate the very
+label textures Round 636 just fixed. A smaller `k` (e.g. 64) does cleanly separate these 5 uploads from the
+*framebuffer* without risking any existing test value overflowing the buffer, but leaves them still able to
+collide with each other in unused VRAM - harmless right now (task #536/#639 already established 0 sprites
+ever reference these textures in the current boot trace, so nothing reads that overlap today), but not a real
+fix either.
+
+**Why real hardware doesn't have this problem.** Real GS `BP` fields are page indices (1 unit = 8192 bytes),
+so any two different `bp` values are automatically >=8192 bytes apart regardless of buffer width - this
+project's own already-written (but unwired) `gs_mem_*_psmct32_swizzled()` functions implement exactly that.
+But naively wiring real page-unit scaling straight onto the CURRENTLY OBSERVED raw `dbp` values (13440-14816)
+would put them at 8192*13440 =~110MB+ - far past the real PS2's actual 4MB VRAM and this project's matching
+`GS_MEM_SIZE` buffer, which would silently drop all 5 uploads instead of aliasing them. That strongly suggests
+either this project's BITBLTBUF.DBP field-extraction (bit position/width) doesn't yet match real hardware
+precisely, or real BIOS code doesn't intend `DBP` to be read as a full page-index the way `FRAME.FBP` is -
+this needs primary-source verification (the real GS Users Manual's BITBLTBUF bit layout) before committing to
+an addressing model, matching the project's own established citation-honesty standard (Round 25 explicitly
+flagged its swizzle table as unverified for the same reason).
+
+**Disposition.** No tracked-source change this round - implementing a technically-incorrect fix here risks
+regressing Round 636's landmark first-readable-text milestone (if scaled too far, uploads get silently
+dropped instead of merely misplaced) or leaving the job half-done (if scaled too little). Task #536/#625's
+real next step is primary-source verification of BITBLTBUF's real DBP/DBW bit layout and unit size, followed
+by a properly-scoped addressing fix (likely reusing the existing swizzled functions' page/pages_per_row math,
+but only after confirming real field semantics) - not a guess. Regression suite and Wii rebuild correctly
+skipped (diagnostic only). Docs/commit/rsync/leak-check done this round; no bundle (refines a diagnosis,
+ships no fix).

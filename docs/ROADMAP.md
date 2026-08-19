@@ -10430,3 +10430,15 @@ utility, Round 595). This corroborates Round 606's live-hardware finding that re
 drive the Browser-state transition, and closes task #536's remaining open question: the JP BIOS
 splash/animation screen displays and runs correctly and indefinitely absent a disc or button
 press - matching real hardware, not a bug. No source fix shipped this round (diagnosis-only).
+
+
+## Round 632 (task #536/#613)
+
+Disassembled thread 6's real body: found the syscall-stub table backing WakeupThread/SleepThread
+(correcting a Round 595/631 assumption), confirmed the real base OSDSYS state struct lives at
+RAM[0x287CD0]->0x001C0000 tying together years of `+0x444/+0x450/+0x454/+0x1BA0` findings, and
+found real Browser-panel label-registration code (0x204D68, calls 0x2092E8 six times with real
+string data) that executes correctly. Escalation-dispatch chain (0x2047CC, 24-way beq on
+device index) confirmed inert given current idle field values - correct, not a bug. Next: trace
+forward from the registered label table to the actual GS-draw call, and separately find/wire the
+real pad-to-message translation Round 631 identified as missing. No source change this round.

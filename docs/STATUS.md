@@ -25695,3 +25695,58 @@ question - "what's blocking the JP BIOS splash/loading screen from displaying" -
 considered answered: the splash/loading screen displays and keeps running indefinitely, exactly
 as real hardware would with no disc and no button press. No further source change is evidenced
 by this round's findings; this is a closing diagnostic round, not a fix round.
+
+
+## Round 632 (task #536/#613): traced thread 6's real Browser-panel setup code - labels DO register with real data; open question narrows to where the GS draw happens
+
+Direct continuation of Round 631's finding (thread 9's message-dispatcher never receives a
+pad-driven message). This round asked the natural follow-up: if we DID get a pad press through,
+would the real OSDSYS code actually have anything to draw, or is there a deeper rendering gap
+too? Disassembled thread 6's full real body (entry `0x00204308`, ~1.5KB, capstone MIPS64+BE) to
+find out.
+
+**Real syscall-stub table identified.** `0x00210E40`-`0x00210E94` is not a single function but a
+table of six 16-byte syscall trampolines (`li $v1,N; syscall; jr $ra; nop`), decoding to real EE
+kernel syscalls 48, -49 (implied "i" variant), 50 (SleepThread), 51 (WakeupThread), -52
+(iWakeupThread), 53 (CancelWakeupThread) - ps2sdk THBASE numbering. This corrects Round
+595/631's working assumption that `0x00210E70` was one function with two internal wake paths:
+it's actually the plain `WakeupThread` stub, and the `0x00210E88` call site Round 631 logged
+(from tid=3) is the neighboring `iWakeupThread` stub at `0x00210E80` - two different callers
+using two different (but adjacent) real kernel stubs, not one function branching internally.
+
+**Real base-state struct confirmed at a fixed physical address.** `RAM[0x00287CD0]` holds a
+pointer that reads exactly `0x001C0000` - confirming years of investigation (Rounds 480-606) all
+touched fields of ONE real OSDSYS state struct: `+0x444` (device/panel index), `+0x450` and
+`+0x454` (browser-state fields, matches Round 606's live "5=Browser, 8=Memory Card" finding),
+`+0x1BA0` (Round 589's "device changed" flag). At slice 100M this round: `+0x444=0`,
+`+0x450=5`, `+0x454=5`, `+0x1BA0=0` - i.e. genuinely idle, no pending panel transition, matching
+real hardware's expected state with no disc and no button ever pressed.
+
+**Thread 6's real escalation-dispatch chain found and confirmed inert.** `0x2047CC`-`0x2047F0`
+is a real 24-way `beq` chain against `+0x444` (values 1-0x18) plus a `+0x450==9` fallback check;
+only if one matches does it call the real `WakeupThread` stub with a target thread id read from
+`+4` of the base struct. Neither condition is ever true in our diskless boot (fields shown
+above), so this specific call site never fires - consistent with (not contradicting) Round 631's
+observed 3->6->9 chain, which turns out to originate from thread 6's own unconditional startup
+calls to the `CancelWakeupThread`/`SleepThread` stubs (`0x210e90`/`0x210e60`), not from this
+escalation chain at all.
+
+**Thread 6's real Browser-panel setup code found and instrumented - it runs correctly.**
+Further down thread 6's body, `0x00204D68`-`0x00204E5C` is a real function that calls a
+label-registration routine (`0x002092E8`) six times in a row, each with a different real string
+pointer (`0x0028B7A0`-`0x0028B810`, spaced 0x10 apart - a real string/icon-name table) and
+`a1=a2=0`. Per-instruction hit counters added directly inside `ee_step()` (not the earlier,
+coarser chunk-boundary sampling that under-counts rare code) confirm this function runs exactly
+once and **all six calls to `0x002092E8` do execute successfully** with real data - this is
+genuine, working OSDSYS panel/label-registration code, not a stub or dead branch. (An earlier,
+manually-transcribed hex address for this call site was wrong - 0x000824BA, not the disassembler
+-verified 0x002092E8 - and falsely read as zero hits; corrected and re-verified this round.)
+
+**Where this leaves task #613's goal.** Two separate things are now confirmed working correctly
+in our build: (1) the animation/splash background (Rounds 452-454/588) and (2) real Browser-panel
+label/icon registration (this round). What's still unconfirmed is whether a *later* real GS-draw
+call actually consumes this registered label table to put pixels on screen every frame, and
+separately (Round 631's finding) that no synthetic pad press currently reaches thread 9's message
+queue to drive any panel transition. Both threads need to be pulled further before "press a
+button, see a real rendered menu" is achievable end-to-end. No tracked-source change this round
+(pure disassembly/instrumentation); regression suite and Wii rebuild correctly skipped.

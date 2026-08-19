@@ -25801,3 +25801,78 @@ rebuild correctly skipped for this docs-only investigative round.
 **Task #536/#613's other half (pad-to-message translation, Round 631's finding) remains
 open and untouched this round** - this round focused entirely on the GS-draw side per the user's
 explicit request to start there.
+
+## Round 634 (task #536/#614): fixed the GS-draw bug - IMAGE-mode GIF transfers that don't fit in one call no longer get their continuation bytes misparsed as a fresh GIFtag
+
+Direct continuation of Round 633's root-cause candidate. Round 633 found that all six of thread
+6's Browser-panel label-registration calls end with a `PRIM` value that decodes to reserved type 7
+(`prim_raw=0x3FF`), plus vertex coordinates pinned at the 12-bit maximum (`x=y=4095`) - textbook
+garbage, not real draw data. This round traced the actual source packet bytes behind that garbage
+and confirmed hypothesis (b) from Round 633's writeup: it's a stream-desync bug, not a
+register-masking bug.
+
+**Root cause.** Added a one-shot raw-packet dump at the exact `gif_process_quadwords()` call where
+`unsupported_prims_seen` first increments. The dumped buffer's first 256 bytes are a clean,
+repeating `ff ff ff <alpha>` pattern where alpha forms a smooth bell curve (`00,05,28,5a,85,a8,c4,
+da,e8,ef,ef,e8,da,c4,a8,85,5a,28,05,00...`) - genuine anti-aliased font-glyph texture data (white
+RGB, smooth alpha falloff), sitting at the very start of the buffer with no GIFtag preceding it.
+That's only possible if this buffer is a mid-transfer *continuation* of an IMAGE-mode payload
+whose tag was parsed in an earlier call. Cross-checked `process_one_packet()`'s IMAGE-mode branch
+(`source/hw/gif.c`, the `flg == 2 || flg == 3` case): when a transfer's declared `NLOOP` qwords
+don't all fit in the current call's buffer, the old code did `if (consumed + skip_bytes > len)
+return consumed;` - discarding all progress on that packet with **no memory of the shortfall**.
+The caller's outer loop in `gif_process_quadwords()` then advanced past just the 16-byte tag and
+re-entered `process_one_packet()` on the *next* bytes - which are genuine continuation pixel data,
+not a tag - and misinterpreted them as a fresh GIFtag. That misparse is exactly what produced
+Round 633's `prim_raw=0x3FF`/`x=y=4095` garbage: raw glyph alpha bytes reinterpreted as PRIM and
+vertex fields.
+
+**The fix (and why it's the simple, stateless version, not the first draft).** The first attempt
+added a `gif_state_t` field (`image_carry_remaining_qwords`) to remember the exact shortfall and
+resume the same rectangle write on the next call - a faithful reconstruction of the real transfer.
+Testing that version caught a real regression before it shipped: when a transfer's declared NLOOP
+didn't cleanly match how the emulated DMA feed chunks its calls, the carry-over counter could get
+stuck non-zero, causing every subsequent call's bytes - including completely unrelated, later
+legitimate GIF traffic - to be silently swallowed as phantom "carry-over" pixels instead of
+parsed. Symptom: `quadwords_seen` and the draw framebuffer's `fbp` (which should keep alternating
+70/0 as double-buffering happens) both froze solid partway through a 150M-slice survey once one of
+these transfers occurred. This is a stateful bug that's easy to introduce and hard to fully rule
+out given the emulated DMA-chunking model here doesn't precisely mirror real hardware's GIF FIFO
+timing.
+
+Given this project's standing "even if it crashes, at least it boots" priority (pixel-perfect
+texture reconstruction is not worth risking a global rendering freeze), the shipped fix is
+stateless instead: `process_one_packet()` still writes whatever qwords of the transfer *do* fit in
+the current call as real pixels (extracted into a shared `image_write_pixel_qwords()` helper used
+by both the fits-in-one-call and doesn't-fit paths), but instead of returning early with partial
+progress, it now returns `len` - i.e. treats the entire remaining buffer as consumed. This
+guarantees the caller's loop always ends with nothing left in the buffer to misparse, at the cost
+of dropping the un-fit tail of an oversized transfer (same real-world effect as before this fix
+for that transfer's last few pixels) rather than perfectly reconstructing it. Crucially, this
+version carries zero state across calls, so it cannot desync or block anything downstream.
+
+**Verified.** Re-ran the same 150M-slice diskless JP-BIOS boot survey used in Round 633:
+`unsupported_prims_seen` stays at 0 for the entire run (previously jumped to 126 within the first
+20M slices and stuck there). `quadwords_seen` grows steadily the whole run with no freeze (7188 at
+20M up to 10142 at 150M). `fbp` correctly alternates 70/0/70 across the three framebuffer
+checkpoints (40M/100M/140M) - confirming double-buffering keeps working, not stuck. The dumped
+framebuffer PPM at 100M slices, viewed as an image, shows the same wireframe animation lines as
+every prior round - visually intact, no corruption, no black-rectangle overwrite. (Pixel counts
+dropped from ~46387 to ~23800; the most likely explanation is that the old buggy path's garbage
+misparse occasionally re-synced by accident partway through and re-drew some of the same real
+animation content a second time, inflating the old count - not a content loss in the fixed
+version.) All 42 host-native regression tests pass. Wii cross-build (devkitPPC) is clean with no
+new warnings.
+
+**What's still missing for real label/glyph content to appear.** This fix stops the corruption but
+doesn't, by itself, guarantee the *first* call of a split transfer's tag-decode was even correct
+in the first place, and doesn't address why the label transfer is split across calls at all (a
+question about this project's emulated DMA-chunk sizing, not a hardware-accuracy question - real
+hardware's actual GIF FIFO depth/timing was never precisely modeled here). No new visible label
+pixels were observed in this round's framebuffer dumps; the fix's job was narrowly to stop
+`unsupported_prims_seen` corruption from happening at all, which it did.
+
+**Task #536/#613's other half (pad-to-message translation, Round 631's finding) remains open and
+untouched this round** - per the user's "do both, start with the gs draw" instruction, this
+completes the GS-draw side; the pad-to-message side is next.
+

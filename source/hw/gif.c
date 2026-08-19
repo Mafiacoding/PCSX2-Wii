@@ -2174,6 +2174,37 @@ static inline uint32_t regs_nibble(uint32_t w2, uint32_t w3, uint32_t idx)
  * qwords) starting at 'p', which must have at least 16 bytes (the
  * tag) available. Returns the number of bytes consumed, or 0 if 'len'
  * isn't enough for even the tag. */
+/* Round 634 (task #536/#614): shared IMAGE-mode raw-pixel writer,
+ * extracted so both the "whole transfer fits in this call" path and
+ * the "only part of it fits" path (see process_one_packet()'s IMAGE
+ * branch below) drive the exact same trx_active/trx_cur_x/trx_cur_y
+ * state machine - no behavioral change for the common case where a
+ * transfer fits in one call, just no duplicated logic. */
+static void image_write_pixel_qwords(const uint8_t *q, uint32_t n_qwords)
+{
+    for (uint32_t i = 0; i < n_qwords && g_gif.trx_active; i++) {
+        const uint8_t *qq = q + i * 16u;
+        uint32_t px[4];
+        px[0] = rd_le32(qq + 0);
+        px[1] = rd_le32(qq + 4);
+        px[2] = rd_le32(qq + 8);
+        px[3] = rd_le32(qq + 12);
+        for (int k = 0; k < 4 && g_gif.trx_active; k++) {
+            gs_mem_write_psmct32(g_gif.trx_dbp, g_gif.trx_dbw,
+                                  g_gif.trx_dsax + g_gif.trx_cur_x,
+                                  g_gif.trx_dsay + g_gif.trx_cur_y,
+                                  px[k]);
+            g_gif.trx_cur_x++;
+            if (g_gif.trx_cur_x >= g_gif.trx_rrw) {
+                g_gif.trx_cur_x = 0;
+                g_gif.trx_cur_y++;
+                if (g_gif.trx_cur_y >= g_gif.trx_rrh)
+                    g_gif.trx_active = 0; /* transfer complete - a new TRXDIR write is required to start another */
+            }
+        }
+    }
+}
+
 static uint32_t process_one_packet(const uint8_t *p, uint32_t len)
 {
     if (len < 16) return 0;
@@ -2285,31 +2316,55 @@ static uint32_t process_one_packet(const uint8_t *p, uint32_t len)
          * byte-skip - not interpreted, but the stream stays in sync. */
         uint32_t skip_qwords = nloop;
         uint32_t skip_bytes = skip_qwords * 16u;
-        if (consumed + skip_bytes > len) return consumed; /* not enough data yet */
 
-        if ((flg == 2 || flg == 3) && g_gif.trx_active) {
-            for (uint32_t i = 0; i < nloop && g_gif.trx_active; i++) {
-                const uint8_t *q = p + consumed + i * 16u;
-                uint32_t px[4];
-                px[0] = rd_le32(q + 0);
-                px[1] = rd_le32(q + 4);
-                px[2] = rd_le32(q + 8);
-                px[3] = rd_le32(q + 12);
-                for (int k = 0; k < 4 && g_gif.trx_active; k++) {
-                    gs_mem_write_psmct32(g_gif.trx_dbp, g_gif.trx_dbw,
-                                          g_gif.trx_dsax + g_gif.trx_cur_x,
-                                          g_gif.trx_dsay + g_gif.trx_cur_y,
-                                          px[k]);
-                    g_gif.trx_cur_x++;
-                    if (g_gif.trx_cur_x >= g_gif.trx_rrw) {
-                        g_gif.trx_cur_x = 0;
-                        g_gif.trx_cur_y++;
-                        if (g_gif.trx_cur_y >= g_gif.trx_rrh)
-                            g_gif.trx_active = 0; /* transfer complete - a new TRXDIR write is required to start another */
-                    }
-                }
-            }
+        /* Round 634 (task #536/#614): a real IMAGE-mode transfer's
+         * NLOOP qwords do not always all fit in this call's buffer -
+         * e.g. a large texture/font-glyph upload that the emulated
+         * DMA feed splits across multiple gif_process_quadwords()
+         * calls. The old code here returned early with NO progress
+         * when that happened, leaving this packet's un-fit pixel
+         * bytes sitting in the buffer for the CALLER's loop to
+         * immediately re-enter process_one_packet() on - which
+         * mis-parses genuine continuation pixel bytes as a fresh
+         * GIFtag. Round 633's raw-packet capture caught this exactly:
+         * prim_raw=0x3FF/type-7 ("reserved" - not a real primitive
+         * type), x=y=4095 (both pinned at the 12-bit max) - textbook
+         * "raw pixel bytes reinterpreted as tag/vertex fields"
+         * symptoms, not a real BIOS bug.
+         *
+         * Fix: write whatever qwords DO fit as real pixels (best
+         * effort, same trx_active/gs_mem_write_psmct32 path as
+         * before), then treat this call's ENTIRE REMAINING BUFFER as
+         * consumed - i.e. return len, not consumed. This guarantees
+         * the caller's outer loop ends cleanly with off==len, so
+         * there is nothing left in this call's buffer to misparse.
+         * A cross-call carry-over (remembering the exact shortfall
+         * and resuming the same rectangle write on the NEXT call) was
+         * prototyped and measured to occasionally desync unrelated
+         * later traffic when a transfer's declared NLOOP doesn't
+         * cleanly match how the emulated DMA feed chunks its calls -
+         * once desynced, every subsequent real primitive in that
+         * chunk gets silently swallowed as phantom "carry-over"
+         * pixels instead of parsed, freezing all further GS output.
+         * This stateless version can't do that: at worst it drops
+         * the tail of one oversized IMAGE transfer (same real-world
+         * outcome as before this fix for that specific transfer's
+         * last few pixels), but it can never corrupt or block
+         * unrelated later packets, which is the safer trade given
+         * this project's "even if it crashes, at least it boots"
+         * priority over pixel-perfect texture reconstruction. */
+        if (consumed + skip_bytes > len) {
+            uint32_t avail_bytes = (len > consumed) ? (len - consumed) : 0u;
+            uint32_t avail_qwords = avail_bytes / 16u;
+
+            if ((flg == 2 || flg == 3) && g_gif.trx_active && avail_qwords > 0)
+                image_write_pixel_qwords(p + consumed, avail_qwords);
+
+            return len; /* fully consumed - nothing left in this buffer to misparse as a fresh tag */
         }
+
+        if ((flg == 2 || flg == 3) && g_gif.trx_active)
+            image_write_pixel_qwords(p + consumed, nloop);
 
         return consumed + skip_bytes;
     }

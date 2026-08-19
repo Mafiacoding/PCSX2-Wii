@@ -10456,3 +10456,22 @@ word unmasked (`source/hw/gif.c` ~line 2332), or the GIF tag parser misaligns wh
 it treats as PRIM for this specific DMA chain. Next: trace the exact DMA chain back to source
 bytes in EE RAM to confirm which hypothesis is right and implement the fix. Separately, task
 #613's pad-to-message-translation half (Round 631) remains open, not touched this round.
+
+## Round 634 (task #536/#614)
+
+Fixed the GS-draw bug found in Round 633: a real IMAGE-mode GIF transfer whose NLOOP qwords
+didn't all fit in one `gif_process_quadwords()` call was silently discarded with no memory of the
+shortfall, leaving genuine continuation pixel bytes for the caller to immediately misparse as a
+fresh GIFtag (`source/hw/gif.c`'s IMAGE-mode branch of `process_one_packet()`) - this is exactly
+what produced Round 633's `prim_raw=0x3FF`/type-7/`x=y=4095` garbage. A first-draft fix using
+persistent cross-call carry-over state was tested and found to occasionally desync unrelated
+later traffic (froze `quadwords_seen`/`fbp` mid-survey); shipped a simpler, stateless version
+instead - write whatever qwords fit as real pixels, then fully consume the buffer so nothing is
+left to misparse. Verified: `unsupported_prims_seen` stays 0 for the full 150M-slice survey (was
+126 and stuck), `quadwords_seen`/`fbp` both keep progressing normally (no freeze), framebuffer
+visually intact (same wireframe animation, no corruption). All 42 regression tests pass, Wii
+cross-build clean. This closes the GS-draw half of task #536/#613's "labels register but don't
+render" gap - real label/glyph pixels still weren't observed this round (the fix stops the
+corruption, doesn't guarantee the split transfer's first-call tag-decode was otherwise correct).
+Next: task #613's other half (pad-to-message translation, Round 631's finding) remains open.
+

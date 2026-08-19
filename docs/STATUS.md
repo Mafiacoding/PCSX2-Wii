@@ -26887,3 +26887,60 @@ diskless JP BIOS boot produces real on-screen picture content deep into the boot
 mandatory workflow: regression, Wii cross-build, docs (this entry), commit, rsync, leak-check.
 Given both the shipped bug fix and the confirmed picture-content milestone, this round is offered
 as bundle-worthy per the standing "only bundle on important progress" rule.
+
+
+## Round 650: attributed the confirmed picture content to real XGKICK-driven triangle draws - first colored/filled polygon content ever rendered (task #638)
+
+**Goal.** Round 649 confirmed real, structured picture content exists in GS memory once the
+checkpoint gs_mem bug was fixed, but left open whether the newly-observed VU1 XGKICK activity
+(11 calls by ~270-330M cumulative slices) actually produced any of it, versus it all being the
+already-working GIF/sprite pipeline from Rounds 634-641. This round answers that with a direct
+before/after measurement.
+
+**Method.** Using the same GSM0-format-compatible checkpoint chain, took a `[R649GIF]` draw-counter
+snapshot at the 240M-cumulative-slice checkpoint (before this round's newly-observed kick window)
+and compared it against a snapshot after chaining forward through 360M, 480M, and 600M:
+
+```
+240M:  sprites=781  triangles=0   lines=2499  points=271   non_bg_pixels=55012
+360M:  sprites=1401 triangles=19  lines=2538  points=278   non_bg_pixels=52323 (dedup color count 157)
+480M:  sprites=1966 triangles=23  lines=2543  points=280   non_bg_pixels=71374
+600M:  sprites=2551 triangles=23  lines=2543  points=280   non_bg_pixels=71314 (plateau - no new triangles)
+```
+
+`triangles_drawn` was **exactly 0 at every checkpoint up to 240M** - consistent with this
+project's own standing, previously-documented gap (Round 570: "triangle rasterizer works, but no
+vertex kicks ever happen under a triangle-type PRIM"). It becomes nonzero (19, then 23) in exactly
+the two windows (240-360M, 360-480M) where real `r642_dump_kick()`-captured XGKICK GIFtags carried
+`PRIM_TYPE_TRIANGLE_FAN` (value 5, decoded from `prim & 0x7` per `source/hw/gif.c`'s own
+`ptype = g_gif.prim & 0x7u`) with real, non-degenerate register counts (`nreg=8` and `nreg=12` -
+plausible XYZ2/RGBAQ/ST-class vertex formats, not zero/garbage). Several kicks in the same windows
+also carried `PRIM_TYPE_LINE_STRIP` (value 2). By 600M the triangle count plateaus at 23 with no
+further XGKICK-driven triangle kicks observed, while `sprites_drawn` keeps climbing (2551) -
+consistent with Round 452's already-documented, unrelated growing-sprite animation loop continuing
+in parallel.
+
+**Visual confirmation.** Dumping and inspecting the framebuffer at 480M (inline visual check only,
+not persisted - same leak-prevention handling as Round 649) shows, for the first time in this
+project's entire history, a **filled, multi-colored polygon** - a wedge/fan shape with a visible
+green/purple/pink striped fill pattern - overlaid on the existing field of wireframe lines. Every
+prior round's framebuffer dumps (Round 450, 588, and this round's own 360M snapshot) showed only
+thin single-color wireframe lines/sprites; this is the first confirmed filled-triangle rendering
+output, and it appears exactly in the slice window attributed to the new XGKICK/TRIANGLE_FAN
+activity above - both the counter data and the visual evidence agree.
+
+**Conclusion for task #638.** The picture-content growth Round 649 found is now attributed with
+real evidence: the confirmed XGKICK activity does produce new, visible, colored triangle content
+distinct from the pre-existing line/sprite pipeline, not just theoretically counted but visually
+confirmed as a real filled shape. This closes the "is this an artifact or real work" question left
+open at the end of Round 649.
+
+**Status.** No tracked source changed this round (pure investigation/attribution using the
+already-shipped Round 649 checkpoint.c fix and existing gif.c/vu.c pipeline) - regression suite and
+Wii cross-build correctly skipped per this project's established docs-only-round precedent. All
+checkpoints/PPM dumps used remained `/tmp`-scratch-only or inline-viewed-and-discarded, never
+committed or rsync'd, consistent with the standing leak-prevention rule. Given two consecutive
+rounds of confirmed, evidenced picture-content progress (Round 649's fix + first trustworthy
+picture, this round's colored-triangle attribution), this is offered to the user as continued
+bundle-worthy progress; a bundle was already built and delivered for Round 649's commit
+(`pcsx2-wii-round649.bundle`) per the user's explicit request this session.

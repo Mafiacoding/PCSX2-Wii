@@ -2107,3 +2107,319 @@ with rd=$0 leaves $0 hardwired at zero.
 gcc -I../include -I../source -o test_ee_sa_reg tests/test_ee_sa_reg.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
 ./test_ee_sa_reg
 ```
+
+
+## Round 623 addition: 41 previously-undocumented test files (task #554)
+
+The audit below found 41 files under `tests/` with no entry anywhere in this
+document (verified via `ls tests/*.c` vs a scan of every backtick-quoted
+`test_*.c` filename and heading in this file). Every compile command below
+was verified this round by actually compiling and running it against the
+current tree - 39 pass with 0 failures; the remaining 2
+(`test_ee_syscall_thread_family.c`, `test_ee_syscall_full_audit_sweep.c`)
+had genuine, real content bugs (stale pre-Round-569 assertions) that were
+fixed in the same round these commands were verified - see STATUS.md Round
+623 for the root-cause writeup.
+
+**Convention note:** unlike most of the commands earlier in this file (which
+use `-I../include -I../source` and assume the shell's cwd is `tests/`), the
+commands below are written to be run from the **repository root** (`-Iinclude
+-Isource`, with the test's own path as `tests/test_x.c`) - this is the
+actually-correct, verified-working invocation. A repo-root-relative `-I../include
+-I../source` combined with a `tests/`-prefixed source path (as several of the
+pre-existing 88 entries above literally show) does not resolve from either
+directory; this was not re-verified project-wide this round (out of scope -
+flagged in STATUS.md Round 623) but is worth knowing when copy-pasting.
+
+### Direct-compile, no extra links needed
+
+`test_dma_inbound.c` (Round 198, task #365) - regression coverage for the
+inbound (IOP-to-EE) DMA payload-copy path.
+
+`test_dma_reply_delivered.c` (Round 225, task #366/#172) - regression
+coverage confirming a DMA reply is actually delivered to the waiting side,
+not just internally marked complete.
+
+`test_dma_sif2.c` (Round 177, task #343) - regression coverage for the SIF2
+channel specifically (as distinct from SIF0/SIF1).
+
+`test_gs_output_pipeline_isolation.c` (Round 189, task #355) - isolates the
+GS output/display pipeline from the rest of the rasterizer to test it on its
+own.
+
+`test_iop_asyncio.c` (Round 153) - real async I/O completion-callback
+mechanism on the IOP side.
+
+`test_iop_sio2_mc.c` - regression test for the real SIO2 memory-card
+(as opposed to pad) command path.
+
+`test_iso_loader.c` - `source/core/iso_loader.c`'s ISO9660 filesystem parser
+(directory walk, file lookup, sector reads) used by the CDVD NCMD dispatch
+path for real disc-image-backed boots.
+
+`test_sio2_pad.c` (Round 184) - the real SIO2 controller (pad) command
+protocol.
+
+`test_spu2_regs.c` (Round 185) - the real SPU2 register offset table.
+
+```sh
+gcc -Iinclude -Isource -o test_dma_inbound tests/test_dma_inbound.c -lm
+./test_dma_inbound
+
+gcc -Iinclude -Isource -o test_dma_reply_delivered tests/test_dma_reply_delivered.c -lm
+./test_dma_reply_delivered
+
+gcc -Iinclude -Isource -o test_dma_sif2 tests/test_dma_sif2.c -lm
+./test_dma_sif2
+
+gcc -Iinclude -Isource -o test_gs_output_pipeline_isolation tests/test_gs_output_pipeline_isolation.c -lm
+./test_gs_output_pipeline_isolation
+
+gcc -Iinclude -Isource -o test_iop_asyncio tests/test_iop_asyncio.c -lm
+./test_iop_asyncio
+
+gcc -Iinclude -Isource -o test_iop_sio2_mc tests/test_iop_sio2_mc.c -lm
+./test_iop_sio2_mc
+
+gcc -Iinclude -Isource -o test_iso_loader tests/test_iso_loader.c -lm
+./test_iso_loader
+
+gcc -Iinclude -Isource -o test_sio2_pad tests/test_sio2_pad.c -lm
+./test_sio2_pad
+
+gcc -Iinclude -Isource -o test_spu2_regs tests/test_spu2_regs.c -lm
+./test_spu2_regs
+```
+
+### `ee_core.c` direct-include tests (`#include "core/ee/ee_core.c"`)
+
+These need the full source tree minus `main.c`/`ppc_dynarec.c`/
+`gs_wii_output.c`/`core/ee/ee_core.c` itself (the test direct-includes it),
+plus `-lm` for `sqrtf`/`fmaxf`/`fminf`/`log2` pulled in transitively via
+`vu.c`/`gif.c`.
+
+`test_ee_fpu4.c` (Round 400) - BC1FL/BC1TL, the "likely" branch variants of
+BC1F/BC1T: when not taken, the delay-slot instruction is nullified rather
+than always executing.
+
+`test_ee_mmi_hilo2.c` (Round 64) - the 19 previously-unimplemented real
+MMI-family opcodes (MADD1/MADDU1/PMFHL/PMTHL, QFSRV, the PMADDW/PMSUBW/
+PMULTW/PDIVW/PMADDH/PHMADH/PMSUBH/PHMSBH/PMULTH/PDIVBW family, PMADDUW/
+PSRAVW/PMULTUW/PDIVUW), ported from PCSX2 v1.6.0's `MMI.cpp`.
+
+`test_ee_syscall_addintchandler.c` (Round 186, task #352) - EE syscall 16
+(AddIntcHandler)/17 (RemoveIntcHandler) must vector as real MIPS Syscall
+exceptions, not silently bypass or halt.
+
+`test_ee_syscall_alarm_eventflag_tlb.c` - the real Alarm-family and
+EventFlag-family EE syscalls plus TLB-related syscalls vectoring correctly.
+
+`test_ee_syscall_resetee_kexit_rfu.c` (Round 493) - the 5 syscalls added
+that round: ResetEE, KExit, ResumeIntrDispatch, ResumeT3IntrDispatch, RFU009.
+
+`test_ee_syscall_setupthread.c` (Round 274, task #423) - SetupThread's real
+exception-vectoring behavior.
+
+`test_ee_syscall_thread_family.c` (Round 187, updated Round 623) - the real
+EE thread-management syscall family (DeleteThread/ExitThread/
+ExitDeleteThread/TerminateThread/DisableDispatchThread/EnableDispatchThread/
+ChangeThreadPriority/RotateThreadReadyQueue/SleepThread/WakeupThread/
+CancelWakeupThread/CreateThread/StartThread). **Round 623 correction:** most
+of these numbers are now claimed by Round 569's real HLE thread scheduler
+(`ee_hle_thread_try_handle()`) before the older exception-vectoring code is
+ever reached - the test now asserts the correct, current HLE-path behavior
+for those, and keeps the original exception-vectoring assertions only for
+the 3 numbers (ReleaseWaitThread/45, SuspendThread/55, ResumeThread/57) the
+HLE scheduler does not claim. See STATUS.md Round 623.
+
+`test_ee_syscall_full_audit_sweep.c` (Round 193, updated Round 623) - a
+programmatic, script-parsed cross-reference of every real ps2sdk syscall
+number against `ee_core.c`'s handled-sysnum list. **Round 623 correction:**
+moved `-38`/`-42`/`-44` (also now HLE-scheduler-claimed, same reason as
+above) out of the generic exception-sweep list into their own HLE-path
+regression check.
+
+`test_ee_cdvd_ncmd_reentry.c` - Round 347's IOP RPC re-entry architecture
+for real CDVD NCMD dispatch, exercised from the EE side.
+
+`test_ee_syscall_enableintc.c` (Round 188) - EnableIntc/DisableIntc real
+syscall vectoring.
+
+```sh
+gcc -Iinclude -Isource -o test_ee_fpu4 tests/test_ee_fpu4.c $(find source -name '*.c' | grep -v 'main.c\|ppc_dynarec.c\|gs_wii_output.c\|core/ee/ee_core.c') -lm
+./test_ee_fpu4
+
+gcc -Iinclude -Isource -o test_ee_mmi_hilo2 tests/test_ee_mmi_hilo2.c $(find source -name '*.c' | grep -v 'main.c\|ppc_dynarec.c\|gs_wii_output.c\|core/ee/ee_core.c') -lm
+./test_ee_mmi_hilo2
+
+gcc -Iinclude -Isource -o test_ee_syscall_addintchandler tests/test_ee_syscall_addintchandler.c $(find source -name '*.c' | grep -v 'main.c\|ppc_dynarec.c\|gs_wii_output.c\|core/ee/ee_core.c') -lm
+./test_ee_syscall_addintchandler
+
+gcc -Iinclude -Isource -o test_ee_syscall_alarm_eventflag_tlb tests/test_ee_syscall_alarm_eventflag_tlb.c $(find source -name '*.c' | grep -v 'main.c\|ppc_dynarec.c\|gs_wii_output.c\|core/ee/ee_core.c') -lm
+./test_ee_syscall_alarm_eventflag_tlb
+
+gcc -Iinclude -Isource -o test_ee_syscall_resetee_kexit_rfu tests/test_ee_syscall_resetee_kexit_rfu.c $(find source -name '*.c' | grep -v 'main.c\|ppc_dynarec.c\|gs_wii_output.c\|core/ee/ee_core.c') -lm
+./test_ee_syscall_resetee_kexit_rfu
+
+gcc -Iinclude -Isource -o test_ee_syscall_setupthread tests/test_ee_syscall_setupthread.c $(find source -name '*.c' | grep -v 'main.c\|ppc_dynarec.c\|gs_wii_output.c\|core/ee/ee_core.c') -lm
+./test_ee_syscall_setupthread
+
+gcc -Iinclude -Isource -o test_ee_syscall_thread_family tests/test_ee_syscall_thread_family.c $(find source -name '*.c' | grep -v 'main.c\|ppc_dynarec.c\|gs_wii_output.c\|core/ee/ee_core.c') -lm
+./test_ee_syscall_thread_family
+
+gcc -Iinclude -Isource -o test_ee_syscall_full_audit_sweep tests/test_ee_syscall_full_audit_sweep.c $(find source -name '*.c' | grep -v 'main.c\|ppc_dynarec.c\|gs_wii_output.c\|core/ee/ee_core.c') -lm
+./test_ee_syscall_full_audit_sweep
+
+gcc -Iinclude -Isource -o test_ee_cdvd_ncmd_reentry tests/test_ee_cdvd_ncmd_reentry.c $(find source -name '*.c' | grep -v 'main.c\|ppc_dynarec.c\|gs_wii_output.c\|core/ee/ee_core.c') -lm
+./test_ee_cdvd_ncmd_reentry
+
+gcc -Iinclude -Isource -o test_ee_syscall_enableintc tests/test_ee_syscall_enableintc.c $(find source -name '*.c' | grep -v 'main.c\|ppc_dynarec.c\|gs_wii_output.c\|core/ee/ee_core.c') -lm
+./test_ee_syscall_enableintc
+```
+
+### `ee_core.c` linked normally (headers only, not direct-included)
+
+`test_ee_elf_loader.c` - the real EE-side ELF32/COFF loader
+(`ee_elf_loader.c`) plus `bios_loader.c`'s ROMDIR walk and `ee_timers.c`.
+
+`test_ee_sio.c` (Round 392) - the real EE debug SIO (0x1000f1xx) MMIO used
+to capture BIOS/OSDSYS console output; needs `ee_sio.c` linked (do not
+exclude it from the link set for this one).
+
+```sh
+gcc -Iinclude -Isource -o test_ee_elf_loader tests/test_ee_elf_loader.c source/core/ee/ee_core.c $(find source -name '*.c' | grep -v 'main.c\|ppc_dynarec.c\|gs_wii_output.c\|core/ee/ee_core.c') -lm
+./test_ee_elf_loader
+
+gcc -Iinclude -Isource -o test_ee_sio tests/test_ee_sio.c source/core/ee/ee_core.c $(find source -name '*.c' | grep -v 'main.c\|ppc_dynarec.c\|gs_wii_output.c\|core/ee/ee_core.c') -lm
+./test_ee_sio
+```
+
+### `iop_core.c` direct-include tests (`#include "core/iop/iop_core.c"`)
+
+Same pattern as the `ee_core.c` direct-include group, minus `core/iop/
+iop_core.c` itself instead.
+
+`test_iop_cpuenableintr.c` - `iop_core.c`'s CpuEnableIntr/CpuDisableIntr real
+syscall behavior.
+
+`test_iop_hle_events.c` (Round 142) - the real B0-table event-flag HLE
+functions.
+
+`test_iop_vblank.c` - `iop_core.c`'s real IOP-side VBLANK signal delivery.
+
+`test_iop_hle_event_flags_alarm.c` - the Round 390 IOP EventFlag/Alarm HLE
+extension.
+
+`test_iop_hle_intr.c` (Round 109) - the clean-room IOP interrupt-handler HLE
+registration mechanism.
+
+`test_iop_hle_thread.c` (Round 389) - the real IOP multi-threading/
+context-switching implementation.
+
+```sh
+gcc -Iinclude -Isource -o test_iop_cpuenableintr tests/test_iop_cpuenableintr.c $(find source -name '*.c' | grep -v 'main.c\|ppc_dynarec.c\|gs_wii_output.c\|core/iop/iop_core.c') -lm
+./test_iop_cpuenableintr
+
+gcc -Iinclude -Isource -o test_iop_hle_events tests/test_iop_hle_events.c $(find source -name '*.c' | grep -v 'main.c\|ppc_dynarec.c\|gs_wii_output.c\|core/iop/iop_core.c') -lm
+./test_iop_hle_events
+
+gcc -Iinclude -Isource -o test_iop_vblank tests/test_iop_vblank.c $(find source -name '*.c' | grep -v 'main.c\|ppc_dynarec.c\|gs_wii_output.c\|core/iop/iop_core.c') -lm
+./test_iop_vblank
+
+gcc -Iinclude -Isource -o test_iop_hle_event_flags_alarm tests/test_iop_hle_event_flags_alarm.c $(find source -name '*.c' | grep -v 'main.c\|ppc_dynarec.c\|gs_wii_output.c\|core/iop/iop_core.c') -lm
+./test_iop_hle_event_flags_alarm
+
+gcc -Iinclude -Isource -o test_iop_hle_intr tests/test_iop_hle_intr.c $(find source -name '*.c' | grep -v 'main.c\|ppc_dynarec.c\|gs_wii_output.c\|core/iop/iop_core.c') -lm
+./test_iop_hle_intr
+
+gcc -Iinclude -Isource -o test_iop_hle_thread tests/test_iop_hle_thread.c $(find source -name '*.c' | grep -v 'main.c\|ppc_dynarec.c\|gs_wii_output.c\|core/iop/iop_core.c') -lm
+./test_iop_hle_thread
+```
+
+### GS register-effect tests (header-only, need `gif.c` + `gs_mem.c`)
+
+`test_gs_clamp.c` (Round 98) - real GS CLAMP_1/2 register behavior.
+`test_gs_colclamp.c` (Round 101) - real GS COLCLAMP register.
+`test_gs_dither.c` (Round 102) - real GS dithering.
+`test_gs_fba.c` (Round 103) - real GS FBA_1/2 (fixed alpha) register.
+`test_gs_fog.c` (Round 97) - real GS Fog effect.
+`test_gs_pabe.c` (Round 104) - real GS PABE (per-pixel alpha blend enable).
+`test_gs_prmode.c` (Round 99) - real GS PRMODE/PRMODECONT switching.
+`test_gs_scanmsk.c` (Round 106) - real GS SCANMSK field-masking.
+`test_gs_scissor.c` (Round 96) - real GS scissor-rectangle clipping.
+`test_gs_signal.c` (Round 108) - real GS SIGNAL/FINISH/LABEL registers.
+`test_gs_texa.c` (Round 107) - real GS TEXA (non-textured alpha) register.
+
+```sh
+gcc -Iinclude -Isource -o test_gs_clamp tests/test_gs_clamp.c source/hw/gif.c source/hw/gs_mem.c -lm
+./test_gs_clamp
+
+gcc -Iinclude -Isource -o test_gs_colclamp tests/test_gs_colclamp.c source/hw/gif.c source/hw/gs_mem.c -lm
+./test_gs_colclamp
+
+gcc -Iinclude -Isource -o test_gs_dither tests/test_gs_dither.c source/hw/gif.c source/hw/gs_mem.c -lm
+./test_gs_dither
+
+gcc -Iinclude -Isource -o test_gs_fba tests/test_gs_fba.c source/hw/gif.c source/hw/gs_mem.c -lm
+./test_gs_fba
+
+gcc -Iinclude -Isource -o test_gs_fog tests/test_gs_fog.c source/hw/gif.c source/hw/gs_mem.c -lm
+./test_gs_fog
+
+gcc -Iinclude -Isource -o test_gs_pabe tests/test_gs_pabe.c source/hw/gif.c source/hw/gs_mem.c -lm
+./test_gs_pabe
+
+gcc -Iinclude -Isource -o test_gs_prmode tests/test_gs_prmode.c source/hw/gif.c source/hw/gs_mem.c -lm
+./test_gs_prmode
+
+gcc -Iinclude -Isource -o test_gs_scanmsk tests/test_gs_scanmsk.c source/hw/gif.c source/hw/gs_mem.c -lm
+./test_gs_scanmsk
+
+gcc -Iinclude -Isource -o test_gs_scissor tests/test_gs_scissor.c source/hw/gif.c source/hw/gs_mem.c -lm
+./test_gs_scissor
+
+gcc -Iinclude -Isource -o test_gs_signal tests/test_gs_signal.c source/hw/gif.c source/hw/gs_mem.c -lm
+./test_gs_signal
+
+gcc -Iinclude -Isource -o test_gs_texa tests/test_gs_texa.c source/hw/gif.c source/hw/gs_mem.c -lm
+./test_gs_texa
+```
+
+### GS tests that direct-include `gs_mem.c`/`gif.c` themselves
+
+`test_gs_tex2.c` (Round 100) - real GS TEX2_1/2 register (texture info
+override without touching TEX0's base/size fields).
+
+`test_gs_texclut.c` (Round 105) - real GS TEXCLUT register (CLUT-load
+buffer offset control, separate from CLUT loading itself).
+
+Only need `-lm` (for `log2` pulled in via the direct-included `gif.c`) - do
+NOT also link `gif.c`/`gs_mem.c` separately, or you'll get "multiple
+definition" errors.
+
+```sh
+gcc -Iinclude -Isource -o test_gs_tex2 tests/test_gs_tex2.c -lm
+./test_gs_tex2
+
+gcc -Iinclude -Isource -o test_gs_texclut tests/test_gs_texclut.c -lm
+./test_gs_texclut
+```
+
+### Remaining specials
+
+`test_iop_cdrom_legacy.c` (Round 145) - the real legacy CD-ROM command
+subset. Direct-includes `hw/iop_asyncio.c`/`hw/iop_cdrom_legacy.c`/
+`hw/iop_intc.c`/`hw/iop_hle_events.c`, so needs only `source/core/
+iso_loader.c` linked separately (for `iso_open`/`iso_close`/`iso_read_sector`).
+
+`test_iop_heap.c` (Round 401, task #128) - the real SYSMEM free-list heap
+allocator port. Header-only (`core/hw/iop_heap.h`), needs `source/hw/
+iop_heap.c` linked.
+
+```sh
+gcc -Iinclude -Isource -o test_iop_cdrom_legacy tests/test_iop_cdrom_legacy.c source/core/iso_loader.c -lm
+./test_iop_cdrom_legacy
+
+gcc -Iinclude -Isource -o test_iop_heap tests/test_iop_heap.c source/hw/iop_heap.c -lm
+./test_iop_heap
+```

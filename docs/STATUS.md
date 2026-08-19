@@ -26245,3 +26245,32 @@ against a real BIOS reference screenshot (Round 636 flagged this as a follow-up,
 pad-to-message-translation half (Round 638's finding: no code path ever issues a real SIO2 pad-read command)
 remains paused per the user's explicit prioritization ("make display work first... get everything together
 now") - ready to resume once the user confirms display work is sufficiently complete.
+
+## Round 640 correction (user-caught): the disappeared text was never a legitimate on-screen draw - it was the collision itself
+
+The user spotted, from the before/after picture, that the readable label text and a white
+horizontal line present pre-fix are simply gone post-fix - not relocated, not redrawn elsewhere.
+Re-reading Round 639's own writeup confirms this is expected, not a regression: Round 639 found
+that the label texture upload's real bytes were landing **directly inside the framebuffer's own
+address range** purely because of the addressing collision - the upload write itself was
+accidentally painting glyph pixels onto the visible screen. That was never a legitimate textured
+sprite/triangle draw reading the label texture and blitting it to the framebuffer; Round 639 also
+found (via `sprites_drawn` instrumentation) that the *only* sprite ever drawn in this trace is a
+single untextured, off-screen, zero-height rectangle - no textured draw call fires at all during
+this boot trace.
+
+So pre-Round-640, "text" was visible by accident: the upload write and the framebuffer happened to
+share address space. Post-Round-640, the upload now correctly lands in its own isolated VRAM page
+(matching real hardware), which means it no longer overlaps the framebuffer - and since nothing
+in this trace ever issues a real textured draw to bring that texture to the screen on purpose, the
+framebuffer now (correctly) shows only the wireframe line/point animation, with no text. The label
+pixel data itself is intact and byte-correct at its new, real address (verified in Round 640's own
+test #3, `test_gs_blk_addressing.c`) - it just isn't being drawn anywhere anymore.
+
+**What's actually needed to get real text back on screen:** a legitimate textured sprite or
+triangle draw call that samples the label texture (now at its correct `_blk`-scaled address) and
+writes the result into the framebuffer. That draw call has never been observed firing in any
+survey to date - most likely blocked by the same "boot never escalates past its initial resting
+state" root cause documented across task #447/#536/Round 638-639 (OSDSYS's disc-browser/animation
+escalation logic is never reached in diskless boot). This is now the concrete, well-defined next
+step for restoring visible text, tracked as a continuation of task #536.

@@ -687,11 +687,25 @@ static void vif_process(vif_state_t *vif, const uint8_t *data, uint32_t qwc)
         } break;
 
         default:
-            /* Any other unrecognized/reserved code - see vif.h's
-             * scope comment. Stop here rather than guess a skip
-             * length. */
+            /* Round 648 (task #536/#647): real hardware's VIFcmdHandler
+             * table (docs/reference/pcsx2/pcsx2/Vif_Codes.cpp) maps
+             * EVERY unrecognized/reserved 8-bit opcode - all 128 slots,
+             * both VIF0 and VIF1 - to vifCode_Null, which consumes
+             * exactly the one code word and returns 1 (continue
+             * parsing), not a stream-terminating error. This project's
+             * prior behavior (abort the whole vif_process() call on the
+             * first unrecognized code) silently discarded every byte
+             * after the first stray/reserved opcode in any real stream
+             * that contains one - proven to happen on a real, verified-
+             * correct BIOS decompressor's actual output (Round 646/647:
+             * cmd=0x42 mid-stream, in the vifCode_Null 0x40-0x47 row).
+             * Real hardware's vifCode_Null also raises an ME1 stall/
+             * interrupt condition, which this project does not model
+             * (out of scope here, consistent with prior rounds) - the
+             * one-word-skip-and-continue behavior is the load-bearing
+             * part for not losing the rest of a legitimate transfer. */
             vif->unsupported_cmds_seen++;
-            return;
+            break;
         }
     }
 }

@@ -26742,3 +26742,56 @@ overclaiming standard (the same discipline applied in Rounds 297, 528, 640-641, 
 
 **Status:** no tracked source changed this round (all instrumentation lived in the `/tmp` scratch
 tree only). Regression suite and Wii cross-build correctly skipped per the docs-only precedent.
+
+## Round 648: fixed the real VIF1 VIFcode dispatch bug found in Round 646/647 - unrecognized opcodes no longer abort the whole DMA transfer (task #536)
+
+**Finding.** Round 647 confirmed the real EE LZSS decompressor (genuine BIOS machine code at
+0x00200C80-0x00200D4C) produces byte-perfect output, and that the byte at 0x0051b6a8 (`cmd=0x42`)
+is a real, legitimately-decompressed byte, not a decode error. Cross-referencing real hardware's
+VIF opcode dispatch table (`docs/reference/pcsx2/pcsx2/Vif_Codes.cpp`'s `vifCmdHandler[2][128]`)
+shows that **every one of the 128 possible 8-bit VIFcode values, across both VIF0 and VIF1, is
+mapped to a defined handler** - anything not a named opcode (STCYCL, FLUSHE, MSCAL, etc.) falls to
+`vifCode_Null`, which is a genuine hardware-defined no-op: it conditionally raises an ER1 stall
+(only when `!ME1`, a condition this project doesn't model, consistent with prior scope decisions)
+but **always executes `return 1;`** - consuming exactly the one code word and letting the VIFcode
+parsing loop continue to the next word.
+
+This project's `vif_process()` (`source/hw/vif.c`) instead had a `default: ... return;` case that
+**aborted the entire `vif_process()` call** the moment it hit any unrecognized/reserved opcode -
+silently discarding every remaining byte in that DMA transfer. Since `cmd=0x42` (Null-class,
+0x40-0x47 row) appears mid-stream in the real, decompression-verified-correct payload at
+0x0051b690, this project's interpreter was bailing out there instead of skip-and-continuing like
+real hardware - a genuine, decisively-evidenced correctness bug independent of whether this
+particular stream turns out to be full of legitimate VIFcodes or something else (see Open
+question below).
+
+**Fix.** `source/hw/vif.c`, `vif_process()`'s VIFcode dispatch `switch (cmd)`: changed the
+`default:` case from `return;` to `break;`. Because `pos` (the word cursor) is already incremented
+past the code word before the switch runs, `break;` naturally falls through to the enclosing
+`while (pos < total_words)` loop's next iteration - exactly matching real hardware's
+`vifCode_Null` "consume 1 word, continue" semantics. A detailed comment citing `Vif_Codes.cpp` was
+added at the fix site.
+
+**Verification.** Host-native regression suite: 42/42 pass (`tests/README.md`'s canonical
+compile+run set), no change from baseline. Wii/devkitPPC cross-build: clean, zero warnings/errors
+(toolchain recovered from the persisted `outputs/build/devkitpro` cache), producing
+`pcsx2-wii-git.elf` (2,841,032 bytes) / `pcsx2-wii-git.dol` (505,024 bytes). A fresh 60M-slice
+diskless JP BIOS boot survey against the fixed scratch tree completed without regression (same
+general OSDSYS/animation-loop region as prior baselines, no new crash).
+
+**Open question - does not yet produce a picture.** The same survey's `[R642] FINAL` summary still
+reports `xgkick_calls=0 direct_calls=0 direct_truncated=0`, identical to the pre-fix baseline. So
+this fix, while a real and well-evidenced correctness improvement, did not by itself unblock any
+VIF1 DIRECT/GIF-forwarding or VU1 XGKICK activity within this window - the decompressed stream at
+0x51b680 is either never actually fed into `vif_process()` during organic boot (recall Round 644's
+correction: this buffer may be OSDSYS's own executable code, not VIF1 FIFO data), or it is fed in
+but the Null-skip alone isn't sufficient to reach a DIRECT/MSCAL opcode further down the stream.
+Task #637 (Round 649) opens to trace whether `vif_process()` is even reached with this buffer
+during organic boot, continuing the user's "let's see if we can produce picture" request.
+
+**Status:** one tracked source file changed (`source/hw/vif.c`, `vif_process()`'s VIFcode dispatch
+default case). Full mandatory workflow completed this round: host-native regression, Wii
+cross-build, forward-progress check (no regression, no picture yet), docs (this entry), commit,
+rsync, leak-check follow. No bundle this round - real correctness fix shipped, but the user's
+core "picture" goal remains unmet, so packaging is premature per the standing bundle-only-on-
+significant-progress rule.

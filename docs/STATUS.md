@@ -27653,6 +27653,64 @@ branches on `pad_data_old` state, and whether writing `PAD_STATE_STABLE`/`PAD_TY
 of `PAD_STATE_DISCONN` (or refreshing the buffer periodically) changes downstream control flow -
 task #447/#623 continuation.
 
+## Round 664 (task #447/#623 continuation): CONFIRMED - Round 663's fix is consumed by a real, repeated padGetState() poll on both ports
+
+**Context.** This round started after a sandbox reset destroyed the prior scratch driver
+(`driver_r655.c`) and all in-progress instrumentation - the tracked repo itself was unaffected (all
+real fixes live in git history/bundles). Recovered git history by cloning the `pcsx2-wii-round653`
+bundle and re-applying the outputs mirror's current working tree (which already reflected Rounds
+654-663) as a single consolidated recovery commit (`10f56b5`) - no new source content, just restoring
+continuity. Rebuilt a minimal scratch driver from `tools/round575-checkpoint/driver.c`'s clean
+`bios_load()`/`system_init()`/`system_run_interleaved()` pattern rather than trying to recreate the
+much larger lost `driver_r655.c`.
+
+**Method.** Added a generic read-watch to `ee_mem_read8()`/`ee_mem_read32()` (scratch-only) that arms
+on the padArea address the moment the Round 663 PAD_BIND handler first computes it, then logs every
+subsequent EE read inside that 128-byte (2x64-byte double-buffer) window. Ran a fresh 40,000,000-slice
+diskless boot from reset.
+
+**Result - OSDSYS reads padArea back, repeatedly, for the whole run.** Starting at instr~76.7M (well
+before the run's eventual instr~320M resting point) and continuing at roughly every ~4.9M-instruction
+interval all the way to the end of the 40M-slice budget, OSDSYS's own code reads specific offsets
+within the padArea buffer: the `frame` field of both double-buffer slots (offsets +0x00/+0x40, the real
+tie-break the Round 663 write comment already cited), the `state` byte (+0x04), the `reqState` byte
+(+0x05), and one field this project's shortcut never writes (+0x28) via a distinct function at
+`0x00217f6c`.
+
+**Disassembled the consumer.** `0x0020B8F8-0x0020B9A4` is a complete, real `padGetState(port, slot)`-
+shaped function: it picks whichever double-buffer slot has the higher `frame` count (matching
+libpad's real `padGetDmaStrOld()` tie-break, already cited in Round 663), reads that slot's `state`
+byte, and if `state == 6` (`PAD_STATE_STABLE`) calls a validation sub-function
+(`0x0020B9D8`, itself a per-port/slot table lookup) - accepting the state as-is only if that
+sub-function returns `2`, otherwise forcing the return value to `5` (`PAD_STATE_EXECCMD`, "still
+detecting"). If `state != 6`, it returns the raw state byte directly (i.e. `0`/`PAD_STATE_DISCONN`
+before Round 663's fix).
+
+**Instrumented the function's actual return value** at its `jr ra` (`0x0020B9A0`): captured 20
+consecutive real calls, alternating `a0(port)=0` and `a0(port)=1` (both PS2 controller ports, `a1(slot)=0`
+each time), spanning instr=76,736,349 through instr=118,535,392. **Every single call returned
+`v0=6` (`PAD_STATE_STABLE`)** - confirming Round 663's fix is not just written once and ignored: it is
+read back by this real `padGetState()`-equivalent on an ongoing, per-frame-ish cadence, for both
+controller ports, and the validation sub-function accepts it as genuinely stable every time (not
+falling back to the "still detecting" `EXECCMD=5` path). Before Round 663, this same function would
+have returned `0` (`PAD_STATE_DISCONN`) on every one of these same calls, since the reply was
+hardcoded regardless of the real `iop_sio2` pad model.
+
+**What this resolves and what's still open.** This closes the question Round 663 left open: the fix
+is real, repeatedly exercised, real-code-consumed - not cosmetic. It does NOT yet show that this
+changes OSDSYS's visible behavior (menu interactivity, animation state) - that requires finding what
+the *caller* of this `padGetState()`-equivalent does with a `STABLE` vs `DISCONN` result, which is
+still untraced. The offset+0x28 field this project never writes (read by `0x00217f6c`) is also still
+unexplained - flagged as an open, real detail rather than guessed at.
+
+**Why no source fix this round.** This is a confirmation/tracing round following up on Round 663's
+open question - no new gap was found to fix, and the existing fix's correctness was strengthened with
+direct evidence rather than changed. No tracked source modified; regression/Wii rebuild correctly
+skipped.
+
+**Next.** Trace the real caller of `0x0020B8F8` (`padGetState`-equivalent) to see what it does with a
+`STABLE` result - task #447/#623 continuation.
+
 ## Round 663 (task #447/#623 continuation): wire PAD_BIND reply to the real iop_sio2 pad-connected model
 
 **Trigger.** Round 662 found the PAD_BIND RPC-bind reply hardcoded `PAD_STATE_DISCONN` regardless of

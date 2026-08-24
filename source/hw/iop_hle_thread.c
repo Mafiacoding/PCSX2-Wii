@@ -96,6 +96,19 @@ void iop_hle_thread_init(void)
     g.stack_bump_next = THREAD_STACK_ARENA_TOP;
 }
 
+/* Round 659: see iop_hle_thread.h's header comment on this function for
+ * the full rationale (checkpoint.c had no block at all for this
+ * subsystem's state). `g` is entirely flat/pointer-free (fixed-size
+ * arrays only), so a raw byte-for-byte blob is a safe, correct
+ * checkpoint representation - same approach every other _get_state()
+ * accessor's caller (checkpoint.c) already relies on for its own
+ * block. */
+void *iop_hle_thread_get_checkpoint_blob(uint32_t *size_out)
+{
+    if (size_out) *size_out = (uint32_t)sizeof(g);
+    return &g;
+}
+
 static iop_tcb_t *tcb(int thid) /* thid is 1-based */
 {
     if (thid < 1 || thid > IOP_HLE_THREAD_MAX_THREADS) return NULL;

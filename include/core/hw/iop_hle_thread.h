@@ -362,6 +362,32 @@ void iop_hle_thread_tick(iop_state_t *st);
 
 const iop_hle_thread_stats_t *iop_hle_thread_get_stats(void);
 
+/* Round 659 (task #447/#623 continuation): raw checkpoint blob accessor.
+ * BACKGROUND: checkpoint.c already serializes the EE-side HLE thread
+ * scheduler (ee_hle_thread.c, tag "EETH") but has NO corresponding
+ * block for this file's own IOP-side scheduler - confirmed by direct
+ * inspection of checkpoint.c's save/load block lists, which include
+ * IDMA/IEXC/IBIO/IMOD/IINT/ITMR for other IOP subsystems but nothing
+ * for iop_hle_thread.c. This was silently dropping every IOP thread's
+ * status/priority/wait-state/register-context/scheduler-queue-position
+ * across every checkpoint save/resume cycle - confirmed empirically
+ * this round: resuming from a checkpoint taken at 780M cumulative
+ * slices reports 0 IOP threads, while a continuous (non-checkpointed)
+ * run to a comparable depth reports the real, expected 6 threads with
+ * live status/priority/pc state. Any past investigation that relied on
+ * checkpoint-chained deep-boot surveys to observe IOP thread/scheduler
+ * behavior at depth (e.g. whether the real SIO2 pad-read producer code
+ * ever gets scheduled - task #447/#623) was unknowingly observing a
+ * silently-reset, empty scheduler instead of the real continuous-run
+ * state. This accessor exposes the whole internal `g` state block (a
+ * flat, pointer-free struct - safe to serialize as a raw blob, same
+ * convention as every other _get_state()-based checkpoint block) so
+ * checkpoint.c can fix this the same way it fixes every other
+ * subsystem's block. Returns the blob pointer; *size_out receives its
+ * size in bytes (do not hardcode the size in callers - it will change
+ * if IOP_HLE_THREAD_MAX_* limits are ever tuned). */
+void *iop_hle_thread_get_checkpoint_blob(uint32_t *size_out);
+
 /* Diagnostic accessors, used by host-native tests. */
 int iop_hle_thread_get_thread_count(void);
 int iop_hle_thread_get_current_thread_id(void);

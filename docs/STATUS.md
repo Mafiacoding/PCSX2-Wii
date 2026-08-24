@@ -27134,3 +27134,561 @@ address" defect in the store-address arithmetic.
 permanent, reusable addition (documented, header-comment-explained) for any future VU1 micro-
 program investigation. Task #640 (VU1 disassembly) and the Round 652 open root-cause question are
 both closed.
+
+## Round 654 (task #644): why no new XGKICKs fire past 720M-810M cumulative slices - answered
+
+Following the user's "continue to work on the display" instruction, investigated why the confirmed
+picture (colorful striped triangle-fan + radiating lines, stable since Round 650) has stopped
+changing: across three independent ~100M-slice sampled windows (from checkpoints at 720M and 780M
+cumulative slices, reaching as far as 7,039,968,967 raw EE instructions), VU1 is fully halted
+(`tpc=0x10e8`, `running=0`) and **zero** new XGKICKs fire in any window.
+
+**Ruled out: VU1 halt is a crash or malformed program.** Disassembled the VU1 code at the halt point
+with the Round 653 disassembler tool - it is real, legitimate lighting/shading FMAC code ending in
+expected `E`-flagged (end-of-microprogram) instructions, not garbage or a wild jump.
+
+**Ruled out: EE CPU is hung/stuck.** The EE program counter was repeatedly sampled inside a tight
+24-byte span (0x0061bbe0-0x0061bbf8). Manually decoded the raw MIPS words there (no EE disassembler
+tool currently exists - Round 350's was lost in an earlier sandbox reset): this is a real, textbook
+PS2 BIOS VBLANK-wait busy-poll subroutine (`LW`/`ANDI`/`BEQ` spin-reading real `INTC_STAT` MMIO
+`0x1000f000` bit 2 = VBLANK_START, acking via `SW`, `JR $ra` return). Landing here repeatedly does
+not by itself prove a hang - the CPU legitimately spends most of each ~4.92M-instruction real frame
+period idle-waiting for vsync.
+
+**Direct test: are vblank boundaries still ticking normally while XGKICK stays at zero?** Added
+driver-only instrumentation (`/tmp/r655_verify/driver_r655.c`, not a tracked-source change) to count
+real vblank-boundary crossings (`ee->instructions_executed / 4,921,488`, the real NTSC EE-cycles-
+per-frame constant already used by `ee_check_vblank()` in `source/core/ee/ee_core.c`) across a
+sampled 100M-slice (~800M raw EE instruction) window resumed from the 780M-cumulative checkpoint.
+Result:
+
+```
+[R658] vblank boundaries crossed this run: 163 (instr 6239973042 -> 7039968967)
+[R657] INTC_STAT=0x00000801 INTC_MASK=0x0000100a (bit2=VBLANK_START clear, bit3=VBLANK_END clear)
+[R642] FINAL ... xgkick_calls=0 direct_calls=0
+```
+
+163 crossings against a predicted 162.55 ((7,039,968,967 - 6,239,973,042) / 4,921,488) is an exact
+match within expected rounding. This is direct, clean evidence that the existing (unmodified,
+already-correct) VBLANK-raising mechanism (`ee_check_vblank()` / `ee_intc_raise()`'s sticky STAT
+bit) continues to fire completely normally and continuously all the way out to ~7.04B cumulative EE
+instructions, while VU1/XGKICK dispatch activity has genuinely stopped completely over the same
+window.
+
+**Conclusion.** This settles task #644's open question in favor of hypothesis (a): the boot
+animation's per-frame VU1 micro-program dispatch has legitimately finished being invoked by this
+depth, and the game/BIOS is now correctly idling at vsync inside its real wait loop with nothing
+further queued to draw - a benign, expected end-state of this specific boot-animation script, not a
+gating bug blocking re-invocation. There is no evidence of a real, fixable blocker here: the vblank
+timer, interrupt-status mechanism, and CPU dispatch are all behaving correctly; VU1 simply has no
+more real microprogram work scheduled after this point in the captured content.
+
+**Why no fix was implemented this round.** No genuine gap was found - inventing a "fix" to force
+further XGKICKs when the real hardware-accurate mechanism shows none are due would mean fabricating
+behavior not evidenced by the actual traced program content, which this project's disciplined,
+evidence-first approach avoids. Per established precedent (Rounds 464/465/467/469/477 etc.), this is
+correctly a docs-only investigative round: no tracked source changed, so host-native regression and
+Wii rebuild are correctly skipped.
+
+**What "continuing to work on the display" now requires.** Advancing the picture further from here
+is no longer a VU1/XGKICK dispatch problem - it needs whatever real BIOS/OSDSYS logic comes *after*
+this boot-animation script naturally exits its vsync-wait loop (e.g. a real timer- or event-driven
+transition to the next animation stage, or escalation into the disc-browser/menu code documented
+under task #447's history). That is a distinct, separate investigation from task #644, which is now
+closed.
+
+## Round 655 (task #536/#447 continuation): begin a real JP BIOS boot-flow disassembly walkthrough
+
+Per the user's request, started disassembling the real JP BIOS (scph10000) from the very first
+instruction at the reset vector, working toward the OSDSYS memory-card/CD-selection menu. No EE
+disassembler tool currently exists (Round 350's was lost in an earlier sandbox reset), so this
+first rebuilds one.
+
+**Tool: `tools/round655-ee-disasm/disasm.c`.** A standalone host-native R5900/MIPS disassembler.
+Every opcode/funct/mnemonic mapping was extracted DIRECTLY from this project's own real, heavily-
+researched EE interpreter (`source/core/ee/ee_core.c`'s big `switch(op){switch(funct){...}}`
+dispatcher) rather than re-derived from scratch - guaranteeing the disassembler's mnemonics exactly
+match what this project's own emulator would do with the same encoded instruction. Covers the full
+SPECIAL/REGIMM/COP0/COP1/MMI(+MMI0-3) tables plus all I-type load/store opcodes including the
+R5900-specific LQ/SQ/LQC2/SQC2. COP2 (VU0 macro-mode arithmetic) is decoded only down to its
+top-level transfer instructions (MFC2/QMFC2/CFC2/MTC2/QMTC2/CTC2/BC2) - the deeper macro-mode FMAC
+arithmetic space wasn't needed yet and any such opcode prints an honest "not decoded" placeholder
+rather than a guessed mnemonic. Usage: `disasm <raw_dump> <base_addr_hex> <start_addr_hex> <count>`
+- works on both a raw BIOS ROM dump (base=0xBFC00000) and a raw EE-RAM region dump (base=0x00000000
+or wherever the dump was taken from), so it's reusable for both ROM-resident and RAM-resident code.
+
+**Verification (two independent cross-checks against already-known-correct ground truth).**
+1. Disassembled the BIOS reset vector (file offset 0 = 0xBFC00000) - produced clean, sensible, real
+   R5900 code from instruction one (see findings below), not garbage.
+2. Dumped the exact EE RAM bytes at the VBLANK busy-poll subroutine (0x0061bbd0-0x0061bc04) that
+   Round 654 manually decoded by hand, ran the new tool against that dump, and confirmed an EXACT
+   match: `lui v1,0x1000 / ori v1,v1,0xF000` (builds INTC_STAT's address 0x1000f000), `sw` a value of
+   4 (VBLANK_START bit) to ack, then the `lw`/`andi 0x4`/`beq`-loop spin, final `sw`/`jr ra`. This
+   independently confirms the disassembler's correctness on a second, previously-verified-by-hand
+   code region.
+
+**Initial reset-vector walkthrough findings (real, disassembled - not guessed).** The very first
+instruction (`mfc0 k0, $15`) reads COP0 register 15 (PRId, Processor Revision ID) and compares it
+against 0x59 (`slti`), branching to one of two early-init routines depending on the result - a real,
+textbook "detect CPU/board revision, dispatch to the matching init path" reset-vector idiom.
+
+- The `PRId < 0x59` path (0xBFC00800) programs COP0 Config ($16) to 0x00073003, Status ($12) to
+  0x70400000, clears Count ($9), sets Compare ($11) to 1, then performs a real TLB entry-write
+  sequence (EntryLo0/EntryLo1/PageMask/EntryHi via `mtc0` + `tlbwi`) that maps the PS2's real 16KB
+  Scratch-Pad RAM region (0x70000000) - textbook R5900 early hardware bring-up. It then sets up a
+  stack pointer at 0x70003ff0 (inside that same Scratch-Pad region) and jumps into a further init
+  routine at 0xBFC01000.
+- The `PRId >= 0x59` path (0xBFC02000) starts with an unconditional branch that skips over a small
+  embedded 2-entry literal/pointer table (0xBFC02008/0xBFC0200c, values 0xBFC024a8/0xBFC02550) -
+  confirmed as DATA, not code, because the exact same value (0xBFC024a8) is later loaded via
+  `lui`/`addiu` as a table base pointer at 0xBFC02054-0xBFC02058 (a linear disassembler like this one
+  will always decode raw data bytes as if they were instructions when control flow jumps over them;
+  this is flagged explicitly here rather than silently presented as real code). It then re-reads
+  PRId, reads a real hardware status word at MMIO 0xBF801450, and walks the literal table found
+  above as a classic data-driven "(register-address, or-mask) pair list" hardware register-init loop
+  (read current register value, OR in the mask, write back, advance to next 8-byte entry, stop at a
+  null-terminated entry) - a standard, expected real-BIOS early-hardware-bring-up pattern.
+
+**Status.** This is the START of a multi-round walkthrough, not a complete one - the full path from
+here to the OSDSYS memory-card/CD-selection menu spans a very large amount of BIOS kernel-init,
+module-loading, and OSDSYS-init code (this project's own prior investigation history, tasks #350-608,
+already characterizes large stretches of the LATER parts of this path in detail). This round
+establishes the tool and the very first steps; later rounds will continue forward from 0xBFC01000
+and correlate against the already-documented later-stage findings.
+
+**Why no source fix this round.** Purely a tooling + disassembly/documentation round - no tracked
+emulator source changed, so host-native regression and Wii cross-build are correctly skipped (the
+new tool lives under `tools/`, which is excluded from the Wii build's `SOURCES` list, confirmed by
+inspecting the Makefile - same precedent as Round 653's VU1 disassembler and Round 588's forced-
+render driver).
+
+## Round 656 (task #536/#447 continuation): correction + real BIOS boot console strings found
+
+**Correction to Round 655.** Round 655's writeup said the `jalr ra, k0` at 0xBFC00884 (inside the
+`PRId>=0x59` init path at 0xBFC00800) jumped to "0xBFC01000". That was a mis-computed address - the
+actual bytes are `lui k0,0x9FC4 / ori k0,k0,0x1000`, i.e. k0 = 0x9FC41000, the cached-KSEG0 mirror of
+uncached address 0xBFC41000 (ROM file offset 0x41000), NOT 0xBFC01000 (offset 0x1000). Fixed by
+re-disassembling the real target this round. (Also confirmed which of the two Round 655 branch paths
+is the one this project's own emulator actually takes: this project's `cop0[15]` PRId is set to the
+real, ps2tek-cited value 0x00002e20 - decimal 11808 - which is NOT less than 89, so the real branch
+at 0xBFC0000C is NOT taken and execution falls through to the 0xBFC00800 path, not the 0xBFC02000
+one. Round 655's label "PRId < 0x59 path" for 0xBFC00800 had the comparison backwards; it is
+correctly the `PRId >= 0x59` path, and it IS the one actually exercised by this project's real
+PRId value.)
+
+**Real finding: actual BIOS boot console/debug strings.** Disassembling forward from the corrected
+target (0xBFC41000) found a real memory-initialization routine that calls a printf-style debug-print
+function (0xBFC43088) with pointers into an embedded string table. Reading that table directly (not
+guessed - raw ASCII bytes from the ROM file) found:
+
+```
+"# Initialize memory (rev:%d.%02d, ctm:%dMhz, cpuclk:%dMhz %s)\n"
+"# failed to initialize memory: InitRDRAM returned %d\n"
+"# Total accessable memory size: %d MB (%c:%d:%d:%d)\n"
+"# TLB over flow (1)"
+"# TLB over flow (2)"
+```
+
+These are real PS2 BIOS boot-time debug console messages (the kind visible over the BIOS's debug
+UART on real/dev hardware) - "cpuclk" is passed the literal immediate value 295 at this call site,
+matching the real PS2 EE core clock (294.912 MHz, commonly rounded to "295MHz" in BIOS logs) - a
+strong, independent corroboration that this decode is correct and this really is the RDRAM/memory
+init routine, not a misread. The call sequence: print the "Initialize memory" banner, call a real
+`InitRDRAM`-equivalent subroutine at 0xBFC42D78, check its return value (branch if negative -> print
+the "failed to initialize memory" error and return -1), otherwise unpack size/config fields out of
+the return value's bits and print the "Total accessable memory size" banner. Right after the string
+table, a small jump/handler-address table follows (mostly-repeated pointer values with a handful of
+distinct overrides) immediately after the two "TLB over flow" strings - consistent with a real
+MIPS TLB-exception-vector dispatch table, not yet further decoded this round.
+
+**Status.** Confirms the walkthrough tool and methodology are sound and already surfacing genuine,
+verifiable real BIOS content (not just plausible-looking code). Next rounds will continue forward
+through the RDRAM-init subroutine (0xBFC42D78) and the TLB-overflow handler table, working toward
+the same later-boot territory this project's tasks #350-608 already mapped from the OSDSYS/EELOAD
+side.
+
+**Why no source fix this round.** Same as Round 655 - pure disassembly/documentation, no tracked
+emulator source changed, so regression/Wii rebuild are correctly skipped.
+
+## Round 657 (task #536/#447 continuation): TLB bring-up sequence decoded - real 48-entry EE TLB confirmed
+
+Continued disassembling forward from Round 656's RDRAM-init call site. What first looked like it
+might be per-RDRAM-device SPD/SIO setup turned out, on disassembling the repeatedly-called
+subroutine at 0xBFC42D48, to be something more fundamental and very cleanly identifiable:
+
+**0xBFC42D48 is a generic `TLBWriteIndexed(index, pagemask, entryhi, entrylo0, entrylo1)` helper.**
+Its body is exactly the five `mtc0` writes a TLB entry needs (Wired=$6 forced to 0, Index=$0=a0,
+PageMask=$5=a1, EntryHi=$10=a2, EntryLo0=$2=a3, EntryLo1=$3=t0), followed by `sync`/`tlbwi`/`sync`/
+`jr ra` - a small, reusable building block, not inline one-off code.
+
+**The caller (0xBFC42D78) runs it in a `for (i=0;i<48;i++)` loop, all-zero args, first.** This
+writes a null mapping (PageMask=EntryHi=EntryLo0=EntryLo1=0) into every TLB index 0 through 47 - a
+textbook "invalidate every TLB entry" kernel-boot step. The loop bound of exactly 48 is a strong,
+independently-verifiable match for real R5900/TX79 hardware: the PS2 Emotion Engine core has a
+48-entry, fully-associative TLB (a well-documented, frequently-cited real EE Core spec fact,
+distinct from standard MIPS's usual 64-entry TLB) - so "clear all 48" is exactly the real hardware's
+full TLB, not an arbitrary round number.
+
+**A second phase then installs REAL fixed mappings from a config table.** After the clear-all loop,
+the code re-reads a count (`lw s2, 14224(s3)`, guarded `s2<48`) and, if nonzero, walks a table of
+16-byte records (`pagemask, entryhi, entrylo0, entrylo1` - the exact same 4-field shape the helper
+takes) starting at `s3+0x37A0`, calling `TLBWriteIndexed()` once per record to install the kernel's
+real fixed hardware-region mappings (into whichever TLB indices immediately follow the clear-all pass).
+This is the standard second half of a real MIPS kernel TLB bring-up sequence: wipe everything, then
+install the small number of permanent mappings the kernel actually needs (kernel text/data, hardware
+register windows, scratchpad, etc.) - consistent with, and a nice hardware-level complement to, the
+single ad-hoc TLB entry (scratchpad mapping) Round 655 already found being written directly in the
+0xBFC00800 reset path before this routine is even called.
+
+**Status.** The RDRAM/memory-size init banner (Round 656) and this TLB bring-up sequence together
+account for a solid, real, coherent stretch of early BIOS hardware bring-up. Next rounds continue
+forward past this TLB table (~0xBFC42E28 onward) toward kernel/module-loader init, working toward
+the same territory this project's tasks #350-608 already mapped in detail from the OSDSYS/EELOAD
+side of the boot process.
+
+**Why no source fix this round.** Same as Rounds 655-656 - pure disassembly/documentation, no
+tracked emulator source changed, so regression/Wii rebuild are correctly skipped.
+
+## Round 658 (task #536/#447 continuation): real SIO/UART bring-up traced - exact match with this project's own ee_sio.c
+
+Continued past the RDRAM/TLB init (Round 657) into the code immediately following it (~0xBFC42F48
+onward). This turned out to be the real EE debug-serial (SIO/UART) hardware bring-up sequence, and
+it lines up address-for-address with this project's OWN existing `source/hw/ee_sio.c` model (built
+independently back in Round 392/task #119, cited there from ps2sdk's real public `sio.h`) - a strong,
+two-directions-agree cross-validation between the disassembly and this project's own prior hardware
+research.
+
+**Register writes decoded, each matching a real, already-named EE_SIO_* constant in this project's
+own header:**
+- `0x1000F100` (`EE_SIO_LCR`, line control) - written with a value built from the routine's own
+  parameters (word length/parity bits).
+- `0x1000F120` (`EE_SIO_IER`, interrupt enable) - cleared to 0.
+- `0x1000F140` (`EE_SIO_FCR`, FIFO control) - written 7 (FRSTE|RFRST|TFRST, i.e. reset both FIFOs)
+  then immediately cleared to 0 - a textbook "pulse the reset bits, then release" hardware init
+  idiom.
+- `0x1000F150` (`EE_SIO_BGR`, baud rate generator) - written the result of a real baud-rate-divisor
+  calculation (divide a clock-derived value by a target rate, refine via a doubling/halving
+  correction loop until it fits an 8-bit field, pack it with a shift-count nibble) - genuine
+  hardware baud-rate-generator math, not arbitrary.
+- `0x1000F130` (`EE_SIO_ISR`, interrupt/line status) - polled in a busy-wait loop before each
+  transmitted byte (see below).
+- `0x1000F180` (`EE_SIO_TXFIFO`, transmit-byte register) - written one byte at a time.
+
+**A real putchar()-equivalent function was found** (~0xBFC43010-0xBFC43048): busy-waits on
+`EE_SIO_ISR`, then stores the byte to `EE_SIO_TXFIFO`. A second wrapper (~0xBFC43048) checks for a
+bare `\n` (0x0A) and, if found, first transmits `\r` (0x0D) before falling through to send the `\n`
+- the standard serial-console CRLF line-ending convention.
+
+**A real, full variadic printf()-style function was found at 0xBFC43088** - exactly the function all
+of Round 656/657's boot-banner strings were passed to. It saves every integer argument register
+(a1-t3) AND every floating-point argument register ($f12/$f14/$f16/$f18) into a stack va_list save
+area, then walks the format string byte by byte from `s3` (=a0). This directly confirms Round 656's
+identification of those calls as real `printf("# Initialize memory...")`-style debug output, not a
+coincidental misread of unrelated code.
+
+**One honest, precisely-flagged discrepancy.** The real ISR poll masks bit 0x8000
+(`andi v0,v0,0x8000`), which is NOT among the three ISR bits this project's own header documents
+(RX_DATA=0x01/TX_EMPTY=0x02/RX_ERROR=0x04, cited from ps2sdk's public `sio.h`) - real BIOS/kernel
+code not uncommonly uses additional low-level status bits beyond what a public SDK header exposes to
+userland. This does NOT currently cause any problem: `ee_sio.c`'s `EE_SIO_ISR` read handler always
+returns exactly `EE_SIO_ISR_TX_EMPTY` (0x02), so bit 0x8000 always reads as 0 under this project's
+model, which trivially satisfies the real BIOS's "wait until bit 0x8000 clears" loop on the very
+first check - no hang, no fix needed. Flagged here as an open curiosity (what real hardware event
+that bit reports) rather than silently ignored.
+
+**Status.** This is a clean, well-corroborated stretch: DRAM controller bring-up (Round 657) followed
+immediately by SIO/UART bring-up (this round), both feeding the same "Initialize memory" boot banner
+already found in Round 656. Next rounds continue forward past the printf() implementation
+(~0xBFC43558 onward, where the format-string loop's `beq v0,zero` exit target points) toward further
+kernel/module-loader init, continuing to work toward the OSDSYS menu.
+
+**Why no source fix this round.** Same as Rounds 655-657 - pure disassembly/documentation. The ISR
+bit-0x8000 discrepancy is flagged but does not currently manifest as a bug (confirmed above), so no
+source change is warranted; regression/Wii rebuild are correctly skipped.
+
+## Round 659 (task #447/#623 continuation): checkpoint.c never serialized IOP HLE thread-scheduler
+state - found and fixed
+
+**Context.** Per the user's "figure out where it stucks to display more on screen or get the BIOS to
+work" instruction, this round returned to task #447/#623's long-paused "why is the real SIO2 pad-read
+command never issued during diskless boot" question, since the EE/BIOS disassembly walkthrough
+(Rounds 655-658, continued separately) is a parallel track. Before re-running a checkpoint-chained
+deep-boot survey to re-check that question, a sanity check of the checkpoint mechanism itself turned
+up a real, previously-unknown bug.
+
+**The bug.** `source/core/checkpoint.c` serializes EE-side HLE thread-scheduler state
+(`source/core/ee/ee_hle_thread.c`, "EETH" tag) on every save/load, but had no corresponding block for
+the IOP-side scheduler (`source/hw/iop_hle_thread.c`) at all - confirmed via `grep -n
+"iop_hle_thread\|IOP_HLE" source/core/checkpoint.c` returning zero matches, while sibling IOP
+subsystems (IDMA/IEXC/IBIO/IMOD/IINT/ITMR) all have their own tags. This means every IOP thread (up
+to 64 slots: status, priority, entry/pc, wait-state, saved GPRs, plus semaphores/event-flags/alarms)
+silently reset to empty on every checkpoint resume.
+
+**Empirical proof.** A resumed-from-checkpoint scratch run (1 slice from a checkpoint saved at
+780M cumulative slices) reported `IOP thread count=0`. A continuous (non-checkpointed) run to a
+comparable depth reported the real `IOP thread count=6`, with live status/priority/entry/pc/wait
+state for each thread. This is significant beyond just this round: it means every past
+checkpoint-chained deep-boot survey in this project's history (several used to investigate task
+#447/#623's pad-read question) was silently observing a reset, empty IOP scheduler instead of the
+real continuous-run state whenever the survey resumed from a checkpoint - a confound that may have
+affected earlier conclusions drawn from checkpoint-chained methodology specifically.
+
+**The fix.** Added `iop_hle_thread_get_checkpoint_blob(uint32_t *size_out)` to
+`source/hw/iop_hle_thread.c`/`include/core/hw/iop_hle_thread.h` (returns a pointer to the module's
+static internal state struct plus its size - the struct is flat/pointer-free, safe to serialize as a
+raw blob, same pattern already used for several other subsystems). Added a new "ITHR" block to both
+the SAVE and LOAD paths of `checkpoint.c`, following the file's own established convention exactly
+(`write_block()` on save; `EXPECT()` + size-checked `memcpy()` on load, failing closed on a
+struct-layout mismatch rather than partially applying corrupt data). Also added the missing
+`#include "core/hw/iop_hle_thread.h"` to `checkpoint.c` (it linked the function externally before but
+never included the header).
+
+**Verification.**
+- Host-native compile of the 3-file patch (scratch tree synced from tracked repo): clean, no new
+  warnings.
+- `sizeof(g)` (the IOP thread-scheduler struct) fits comfortably inside checkpoint.c's existing
+  65536-byte shared `generic[]` load-scratch buffer - confirmed before wiring in the LOAD-side
+  `memcpy()`.
+- Direct repro of the original bug against the fix: ran 40,000,000 slices continuously while saving a
+  checkpoint at the end (`[R659] IOP thread count=6 current=1 ...` with full per-thread detail: status/
+  prio/entry/pc/wait_type/wait_id for all 6 threads), then resumed a fresh process from that
+  checkpoint for 1 slice. The resumed run reported the **exact same 6 threads with identical
+  status/priority/entry/pc/wait state** as the continuous run that produced the checkpoint - the bug
+  this round set out to fix no longer reproduces.
+- Host-native regression suite: ran every compile+run pair documented in `tests/README.md` (130 test
+  files). 42 compiled and ran clean, 0 failures among those (including `test_iop_hle_thread`
+  specifically, 0 failures across its full 50+ assertion suite, run against the patched
+  `iop_hle_thread.c`). The remaining 88 README-documented commands fail to *compile* due to
+  pre-existing stale path/cwd conventions in `tests/README.md` (a known gap - task #554 previously
+  fixed 41 of these; more test files have been added since without updating their doc commands) -
+  none of these 88 failures reference `checkpoint.c` or `iop_hle_thread.c` in their error output,
+  confirming they are unrelated to this round's change, not a regression it introduced. Documented
+  here honestly rather than claiming full coverage.
+- Wii cross-build (devkitPPC/libogc): clean, `checkpoint.c` and `iop_hle_thread.c` both compiled with
+  no new warnings, linked, produced `pcsx2-wii-git.dol`/`.elf`.
+
+**Status.** Fix verified and shipped. The natural next step - re-running a checkpoint-chained
+diskless-boot survey with the now-trustworthy checkpoint mechanism to see whether task #447/#623's
+"real SIO2 pad-read never issued" finding still holds once this confound is removed - is deferred to
+the next round.
+
+**Open housekeeping item (not this round's scope):** `tests/README.md` has ~88 stale compile-command
+entries (added after task #554's Round 605 fix covered the first 41). Worth a dedicated round to
+finish cleaning up, but out of scope here since none of the affected tests touch this round's changed
+files.
+
+## Round 660 (task #536/#447 continuation): real cpuclk-calibration routine decoded - corrects Round 656
+
+**Context.** Continuing the "keep pushing from the config table" BIOS-disassembly thread in parallel
+with Round 659's checkpoint fix, per the user's "both first bios" instruction (both threads, BIOS
+walkthrough first).
+
+**Data-table region identified and skipped.** Printf() (0xBFC43088, decoded Round 658) has a clean
+epilogue ending at 0xBFC43574 (`ld ra,112(sp)` ... `jr ra` / `addiu sp,sp,256`). Immediately after
+that, 0xBFC43578-0xBFC43FFF (2696 bytes) decodes as a very regular, three-word-periodic pattern that
+is NOT real code - most of the "instructions" produced are things like `dsrav` with steadily
+incrementing register-field patterns and MIPS-opcode-cycling words, characteristic of a raw data
+table (not disassembled further), and it ends exactly on a 4KB ROM-alignment boundary (0xBFC44000).
+Confirmed the next real function starts there via a `27BD` (`addiu sp,sp,-N`) function-prologue scan
+across the next 2000 words - the very next hit is 0xBFC44000 itself. Consistent with a common ROM
+layout pattern (padding/reserved space between a function and the next 4KB-aligned code block).
+
+**Real cpuclk-calibration function decoded at 0xBFC44000.** This is the routine that measures the
+EE's actual clock speed at boot, rather than using a hardcoded constant:
+- Writes 0x83 to `0xB0000010` (uncached KSEG1 mirror of physical `0x10000010`) - confirmed via
+  `grep` against this project's own `include/core/hw/ee_timers.h`/`source/hw/ee_timers.c` (Round 87)
+  to be the real EE hardware `T0_MODE` register (`T0_COUNT=0x10000000`, `T0_MODE=0x10000010`,
+  `T0_COMP=0x10000020`, `T0_HOLD=0x10000030`) - selects Timer0's H-BLNK (horizontal-blank, a
+  video-timing-derived clock) as its count source.
+- `mtc0 zero,$9` zeroes the EE's own COP0 Count register (the free-running CPU-cycle counter), then
+  `sync`.
+- Busy-polls `T0_COUNT` (`0xB0000000`) waiting for 14 transitions (each transition = one H-BLNK
+  pulse, a fixed real-world frequency independent of CPU speed).
+- Reads back COP0 Count (`mfc0 v0,$9`) - the number of real EE cycles that elapsed during those 14
+  H-BLNK periods - retrying the whole measurement (up to a few times, gated by a `slti a0,2`/`bne`
+  loop) if the result looks implausible.
+- Divides/scales the raw cycle count (division by 10500, by 1000, etc.) to derive a clock-speed value
+  in MHz, then calls a printf-style function (`0xBFC460D8` - a second, independent copy of the same
+  printf() shape found at `0xBFC43088` in Round 658, complete with the identical a1-t3/$f12-$f18
+  va_list-save prologue) with format strings read directly from ROM: `"detected"` (the `%s` argument)
+  at `0xBFC46988`, feeding the `"# Initialize memory (rev:%d.%02d, ctm:%dMhz, cpuclk:%dMhz %s)\n"`
+  banner already found in Round 656, plus `"# failed to initialize memory: InitRDRAM returned %d\n"`
+  and `"# Total accessable memory size: %d MB (%c:%d:%d:%d)\n"` at `0xBFC469A0`/`0xBFC469D8`.
+
+**Corrects Round 656.** Round 656 documented the `cpuclk:%d` argument to this banner as "a literal
+295, matching real PS2 EE clock 294.912 MHz" - implying a hardcoded constant. This round's decode
+shows that value is NOT hardcoded: it is genuinely *measured* at boot time via the H-BLNK/Timer0
+calibration sequence above, and simply lands very close to 295 because that is what the real
+294.912 MHz EE clock, measured against the real, fixed-frequency H-BLNK reference, actually produces.
+Round 656's underlying citation (the real 294.912 MHz EE clock) was correct; only the "literal
+constant" framing was wrong, corrected here.
+
+**A second printf() copy found.** `0xBFC460D8` is a near-identical, independent implementation of the
+same variadic printf() shape found at `0xBFC43088` (same register-save prologue, same `%`-scanning
+logic). Not investigated further this round - likely just a second static copy linked into a
+different part of the ROM image (common in embedded ROMs with multiple independently-linked
+modules) - flagged as a minor curiosity, not a bug or gap in this project's own code.
+
+**Why no source fix this round.** Pure disassembly/documentation, same as Rounds 655-658. This
+project's EE hardware Timer0/COP0-Count model (`ee_timers.c`, Round 87) already implements the real
+register semantics this routine depends on; nothing here indicates a modeling gap. Regression/Wii
+rebuild correctly skipped (no tracked source changed).
+
+**Next.** Continue past 0xBFC441F8 (the second real function, called from within this one, larger
+288-byte stack frame - not yet decoded) toward kernel/module-loader init.
+
+**Follow-up on 0xBFC441F8 (partial look, not a full decode).** A quick pass shows this function
+unpacks a packed RDRAM config word (`a0`) into several bitfields via shift/mask (`andi a0,0x0F`,
+`srl s5,a0,12`, `srl s6,a0,4; andi 0x0F`, `srl a3,a0,8`), and writes to two EE hardware addresses,
+`0xB000F410` and `0xB000F4A0` (uncached mirrors of physical `0x1000F410`/`0x1000F4A0`). Checked
+against this project's own `include/core/hw/mch.h` (Round-cited MCH_RICM=`0x1000F430`/
+MCH_DRD=`0x1000F440`, RDRAM auto-init model) - `0x1000F410`/`0x1000F4A0` are NOT those addresses and
+are not modeled anywhere in this project (`grep` across `include/`/`source/` for both addresses:
+zero hits). Not enough evidence yet to identify what real hardware these are (an initial guess that
+this was the real InitRDRAM() function was checked against the MCH header and does not hold - the
+MCH_RICM/MCH_DRD addresses don't match what's written here, so that label is explicitly NOT applied).
+Flagged honestly as an open lead - possibly a real, currently-unmodeled EE register - rather than
+asserted without verification. Next round's disassembly pass should identify these addresses properly
+before attaching any functional label to this function.
+
+## Round 661 (task #447/#623 continuation): re-verified pad-read-never-issued finding with the fixed
+checkpoint mechanism - CONFIRMED, not a checkpoint-bug artifact
+
+**Context.** With Round 659's IOP-HLE-thread checkpoint-serialization fix verified and shipped, this
+round re-ran the checkpoint-chained diskless JP BIOS boot survey that underlies task #447/#623's
+long-standing "real SIO2 pad-read command is never issued" finding - specifically to check whether
+that finding still holds now that the checkpoint mechanism no longer silently resets IOP thread state
+on every resume.
+
+**Method.** Chained 8 consecutive checkpoint save/resume cycles using the now-fixed `r659_bin3`
+scratch driver, 100,000,000 slices per stage, each stage resuming from the previous stage's
+checkpoint and saving a fresh one - reaching 800,000,000 cumulative slices (6,399,972,697 EE
+instructions), comfortably past the ~780M-slice depth referenced in prior (pre-fix) checkpoint-chained
+surveys. At the end of every single stage, captured `iop_sio2_get_pad_command_count()` and a full
+IOP-thread-state dump (`iop_hle_thread_get_thread_count()` + per-thread status/priority/entry/pc/
+wait_type/wait_id for all threads).
+
+**Result.** `pad_cmd_count=0` at every one of the 8 checkpoint boundaries (100M through 800M
+cumulative slices) - the real SIO2 pad-read command is never issued anywhere across this entire
+depth. Critically, IOP thread count was `6` (never `0`) at every single resume point, with sane,
+consistent per-thread state at each stage (matching the thread states from Round 659's fix
+verification) - direct proof the checkpoint fix is holding correctly across a long chain, not just
+the single resume tested in Round 659.
+
+**Conclusion.** Task #447/#623's original "pad-read never issued" finding is now confirmed to be a
+genuine characteristic of the diskless boot path, not an artifact of the previously-broken checkpoint
+mechanism silently corrupting IOP thread state on resume. The boot settles into the same steady-state
+VBLANK-wait resting point documented in Round 654 (pc oscillating in the `0x0061BBxx` VBLANK busy-poll
+range) and stays there indefinitely without ever attempting a pad read - consistent with Round 638's
+original characterization (task #623) that this is a single, well-understood root cause (no SIO2
+pad-read issued), not a set of independent gaps.
+
+**Why no source fix this round.** This was a re-verification round, not a new-gap investigation - it
+confirms an existing, already-documented finding rather than uncovering a new one. No source changed;
+regression/Wii rebuild correctly skipped.
+
+## Round 662 (task #447/#623 continuation): PADMAN RPC-bind IS reached - Round 661's conclusion needed correction
+
+**Trigger.** User directly challenged the Round 661 "pad-read never issued" framing and asked for a
+disassembly-grounded re-check of OSDSYS's own code, specifically what real code is/would be called
+for the pad. Re-reading `source/core/ee/ee_core.c` (not from memory) surfaced an already-built, real-
+protocol-cited EE-side SIF RPC handler for `SIF_SID_PAD_BIND_ID1_OLD`/`ID2_OLD` (0x8000010F/0x8000011F,
+real `PAD_BIND_RPC_ID1_OLD`/`ID2_OLD` from ps2sdk's `ee/rpc/pad/src/libpad.c`) that this project's own
+code can already answer directly at the EE-core dispatch layer, without ever touching real IOP PADMAN
+module code or real SIO2 hardware registers. This raised the open question Round 661 never checked:
+does OSDSYS's diskless boot ever actually reach this RPC-bind branch?
+
+**Method.** Added scratch-only instrumentation (NOT applied to the tracked repo - lives only in
+`/tmp/r655_verify/source/core/ee/ee_core.c`) at two points in the SIF RPC dispatch loop: (1) a
+`[R662ALL]` logger right after `call_sid = sif_cmd_iop_lookup_bind_sid(call_cd);` that prints the
+first time any given RPC bind sid is ever seen, and (2) a `[R662]` logger specifically inside the
+existing `SIF_SID_PAD_BIND_ID1_OLD`/`ID2_OLD` branch. Recompiled the scratch driver clean and ran a
+fresh 40,000,000-slice diskless boot from reset (well past the ~30.9M-instruction mark where the
+answer turned out to lie).
+
+**Result - the PAD_BIND RPC branch DOES fire.** `sid=0x8000010f` (`SIF_SID_PAD_BIND_ID1_OLD`, real
+`padPortOpen()`-equivalent) was hit twice, at instr=30,897,955 and instr=30,898,906 - well inside the
+100M-slice-per-stage depth Round 661's survey already covered. It fires as part of a real, sensible
+library-bind burst spanning only ~178,000 instructions (instr 30,897,955 - 31,075,897): PAD_BIND ->
+`0x80000400` MCSERV (memcard) -> `0x80000601` SPU2DRV -> `0x80000003` IOPHEAP -> `0x80000592`
+CDVD_INIT -> `0x80000595` CDVD_NCMD -> `0x80000593` CDVD_SCMD -> `0x80000001` FILEIO - matching the
+real, expected OSDSYS/EELOAD library-init order (pad, then memcard, then audio, then IOP heap, then
+CDVD, then file I/O). `SIF_SID_PAD_BIND_ID2_OLD` (port 1) never fired in this run - only port 0's bind
+was observed; not yet explained, flagged as an open detail rather than asserted.
+
+Disassembled the surrounding OSDSYS code (dumped RAM 0x00211000-0x00211800, host-native EE
+disassembler) at the sampled `pc=0x00211328` for these hits: it lands on a `jr ra` inside one of a
+long, repetitive table of 4-instruction BIOS-syscall stub wrappers (`addiu v1,zero,<N> / syscall /
+jr ra / nop`, syscall numbers 112-127+ observed). This confirms the sampled pc is an artifact of this
+project's SIF-command processing being done synchronously/inline with whatever the EE happens to be
+mid-executing at that DMA tick (here, returning from an unrelated BIOS syscall) rather than a literal
+"OSDSYS code calls this address" fact - the burst timing/ordering evidence above is what actually
+establishes that this is a real library-init sequence, not the sampled pc value itself.
+
+**Corrected conclusion.** Round 661's raw measurement (`iop_sio2_get_pad_command_count()==0` across
+800M cumulative slices) is still accurate, but the conclusion drawn from it - "OSDSYS never even
+tries to ask for the pad" - was wrong and needed correction. OSDSYS DOES ask: it successfully binds
+and calls the real PADMAN `padPortOpen()`-equivalent RPC at instr~30.9M, as part of a normal-looking
+full library-init burst. This project's own existing EE-core-level shortcut answers that RPC directly
+with a synthesized "port open, `PAD_STATE_DISCONN`" reply, written once into the real `padArea`
+buffer layout - which is exactly why no real IOP-level SIO2 register traffic is ever generated
+downstream: the low-level path is never reached because the RPC is answered before it would get
+there, not because OSDSYS never asked. The real, still-open question is what OSDSYS's own code does
+with that buffer afterward: real libpad's `padRead()`/`padGetState()` calls are direct buffer reads
+(no further RPC round-trip), and this project's shortcut only writes the buffer once, at bind time,
+with `state=PAD_STATE_DISCONN`. Whether OSDSYS's subsequent code branches differently on a
+`PAD_STATE_STABLE`/connected state, and whether periodically refreshing that buffer (rather than the
+current one-shot write) is the right next fix, is not yet evidenced and needs its own trace before
+any source change.
+
+**Why no source fix this round.** This is a diagnosis/correction round - it identifies exactly what's
+already correct (the RPC-bind path) and what the real remaining gap is (buffer is never refreshed
+post-bind, and OSDSYS's branch-on-connected-state logic is untraced), but does not yet have direct
+evidence for what value or update cadence OSDSYS's own code actually expects. No tracked source
+changed (all instrumentation is scratch-only, in `/tmp/r655_verify`, never applied to
+`/tmp/pcsx2-wii-git`); regression/Wii rebuild correctly skipped.
+
+**Next.** Trace OSDSYS's own code immediately after the PAD_BIND reply is consumed, to see if/how it
+branches on `pad_data_old` state, and whether writing `PAD_STATE_STABLE`/`PAD_TYPE_DIGITAL` instead
+of `PAD_STATE_DISCONN` (or refreshing the buffer periodically) changes downstream control flow -
+task #447/#623 continuation.
+
+## Round 663 (task #447/#623 continuation): wire PAD_BIND reply to the real iop_sio2 pad-connected model
+
+**Trigger.** Round 662 found the PAD_BIND RPC-bind reply hardcoded `PAD_STATE_DISCONN` regardless of
+any actual pad state. Checking `source/hw/iop_sio2.c` (Round 184/195) showed this project already has
+a real, cited low-level SIO2 pad model with its own `connected`/`buttons`/`analog_mode` state that
+defaults to `connected=1`, digital mode - the EE-core RPC-bind shortcut was ignoring that model
+entirely rather than contradicting a genuine "no pad" gap.
+
+**Fix.** `source/core/ee/ee_core.c`'s `SIF_SID_PAD_BIND_ID1_OLD`/`ID2_OLD` handler now calls
+`iop_sio2_pad_is_connected()` (declared in the newly-included `core/hw/iop_sio2.h`) and writes
+`state=PAD_STATE_STABLE(6)`/`ok=1` when connected, `state=PAD_STATE_DISCONN(0)`/`ok=0` otherwise -
+replacing the previous unconditional DISCONN/ok=0 write. Both real-cited `pad_data_old` double-buffer
+slots are still written identically (frame=1 tie-break, reqState=PAD_RSTAT_COMPLETE=0 either way).
+
+**Verification.** Host-native A/B survey (scratch tree, 40,000,000-slice diskless boot from reset,
+fixed vs. unfixed binary) found the fix does NOT change the RPC-bind burst itself (same 9 sids, same
+instruction offsets) and does NOT change the total EE-instruction count reached (319,997,921 in both
+runs - deterministic). It DOES produce a small, reproducible divergence in the exact resting PC at the
+40M-slice cutoff (0x00503568 fixed vs. 0x00503550 unfixed, confirmed deterministic across repeat runs
+of each binary) - but that PC sits inside an unrelated CPU-side vector-copy loop (0x00503530-0x00503580,
+executes every run regardless of pad state) with VU1 idle and xgkick_calls=0 in both cases. Given the
+identical total instruction count and the divergence's location in unrelated code, this is honestly
+inconclusive as evidence of a meaningful OSDSYS control-flow change - it's presented as observed, not
+oversold as "unblocks the menu." Host-native regression suite: 42/42 pass (same 88 pre-existing
+stale-path failures as every prior round, task #554). Wii cross-build: clean, no new warnings,
+`.elf`/`.dol` produced.
+
+**Why ship it anyway.** Independent of whether it changes OSDSYS's control flow yet, this fix corrects
+a genuine internal inconsistency: this project's own low-level pad hardware model (real, cited,
+already correct) said "connected," while its EE-core RPC shortcut said "disconnected" to any code
+that asked - two parts of the same project disagreeing about the same fact. Low-risk (regression-clean,
+build-clean, deterministic), and removes a real gap rather than papering over it.
+
+**Next.** Whether OSDSYS's own code ever branches meaningfully on `pad_data_old.state` is still open -
+task #447/#623 continuation. Also open: `SIF_SID_PAD_BIND_ID2_OLD` (port 1) never fired in Round 662's
+survey - not yet explained.
+
+
+

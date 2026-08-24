@@ -123,6 +123,7 @@
 #include "core/hw/iop_cdvd.h" /* Round 347 (IOP RPC re-entry architecture): real CDVD MMIO dispatch */
 #include "core/hw/iop_hle_intr.h" /* Round 347: real registered-handler completion detection */
 #include "core/hw/iop_heap.h" /* Round 401: real SYSMEM free-list heap allocator port - see comment at the SIF_SID_IOPHEAP branch below */
+#include "core/hw/iop_sio2.h" /* Round 663: real low-level pad-connected state for PAD_BIND reply */
 
 /* Task #172 continued (regression fix): the SIF DMA-copy syscall
  * handler below needs to write into IOP memory, but ee_core.c must
@@ -4891,13 +4892,31 @@ static int ee_step(void)
                                 {
                                     uint32_t pad_area = ee_mem_read32(st, call_recvbuf + 16u);
                                     if (pad_area != 0u) {
+                                        /* Round 663 (task #447/#623): this project already has a
+                                         * real, cited low-level SIO2 pad model (source/hw/iop_sio2.c,
+                                         * Round 184/195) that defaults to connected=1, digital mode -
+                                         * but this RPC-bind reply was hardcoding PAD_STATE_DISCONN
+                                         * regardless, ignoring that real model entirely. Query the
+                                         * real low-level state instead of hardcoding disconnected -
+                                         * makes this synthesized reply consistent with the rest of
+                                         * this project's own pad emulation rather than contradicting
+                                         * it. Round 663's host-native A/B survey found this changes
+                                         * (deterministically, reproducibly) a downstream CPU-side
+                                         * resting pc by a handful of instructions at the 40M-slice
+                                         * mark, in an unrelated vector-copy loop far from OSDSYS's
+                                         * own pad-consuming code - real but modest, NOT verified to
+                                         * unblock menu interactivity; that remains open. */
                                         int slot_i;
+                                        int connected = iop_sio2_pad_is_connected();
+                                        uint8_t state = connected ? 6u /* PAD_STATE_STABLE, real libpad.h enum */
+                                                                    : 0u /* PAD_STATE_DISCONN */;
+                                        uint8_t ok = connected ? 1u : 0u;
                                         for (slot_i = 0; slot_i < 2; slot_i++) {
                                             uint32_t base = pad_area + (uint32_t)(slot_i * 64);
                                             ee_mem_write32(st, base + 0u, 1u);  /* frame (both slots equal - real tie-break picks slot 0) */
-                                            ee_mem_write8(st, base + 4u, 0u);   /* state = PAD_STATE_DISCONN (real libpad.h enum) */
+                                            ee_mem_write8(st, base + 4u, state); /* state - now reflects the real iop_sio2 pad model */
                                             ee_mem_write8(st, base + 5u, 0u);   /* reqState = PAD_RSTAT_COMPLETE */
-                                            ee_mem_write8(st, base + 6u, 0u);   /* ok = 0 (no real report yet, honest placeholder) */
+                                            ee_mem_write8(st, base + 6u, ok);   /* ok - now reflects real connected state */
                                         }
                                     }
                                 }

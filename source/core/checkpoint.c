@@ -17,6 +17,7 @@
 #include "core/hw/iop_excb.h"
 #include "core/hw/iop_hle_bios.h"
 #include "core/hw/iop_hle_modules.h"
+#include "core/hw/iop_hle_thread.h"
 #include "core/hw/iop_intc.h"
 #include "core/hw/iop_timers.h"
 #include "core/hw/iop_heap.h"
@@ -91,6 +92,16 @@ int checkpoint_save(const char *path)
     if (write_block(f, "IMOD", iop_hle_modules_get_state(), sizeof(*iop_hle_modules_get_state())) < 0) goto fail;
     if (write_block(f, "IINT", iop_intc_get_state(), sizeof(*iop_intc_get_state())) < 0) goto fail;
     if (write_block(f, "ITMR", iop_timers_get_state(), sizeof(*iop_timers_get_state())) < 0) goto fail;
+    /* Round 659: IOP HLE thread-scheduler state (source/hw/iop_hle_thread.c)
+     * - see iop_hle_thread.h's iop_hle_thread_get_checkpoint_blob() header
+     * comment for why this block was missing entirely before this round
+     * (every IOP thread was silently reset to "0 threads" on every
+     * checkpoint resume). */
+    {
+        uint32_t ithr_size = 0;
+        void *ithr_blob = iop_hle_thread_get_checkpoint_blob(&ithr_size);
+        if (write_block(f, "ITHR", ithr_blob, ithr_size) < 0) goto fail;
+    }
     if (write_block(f, "MCH0", mch_get_state(), sizeof(*mch_get_state())) < 0) goto fail;
     if (write_block(f, "SIF0", sif_get_state(), sizeof(*sif_get_state())) < 0) goto fail;
     if (write_block(f, "VIF0", vif0_get_state(), sizeof(*vif0_get_state())) < 0) goto fail;
@@ -206,6 +217,13 @@ int checkpoint_load(const char *path, const bios_image_t *ee_bios,
     EXPECT("IMOD", generic, sizeof(generic), &size); memcpy(iop_hle_modules_get_state(), generic, size);
     EXPECT("IINT", generic, sizeof(generic), &size); memcpy(iop_intc_get_state(), generic, size);
     EXPECT("ITMR", generic, sizeof(generic), &size); memcpy(iop_timers_get_state(), generic, size);
+    {
+        uint32_t ithr_cap = 0;
+        void *ithr_dest = iop_hle_thread_get_checkpoint_blob(&ithr_cap);
+        EXPECT("ITHR", generic, sizeof(generic), &size);
+        if (size != ithr_cap) goto fail_close; /* struct-layout mismatch - fail safely, per this file's own documented contract */
+        memcpy(ithr_dest, generic, size);
+    }
     EXPECT("MCH0", generic, sizeof(generic), &size); memcpy(mch_get_state(), generic, size);
     EXPECT("SIF0", generic, sizeof(generic), &size); memcpy(sif_get_state(), generic, size);
     EXPECT("VIF0", generic, sizeof(generic), &size); memcpy(vif0_get_state(), generic, size);

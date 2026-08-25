@@ -28134,3 +28134,47 @@ hardware. This narrows, rather than closes, task #536/#447's remaining open thre
 
 No tracked-source change this round (pure investigation/measurement) - regression suite and Wii
 rebuild correctly skipped.
+
+## Round 671 (task #536/#447 continuation): confirmed OSDSYS's registered VBLANK-END handler DOES execute periodically, but never wakes any of the three parked worker threads - narrows the remaining gap to one specific handler body
+
+Direct continuation of Round 670's negative result. Built a thread-state survey driver using the
+existing `ee_hle_thread_get_*()` accessors (Round 613) to dump every EE thread's status/priority/
+wait-type/saved-pc/wakeup-count at each sample point across the same ~760M-instruction diskless-boot
+window, with CIRCLE held throughout.
+
+**Result: threads 6/7/8 are OSDSYS's own real worker threads, permanently parked.** All three
+(entries `0x00204308`/`0x00203D78`/`0x00214A70` - matching Round 596's disassembly-identified real
+disc-browser-dispatcher thread and siblings) sit in `WAIT`/`SLEEP` status with identical
+`saved_pc=0x00210E68` (inside the generic `SleepThread` syscall trampoline, 8 bytes before the
+`WakeupThread` stub Round 595 decoded) and **`wakeup_count=0` at every single sample, unchanged, for
+the entire 760M-instruction window** - CIRCLE held or not. Only thread 3 (the animation-loop thread,
+entry `0x00500000`, priority 5) ever runs; threads 1/2 sit `READY` but are correctly never scheduled
+(their priorities, 30/64, are numerically worse than thread 3's 5 - Round 597's preemption logic is
+behaving correctly here, not buggy).
+
+**Added scratch PC-hit instrumentation (not part of tracked source) to answer the obvious follow-up:
+does the interrupt path even fire at all post-Round-629's fixes?** Counted visits to the real EE
+interrupt vector (`0x80000200`), to OSDSYS's own registered VBLANK-END handler (`0x00203BE0`, Round
+468's finding), and to the generic Sleep/WakeupThread trampoline region. Result across the run:
+```
+                          post-warmup   +160M instr    +320M instr    +480M instr
+intc_vector (0x80000200)      451           555            619            687
+vblank_handler (0x203BE0)      42            75            107            140
+wakeupthread_stub region      126           225            321            420
+```
+Both the interrupt vector AND OSDSYS's own registered VBLANK-END handler run repeatedly and
+continuously throughout the entire window (140 handler invocations over ~480M instructions is
+roughly consistent with the real ~4.9M-instruction VBLANK period) - the interrupt-dispatch mechanism
+Rounds 611-629 spent so much effort fixing is confirmed alive and firing correctly post-Round-629.
+
+**Conclusion.** The remaining gap is now pinned to one specific, small piece of code: whatever
+`0x00203BE0`'s handler body actually does when it runs. It executes 140+ times but never once
+results in a `WakeupThread` call reaching any of threads 6/7/8 (their wakeup_count never leaves 0).
+Either the handler's real logic only wakes them under some precondition this diskless-boot state
+never satisfies, or it targets a different thread ID than the ones we're watching, or it does
+something else entirely unrelated to waking worker threads. This is now a concrete, disassembly-
+ready next step (Round 655's EE/R5900 disassembler tool is already built and available) rather than
+an open-ended search - a direct, significant narrowing of task #536/#447's remaining blocker.
+
+No tracked-source change this round - the PC-hit counters were added to a scratch copy of ee_core.c
+under `/tmp/r671/srctree/`, not the tracked file. Regression suite and Wii rebuild correctly skipped.

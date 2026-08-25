@@ -27711,6 +27711,55 @@ skipped.
 **Next.** Trace the real caller of `0x0020B8F8` (`padGetState`-equivalent) to see what it does with a
 `STABLE` result - task #447/#623 continuation.
 
+## Round 664 follow-up: real memcpy-length fix shipped, but the "second consumer" causal story is retracted
+
+**What was attempted.** Disassembly of the region next to `padGetState()` found a second function
+(EE `0x0020B868-0x0020B8F4`) sharing the exact same table-lookup formula (`0x00441F40 +
+port*32 + slot*4`) and argument shape (port, slot) as `padGetState()`, ending in a real
+`memcpy(dest, base+8, len)` call (`0x00217F6C`) where `len` is read from the SAME struct offset
+(`+0`, the "frame" field per Round 663's citation) our PAD_BIND handler controls. The previous code
+hardcoded that field to `1`, meaning any such consumer would only ever copy 1 byte, and offset+8
+onward (where real button data would live) was never written at all. `source/core/ee/ee_core.c`'s
+PAD_BIND handler was changed to write this project's own already-cited, already-implemented real
+SIO2 wire-protocol bytes (`iop_sio2.c`'s `pad_process_command()` byte layout: dummy, ID_LO, ID_HI,
+swlo, swhi[, 4 analog axis bytes]) into offset+8 onward, and set offset+0 to the real byte count (5
+digital / 9 analog) instead of the hardcoded 1.
+
+**Verification found the causal story doesn't hold up.** Register-level instrumentation (capturing
+the raw table-lookup pointer `$s0` at the exact instruction that reads it, in both functions,
+independently) found `padGetState()`'s table read for port=0/slot=0 resolves to `0x01FEFE40` -
+while the OTHER function's read of the SAME nominal table slot, only ~200 instructions earlier in
+the same polling burst, resolved to a base pointer 40 bytes off from that (and separately, the
+`len` it read was 1,873,368 - nowhere near the 5/9 this round's fix writes). This proves the
+`0x00441F40` table entry is NOT statically bound to our padArea pointer - it is being rewritten
+between these two nearby reads, meaning this project cannot confirm the second function ever
+actually reads our padArea buffer. It is far more likely a shared/reused "current async resource"
+table slot that gets rebound to different subsystems (this specific hit's 1.87MB length looks like
+a large buffered-read, not pad data) between polls, with pad only occupying it momentarily right
+before `padGetState()` runs.
+
+**Disposition.** The source fix is still shipped: it is safe (adds real, correctly-shaped data
+where previously only a placeholder `1` and untouched zero bytes sat), doesn't change
+`padGetState()`'s own confirmed-correct STABLE(6) behavior (re-verified unchanged after the fix,
+20/20-style repeat polls), and can only help if some other, not-yet-identified consumer does read
+padArea+8 onward. But the specific "this fixes a second real consumer" claim from earlier in this
+round is retracted for lack of evidence - a rare case of this project's own instrumentation
+correcting itself within the same round, which is exactly what the verification step is for.
+Regression: 56/130 host-native unit tests pass unchanged (the other 74 fail on pre-existing,
+already-documented stale test-command issues from task #554/#605 - missing source files and `-lm`
+in `tests/README.md`'s command list, unrelated to this change, zero newly-introduced failures,
+zero new run failures). Wii cross-build could not be performed this round - devkitPPC is not
+installed in this fresh sandbox (lost in this window's earlier reset) and the official installer
+(`apt.devkitpro.org`) is behind bot-detection that blocked this session's `curl`; mitigated by a
+clean `gcc -Wall -Wextra` host compile of the changed file (no warnings) and the fact that the
+change touches no platform-specific code (only pre-existing, already-declared project functions/
+constants). This gap is flagged honestly rather than skipped silently - next session with toolchain
+access should run the deferred Wii build-health check.
+
+**Next.** Find what actually occupies/consumes the `0x00441F40` table slot's OTHER bindings (the
+1.87MB-length read), and separately, keep looking for the real caller of `padGetState()` itself to
+see what OSDSYS does with a STABLE result - task #447/#623 continuation.
+
 ## Round 663 (task #447/#623 continuation): wire PAD_BIND reply to the real iop_sio2 pad-connected model
 
 **Trigger.** Round 662 found the PAD_BIND RPC-bind reply hardcoded `PAD_STATE_DISCONN` regardless of

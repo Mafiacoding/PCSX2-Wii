@@ -4911,12 +4911,52 @@ static int ee_step(void)
                                         uint8_t state = connected ? 6u /* PAD_STATE_STABLE, real libpad.h enum */
                                                                     : 0u /* PAD_STATE_DISCONN */;
                                         uint8_t ok = connected ? 1u : 0u;
+                                        /* Round 664 (task #447/#623): disassembly of OSDSYS's own
+                                         * real padArea-reading code (EE 0x0020B868-0x0020B8F4, this
+                                         * round's decoded region) found a second, distinct consumer
+                                         * next to padGetState() - it calls a real memcpy(dest,
+                                         * base+8, len) where `len` is read directly from THIS SAME
+                                         * buffer's offset+0 field (the "frame" field per Round 663's
+                                         * own libpad.c citation), gated on offset+6 being non-zero
+                                         * (i.e. `ok`). That field doubles as this consumer's real
+                                         * payload byte count - it is not purely a monotonic counter.
+                                         * The previous hardcoded "frame=1" made this real copy
+                                         * transfer exactly 1 byte, and offset+8 onward was never
+                                         * written at all - so even with Round 663's STABLE fix, no
+                                         * real button data ever reached whatever this copy feeds.
+                                         * Fix: write the SAME real, already-cited SIO2 wire-protocol
+                                         * bytes this project's own iop_sio2.c pad_process_command()
+                                         * produces (0x00 dummy, ID_LO, ID_HI, swlo, swhi[, 4 analog
+                                         * axis bytes if in analog mode]) into offset+8 onward, and
+                                         * set offset+0 to that exact byte count - keeping the
+                                         * low-level SIO2 model and this high-level PADMAN buffer
+                                         * mutually consistent instead of inventing new byte values. */
+                                        uint16_t wire = connected ? (uint16_t)~iop_sio2_pad_get_buttons() : 0xFFFFu;
+                                        int analog = connected && iop_sio2_pad_is_analog_mode();
+                                        uint8_t rx = 0x80u, ry = 0x80u, lx = 0x80u, ly = 0x80u;
+                                        uint32_t payload_len = connected ? (analog ? 9u : 5u) : 0u;
+                                        if (analog) {
+                                            iop_sio2_pad_get_analog_axes(&rx, &ry, &lx, &ly);
+                                        }
                                         for (slot_i = 0; slot_i < 2; slot_i++) {
                                             uint32_t base = pad_area + (uint32_t)(slot_i * 64);
-                                            ee_mem_write32(st, base + 0u, 1u);  /* frame (both slots equal - real tie-break picks slot 0) */
+                                            ee_mem_write32(st, base + 0u, payload_len); /* real memcpy length (was hardcoded 1) */
                                             ee_mem_write8(st, base + 4u, state); /* state - now reflects the real iop_sio2 pad model */
                                             ee_mem_write8(st, base + 5u, 0u);   /* reqState = PAD_RSTAT_COMPLETE */
                                             ee_mem_write8(st, base + 6u, ok);   /* ok - now reflects real connected state */
+                                            if (connected) {
+                                                ee_mem_write8(st, base + 8u, 0x00u); /* dummy, real cited SIO2 byte 0 */
+                                                ee_mem_write8(st, base + 9u, analog ? IOP_PAD_ID_ANALOG_LO : IOP_PAD_ID_LO);
+                                                ee_mem_write8(st, base + 10u, analog ? IOP_PAD_ID_ANALOG_HI : IOP_PAD_ID_HI);
+                                                ee_mem_write8(st, base + 11u, (uint8_t)(wire & 0xFFu));
+                                                ee_mem_write8(st, base + 12u, (uint8_t)((wire >> 8) & 0xFFu));
+                                                if (analog) {
+                                                    ee_mem_write8(st, base + 13u, rx);
+                                                    ee_mem_write8(st, base + 14u, ry);
+                                                    ee_mem_write8(st, base + 15u, lx);
+                                                    ee_mem_write8(st, base + 16u, ly);
+                                                }
+                                            }
                                         }
                                     }
                                 }

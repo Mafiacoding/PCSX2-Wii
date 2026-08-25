@@ -29115,3 +29115,49 @@ its own module's code rather than parking, that would be the strongest evidence 
 strengthening the case that this project's own model (create -> start -> immediate permanent sleep)
 under-represents its real role, independent of whether it turns out to be the navigation-dispatch
 answer specifically.
+
+## Round 689: attempted to catch thread 5's VBLANK-wait loop exit live - blocked by a real-time-advancement tooling limitation, not a new finding; documented and closed cleanly
+
+Direct continuation of Round 688's own suggested next step (single-step or breakpoint past the
+VBLANK-wait return to see what thread 5 does next).
+
+**Method attempted.** Set a temporary breakpoint at `0x007c4b78` (the loop's only exit path -
+reached exclusively when `INTC_STAT` bit 2, VBLANK_START, is finally observed set) and called
+`pcsx2_continue`, expecting a real VBLANK (~60Hz on NTSC) to satisfy the wait within milliseconds
+of real time.
+
+**Result: the breakpoint never fired, and cycle-count deltas revealed why.** Across four
+continue/observe cycles - including one with a genuine 5-second host-side `sleep` inserted between
+`pcsx2_continue` and the next `pcsx2_status` check, specifically to rule out the query-triggers-pause
+artifact Round 684 diagnosed - the EE cycle counter advanced by only single-digit-to-low-thousands
+amounts (8, 6, ~145,752 cycles across the four samples) rather than the tens-of-millions of cycles
+a real 5-second wall-clock window at ~294MHz should produce. The PC repeatedly snapped back to
+the exact same instructions (`0x007c4b74`, `0x007c4b60`) rather than advancing into new territory.
+
+**Classification: this is the same tooling limitation family Round 684 first diagnosed (memory
+watchpoints reporting 0 hits despite confirmed writes), now manifesting for real-time advancement
+under `pcsx2_continue` specifically when the emulator's own GUI window is not the active/rendering
+foreground - not a new fact about thread 5, OSDSYS, or this project's own emulator.** The live
+PCSX2 session in this sandbox appears to only genuinely advance EE cycles in small bursts tied to
+each MCP tool call's own round-trip, not in real wall-clock time between calls - meaning "wait for
+the next real VBLANK" cannot be reliably observed through this specific control channel without a
+different mechanism (e.g. driving cycle-count-bounded single-stepping directly, or determining why
+the emulator's internal clock isn't advancing between calls - possibly requiring the GUI window to
+be focused/visible, which this session has no way to verify or force).
+
+**No new evidence for or against thread 5's post-VBLANK-wait behavior was obtained this round.**
+Round 688's open question (does thread 5 loop back into more of its own module, or eventually
+reach a real `SleepThread`) remains unanswered. Breakpoint cleared; live session left paused at
+`pc=0x007c4b74` (mid-loop), unchanged in substance from Round 688's resting state.
+
+**Classification.** No tracked-source change - pure live-tooling investigation, negative/inconclusive
+result. Regression suite and Wii rebuild correctly skipped (docs-only round).
+
+**Disposition.** Recommends a methodology change for whoever picks up this specific thread-5
+post-VBLANK-wait question next: either (a) use `pcsx2_step`/`pcsx2_step_over` to single-step through
+the loop a bounded number of times rather than relying on `pcsx2_continue` + real-time wait, since
+per-instruction stepping is not subject to this same real-time-advancement gap, or (b) fall back to
+this project's own static-disassembly-based tracing (matching the successful methodology of Round
+686) starting from `0x007c4b84` (the loop's real return address) forward, to see what real code the
+function at `0x007c4b50`'s caller (`0x007b6440`'s `jr ra`, further up the chain) does next, without
+needing the live session to actually complete a real VBLANK wait at all.

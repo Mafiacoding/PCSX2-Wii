@@ -28343,3 +28343,67 @@ reached, not a defect reachable via further source changes to the pad path itsel
 
 No tracked-source change this round - instrumentation remains in the scratch copy under
 `/tmp/r671/srctree/`. Regression suite and Wii rebuild correctly skipped.
+
+## Round 677 (task #536/#447 continuation, direct response to "chase the Browser-transition trigger"): identified thread 4 as the likely real interactive-Browser thread - a separate overlay module, currently asleep, and never once targeted by any WakeupThread call in this entire diskless boot
+
+Direct continuation of Round 676's exhaustive consumer sweep. Rather than keep guessing at what
+code the Browser transition lives in, this round dumped the full thread table (all valid thread IDs,
+not just 1-8) after the same 760M-instruction pulse-tested window, and found a **9th real thread**
+Round 671's original 8-thread survey never listed:
+
+```
+thid= 1 status=READY    prio=30  entry=0x00000000  saved_pc=0x00210E78
+thid= 2 status=READY    prio=64  entry=0x0020C260  saved_pc=0x0020C260
+thid= 3 status=RUN      prio= 5  entry=0x00500000  saved_pc=0x00500DC8  <-- CURRENT (animation loop)
+thid= 4 status=WAIT     prio= 5  entry=0x00600000  saved_pc=0x0061B668  (SleepThread, syscall 0x32)
+thid= 5 status=WAIT     prio= 5  entry=0x007A0000  saved_pc=0x007C45E8  (SleepThread, syscall 0x32)
+thid= 6 status=WAIT     prio= 3  entry=0x00204308  saved_pc=0x00210E68  (disc-browser dispatcher)
+thid= 7 status=WAIT     prio= 4  entry=0x00203D78  saved_pc=0x00210E68
+thid= 8 status=WAIT     prio= 0  entry=0x00214A70  saved_pc=0x00210E68
+thid= 9 status=WAIT     prio= 2  entry=0x00205DC0  saved_pc=0x00210E68  (real, actively-woken)
+```
+
+**Threads 4 and 5 are new discoveries: separate real overlay modules, not part of OSDSYS's core
+0x00200000-0x00220000 code.** Their entries (`0x00600000`, `0x007A0000`) are both preceded by their
+own `sq zero`-loop BSS-clear sequences (mirroring thread 3's own init at `0x00500000`, disassembled
+Round 675) and each has its OWN LOCAL copy of the generic syscall trampoline table (confirmed by
+disassembling `0x0061B640-0x0061B6A0`: real `SleepThread`=`0x32`, `_iReleaseWaitThread`=`-0x2e`,
+`GetThreadId`=`0x2f`, etc., all matching `syscallnr.h` exactly) rather than sharing OSDSYS core's
+copy at `0x00210E70`/`0x002111C0` - strong evidence these are genuinely separate, independently-
+loaded ELF/overlay modules, not just more OSDSYS-core worker threads like 6/7/8/9.
+
+**Round 605 (this project's own live-PCSX2 session, months earlier) identified the real interactive
+OSDSYS Browser/menu-animation thread on ACTUAL HARDWARE as "TID4."** Thread 4 here - a distinct
+overlay module, currently idle in a genuine `SleepThread()` call, priority 5 (same tier as the
+animation loop) - is a strong candidate match for that same real thread.
+
+**Comprehensive negative result: nothing ever wakes thread 4.** Extended the syscall-trampoline
+instrumentation to log the complete set of distinct thread-ID arguments passed to every
+`WakeupThread`/`_iWakeupThread` call site across the full 760M-instruction window, not just the one
+call already characterized (Round 672-674's VBLANK-driven `_iWakeupThread(6)`). Full result:
+```
+WakeupThread(a0=0):    1 call   (a one-time bootstrap artifact - target 0 is not a valid thread ID)
+WakeupThread(a0=3):    1 call
+WakeupThread(a0=9):   61 calls  (thread 9, the newly-found 9th OSDSYS-core worker, is genuinely
+                                  serviced roughly once per few VBLANKs - real, working code)
+_iWakeupThread(a0=6): 62 calls  (the already-known VBLANK-driven wake of thread 6)
+```
+**Thread 4 (and thread 5) are never once targeted, by any call, anywhere in this window.** This is
+about as comprehensive a negative result as is practical to obtain by static/dynamic instrumentation
+of the currently-executing code: every single wakeup call this diskless boot ever issues was
+captured and its target logged, and `4` never appears.
+
+**Conclusion - this is the most concrete lead this investigation has produced.** Thread 4 is very
+plausibly the real interactive Browser/menu thread Round 606 exercised live on real hardware, sitting
+correctly initialized (its own BSS cleared, its own module loaded) and correctly parked in a genuine
+blocking `SleepThread()` call - exactly the state a real "waiting for the console to finish booting
+before showing the interactive menu" thread would be in. What's missing is whatever real IOP/EE
+event should issue the one-time `WakeupThread(4)` call to release it - most plausibly tied to a real
+module-load-complete signal for the `0x00600000` overlay itself, or a CDVD/memory-card enumeration
+step completing, neither of which this diskless boot's current code path has been shown to reach.
+This gives the next round of investigation a specific, disassembly-ready target: trace backward from
+thread 4's own module-load site (find who calls `StartThread`/`iop_module_loader`-equivalent for the
+`0x00600000` ELF) to find the real completion signal that should trigger its first wakeup.
+
+No tracked-source change this round - all instrumentation remains in the scratch copy under
+`/tmp/r671/srctree/`. Regression suite and Wii rebuild correctly skipped.

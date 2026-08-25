@@ -28663,3 +28663,93 @@ deferred pending live access. Recommend the user's next choice: (a) fresh live-P
 resolve this via real single-stepping, since static tooling has now been fully exhausted, or (b)
 pause this specific investigative thread here, given ~90 rounds (594-681) of both live and static
 evidence converging on the same wall.
+
+## Round 682: LIVE PCSX2 BREAKTHROUGH - found the real Browser per-panel dispatch table and the real caller of the "+0x450" writer functions, correcting a 90-round addressing error (task #447/#536)
+
+User granted live control of a running `pcsx2-qt.exe` instance (JP BIOS, DebugServer connected,
+paused=false, already sitting on the real OSDSYS "Browser System Settings" sub-panel). Continuing
+directly from Round 681's "first jalr" investigation, now with the live access Round 679 had
+offered as the alternative to static analysis once static analysis was exhausted.
+
+**Environment note (not a project bug):** keyboard-to-pad input initially did nothing at all -
+Circle/Cross presses had zero effect on screen or on watchpoints, despite Controller Settings
+confirming the correct real bindings (Circle=Keyboard L, Cross=Keyboard K, matching Round 606).
+Root cause: Global Settings > "Enable SDL Input Source" was unchecked in this PCSX2 instance, so
+no input source - including the keyboard-emulated-pad bindings - could reach the emulated
+controller at all. Enabling it fixed input immediately. Purely a live-session environment detail,
+noted here in case a future round reconnects to the same instance.
+
+**The real breakthrough.** With input working, set write watchpoints on `0x001C0450`/`0x001C0444`
+and pressed Circle. The emulator paused (via a UI action, not the watchpoint - watchpoint hits
+stayed at 0, a live-tooling quirk) at `pc=0x00201100`, one instruction before a `jr ra` whose
+delay slot is `sw a0, 0x450(v1)`. Full disassembly of the surrounding code revealed:
+
+```
+0x002010f0: lui  v0, 0x0028
+0x002010f4: li   a0, 0x6
+0x002010f8: lw   v1, 0x7CD0(v0)     ; v1 = RAM[0x00287CD0] = browser base ptr (0x001C0000)
+0x002010fc: sw   zero, 0x444(v1)    ; +0x444 = 0
+0x00201100: jr   ra
+0x00201104: sw   a0, 0x450(v1)      ; (delay slot) +0x450 = 6
+```
+
+**This is the exact function Round 594 named "0x00201104" - except the real, jal-able entry point
+is `0x002010F0`, sixteen bytes EARLIER than the store instruction whose address got used as the
+function's name/identity throughout Rounds 594-681.** The backtrace confirmed the live caller:
+
+```
+0x0020141c: jal ->0x002010F0    ; inside a handler function starting at 0x00201408
+```
+
+**Rounds 679-681's exhaustive direct-`jal` and indirect-`jalr` static sweeps searched for calls
+to `0x00201104`/`0x00201118`/`0x00205118` - the store-instruction addresses - and correctly found
+zero, because real code never calls those exact addresses. It calls their function's real entry
+points (`0x002010F0`, `0x00201108`, and presumably an analogous offset for `0x00205118`), which
+sit earlier in the same tiny leaf functions. This single addressing mistake, made when these
+functions were first named in Round 594, is why ~90 rounds of both static analysis and earlier
+live sessions never found a caller: the search was aimed at the wrong instruction the whole time.**
+
+**The real dispatch mechanism (previously undocumented in full).** Backtrace frame #2 pointed to
+`0x00203d78`, a genuine, large, linear switch-style dispatcher disassembled in full this round: it
+repeatedly reloads `+0x444` (`RAM[0x001C0444]`, the real Browser panel/device index) and, for each
+value 1 through at least 17 (skipping 16), calls a distinct handler function:
+
+| `+0x444` | handler | | `+0x444` | handler |
+|---|---|---|---|---|
+| 1 | `0x00200FB8` | | 8 | `0x00201348` |
+| 2 | `0x00201068` | | 9 | `0x002013B0` |
+| 3 | `0x00201120` | | 10 | `0x00201408` (calls `0x002010F0`, sets `+0x450=6`) |
+| 4 | `0x00201180` | | 11 | `0x00201460` |
+| 5 | `0x002011D0` | | 12 | `0x002014B0` |
+| 6 | `0x00201228` | | 13 | `0x00201508` |
+| 7 | `0x00201290` | | 14 | `0x002015D0` |
+| | | | 15 | `0x00201568` |
+| | | | 17 | `0x00203398` |
+
+This is a real, substantial OSDSYS Browser-panel dispatch table - each `+0x444` value routes
+Circle/Cross activity on a specific panel to its own handler, several of which (at minimum handler
+10) write a new `+0x450` state and reset `+0x444` back to 0. This directly extends and refines
+Round 269's "16-slot device table" finding with the actual real dispatch logic driving it.
+
+**Live proof of the full chain.** Read `RAM[0x1C0440..0x1C0460)` immediately after the Circle
+press processed: `+0x444 = 0x00000000`, `+0x450 = 0x00000006` - exactly matching the disassembled
+behavior of handler-chain `0x00203d78 → 0x00201408 → 0x002010F0`. The real live system just
+executed, end-to-end and observed, precisely the mechanism this project has been trying to find
+since Round 594.
+
+**Implications for this project's own emulator (not yet acted on this round).** This round's
+findings are entirely about the REAL BIOS's addressing/control-flow, captured via live PCSX2 - not
+a change to this project's own `source/` tree. The natural next step, deferred to a future round:
+check whether this project's OWN diskless-boot trace ever reaches `pc=0x00203D78` (the real
+dispatcher) at all, and if so, whether `+0x444` is ever nonzero when it gets there. Given Rounds
+594-681 already established this project's own boot never progresses past a much earlier resting
+point, the leading hypothesis remains that this project's control flow simply never reaches this
+dispatcher in the first place - this round supplies the exact real target address and dispatch
+logic needed to check that directly and, if reached-but-inert, to find the real condition that
+should populate `+0x444`.
+
+**Classification.** No tracked-source change this round - pure live-PCSX2 research. Regression
+suite and Wii rebuild correctly skipped (docs-only round). This corrects and supersedes the
+addressing convention used throughout Rounds 594-681's documentation (`0x00201104`/`0x00201118`
+were store-instruction addresses, not function entry points); future references to these writer
+functions should use the corrected entry addresses `0x002010F0`/`0x00201108`.

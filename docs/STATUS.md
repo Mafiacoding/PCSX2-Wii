@@ -28021,3 +28021,66 @@ by the same logic, the `dma_channel_receive_quadwords()` DMA-copy path) to be co
 
 **Workflow note.** Regression suite and Wii rebuild correctly skipped - purely investigative,
 scratch-only instrumentation (`/tmp/r667_verify/`), no tracked source changed this round.
+
+## Round 669 (task #447/#623 continuation, at user's request "fix the pad issue"): fixed pad-mailbox starvation - periodic pad_area refresh every real VBLANK
+
+**Root cause (per Round 638's finding).** OSDSYS's two real pad-mailbox consumer threads (thread
+7/RAM[0x1C0444], thread 9/RAM[0x0028AA10]) are correctly implemented and correctly wired to the
+`pad_area` buffer bound via `PAD_BIND` (Rounds 663/664/666), but that buffer was only ever written
+ONCE, at bind time. Real IOP-side PADMAN continuously refreshes `pad_area` every field via its own
+per-VBLANK DMA; this project's simplified pad model (Round 362: no executable IOP PADMAN, real Wii
+GameCube input fed directly into `iop_sio2.c` instead) never re-published that live state back into
+the bound EE-side buffer after the initial bind. OSDSYS's consumers were therefore reading frozen,
+stale button bytes forever - explaining why pad input never visibly changed OSDSYS's menu/UI state
+despite `main.c`'s real per-VSync loop already reading the physical Wii pad correctly.
+
+**Fix.** In `source/core/ee/ee_core.c`:
+- Factored the existing PAD_BIND write logic (unchanged byte-for-byte; see Rounds 663/664/666's own
+  citation trail for the real SIO2 wire-protocol layout) into a shared `ee_pad_area_write_slots()`
+  helper.
+- Added `g_ee_pad_area_bound[2]`, recording each port's bound `pad_area` address (from the real
+  `padOpenArgs.port` field at PAD_BIND request-buffer offset +4) the first time PAD_BIND completes
+  for that port.
+- Added `ee_pad_area_refresh_all()`, called from the already-real `ee_check_vblank()` at every
+  `VBLANK_START` (the exact real per-field cadence IOP-side PADMAN would have used) - re-issuing the
+  live `iop_sio2.c` pad state into every bound port's `pad_area` buffer, with no protocol changes.
+
+`git diff --stat`: `source/core/ee/ee_core.c | 198 +++++++++++++++++++++++++----------------------`,
+1 file changed, 107 insertions(+), 91 deletions(-).
+
+**Verification (byte-exact, host-native).** Purpose-built driver (`r669_verify_driver.c`): booted
+diskless to real `PAD_BIND` completion (~35M slices), snapshotted `pad_area`'s live wire-protocol
+button bytes, pressed CROSS via `iop_sio2_pad_press()` (the exact call `main.c`'s real Wii-target
+VSync loop makes) with explicitly NO new RPC/PAD_BIND call, ran several more real VBLANK periods,
+re-read the same bytes:
+
+```
+[R669V] table[port0] (pad_area candidate) = 0x01FEFE40
+[R669V] BEFORE press: wire_lo=0xFF wire_hi=0xFF state=6
+[R669V] pressed CROSS via iop_sio2_pad_press() (live iop_sio2 state only, no RPC)
+[R669V] running 6000000 more slices (several real VBLANK periods) with CROSS held
+[R669V] AFTER press+refresh: wire_lo=0xFF wire_hi=0xBF state=6
+[R669V] RESULT: pad_area button bytes CHANGED after live press (no new PAD_BIND) -> periodic refresh is WORKING
+```
+
+`wire_hi` changed `0xFF -> 0xBF` (CROSS bit cleared under inverted wire polarity), `state` correctly
+stayed `6` (STABLE) throughout - exactly the expected result with zero protocol regressions.
+
+**Regression suite.** Ran the project's 95 documented `tests/README.md` compile+run pairs both with
+and without this round's fix (via a `git stash`-based A/B comparison against the unmodified Round-668
+tree, commit `ad0a47c`): identically **25/95 PASS** in both cases, with an identical 70-item failure
+list. This conclusively proves the fix introduces zero new test regressions - all 70 failures are
+pre-existing `tests/README.md` staleness (missing newer source-file dependencies like
+`ee_hle_thread.c`/`ee_timers.c`/`iop_heap.c`/`iop_cdvd.c`/`iop_dma.c`, and missing `-lm`, in the
+README's literal documented commands - tracked separately as task #554, out of scope this round).
+
+**Wii cross-build.** Clean `make clean && make -j4` against the fixed tree with devkitPPC/libogc:
+zero warnings (even cleaner than the historically-cited "2 pre-existing benign strncpy-truncation
+warnings" baseline), `pcsx2-wii-git.dol`/`.elf` both produced successfully.
+
+**Disposition.** Task #447/#623's pad-mailbox-starvation half is now fixed and shipped. This does
+not, by itself, prove OSDSYS's menu/animation visibly *changes* in response - that would require a
+fresh boot-flow observation with the fix active, which is a natural next step but is being deferred:
+per the user's explicit instruction this round ("fix the pad issue, once done continue the bios
+picture work"), the next round returns to the general JP BIOS splash/menu rendering thread (task
+#536).

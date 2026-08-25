@@ -637,12 +637,98 @@ static void ee_check_dmac_interrupt(ee_state_t *st, uint32_t this_pc)
  * intentionally only names the sources it has historically raised. */
 #define EE_INTC_IRQ_SBUS 1
 
+/* Round 669 (task #447/#623, fixing Round 638's "pad-mailbox
+ * starvation" finding): persistent storage for pad_area buffers
+ * bound via the real PAD_BIND RPC (SIF_SID_PAD_BIND_ID1_OLD/ID2_OLD,
+ * handled far below in this file), indexed by real port number (0 or
+ * 1, per libpad's own padOpenArgs.port field at request-buffer offset
+ * +4 - see the PAD_BIND handler's own citation trail). Populated once
+ * per port when PAD_BIND completes, then read back every real
+ * VBLANK_START (ee_check_vblank() below) to keep live button state
+ * flowing into OSDSYS's own consumers - mirroring real IOP-side
+ * PADMAN's continuous per-field DMA refresh of this exact buffer.
+ *
+ * Round 638 traced OSDSYS's two pad-mailbox consumer threads
+ * (RAM[0x1C0444]->thread 7, RAM[0x0028AA10]->thread 9) and found both
+ * correctly implemented but permanently starved because this
+ * project's own pad_area write only ever happened ONCE, at bind time
+ * - real IOP-side PADMAN would have kept refreshing it every field.
+ * This project's own main.c (Wii target) already reads the real Wii
+ * GameCube pad every VSync and feeds it into iop_sio2_pad_set_buttons()
+ * - that live button state was simply never being re-published into
+ * the bound EE-side pad_area buffer. This is the fix. */
+static uint32_t g_ee_pad_area_bound[2] = { 0u, 0u };
+
+/* Writes the real, already-cited SIO2 wire-protocol pad state (state/
+ * reqState/ok/payload_len bytes plus the pad_process_command()-shaped
+ * reply bytes: dummy/ID/buttons[/analog axes]) into both 64-byte
+ * double-buffered slots at `pad_area`, sourced from the live
+ * iop_sio2.c pad model. Factored out so the PAD_BIND RPC handler
+ * (initial bind, far below) and ee_pad_area_refresh_all() (Round
+ * 669's periodic per-VBLANK refresh, right below) write byte-for-byte
+ * identical content - see the PAD_BIND handler's own extensive
+ * citation trail (Rounds 63/663/664/666) for the real protocol layout
+ * this mirrors; nothing here changes that layout, only when it runs. */
+static void ee_pad_area_write_slots(ee_state_t *st, uint32_t pad_area)
+{
+    int slot_i;
+    int connected = iop_sio2_pad_is_connected();
+    uint8_t state = connected ? 6u /* PAD_STATE_STABLE, real libpad.h enum */
+                                : 0u /* PAD_STATE_DISCONN */;
+    uint8_t ok = connected ? 1u : 0u;
+    uint16_t wire = connected ? (uint16_t)~iop_sio2_pad_get_buttons() : 0xFFFFu;
+    int analog = connected && iop_sio2_pad_is_analog_mode();
+    uint8_t rx = 0x80u, ry = 0x80u, lx = 0x80u, ly = 0x80u;
+    uint32_t payload_len = connected ? (analog ? 9u : 5u) : 0u;
+    if (analog) {
+        iop_sio2_pad_get_analog_axes(&rx, &ry, &lx, &ly);
+    }
+    for (slot_i = 0; slot_i < 2; slot_i++) {
+        uint32_t base = pad_area + (uint32_t)(slot_i * 64);
+        ee_mem_write32(st, base + 0u, payload_len); /* real memcpy length */
+        ee_mem_write32(st, base + 40u, payload_len); /* 2nd consumer's real length field (Round 666) */
+        ee_mem_write8(st, base + 4u, state);
+        ee_mem_write8(st, base + 5u, 0u);   /* reqState = PAD_RSTAT_COMPLETE */
+        ee_mem_write8(st, base + 6u, ok);
+        if (connected) {
+            ee_mem_write8(st, base + 8u, 0x00u); /* dummy, real cited SIO2 byte 0 */
+            ee_mem_write8(st, base + 9u, analog ? IOP_PAD_ID_ANALOG_LO : IOP_PAD_ID_LO);
+            ee_mem_write8(st, base + 10u, analog ? IOP_PAD_ID_ANALOG_HI : IOP_PAD_ID_HI);
+            ee_mem_write8(st, base + 11u, (uint8_t)(wire & 0xFFu));
+            ee_mem_write8(st, base + 12u, (uint8_t)((wire >> 8) & 0xFFu));
+            if (analog) {
+                ee_mem_write8(st, base + 13u, rx);
+                ee_mem_write8(st, base + 14u, ry);
+                ee_mem_write8(st, base + 15u, lx);
+                ee_mem_write8(st, base + 16u, ly);
+            }
+        }
+    }
+}
+
+/* Round 669: called once per real VBLANK_START (ee_check_vblank()
+ * immediately below) - re-issues the live pad state into every
+ * pad_area buffer bound so far via PAD_BIND, matching real IOP-side
+ * PADMAN's continuous per-field refresh. A no-op for any port that
+ * hasn't completed PAD_BIND yet (g_ee_pad_area_bound[port] == 0). */
+static void ee_pad_area_refresh_all(ee_state_t *st)
+{
+    int port;
+    for (port = 0; port < 2; port++) {
+        if (g_ee_pad_area_bound[port] != 0u)
+            ee_pad_area_write_slots(st, g_ee_pad_area_bound[port]);
+    }
+}
+
 static void ee_check_vblank(ee_state_t *st)
 {
     uint64_t phase = st->instructions_executed % EE_CYCLES_PER_FRAME_NTSC;
-    if (phase == 0)
+    if (phase == 0) {
+        /* Round 669: refresh live pad state at the same real cadence
+         * VBLANK_START itself fires at - see the citation above. */
+        ee_pad_area_refresh_all(st);
         ee_intc_raise(EE_INTC_IRQ_VBLANK_START);
-    else if (phase == EE_CYCLES_VBLANK_DURATION)
+    } else if (phase == EE_CYCLES_VBLANK_DURATION)
         ee_intc_raise(EE_INTC_IRQ_VBLANK_END);
 }
 
@@ -4892,95 +4978,25 @@ static int ee_step(void)
                                 {
                                     uint32_t pad_area = ee_mem_read32(st, call_recvbuf + 16u);
                                     if (pad_area != 0u) {
-                                        /* Round 663 (task #447/#623): this project already has a
-                                         * real, cited low-level SIO2 pad model (source/hw/iop_sio2.c,
-                                         * Round 184/195) that defaults to connected=1, digital mode -
-                                         * but this RPC-bind reply was hardcoding PAD_STATE_DISCONN
-                                         * regardless, ignoring that real model entirely. Query the
-                                         * real low-level state instead of hardcoding disconnected -
-                                         * makes this synthesized reply consistent with the rest of
-                                         * this project's own pad emulation rather than contradicting
-                                         * it. Round 663's host-native A/B survey found this changes
-                                         * (deterministically, reproducibly) a downstream CPU-side
-                                         * resting pc by a handful of instructions at the 40M-slice
-                                         * mark, in an unrelated vector-copy loop far from OSDSYS's
-                                         * own pad-consuming code - real but modest, NOT verified to
-                                         * unblock menu interactivity; that remains open. */
-                                        int slot_i;
-                                        int connected = iop_sio2_pad_is_connected();
-                                        uint8_t state = connected ? 6u /* PAD_STATE_STABLE, real libpad.h enum */
-                                                                    : 0u /* PAD_STATE_DISCONN */;
-                                        uint8_t ok = connected ? 1u : 0u;
-                                        /* Round 664 (task #447/#623): disassembly of OSDSYS's own
-                                         * real padArea-reading code (EE 0x0020B868-0x0020B8F4, this
-                                         * round's decoded region) found a second, distinct consumer
-                                         * next to padGetState() - it calls a real memcpy(dest,
-                                         * base+8, len) where `len` is read directly from THIS SAME
-                                         * buffer's offset+0 field (the "frame" field per Round 663's
-                                         * own libpad.c citation), gated on offset+6 being non-zero
-                                         * (i.e. `ok`). That field doubles as this consumer's real
-                                         * payload byte count - it is not purely a monotonic counter.
-                                         * The previous hardcoded "frame=1" made this real copy
-                                         * transfer exactly 1 byte, and offset+8 onward was never
-                                         * written at all - so even with Round 663's STABLE fix, no
-                                         * real button data ever reached whatever this copy feeds.
-                                         * Fix: write the SAME real, already-cited SIO2 wire-protocol
-                                         * bytes this project's own iop_sio2.c pad_process_command()
-                                         * produces (0x00 dummy, ID_LO, ID_HI, swlo, swhi[, 4 analog
-                                         * axis bytes if in analog mode]) into offset+8 onward, and
-                                         * set offset+0 to that exact byte count - keeping the
-                                         * low-level SIO2 model and this high-level PADMAN buffer
-                                         * mutually consistent instead of inventing new byte values. */
-                                        uint16_t wire = connected ? (uint16_t)~iop_sio2_pad_get_buttons() : 0xFFFFu;
-                                        int analog = connected && iop_sio2_pad_is_analog_mode();
-                                        uint8_t rx = 0x80u, ry = 0x80u, lx = 0x80u, ly = 0x80u;
-                                        uint32_t payload_len = connected ? (analog ? 9u : 5u) : 0u;
-                                        if (analog) {
-                                            iop_sio2_pad_get_analog_axes(&rx, &ry, &lx, &ly);
-                                        }
-                                        for (slot_i = 0; slot_i < 2; slot_i++) {
-                                            uint32_t base = pad_area + (uint32_t)(slot_i * 64);
-                                            ee_mem_write32(st, base + 0u, payload_len); /* real memcpy length (was hardcoded 1) */
-                                            /* Round 666 (task #447/#623): disassembly of EE 0x0020B868-
-                                             * 0x0020B8F4 (the "second consumer" identified in Round 664,
-                                             * this project's own /tmp/r665_osdsys_code.bin dump) shows its
-                                             * real memcpy(dest, pad_area+8, LEN) call at 0x0020B8D8 reads
-                                             * LEN via `lw a2, 0(s0)` where s0 = pad_area + 40 (or
-                                             * pad_area + 104 when the buffer-select shift picks the second
-                                             * 64-byte half, i.e. base+40 for slot_i=1 since base already
-                                             * includes the +64). This field was never written by this
-                                             * handler, so it held stale/uninitialized RAM - confirmed by
-                                             * direct instrumentation to read ~1.87MB, producing a massive
-                                             * out-of-bounds memcpy every time this consumer ran. Round 664
-                                             * had captured this same s0=pad_area+40 pointer via register
-                                             * trace and, not realizing it was a distinct real length field
-                                             * (mistaking it for a second, differently-bound source
-                                             * pointer), concluded the table binding was unreliable and
-                                             * retracted the "second consumer" fix claim. Round 666 proved
-                                             * via direct simultaneous instrumentation that the table at
-                                             * 0x00441F40/0x00441F60 is written exactly once and exactly
-                                             * equals pad_area (no mismatch at all) - the real bug was only
-                                             * ever this uninitialized length field. Mirroring payload_len
-                                             * here (verified in a scratch build: real_len_at_s0 now reads
-                                             * 5, matching payload_len, instead of ~1.87MB) fixes it. */
-                                            ee_mem_write32(st, base + 40u, payload_len);
-                                            ee_mem_write8(st, base + 4u, state); /* state - now reflects the real iop_sio2 pad model */
-                                            ee_mem_write8(st, base + 5u, 0u);   /* reqState = PAD_RSTAT_COMPLETE */
-                                            ee_mem_write8(st, base + 6u, ok);   /* ok - now reflects real connected state */
-                                            if (connected) {
-                                                ee_mem_write8(st, base + 8u, 0x00u); /* dummy, real cited SIO2 byte 0 */
-                                                ee_mem_write8(st, base + 9u, analog ? IOP_PAD_ID_ANALOG_LO : IOP_PAD_ID_LO);
-                                                ee_mem_write8(st, base + 10u, analog ? IOP_PAD_ID_ANALOG_HI : IOP_PAD_ID_HI);
-                                                ee_mem_write8(st, base + 11u, (uint8_t)(wire & 0xFFu));
-                                                ee_mem_write8(st, base + 12u, (uint8_t)((wire >> 8) & 0xFFu));
-                                                if (analog) {
-                                                    ee_mem_write8(st, base + 13u, rx);
-                                                    ee_mem_write8(st, base + 14u, ry);
-                                                    ee_mem_write8(st, base + 15u, lx);
-                                                    ee_mem_write8(st, base + 16u, ly);
-                                                }
-                                            }
-                                        }
+                                        /* Round 663-666 (task #447/#623): see
+                                         * ee_pad_area_write_slots()'s own citation trail
+                                         * (defined near ee_check_vblank(), far above) for
+                                         * the full real-protocol rationale behind every
+                                         * byte this writes - unchanged behavior, just
+                                         * factored into a shared helper.
+                                         *
+                                         * Round 669 addition: remember this port's real
+                                         * pad_area address (libpad's own padOpenArgs.port
+                                         * field, request-buffer offset +4) so
+                                         * ee_pad_area_refresh_all() can keep re-publishing
+                                         * live button state into it every VBLANK_START,
+                                         * fixing Round 638's "pad-mailbox starvation" -
+                                         * this initial write was the ONLY write that ever
+                                         * happened before this round. */
+                                        uint32_t port = ee_mem_read32(st, call_recvbuf + 4u);
+                                        if (port < 2u)
+                                            g_ee_pad_area_bound[port] = pad_area;
+                                        ee_pad_area_write_slots(st, pad_area);
                                     }
                                 }
                                 ee_arm_rpc_call_pending(call_cd);

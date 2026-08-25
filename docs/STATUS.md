@@ -28407,3 +28407,66 @@ thread 4's own module-load site (find who calls `StartThread`/`iop_module_loader
 
 No tracked-source change this round - all instrumentation remains in the scratch copy under
 `/tmp/r671/srctree/`. Regression suite and Wii rebuild correctly skipped.
+
+## Round 678: disassembled + tested thread 4/5's real creation site and every plausible pad-navigation trigger - no code-level bug found, dormancy fully explained by the already-documented browser-state-5 blocker
+
+Per the user's explicit "disassemble and fix" instruction, this round picked up Round 677's own
+recommended next step: trace backward from thread 4's module-load site to find the real signal that
+should trigger its first `WakeupThread(4)`.
+
+**Found the exact real `CreateThread`/`StartThread` call site for both thread 4 and thread 5.**
+Instrumented the emulator's own `CreateThread`/`StartThread` syscall handlers (scratch
+`ee_hle_thread.c`) to log the caller's return address (`$ra`) and full param block every time either
+targets entry `0x00600000` or `0x007A0000`. Result, captured live during boot:
+```
+CreateThread(entry=0x00600000): ra(caller)=0x00204CF8  param=0x003FE1C0  stack=0x002DE130  priority=5
+CreateThread(entry=0x007A0000): ra(caller)=0x00204CF8  param=0x003FE1F0  stack=0x002FE130  priority=5
+StartThread(thid=4):            ra(caller)=0x00204D08  arg=0x00000000
+StartThread(thid=5):            ra(caller)=0x00204D08  arg=0x00000000
+```
+Disassembling `0x00204C40-0x00204D68` (in the already-dumped OSDSYS-core RAM region) shows this is a
+single generic 12-iteration table-driven thread-init loop (`slti v0, s5, 12` / branch back to
+`0x00204B80`): for each of 12 table entries it calls a gate function at `0x00218C50`, and only if
+that gate returns 0 does it build a thread param block and call the real `CreateThread` syscall stub
+(`0x00210D40`) immediately followed by the real `StartThread` syscall stub (`0x00210D60`) with
+`arg=0`, unconditionally, back-to-back, no gap. **This is exactly right** - it's the same mechanism
+that legitimately creates/starts threads 3, 6, 7, 8, 9 (all already confirmed real and correctly
+running/parked). Thread 4 and 5's creation and start are correct, real, unconditional OSDSYS-core
+code - not a bug, not a gap, nothing to fix here.
+
+**Tested the leading remaining hypothesis: real pad-navigation input.** Round 672-674 already proved
+CIRCLE presses flow correctly end-to-end through the real pad pipeline. This round extended that test
+to the four directional buttons (`IOP_PAD_BTN_UP/DOWN/LEFT/RIGHT`) that a real OSDSYS Browser's
+icon-carousel navigation would plausibly use to move its cursor and (per thread 6's already-decoded
+23-way device-index switch on `+0x444`, Round 677) issue a `WakeupThread` to whichever device/thread
+the newly-highlighted icon corresponds to. Result across all four buttons, each pulsed against a
+~370M-instruction-deep boot state: `+0x444` stayed `0x00000000`, `+0x450` stayed `0x00000005`,
+`+0x454` stayed `0x00000000` - completely unchanged from their pre-pulse values - and the
+`WakeupThread`/`_iWakeupThread` target sweep (extended with the same instrumentation from Round 677)
+showed no new targets at all: still only `{0, 3, 9}` for `WakeupThread` and `{6}` for
+`_iWakeupThread`. **Thread 4 is never targeted, and directional pad input has zero observable effect
+on any of the OSDSYS state fields already known to gate escalation.**
+
+**Conclusion - this is not an independent bug, it's a downstream symptom of the already-documented
+browser-state-5 blocker.** Rounds 594-596 and 600 (cited in this project's own history) already found
+and documented that `+0x450` (the OSDSYS Browser state-machine field) is permanently stuck at value 5
+in this diskless, memory-card-less boot because the real state-5-to-interactive transition code is
+never reached - i.e. OSDSYS's Browser never finishes its own internal "device scan" phase to become
+genuinely interactive. Thread 4 (and 5)'s permanent dormancy is fully consistent with, and explained
+by, that same pre-existing finding: with the Browser's own state machine never leaving its
+pre-interactive state, there is no real code path in this diskless boot that would EVER legitimately
+call `WakeupThread(4)` - not because of a missing/broken wakeup call, but because the precondition
+that real OSDSYS code checks before issuing that call is itself never satisfied.
+
+**No tracked-source fix implemented this round.** Implementing a synthetic/unconditional
+`WakeupThread(4)` call to force thread 4 awake would fabricate behavior with no real-hardware
+evidence behind it - exactly the class of speculative fix this project's own history has repeatedly
+and correctly declined to ship (cf. Round 549's reverted FIO_F_CLOSE fix). The genuine remaining gap
+- why the state-5-to-interactive transition never fires in a diskless/card-less boot - was already
+identified by Rounds 594-596/600 as the real target for any future fix in this area; this round's
+work confirms that gap is the single root cause behind both the stuck `+0x450` field and thread 4's
+dormancy, rather than there being two separate bugs.
+
+All instrumentation (the `ee_hle_thread.c` CreateThread/StartThread hooks, the nav-pulse driver)
+remains scratch-only under `/tmp/r671/srctree/` and `/tmp/r673/`; no tracked source changed. Host-
+native regression suite and Wii cross-build correctly skipped (docs-only round).

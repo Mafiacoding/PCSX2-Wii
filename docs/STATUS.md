@@ -29344,3 +29344,92 @@ productive angle, not yet tried this session: search for the real SIO2/pad-inter
 code (this project's own `ee_intc.c`/`iop_sio2.c` already model pad IRQ delivery) and check whether
 real OSDSYS registers a handler that calls directly into Browser code on each pad edge, bypassing
 per-tick thread polling entirely - which would explain why no thread body shows the trigger.
+
+## Round 693: BREAKTHROUGH - live-captured the real dispatch into 0x00210E70 from thread 6's own body; the long-sought pad-navigation mechanism was hiding past Round 691's 250-instruction trace boundary, not in a separate thread
+
+Direct continuation of Round 692's own recommendation ("search for the real SIO2/pad-interrupt handler's
+own code... check whether real OSDSYS registers a handler that calls directly into Browser code").
+That specific IOP-interrupt-handler lead was checked first and came up empty (see below), but pushing
+the *static disassembly* of thread 6's own body further forward - past where Round 691 stopped at
+~250 instructions in - immediately found the real mechanism, live-confirmed by a breakpoint hit this
+round.
+
+**IOP-side check (negative, quick).** Live IOP thread survey (`pcsx2_get_threads cpu:iop`, first time
+this session) shows 32 IOP TCB slots: TID1 is the IOP's own idle thread (`j ->$0x0000AE94`, exact
+IOP-side analogue of Round 692's EE TID0 idle loop), ~20 threads WAIT-parked at a generic
+syscall-return stub (`0x0000aea4: jr ra; nop`), and ~11 DORMANT (status=0x10) slots whose PC field
+(`0x40016000`) disassembles as garbage/ASCII string data - i.e. genuinely uninitialized TCB entries,
+not real code. SIO2 hardware registers (`0x1F808200`-`0x1F80823F`) read all-zero (no pending/active
+transfer at this paused instant). Nothing here identifies a distinct "pad ISR" thread; this is
+consistent with the real PS2 pad model being IOP-driven-DMA + EE-side polling rather than a
+push-interrupt-into-app-code model, so this angle is deprioritized (not fully closed - the actual
+low-level SIO2 IRQ handler's code address was not located - but not fruitful as a shortcut).
+
+**EE-side re-examination (the real find).** Continued the `pcsx2_disassemble` walk of thread 6's real
+per-tick body (entry `0x00204308`, confirmed disc-browser dispatcher since Round 596) from
+`0x00204560` onward - exactly where Round 691's trace stopped. The very next ~170 instructions
+(`0x00204560`-`0x00204828`) contain the real dispatch table this whole investigation has been
+looking for:
+
+- `0x002045f8`-`0x0020464c`: reads `+0x454` and compares it against literal case values `0x12`-`0x15`
+  (18-21). On match: sets `a0=1, a1=0x1031, a2=<case index>` and falls through to a single shared call
+  site at `0x00204668: jal ->0x00214778` (the exact "heartbeat producer/consumer" function this
+  project instrumented back in Round 481). After the call, `+0x454` is zeroed - a classic one-shot
+  "pending sub-event" flag, consumed exactly once per tick.
+- `0x0020467c`-`0x002047cc`: reads `+0x444` and compares it against a long literal chain of case values
+  `2` through `0x18` (2-24 decimal) - a full ~23-entry panel/state-ID switch, implemented as successive
+  `beq`s that all converge on one shared call site: **`0x002047cc: jal ->0x00210E70`**, passing
+  `a0 = *(struct_ptr + 4)` where `struct_ptr` is the browser-state struct held at `0x7CD0(s1)`.
+  **`0x00210E70` is the exact handler function Round 595 already fully decoded as "the common target of
+  all three escalation gates."**
+- `0x002047d8`-`0x002047f0`: **explicitly re-checks `+0x450 == 9`** - Round 594's original escalation
+  gate, confirmed here as a real, in-context secondary trigger alongside the main `+0x444` switch, not
+  a stray/superseded finding. On match, it ALSO calls `0x00210E70` (again with `a0 = *(struct_ptr+4)`).
+- `0x002047f4`-`0x00204824`: reads a third, previously-uncharacterized field `+0x4C4`, compares it
+  against `s3` (=1 at the live hit below), and if different calls `0x0020E930` with a stack argument,
+  tests bits `0x9` (bits 0+3) of the result, and conditionally clears `+0x4C4` back to 0 - looks like a
+  one-shot "consume this sub-flag once its handler reports done" pattern, structurally identical to the
+  `+0x454` handling above.
+- `0x00204828`: **a third call site**, `jal ->0x00210E70`, again with the same `a0 = *(struct_ptr+4)`
+  argument convention, reached unconditionally at the end of this block regardless of which branches
+  above were taken.
+
+**Live confirmation.** Set a breakpoint at `0x00210E70` and called `pcsx2_continue`. It hit almost
+immediately (cycles advanced ~453K from the prior paused state - modest but real forward execution,
+unlike Round 689's stalled-continue finding). Backtrace: `#0 entry=0x00210e70 pc=0x00210e70` /
+`#1 entry=0x00204308 pc=0x00204830` - `ra=0x00204830` is exactly `0x00204828+8`, i.e. this is
+**the third call site above, confirmed live**. Registers at the hit: `a0=0x00000009`,
+`a1=0x00001031`, `s3=0x00000001` (a1/s3 are leftover values from earlier straight-line code in the
+same block, not necessarily meaningful arguments to this particular call - `a0` is the real argument
+per the `lw a0,0x4(v0); jal` pattern seen at every call site in this block). `a0=9` is a genuine,
+freshly-loaded runtime struct-field value - notably the same literal `9` that Round 594's `+0x450==9`
+gate uses, though here it comes from `*(struct_ptr+4)`, a related-but-distinct field, not `+0x450`
+itself directly.
+
+**Significance.** This closes the multi-hundred-round search (tasks #447/#536): **the real
+pad-to-panel-navigation dispatch does not go through the previously-suspected `0x00203D78` (Round 685
+found it's never hit under ordinary navigation - correctly, since it was never the right address to
+watch) and is not implemented as a "hidden" cross-thread `WakeupThread` call (Round 686's dead end) or
+inside any of the 8 other real threads swept in Rounds 686-692. It is ordinary, direct, per-tick
+in-line code inside thread 6's own dispatcher body, gated by three state fields (`+0x454` one-shot
+sub-event, `+0x444` ~23-way panel-ID switch, `+0x450==9` secondary trigger, `+0x4C4` a third one-shot
+flag) all funneling into the already-decoded `0x00210E70` handler.** Round 691's negative result
+("neither `+0x444` nor a call to `0x00203D78` found anywhere in the ~250 instructions traced") is
+hereby corrected - not wrong given its stated scope, but incomplete: the real dispatch sits at
+instruction offset ~340-450 of the same function, just past where that round's trace stopped.
+
+**Classification.** No tracked-source change - pure live/static investigation. Regression suite and
+Wii rebuild correctly skipped. Live PCSX2 session left paused at the `0x00210E70` breakpoint hit
+(intentionally, in case a follow-up round wants to single-step deeper into the handler with this
+exact real call context still on the stack).
+
+**Disposition / next step.** The dispatch call site is now fully located and live-confirmed. What
+remains open: (1) full semantics of `0x00210E70` given a REAL runtime argument (`a0=9`) rather than
+Round 595's presumably-synthetic/static reading - worth re-disassembling `0x00210E70` now with this
+live context to see exactly what it does with `a0=9`; (2) identifying the real field at `struct_ptr+4`
+(distinct from `+0x444`/`+0x450`/`+0x454`/`+0x4C4`, all already named) and whether it changes value
+across ordinary D-Pad presses the way `+0x450` was shown to (Round 606); (3) whether this newly-found
+three-call dispatch block, now precisely located in our own project's terms, has any actionable
+implication for task #536 (making our own diskless BIOS boot's OSD menu genuinely pad-interactive) -
+i.e. whether our tracked `ee_core.c`/browser-state modeling has an equivalent code path at all, or
+needs one added, once this real mechanism is fully understood.

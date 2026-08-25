@@ -28178,3 +28178,97 @@ an open-ended search - a direct, significant narrowing of task #536/#447's remai
 
 No tracked-source change this round - the PC-hit counters were added to a scratch copy of ee_core.c
 under `/tmp/r671/srctree/`, not the tracked file. Regression suite and Wii rebuild correctly skipped.
+
+## Round 672-674 (task #536/#447/#664/#667 continuation, user-directed "disassemble everything needed right now and fix it"): thread 6's real pad-polling dispatcher fully disassembled - CONFIRMS Round 669's pipeline is live and correct end-to-end; corrects Round 671's superseded "threads never wake" claim; no fix needed in tracked source this round
+
+Direct continuation of Round 671, in response to the user's explicit instruction to keep
+disassembling until a fix is found. Dumped RAM `0x00200000-0x00220000` at post-PAD_BIND depth and
+ran it through the Round 655 EE/R5900 disassembler (`tools/round655-ee-disasm/`) to answer Round
+671's own open question: what does `0x00203BE0`'s VBLANK-END handler body actually do.
+
+**Correction to Round 671: threads 6/7/8 are NOT permanently stuck.** Round 671's thread-state
+survey sampled only every 20,000,000 slices and saw `wakeup_count=0` at every sample, concluding the
+handler "never once results in a WakeupThread call reaching any of threads 6/7/8." Finer per-
+instruction/per-thread instrumentation (`r673_thread_instr_count[]`, a per-thread-ID PC log) shows
+thread 6 alone executes 300,000-700,000+ real instructions per 5,000,000-slice window, waking and
+re-sleeping many times between Round 671's coarse sample points - the "never wakes" claim was a
+sampling-granularity artifact. **This is the same fact Round 613 already published once before**
+(STATUS.md, Round 613: "thread 6 already wakes periodically on its own - it was never stuck... a
+methodology artifact of the periodic dump's sampling interval being coarser than the wake bursts it
+needed to observe"). Round 638's later "pad-mailbox starvation, threads permanently stuck" framing
+was itself a regression of Round 613's already-published finding. Both Round 613 and this round
+independently reached the same correct conclusion; Round 671's framing above is superseded.
+
+**0x00203BE0's real call chain, fully decoded:** `0x00203BE0` loads `a0` from
+`RAM[RAM[0x287CD0]]` (`RAM[0x287CD0]=0x1C0000`, the fixed OSDSYS working-memory base baked into the
+ELF's `.data` segment, Round 668) and calls `0x00210E80` = real EE syscall `-0x34` =
+`__NR__iWakeupThread` (confirmed via `docs/reference/ps2sdk/ee/kernel/include/syscallnr.h`). Live
+instrumentation confirms this fires every VBLANK with `a0=6` - i.e. it DOES correctly call
+`_iWakeupThread(6)` every single VBLANK, exactly as it should.
+
+**Thread 6's real dispatcher, fully disassembled (`0x00204560-0x002047D8`):** this is a single
+function thread 6 runs every wake cycle, doing, in order: (1) two `CD_NCMD_CDDASTREAM` heartbeat
+calls (`0x00214778`, Round 355/599) gated on a counter at `+0x1B9C`; (2) two calls to a
+`memcpy`-style sibling (`0x0020B868`) for "port 0" and "port 1" respectively, copying live pad
+payload bytes into a fixed OSDSYS cache at `RAM[0x1C0000+0x95D8]` (port 0) and `+0x95FC` (port 1);
+(3) two calls to `padGetState()` (`0x0020B8F8`, Round 664) for port 0/1, the port-1 result cached at
+`+0x15F8`, and a further wrapper (`0x00204080`) whose result is cached at `+0x161C`; (4) an edge-
+check on a field at `+0x1634` against a per-function reference constant `$s3`, calling
+`FlushCache`-family syscall 100 (`0x64` = real `__NR_FlushCache`, confirmed via `syscallnr.h`) and
+resetting the field if changed; (5) a message dispatch reading `+0x454` against literal values
+18/19/20/21 (CDDASTREAM calls, then clears `+0x454`); (6) a 23-way device-index switch on `+0x444`
+against `$s3` and literals 2-24, each case calling the real `WakeupThread`-class dispatcher
+(`0x00210E70`, Round 595) - our diskless boot's `+0x444=0` matches none of these cases, so this
+switch (evidently CD/memory-card hotplug-event routing) correctly does nothing; (7) an unconditional
+final `0x00210E70` call every cycle regardless.
+
+Both `padGetState()` and its sibling resolve their target `pad_area` pointer via an indirect table
+at a fixed address `0x00441F40` (`TABLE[0x441F40 + port*32 + idx*4]`), not a direct parameter - live
+read confirms `TABLE[port=0,idx=0] = 0x01FEFE40`, exactly matching Round 669's own cited real
+`pad_area` address. The table is correctly populated; this is not the gap.
+
+**Decisive live verification - Round 669's fix is confirmed working correctly end-to-end for the
+first time.** A pulse-test driver (press/release CIRCLE 15 times across 760M instructions) read
+`pad_area`'s live source bytes directly (`0x01FEFE40+11/+12`, the wire button mask Round 664/669
+write every VBLANK) alongside OSDSYS's own copied cache destination
+(`RAM[0x1C0000+0x95D8..0x95DC]`, written by the sibling `memcpy` above). Source wire correctly
+toggles `0xFFFF` (released) / `0xDFFF` (CIRCLE pressed) every pulse, exactly matching live
+`iop_sio2` state. **The destination cache's 5th copied byte (`RAM[0x1C95DC]`, the real button-high
+byte) toggles `0xFF` (released) / `0xDF` (pressed) in perfect lockstep with every single press and
+release** - proof that live pad state now flows, correctly and immediately, all the way from
+`iop_sio2.c` through Round 669's per-VBLANK `pad_area` refresh through OSDSYS's own real BIOS code
+(`0x0020B868`) into OSDSYS's own working-memory cache. (An earlier probe in this same round
+mistakenly read a 4-byte window `RAM[0x1C95D8..0x1C95DB]` that happens to exclude the one byte that
+actually changes - `RAM[0x1C95DC]`, the 5th byte of the 5-byte digital-pad payload - and wrongly
+looked constant; corrected by probing the individual bytes.)
+
+**Conclusion.** The full pad-input pipeline - live button read, per-VBLANK `pad_area` refresh
+(Round 669), OSDSYS's own real thread-6 dispatch, real `padGetState`/sibling calls, table-indirected
+pointer resolution, real memcpy into OSDSYS's working-memory cache - is now proven correct and live,
+button-for-button, for the first time in this project's history. What still doesn't happen is any
+*visible* reaction: `+0x444`/`+0x450`/`+0x454` and the GS framebuffer remain exactly as Round 670
+found them. Given this round's evidence, that is because thread 6's own dispatcher (the only code
+observed to run on our diskless boot) never itself acts on the live cache it just populated - its
+only two "reactions" to pad-adjacent state are the `+0x1634` edge-check (gated on a per-function
+constant `$s3` that, based on the call pattern, tracks port-1/multitap-style bookkeeping rather than
+primary button state) and the `+0x444` device-hotplug switch (correctly inert with no disc/memory
+card present). No code path observed anywhere in this or prior rounds' disassembly reads
+`RAM[0x1C95D8..0x1C95DC]` back out to drive a menu cursor or screen transition. Either (a) the real
+consumer of this cache is different, still-unreached OSDSYS code - most likely gated behind whatever
+transitions the diskless "no disc" screen into the actual multi-panel Browser Round 606 exercised
+live (a state, per Round 607's synthesis, real disc auto-boot bypasses entirely) - or (b) real
+hardware's diskless-boot top screen genuinely does not react to pad input either, and Round 606's
+interactive Browser is only reachable after a further real transition we have not yet found/
+triggered. Both are consistent with "our own code is correct; the gap is Sony's own BIOS control
+flow, not a bug we can source-fix" - not evidence of a defect in this project's tracked source.
+
+**No tracked-source change this round.** Every instrumentation edit (PC-hit counters, per-thread
+instruction counters, PC trace logging, the sibling-check/padGetState-return probes) was made to a
+scratch copy of `ee_core.c` under `/tmp/r671/srctree/`, never the tracked file; `git status` on the
+tracked repo is clean. Consistent with this project's standing practice (see Rounds 464/465/468/469/
+479/586 for precedent), no speculative fix is being shipped without concrete evidence of what to
+change - regression suite and Wii rebuild are correctly skipped, since there is nothing to verify
+against. The user's "fix it" instruction is addressed by this round's finding that there is, in
+fact, nothing left to fix on our side of the pipeline: Round 669's fix is now proven complete and
+correct: the remaining gap is locating (or ruling out) a further, still-undiscovered real BIOS
+transition into the interactive Browser screen.

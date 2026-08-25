@@ -29161,3 +29161,73 @@ this project's own static-disassembly-based tracing (matching the successful met
 686) starting from `0x007c4b84` (the loop's real return address) forward, to see what real code the
 function at `0x007c4b50`'s caller (`0x007b6440`'s `jr ra`, further up the chain) does next, without
 needing the live session to actually complete a real VBLANK wait at all.
+
+## Round 690: static disassembly (no live execution needed) resolves Round 688/689's open question - thread 5 (real hardware) is a perpetual per-VBLANK animation-update loop, not a thread that ever reaches SleepThread under normal operation
+
+Direct continuation of Round 689's own recommended fallback methodology ("static-disassembly-based
+tracing... starting from the loop's real return address forward, without needing the live session
+to actually complete a real VBLANK wait at all"), per the user's "go". Since the code at these
+addresses is already resident in the live session's mapped memory, `pcsx2_disassemble` can read and
+decode it directly with no dependency on real-time advancement - sidestepping Round 689's diagnosed
+tooling limitation entirely.
+
+**Disassembled forward from `0x007ada18`** (immediately after the second `WaitVBlank` call site
+`0x007ada60` identified in Round 688, inside function `0x007ad9a8` - the same function whose entry
+Round 686 first found doing the "1.00" version-string table copies). The `0x007ada60-0x007adae0`
+region is unambiguously a real, ordinary **per-frame animation-update loop**, not menu/navigation
+logic:
+- Two `jal 0x007B63D0` (`WaitVBlank`) calls per pass - one gated behind a live flag read
+  (`lbu v0,-0x7A34(gp)` / `beqz`), one unconditional - meaning this loop can wait for up to two
+  real VBLANKs per iteration depending on that flag's state.
+- A 64-bit counter at `gp-0x7A68` is read, incremented, and its low bit extracted as an odd/even
+  toggle (`andi v0,v1,1`) - classic double-buffer selection.
+- Three real sub-calls follow: `0x007B6BD8`, `0x007C4940` (the same generic init/reset helper seen
+  called from thread 5's own crt0 in Round 686), and `0x007B6370`.
+- A second, independent counter at `gp-0x7A50` is incremented and explicitly bounds-checked against
+  `0x5B` (91 decimal) via `slti a0,v1,0x5B` / `bnez a0,->0x7ADA50` - when the counter reaches 0 or
+  exceeds 90 the code branches back up to redo the WaitVBlank/update cycle from `0x007ADA50`, i.e.
+  a genuine ~91-frame animation-cycle counter with wraparound.
+
+**Disassembled `0x007B6370`** (the third sub-call, called with `a0 = s1 + odd_even_flag*0x28`):
+confirms the double-buffer pattern directly - it selects between two 40-byte (`0x28`) stride
+records based on the odd/even flag, calls a shared helper (`0x007B6EA0`) with the selected
+record's address, then branches to one of two further handlers (`0x007B6000` for the odd case)
+depending on the same flag. This is textbook double-buffered sprite/texture animation update code.
+
+**Conclusion: this directly and conclusively answers Round 688/689's open question.** Thread 5 on
+real hardware does not merely run "a bit further" than Round 678's own-emulator model before
+sleeping - it enters what is, by every structural signal available (bounded frame counter with
+wraparound, double-buffered per-frame updates, VBLANK-gated pacing), a **permanent, perpetual
+per-frame overlay-animation loop that never exits under normal operation**. Across this session's
+observations (Rounds 684-690, spanning roughly 1.6 billion real EE cycles of free-running
+observation with the live PC always landing back inside this same loop), thread 5 was never once
+caught at or past a `SleepThread` call. This revises, with much stronger evidence than Round 688's
+single snapshot, Round 678's own-emulator characterization: real hardware's thread-5-equivalent role
+is a continuously-active background animation/overlay updater (plausibly the OSDSYS Browser's
+decorative icon-pulse or cursor-blink effect), not a thread that initializes once and permanently
+parks waiting for an external `WakeupThread`.
+
+**Relevance to the standing task #447/#536 navigation-dispatch question: this closes off thread 5 as
+a candidate location for that logic.** Nothing in this loop touches `+0x444`/`+0x450`/`+0x454` or
+any pad-state read - it is self-contained animation bookkeeping, unrelated to Browser panel
+navigation. The real "what re-invokes the panel dispatcher on each pad press" question (open since
+Round 687) remains unanswered and is not advanced by this round's finding; this round instead
+retires a large, previously-open side-question (whether this project's own thread-4/5 permanent-sleep
+model under-represents real hardware) with a clear, well-evidenced "yes, thread 5 specifically is
+much more active on real hardware than modeled" answer.
+
+**Classification.** No tracked-source change - pure static disassembly of already-resident live
+memory, no execution/timing dependency, no tooling workaround needed. Regression suite and Wii
+rebuild correctly skipped (docs-only round). Live PCSX2 session left connected, still paused inside
+the same loop (`pc=0x007c4b60`), unchanged in substance.
+
+**Disposition.** Recommends closing the "does thread 4/5 really sleep on real hardware" thread
+(Rounds 677-690) as answered: thread 4 does appear to genuinely park (Round 677/686's `SleepThread`
+match at `0x0061b668` was corroborated again by Round 688's fresh live thread table), but thread 5
+is a real, perpetually-active animation thread, not a sleeper - this project's own emulator's
+"create, start, immediately sleep, never woken" model is accurate for thread 4 but measurably wrong
+for thread 5's real role. Whether correcting this project's own thread-5 model (making it loop
+instead of sleep) would have any user-visible effect on the diskless-boot picture this project
+already renders (Round 641 onward) is untested and would need its own dedicated round if pursued -
+it is a plausible, minor contributor to "OSDSYS's Browser looks static/incomplete" but is not
+connected to the still-open, higher-priority pad-navigation-dispatch question.

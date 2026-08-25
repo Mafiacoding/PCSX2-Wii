@@ -28962,3 +28962,82 @@ and Wii rebuild correctly skipped (docs-only round, no tracked source changed). 
 left connected and paused (last observed EE PC `0x00212be8`, cycles ~922M) for continuity into a
 future round focused squarely on the state-5-to-6 Browser transition trigger, the one lead every
 investigative thread in this session (Rounds 677-686) now converges on.
+
+## Round 687: live-verified `+0x450` genuinely toggles 5<->8 with no operator input this round, reconciling Round 594's "escalation needs value 9" framing against Round 606/607's real-hardware finding
+
+Direct continuation of Round 686's own recommended next step ("a future round focused squarely on
+the state-5-to-6 Browser transition trigger"), per the user's "go".
+
+**Attempted DMA-channel polling as a way to catch a possible bulk/DMA-driven `+0x444` writer** (the
+leading remaining hypothesis after Round 686's exhaustive `sw`-instruction sweep found only
+zero-writes to that offset in the entire statically-loaded OSDSYS image). `pcsx2_dma_trace_start`
+polls the 10 EE DMAC channel register sets on an interval and logs to a file on the MCP server's own
+host filesystem, outside this project's sandbox reach - no tool exists in this session to read that
+log back, so the technique could be started/stopped but not actually inspected. Classified as a
+methodology dead end for this session (would need a different capture mechanism, e.g. a scratch
+`ee_mem_write32()`-hooked bulk-DMA probe in a host-native driver, matching Round 594's own
+`dma_r593probe.c` precedent, to be useful) - noted for a future round rather than pursued further here.
+
+**Cleared the stale breakpoints left armed from Round 686 (they were re-firing on the same
+`0x00212be8`/`0x0021300c` pair every ~10-30M cycles, wasting continue/pause round-trips) and free-ran
+the live session for ~744,000,000 cycles (922,470,671 -> 1,666,742,922) with no operator input.**
+Reading `0x001C0450` before and after: it was `8` (Memory Card panel, per Round 606/685's context)
+at the start of this round and had reverted to `5` (Browser) by the end, entirely on its own, with
+zero pad presses from this session. `+0x444` stayed at its prior pointer-like value
+(`0x01C00000`, unchanged since Round 685) throughout.
+
+**This is a valuable, if small, new data point: `+0x450` genuinely transitions on its own over a
+long-enough real-time window, not only in direct response to an operator's Circle/Cross press.**
+The most likely explanation is a real OSDSYS "return to Browser after idle timeout" UX behavior
+(common in menu systems generally, and consistent with `+0x450`'s role as a live UI-panel-state
+field rather than a one-shot flag) - though this round did not instrument the exact trigger closely
+enough to prove that specific explanation over alternatives (e.g. a scripted demo/attract-mode
+timer). Logged as a fact, not over-interpreted.
+
+**Reconciliation of two previously-separate findings in this project's own history that were never
+directly cross-checked against each other:** Round 594 (this project's own static disassembly)
+found the escalation dispatcher's `WakeupThread`-calling branch is gated on `+0x450 == 9` specifically,
+and this project's own emulator's init code only ever produces `5`/`6`/`8` there, never `9` -
+framing "reach value 9" as the target for full interactivity. Round 606 (live hardware, months
+earlier in this project's history) directly observed the *actual* interactive Browser <-> Memory
+Card transition uses `5 <-> 8`, never `9` - and this round's fresh live read confirms `8 -> 5`
+reversion is also real, organic behavior. **These were never explicitly reconciled in STATUS.md
+before now: the `+0x450 == 9` gate Round 594 found is real and correctly disassembled, but it is
+very likely NOT the gate real hardware's ordinary Browser/Memory-Card interactivity uses at all -
+it's some other, rarer branch of the same dispatcher** (plausibly a one-time "first full device
+scan complete" or "system update available" signal, not general panel navigation). Chasing "get
+`+0x450` to reach 9" was very likely the wrong target for basic Browser interactivity from the
+start; the right target - confirmed by direct, repeated live observation now twice (Rounds 606
+and 687) - is the `5 <-> 8` transition this project's own writer functions (`0x00201100`/
+`0x00201108`/`0x0020511c`, all three already correctly identified in Round 594/682/686) are already
+capable of producing, just not on a second, pad-driven dispatcher call.
+
+**This directly re-confirms, rather than supersedes, Round 678/679's own already-established
+negative result** (this project's own emulator's pad-read pipeline is confirmed correctly wired
+end-to-end - Rounds 663-666/672-674 - but Circle/Cross/directional input never triggers a *second*
+call into the `0x00203D78` dispatcher in this project's own trace; it fires exactly once, during
+init, always with `+0x444=0`, per Round 683). The real, still-open gap is unchanged by this round's
+work: **something in real OSDSYS's per-tick Browser thread (tid 6, `entry=0x00204308`, confirmed
+alive and heartbeating via Round 597-599's forced-preemption fix) reads live pad state and
+re-invokes the panel-navigation dispatch on every relevant button press, and no code path
+reachable in this project's own diskless boot trace does the equivalent** - not because pad
+reads don't work, but because whatever should consume them for navigation purposes and call
+back into the dispatcher a second time is either never reached or the equivalent BIOS code for
+it lives outside the statically-searchable OSDSYS core image (same open-ended possibility Round
+686 raised for `+0x444`'s real writer).
+
+**Classification.** No tracked-source change - this round is pure live-hardware observation plus a
+correction/reconciliation of prior documentation, not a new fix. Regression suite and Wii rebuild
+correctly skipped (docs-only round). Live PCSX2 session left connected, paused at
+`pc=0x007c4b60` (the resting idle-thread PC first characterized in Rounds 684-685), `+0x450=5`,
+`+0x444=0x01C00000`, no breakpoints armed.
+
+**Disposition.** Corrects this project's own documentation: future rounds chasing OSDSYS Browser
+interactivity should target the real, twice-observed `5 <-> 8` transition, not Round 594's
+`+0x450 == 9` gate (which remains real and correctly disassembled, just very likely irrelevant to
+ordinary navigation). The core open question is unchanged and remains the same one Round 686 closed
+on: what real code re-invokes the navigation dispatcher on each pad press, on hardware where thread
+5-equivalent code (Round 686) and thread 6 (Round 596-599) both demonstrably run - and whether that
+code is reachable at all in this project's statically-loaded/traced OSDSYS image, or requires
+further live-hardware disassembly (following the same technique Round 686 used successfully for
+thread 5's crt0) of code regions this project has not yet dumped.

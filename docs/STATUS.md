@@ -29041,3 +29041,77 @@ on: what real code re-invokes the navigation dispatcher on each pad press, on ha
 code is reachable at all in this project's statically-loaded/traced OSDSYS image, or requires
 further live-hardware disassembly (following the same technique Round 686 used successfully for
 thread 5's crt0) of code regions this project has not yet dumped.
+
+## Round 688: live backtrace catches thread 5 (real hardware) still actively executing well past its Round 686 device-table-init call, inside a generic VBLANK-sync library routine - refines, does not overturn, Round 678's "thread 5 sleeps" model
+
+Direct continuation of Round 687, per the user's "check the next steps" / "continue" request. Live
+PCSX2 session still connected, paused at the same idle-loop PC (`0x007c4b60`) landed on repeatedly
+throughout Rounds 684-687.
+
+**`pcsx2_get_threads` gave the first full real-hardware thread table this session (10 threads,
+TID0-9)** - not previously captured live in this exact form. Cross-checking against Round 596/677's
+own-emulator thread table (which used 1-based TID numbering) shows a striking correspondence:
+real TID4 rests at `pc=0x0061b668` - the *exact* address Round 677's own emulator trace also landed
+on for its own thread 4 (`entry=0x00600000`); real TID2/6/7/8/9 all rest at `pc=0x00210e68`, matching
+Round 596's own emulator finding that OSDSYS-core worker threads 6/7/8/9 park at that identical
+address. This is strong independent corroboration that this project's own thread/scheduler model
+(Round 569/596-599) already matches real hardware's actual resting PCs closely, for most threads.
+
+**The one thread that does NOT match: real TID5 (thread 5's real-hardware counterpart) has
+`status=1` (RUN), not `WAIT` (4) like every other parked thread** - live, at the exact moment of this
+snapshot, thread 5-equivalent code is the CPU's actively-running thread, not asleep.
+
+**Backtrace at the paused PC (`0x007c4b60`) confirms this is genuinely still thread 5's own call
+chain, several frames deeper than Round 686 reached:**
+```
+#0 pc=0x007c4b60  (MMIO poll loop, see below)
+#1 entry=0x007b63d0 pc=0x007b63e8
+#2 entry=0x007ad9a8 pc=0x007ada68   <- the exact function Round 686 disassembled
+                                        (the "1.00" version-string table-copy routine)
+#3 entry=0xffffffff pc=0x007a00a4   <- the exact crt0 tail-jump instruction Round 686 found
+                                        ("j 0x007C4300", thread 5's own entry-point code)
+```
+Frames #2/#3 are a precise, address-for-address match to Round 686's own disassembly - direct
+confirmation this is the same call chain, now caught one step further along.
+
+**Disassembled the two new frames.** `0x007c4b50-0x007c4b84` is a small real subroutine: write `4`
+to `0x1000F000`, then spin (`lw`/`andi 4`/`beqz`) until that same register reads back with bit 2
+set, then write `4` again and return - i.e. **ack INTC_STAT's VBLANK_START bit, then busy-wait for
+the next VBLANK_START, then ack it again.** `0x007b63d0` (the caller) reads a saved edge-type flag,
+picks between this VBLANK_START-wait routine and a sibling `0x007c4b88` (presumably a VBLANK_END
+variant, by the identical calling shape), then reads GS's privileged `CSR` register
+(`0x12001000`, confirmed via `lui v1,0x1200 / ori v1,0x1000`) and extracts bit 13 - the real GS
+`FIELD` bit (even/odd interlace field). **This is a completely generic, standard PS2 SDK
+graphics-sync utility** (functionally identical to the well-known `WaitVBlankStart`+field-read
+pattern), not menu-navigation-specific code - it is very likely called from many places in real
+OSDSYS, including but not limited to thread 5.
+
+**Read the live `0x1000F000` (INTC_STAT) value: `0x00000000`** - VBLANK_START's bit is not yet set,
+confirming the live session really is caught mid-spin in this wait, not past it.
+
+**Classification of this finding.** This refines, rather than overturns, Round 678's own-emulator
+characterization ("thread 5 legitimately calls SleepThread and parks"): real hardware's thread
+5-equivalent code does NOT go straight from the device-table-init call (Round 686) into a permanent
+sleep - it continues into further real work, including at least one ordinary VBLANK-synced wait
+loop, and was caught genuinely RUNNING (not WAIT/SLEEP) at this snapshot. Whether it eventually
+does reach a real `SleepThread` call afterward (matching this project's own emulator's model) or
+instead loops indefinitely on VBLANK sync as a per-frame overlay-update thread is not yet
+determined - this round only captured one snapshot, not a full trace of the post-device-init
+control flow. The VBLANK-sync code itself is mundane library boilerplate, not a lead toward the
+still-open navigation-dispatch question (what re-invokes `0x00203D78` on a pad press) - this
+round's contribution is corroborating/correcting evidence about thread 5's true post-init
+liveness on real hardware, not a new lead on that specific open question.
+
+**Classification.** No tracked-source change - pure live observation. Regression suite and Wii
+rebuild correctly skipped (docs-only round). Live PCSX2 session left connected, still paused at
+`pc=0x007c4b60` inside the VBLANK-wait spin, `INTC_STAT=0`.
+
+**Disposition.** The open question from Round 686/687 (what real code re-invokes the panel/navigation
+dispatcher on each pad press) remains unresolved and is the natural next target. A concrete next
+step: single-step or set a temporary breakpoint past this VBLANK-wait return (`0x007c4b84`/`ra`) to
+see what thread 5 does immediately after this sync point completes - if it loops back into more of
+its own module's code rather than parking, that would be the strongest evidence yet that thread
+5-equivalent code is a genuine, continuously-active per-frame overlay thread on real hardware,
+strengthening the case that this project's own model (create -> start -> immediate permanent sleep)
+under-represents its real role, independent of whether it turns out to be the navigation-dispatch
+answer specifically.

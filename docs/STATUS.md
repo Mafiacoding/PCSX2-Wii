@@ -29231,3 +29231,56 @@ instead of sleep) would have any user-visible effect on the diskless-boot pictur
 already renders (Round 641 onward) is untested and would need its own dedicated round if pursued -
 it is a plausible, minor contributor to "OSDSYS's Browser looks static/incomplete" but is not
 connected to the still-open, higher-priority pad-navigation-dispatch question.
+
+## Round 691: static disassembly of thread 6's real per-tick body (0x00204308-0x00204560) rules out two more candidate functions for the pad-navigation-dispatch mechanism
+
+Direct continuation of the still-open question from Round 687/690 ("what real code re-invokes the
+panel/navigation dispatcher on each pad press"), per the user's "go". Used the same
+live-memory-static-disassembly technique that worked in Round 690 (no execution/timing dependency).
+
+**Disassembled thread 6's real function body** (`entry=0x00204308`, confirmed the real disc-browser
+dispatcher thread since Round 596) across roughly 250 instructions (`0x00204308-0x00204560`).
+Found and traced two internally-gated candidate call sites that looked promising for
+navigation-dispatch purposes, and ruled both out:
+
+1. **A device-table "value changed" polling loop** (`0x0020442c-0x00204444`): reads a per-slot field
+   at `table[s0+0x8000].164C`, compares it against a saved value, and calls `0x00204290` only when
+   it differs. This looked exactly like a "did the highlighted device change, react if so" pattern.
+   **Disassembling `0x00204290` shows it is a real-time-clock computation function** - it reads three
+   RTC-like fields (`+0x1650`/`+0x1644`/`+0x1648`/`+0x164C`), does fixed-point millisecond/date math
+   (`mult`/`div` against constants `0x3E8`=1000, `0xE10`=3600, a large multiplier), and calls
+   `0x00217050` with the result - almost certainly OSDSYS's real-time-clock display update in the
+   Browser's corner, not panel-navigation logic. Ruled out.
+
+2. **A `+0x1BA0` "device changed" flag gate** (`0x0020437c-0x002043a4`, the same flag Round 589
+   instrumented): when the flag equals exactly `1`, calls `0x0020E238`. **Disassembling `0x0020E238`
+   shows it calls `0x002134A8` with `a1=0x15` (21 decimal)** - `0x002134A8` is the same function
+   Round 353/430 already characterized as part of the real "resource table" lookup/ROM-offset
+   resolution subsystem (entirely unrelated to Browser navigation - it backs `p_ExecPS2`/entry
+   resolution). This is very plausibly a "reload an icon/asset resource when the device list
+   changes" UI-refresh call, not the pad-to-navigation-dispatch mechanism. Ruled out.
+
+**Neither `+0x444` nor a call to `0x00203D78` appears anywhere in the ~250 instructions of thread
+6's body traced so far.** This is consistent with, and further corroborates, Round 685's own
+already-established finding that ordinary D-Pad panel navigation on real hardware does NOT trigger
+the `0x00203D78` dispatcher breakpoint at all - reinforcing that this specific dispatcher is a rare,
+separate code path (confirmed reached via the real kernel syscall trampoline Round 684 traced), not
+part of thread 6's routine per-tick work.
+
+**Classification.** No tracked-source change - pure static disassembly, negative/narrowing result.
+Regression suite and Wii rebuild correctly skipped (docs-only round). Live PCSX2 session left
+connected and paused, unchanged in substance.
+
+**Disposition.** Two more plausible candidates within thread 6's body are now ruled out with
+disassembly-level certainty, narrowing (without yet finding) the real navigation-dispatch mechanism.
+Thread 6's function is substantially larger than the ~250 instructions traced so far (its own
+prologue reserves `0xB0`=176 bytes of stack and saves 9 callee-saved registers, consistent with a
+long, multi-branch body) - fully mapping its remaining extent is one honest next step, but given two
+of its more promising-looking internal branches have now both resolved to unrelated subsystems
+(clock display, resource loading), a higher-leverage next step is likely to look outside thread 6
+entirely: the live thread table Round 688 captured showed TID0 (`pc=0x00081fc0`) and TID1
+(`pc=0x00210e78`) both in `READY` state (not `WAIT`) - i.e., live, schedulable, and not part of
+threads 3/4/5/6-9's already-characterized roles - and neither has been disassembled/identified this
+session. TID1's resting address (`0x00210e78`) was previously flagged back in Round 465 as "OSDSYS's
+own code the calling thread got redirected to" but never fully attributed to a specific real
+subsystem; it is a reasonable next candidate to check for pad-to-navigation-dispatch logic.

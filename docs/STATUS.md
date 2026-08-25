@@ -28753,3 +28753,44 @@ suite and Wii rebuild correctly skipped (docs-only round). This corrects and sup
 addressing convention used throughout Rounds 594-681's documentation (`0x00201104`/`0x00201118`
 were store-instruction addresses, not function entry points); future references to these writer
 functions should use the corrected entry addresses `0x002010F0`/`0x00201108`.
+
+## Round 683: confirmed OUR OWN emulator's diskless boot DOES reach the real Browser dispatcher (0x00203D78) - but always with +0x444=0, explaining why it silently no-ops (task #447/#536)
+
+Direct follow-up to Round 682's live-PCSX2 discovery: instrumented this project's own scratch
+`ee_core.c` (`/tmp/r671/srctree/source/core/ee/ee_core.c`, NOT tracked source) with hit-counters
+for `pc==0x00203D78` (the real per-panel dispatcher) and `pc==0x002010F0`/`0x00201108` (the real
+entry points of the "+0x450=6/8" writer functions, corrected in Round 682), logging `+0x444` at
+each dispatcher hit.
+
+**Result, reproduced across two independent runs (45M and 65M slices, 360M and 520M cumulative EE
+instructions respectively): the dispatcher at `0x00203D78` is reached in this project's own
+diskless boot exactly once, early in boot, with `+0x444 == 0` both times.** Since the dispatcher's
+entire body is a linear chain of `bne v1,N,skip` comparisons for N=1..17 (Round 682's table), and
+`0` never matches any of them, the whole function falls straight through without ever calling a
+single panel handler - a real, silent no-op, not a crash or a stall. The `writer-6`/`writer-8` hits
+(also 1 each) are separate, unrelated calls from OSDSYS's own early-init sequence (matches Round
+594's already-documented "0x00205118 writes 5, the value that sticks after early init" finding),
+not calls made through the dispatcher chain - `+0x450` settles at the correct real idle value (5)
+by the end of both runs, consistent with all prior rounds.
+
+**This resolves the structural question Round 682 left open.** The real Browser per-panel dispatch
+mechanism is not missing, broken, or unreached in this project's own emulator - it runs exactly
+once, on schedule, just like real hardware would run it during init. **The actual remaining gap is
+one level upstream: something must write a nonzero "current panel" value into `+0x444` before the
+dispatcher can ever route to a real handler, and this project's trace never does that.** This
+reframes ~90 rounds of "why doesn't Circle/Cross do anything" investigation precisely: it was never
+about the dispatcher, the writer functions, or the call graph between them (all confirmed present
+and correctly reachable) - it is specifically about whatever real BIOS mechanism is supposed to
+populate `+0x444` in response to pad navigation, which this project has not yet located.
+
+**Classification.** No tracked-source change - `g_r682_dispatcher_hits`/`g_r682_dispatcher_444`/
+`g_r682_writer_6_hits`/`g_r682_writer_8_hits` and their two call sites live only in the scratch
+copy of `ee_core.c`. Regression suite and Wii rebuild correctly skipped (docs-only round).
+
+**Disposition / next step.** Find the real writer of `+0x444` itself (not `+0x450` - that's this
+round's already-answered question). Given the corrected addressing convention from Round 682, the
+right next move is almost certainly a live-PCSX2 watchpoint on `0x001C0444` specifically (write-
+type, not the `+0x450` watch used in Round 682, which never fired because `+0x450`'s only live
+writer in this session turned out to be reached via the `+0x444==10` dispatch path, itself
+downstream of the still-unknown `+0x444` writer) - the same live session is still connected and
+running, so this is directly actionable next.

@@ -29433,3 +29433,63 @@ three-call dispatch block, now precisely located in our own project's terms, has
 implication for task #536 (making our own diskless BIOS boot's OSD menu genuinely pad-interactive) -
 i.e. whether our tracked `ee_core.c`/browser-state modeling has an equivalent code path at all, or
 needs one added, once this real mechanism is fully understood.
+
+## Round 694: MECHANISM FULLY SOLVED - 0x00210E70 is literally the real ps2sdk WakeupThread() syscall trampoline (__NR_WakeupThread=0x33); thread 6 wakes OSDSYS worker threads via plain SleepThread/WakeupThread, closing task #447/#536's core question
+
+Direct continuation of Round 693, picking up exactly where it left off (disassembling `0x00210E70`
+itself, still live-paused at that breakpoint hit with real `a0=9` in context).
+
+**The disassembly is not application logic - it's a raw kernel syscall trampoline table.**
+`pcsx2_disassemble` at `0x00210e70` shows a a run of trivial 4-instruction (16-byte) stubs, each of
+the form `li v1,<N>; syscall; jr ra; nop`. This project's own `docs/reference/ps2sdk/ee/kernel/
+include/syscallnr.h` (fetched back in task #437) gives the real ps2sdk syscall-number `#define`s for
+this exact numbering convention, and they match perfectly:
+
+- `0x00210e60` (`li v1,0x32; syscall; jr ra`) = **`__NR_SleepThread = 0x32`** - i.e. real
+  `SleepThread()`. Its return address, `0x00210e68`, is exactly the PC every OSDSYS-core worker
+  thread (TID2/6/7/8/9, per Round 688/692's live thread table) has been observed parked at all
+  session. **This confirms, precisely, that those 5 threads are genuinely self-parked via an ordinary
+  `SleepThread()` call - not blocked on a semaphore, not a modeling artifact.**
+- `0x00210e70` (`li v1,0x33; syscall; jr ra`) = **`__NR_WakeupThread = 0x33`** - i.e. real
+  `WakeupThread(thid)`. **This is the exact function Round 693 live-captured being called from thread
+  6's own dispatch block** (`0x002047cc`, `0x002047e8`, and the live-hit call site `0x00204828`),
+  with the real live argument `a0=9` read directly from the browser-state struct
+  (`a0 = *(struct_ptr+4)`, `struct_ptr` held at `0x7CD0(s1)`).
+
+**The full, now-solved mechanism**: thread 6's per-tick body (entry `0x00204308`) polls three browser
+state fields (`+0x444` panel-ID, `+0x450` escalation flag, `+0x454` one-shot sub-event) every tick.
+When any of them indicates a real state change, it calls the real PS2 kernel primitive
+`WakeupThread(thid)`, where `thid` is read out of the browser struct (`+4` from the struct's base) -
+i.e. **thread 6 looks up which specific OSDSYS worker thread owns the panel/state that just became
+active, and wakes exactly that thread with an ordinary `WakeupThread()` syscall.** The woken worker
+thread (one of TID2/6/7/8/9, previously parked via the matching `SleepThread()` at `0x00210e60`) then
+presumably does the real per-panel work (redraw, sub-menu logic, etc.) before calling `SleepThread()`
+again to go back to sleep. This is completely ordinary PS2 kernel thread synchronization - a
+producer/consumer pattern using stock `SleepThread`/`WakeupThread`, not any exotic or hidden mechanism.
+
+**This closes the multi-hundred-round search for tasks #447/#536's core question** ("what real code
+translates pad input into OSDSYS Browser panel navigation"): the answer is thread 6's own per-tick
+polling of `+0x444`/`+0x450`/`+0x454`, dispatching via plain `WakeupThread()` to whichever worker
+thread ID is stored at `browser_struct+4`. Round 685's `0x00203D78` breakpoint was never going to
+fire because that was never the right address - the real dispatch is the `WakeupThread()` syscall
+itself. Round 686's "ruled out the 5 indirect-jalr dispatch sites as a WakeupThread source" finding
+is now understood correctly: those sites were real kernel-level RPC/callback machinery as
+characterized then, and the REAL WakeupThread call was sitting in a completely different, much more
+mundane spot (a direct `jal`, not an indirect `jalr`) that Round 691's 250-instruction trace simply
+hadn't reached yet - found only once Round 693 pushed the same disassembly further forward.
+
+**Live state.** Session left exactly as Round 693 left it - paused at the `0x00210E70` breakpoint hit,
+`a0=9` (real `WakeupThread(9)` argument) still in registers, backtrace `ra=0x00204830` (thread 6's
+third call site). No further live action taken this round; the finding came entirely from static
+disassembly of the already-hit address plus this project's own previously-fetched ps2sdk header.
+
+**Classification.** No tracked-source change - pure static disassembly + reference-header
+cross-check. Regression suite and Wii rebuild correctly skipped (docs-only round).
+
+**Disposition for task #536** (our own diskless BIOS boot's OSD menu interactivity): our tracked
+`ee_hle_thread.c`/`ee_core.c` already implement real `SleepThread`/`WakeupThread` semantics (shipped
+rounds ago per this project's kernel-primitive work). The open question is no longer "what's the real
+mechanism" (now answered) but whether our own emulated OSDSYS code ever reaches the equivalent
+`+0x444`/`+0x450`/`+0x454`-polling dispatch code in thread 6's role during a diskless boot, and if not,
+what's blocking it from getting there - a natural next round's starting point, now that the ground-truth
+target mechanism is fully known rather than being reverse-engineered from scratch.

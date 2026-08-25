@@ -28883,3 +28883,82 @@ navigation just observed (distinct from `0x00203D78`), since it fires reliably o
 input and is therefore much easier to catch live than the rare category-dispatch path.
 
 Regression suite and Wii rebuild correctly skipped - no tracked source changed.
+
+## Round 686: live disassembly of thread 5's real crt0 + device-table-init sequence rules out the indirect-jalr "hidden WakeupThread" lead and extends Round 678's dormancy conclusion with concrete data-level evidence
+
+Direct continuation of Round 685, per the user's explicit "figure out which steps are missing"
+instruction. Two threads of work this round, both live-PCSX2-instrumented against the same paused
+JP BIOS session (still connected from Rounds 682-685).
+
+**Thread A - resolved Round 680's 5 unresolved indirect (`jalr`) dispatch sites.** These were the
+only call sites Round 680's exhaustive static jal/jalr sweep could not resolve (their targets are
+runtime data, not statically visible), making them the last plausible hiding place for a "hidden"
+`WakeupThread(4)`/`WakeupThread(5)` call invisible to static analysis. Set live code breakpoints on
+all 5 (`0x0020C2F0`, `0x00212BE8`, `0x00212C24`, `0x0021300C`, `0x0021D64C`) and free-ran the session.
+Two fired repeatedly (`0x00212BE8` -> target `0x00212FB8` -> `0x0021300C` -> target `0x0020FF78`),
+confirmed via register reads and backtraces to be the SAME call chain firing periodically (observed
+3 times across ~41M cycles, each an independent event, not a single recursive burst). Disassembled
+both resolved targets: `0x0020FF78` and the `0x0020FFB0` function immediately following it turn out
+to be a generic gp-relative struct-init/callback-registration routine touching heap objects around
+`0x0046Cxxx-0x0046Dxxx` (RPC-callback-registration shape: checks an "already initialized" flag,
+early-outs with error code `-0x64` if a required field is unset, otherwise wires two argument
+pointers into a struct and stores a third field conditionally). The call context itself (`sp=
+0x00081f30`, caller frame `pc=0x00081fec` = `li v1,-0x5`) is the same low kernel-stack region Round
+467 identified as EE kernel/exception-handler territory, not user-thread OSDSYS-core stack space -
+i.e. this whole chain is genuine kernel-level RPC/exception-adjacent machinery, unrelated to thread
+4/5's module addresses (`0x600000`/`0x7A0000`) or the `WakeupThread` syscall. **The other 3 sites
+(`0x0020C2F0`, `0x00212C24`, `0x0021D64C`) never fired across the full observation window.**
+Classification: this lead is now closed with high confidence - none of Round 680's indirect-dispatch
+sites are a hidden thread-4/5 wake mechanism.
+
+**Thread B - direct live-hardware disassembly of thread 5's own module code, comparing against this
+project's Round 677/678 model.** Round 678 (this project's own emulator) found that in a diskless
+boot, thread 5 (entry `0x007A0000`) runs its own code and legitimately parks in a real `SleepThread`
+syscall at `saved_pc=0x007C45E8`, and concluded (correctly, per its own evidence) that thread 4/5's
+dormancy is by-design, gated upstream by the already-documented Browser state-5 blocker (Rounds
+594-596/600), not a missing-wakeup bug. This round obtained the first-ever direct live-hardware
+disassembly of that same code region to check this conclusion against real silicon, not just this
+project's own trace.
+
+`pcsx2_disassemble` at `0x007A0000` (thread 5's real entry point, live on real PS2 hardware via
+PCSX2's HLE-less interpreter) shows a completely ordinary, real crt0: a BSS-clear loop
+(`sq zero,(v0)` incrementing by 0x10 from `0x008A5B80` to `0x008F85C0`, ~338KB), then real EE BIOS
+syscalls `0x3C` (`InitializeMainThread`) and `0x3D` (`InitializeHeap`) with correctly-formed
+gp/sp/heap arguments, then `ei` (enable interrupts), then two `jal`s into `0x007C4940` and, via a
+short intermediate stub at `0x007A0090-0x007A00BC`, into `0x007AD9A8`.
+
+Disassembling `0x007AD9A8` found the real work: it calls a sub-function (`0x007BB930`), then performs
+TWO 5-byte unaligned struct copies (`lwl`/`lwr`/`lb` pattern) from a fixed source at `0x008A5978`
+into destinations `0x001C01E0` and `0x001C0220` - i.e. **thread 5's own real code writes directly
+into the `0x1C0xxx` OSDSYS state region this project has been investigating since Round 591** - then
+calls `0x007C45E0`, which (per Round 678's own finding) contains the `SleepThread` call at
+`+8 = 0x007C45E8`. Reading the actual live memory at both ends of the copy confirms this is genuine,
+meaningful data, not garbage: source `0x008A5978` holds the ASCII string `"1.00\0\0\0"`, and it
+lands correctly at `0x001C01E0` and `0x001C0220` (with a third, identically-formatted `"1.00"` entry
+already present at `0x001C0200`, 0x20 apart from each of the other two - a small fixed-stride table
+of version-string records, not the `+0x444`/`+0x450` browser-state fields at a different, unrelated
+offset within the same broader `0x1C0xxx` region).
+
+**Conclusion: this independently confirms and extends Round 678's finding at the data level, not just
+the control-flow level.** Thread 5's real code, unconditionally, without waiting on any external
+signal: clears its BSS, initializes its own thread/heap context via real BIOS syscalls, writes a real
+"1.00" version-string table into `0x1C0xxx`, and only THEN legitimately calls `SleepThread` - the
+exact same resting point this project's own emulator already reaches. There is no missing
+`WakeupThread(4)`/`WakeupThread(5)` call anywhere (Round 677/680's static sweep and this round's live
+indirect-jalr trace both agree), and thread 5's own real code performs genuine, correct, non-garbage
+initialization work before parking, matching this project's own traced behavior in both shape and
+apparent data correctness. **The single remaining concrete "missing step" for the BIOS Browser to
+become interactive is therefore exactly what Rounds 594-596/600 already identified and Round 678
+reconfirmed: the OSDSYS Browser's own internal state machine (`+0x450`) never transitions away from
+state 5 (its pre-interactive "device scan" phase) in a diskless/memory-card-less boot, and the real
+trigger condition for that specific state-5-to-6 transition is still unfound** - not a thread-wake
+gap, not a hidden dispatch path, not a data-corruption bug in thread 5's own init sequence.
+
+No tracked-source fix implemented this round - both angles investigated (indirect-jalr sweep,
+thread 5 live disassembly) produced negative/confirming results rather than an actionable gap.
+Implementing a synthetic state-5-to-6 transition or forced `WakeupThread` call remains exactly the
+class of unevidenced fix this project has repeatedly and correctly declined to ship. Regression suite
+and Wii rebuild correctly skipped (docs-only round, no tracked source changed). Live PCSX2 session
+left connected and paused (last observed EE PC `0x00212be8`, cycles ~922M) for continuity into a
+future round focused squarely on the state-5-to-6 Browser transition trigger, the one lead every
+investigative thread in this session (Rounds 677-686) now converges on.

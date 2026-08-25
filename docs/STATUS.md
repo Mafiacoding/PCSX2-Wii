@@ -27759,6 +27759,45 @@ warnings, 0 errors, producing pcsx2-wii-git.elf and pcsx2-wii-git.dol.
 1.87MB-length read), and separately, keep looking for the real caller of `padGetState()` itself to
 see what OSDSYS does with a STABLE result - task #447/#623 continuation.
 
+## Round 665: found padGetState()'s real caller - OSDSYS genuinely wants pad data, but the shared table isn't feeding it ours (task #447/#623)
+
+**Method.** Encoded the real MIPS `jal 0x0020B8F8` instruction (`0x0C082E3E`) and grepped a full dump
+of the loaded OSDSYS code region (`0x00200000-0x00220000`) for it - found exactly 2 occurrences,
+`0x00204584` and `0x0020459C`, 24 bytes apart (the real port=0/port=1 call pair).
+
+**Disassembled the caller (`0x00204548-0x002045B4`).** This is a real per-tick "service" routine
+that, in order: calls `0x0020B868` (Round 664's "second consumer") for port=0 with a real, concrete
+output-buffer argument `struct_base+0x95D8`, then again for port=1 with `struct_base+0x95FC` - THE
+EXACT SAME addresses Round 664 already captured as this function's memcpy `dest` (`0x001C95D8`/
+`0x001C95FC`). This closes Round 664's loop: `0x0020B868` is real, intentional pad-consuming code -
+its job is to copy fresh pad data from whatever the shared `0x00441F40` table slot currently points
+to, into OSDSYS's own persistent per-port cache at `0x1C95D8`/`0x1C95FC`. Then the routine calls
+`padGetState()` (`0x0020B8F8`) for both ports and **stores port=0's return value with a real `sw`
+instruction** into a persistent struct field (`struct_base+0x8000+5624`) - direct, disassembly-level
+proof that OSDSYS's own code captures and persists `padGetState()`'s result, not just calls and
+discards it. (A neighboring call to `0x00204080` initially looked like it might consume port=1's
+value too, but disassembling it found its argument comes from a fixed hardware MMIO byte at
+`0x1F40200F`, unrelated to pad - retracted that guess before writing it down, same self-correction
+discipline as Round 664.)
+
+**What this confirms and what it doesn't.** OSDSYS's real dispatcher genuinely, structurally wants
+pad data every tick - this is now proven by real store instructions, not inferred from argument
+shape alone. But Round 664 already found, empirically, that at the moment these specific calls
+execute, the shared `0x00441F40` table slot does NOT reliably point to our own PAD_BIND-written
+`pad_area` buffer (a 40-byte pointer mismatch and a 1.87MB length showed up where our 5/9-byte
+payload was expected). So the real, confirmed-wanting consumer and our real, confirmed-correct
+`padGetState()` fix are not yet known to be connected - the missing link is understanding who
+writes the `0x00441F40` table entries and when, and whether they're ever bound to our `pad_area`
+pointer at the right moment, or whether OSDSYS's real pad-open path uses an entirely different
+binding this project hasn't modeled yet.
+
+**Why no source fix this round.** Pure investigative/tracing round - no new gap was resolved to a
+buildable fix; the previous round's shipped fix remains unchanged and correct. Regression suite and
+Wii rebuild correctly skipped (no tracked source touched).
+
+**Next.** Find the real writer(s) of the `0x00441F40 + port*32 + slot*4` table entries - what binds
+that slot to a real pad buffer, and when, relative to these poll calls - task #447/#623 continuation.
+
 ## Round 663 (task #447/#623 continuation): wire PAD_BIND reply to the real iop_sio2 pad-connected model
 
 **Trigger.** Round 662 found the PAD_BIND RPC-bind reply hardcoded `PAD_STATE_DISCONN` regardless of

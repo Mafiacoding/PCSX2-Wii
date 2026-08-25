@@ -27903,3 +27903,58 @@ correctly wired end-to-end, from RPC reply to both known real consumers.
 `0x1C95D8`/`0x1C95FC` per-port cache and `padGetState()`'s `struct_base+0x8000+5624` field) are
 ever read anywhere, and whether that read gates any visible menu/UI behavior - the natural next step
 toward task #447/#623's core question of real interactivity.
+
+## Round 667: traced the real per-tick dispatcher around padGetState()'s consumers; no static reader of the pad-fed fields found yet (task #447/#623)
+
+**Goal.** Determine whether the two struct fields now correctly fed with real pad data (the
+`0x0020B868` consumer's per-port cache at `0x1C95D8`/`0x1C95FC`, and `padGetState()`'s own result at
+`struct_base+5624`) are ever read anywhere, and whether that gates visible menu/UI behavior.
+
+**Found the enclosing function.** Backward-disassembled from the known `0x00204548` call site to its
+real prologue at `0x00204308` - this is OSDSYS's main per-tick dispatcher (large function, ~176-byte
+stack frame). Confirmed `$s3=1` is set once near the top (`addiu s3, zero, 1`) and reused throughout
+as a boolean-true comparison constant - not itself pad-related, correcting a possible misreading risk
+this round started with (Round 468's unrelated `$s3=3` INTC-cause finding was a different function
+entirely; this project's own register-naming across functions is not globally consistent, as expected).
+
+**Confirmed struct_base's real resolution.** `struct_base = *(0x00287CD0) + 0x8000`, where
+`0x00287CD0` is a fixed OSDSYS context-pointer slot. Live-resolved via periodic direct-memory poll to
+`ctx_ptr=0x001C0000` (`struct_base=0x001C8000`) at instr~179.7M in this round's 320M-instruction
+survey - notably NOT caught by write-instrumentation on `ee_mem_write32`, meaning this pointer is
+populated via a path that bypasses normal CPU stores (most likely a raw SIF/DMA payload copy) rather
+than a `sw` instruction, an important methodological note for any future write-watch on this pointer.
+
+**Disassembled the immediately-following dispatch logic (`0x002045BC-0x002045F4`).** Right after the
+two `padGetState()` calls, the function reads `struct_base+5684` and compares it to the boolean-true
+constant: if equal, it calls two more real functions (`0x002111C0`, `0x0020E4C0`) then clears the
+field back to 0 - a classic one-shot "pending event -> fire and clear" pattern. Confirmed via a
+second, independent instrumentation pass that a clear-write to this exact field does occur for real
+(`pc=0x00205104`, a second/different clear site than the one in the main dispatcher, instr=226.4M),
+but the SET (to 1) was never caught by write-instrumentation either - same DMA/bypass-write signature
+as `0x00287CD0`. This means the "pending event" flag is very likely NOT set directly by pad input at
+all, but by some other cross-subsystem signal (DMA completion, DISPLAY/VBLANK-driven redraw request,
+etc.) - tentative, not yet proven by a positive capture of the actual SET site.
+
+**Searched the full loaded OSDSYS code range (`0x00200000-0x00480000`, 2.5MB dumped and disassembled
+this round, up from Round 665's 128KB partial dump) for any other reader of the three padGetState()-
+fed struct offsets** (`+5624`/`0x15F8`, `+5660`/`0x161C`, `+5684`/`0x1634`) via literal-offset pattern
+matching. Found none beyond the write sites already known from this same dispatcher function. This is
+inconclusive, not a negative proof: MIPS code can address the same field via a different base
+register value, an array-indexed access, or code paths not yet loaded/executed at this boot depth
+(OSDSYS may load additional overlays later that this project's boot survey hasn't reached) - a plain
+grep for the literal displacement constant will miss all of these.
+
+**Disposition.** No tracked-source fix this round - pure investigation. The real pad-data plumbing
+chain (PAD_BIND -> `pad_area` -> `0x00441F40` table -> both real consumers) is now fully confirmed
+correct end-to-end (Round 666), but whether OSDSYS's own code ever *acts* on that data to change
+menu/UI state remains open. The one-shot event-flag mechanism found this round looks more likely
+tied to a display/DMA event than to pad input specifically, based on its bypass-write signature -
+though this is a lead, not a conclusion.
+
+**Next.** Either (a) instrument the SIF/DMA payload-copy paths directly to catch the real SET write to
+`struct_base+5684` and `0x00287CD0` and see what triggers them, or (b) widen the reader search beyond
+literal-offset grep (e.g. instrument reads at the exact runtime addresses `struct_base+5624/5660/5684`
+directly, the same technique that worked for finding the writes) - task #447/#623 continuation.
+
+**Workflow note.** Regression suite and Wii rebuild correctly skipped (no tracked source changed this
+round - purely investigative, scratch-only instrumentation).

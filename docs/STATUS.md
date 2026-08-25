@@ -28084,3 +28084,53 @@ fresh boot-flow observation with the fix active, which is a natural next step bu
 per the user's explicit instruction this round ("fix the pad issue, once done continue the bios
 picture work"), the next round returns to the general JP BIOS splash/menu rendering thread (task
 #536).
+
+## Round 670 (task #536/#447 continuation, "picture work" resumed post-Round-669): tested whether live pad input now visibly affects OSDSYS's diskless-boot Browser state - clean negative result, well-controlled
+
+Direct continuation of Round 669's pad-mailbox-starvation fix. The obvious next question: now that
+`pad_area` genuinely refreshes with live button state every VBLANK, does this project's OWN diskless
+emulated boot ever reach code that reacts to it - specifically the `+0x444`/`+0x450`/`+0x454`
+Browser-state struct (`0x001C0440-0x1C0460`) Rounds 594-607 spent ~15 rounds characterizing on real
+hardware (a genuine, reproducible `+0x450` 5<->8 transition via a real Circle press), which this
+project's own diskless boot has been observed frozen at `+0x450=5` since Round 594.
+
+**Methodology.** Built a host-native survey driver: warm up to real PAD_BIND completion (~280M
+cumulative instr, matching Round 669's own depth), then run three 20M-slice windows sampling
+`+0x444`/`+0x450`/`+0x454` and a whole-4MB-GS-memory FNV-1a checksum at each step - window A with no
+input, window B with CIRCLE held throughout (`iop_sio2_pad_set_buttons()`, the exact call `main.c`'s
+real VSync loop makes), window C with CROSS held. Ran a second, CONTROL driver with the identical
+windowed structure but NEVER touching any button state at all, to distinguish genuine pad-driven
+effects from coincidental time/instruction-count-based init events.
+
+**Result.**
+```
+pad-input run:    post-warmup  instr=279998106  +444=0 +450=5 +454=0
+                   windowA      instr=439997431  +444=0 +450=5 +454=0   (no input)
+                   windowB      instr=599996887  +444=0 +450=5 +454=5   (CIRCLE held)
+                   windowC      instr=759996320  +444=0 +450=5 +454=5   (CROSS held)
+control run:       post-warmup  instr=279998106  +444=0 +450=5 +454=0
+                   windowA      instr=439997431  +444=0 +450=5 +454=0   (no input)
+                   windowB      instr=599996887  +444=0 +450=5 +454=5   (still no input)
+```
+`gs_checksum` was identical (`0x97B490F2`) at every single sample point in both runs - the
+framebuffer never changed at all across ~600-760M cumulative instructions.
+
+`+0x454`'s `0->5` transition happens at the exact same cumulative-instruction range in BOTH runs,
+regardless of whether CIRCLE was held (pad-input run) or no button was ever touched (control run).
+This proves it is a deterministic, time/instruction-count-gated init event - not pad-input-driven.
+`+0x450`, the field Round 606 proved (on real hardware) genuinely responds to Circle/Cross presses,
+never moved from its Round-594-documented frozen value of `5` in either run, CIRCLE-held or not.
+
+**Conclusion.** Round 669's fix is confirmed working exactly as designed (byte-level verified in
+that round's own driver) - but this round's negative result shows the fix alone is not sufficient to
+make OSDSYS's Browser/menu system visibly react to pad input during OUR OWN diskless emulated boot,
+because our boot's control flow apparently never reaches the real dispatcher code that would consume
+that live state in the first place (consistent with Round 667's "no static reader of the pad-fed
+struct fields found yet" and the still-open Browser-escalation thread from Rounds 594-607). Round
+669 fixed a real, confirmed bug (stale `pad_area`), but it was necessary, not sufficient, for visible
+menu interactivity - the remaining gap is downstream: finding/reaching whatever real OSDSYS code
+path reads `pad_area`'s content and drives the `+0x450`-class dispatch Round 606 observed on real
+hardware. This narrows, rather than closes, task #536/#447's remaining open thread.
+
+No tracked-source change this round (pure investigation/measurement) - regression suite and Wii
+rebuild correctly skipped.

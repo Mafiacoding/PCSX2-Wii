@@ -29284,3 +29284,63 @@ threads 3/4/5/6-9's already-characterized roles - and neither has been disassemb
 session. TID1's resting address (`0x00210e78`) was previously flagged back in Round 465 as "OSDSYS's
 own code the calling thread got redirected to" but never fully attributed to a specific real
 subsystem; it is a reasonable next candidate to check for pad-to-navigation-dispatch logic.
+
+## Round 692: TID0/TID1 both resolve to mundane kernel constructs, not navigation-dispatch candidates - completes the per-thread sweep of all 10 real hardware threads without finding the pad-navigation trigger
+
+Direct continuation of Round 691's flagged next step (examine TID0/TID1, the two `READY` threads
+from Round 688's live thread table that hadn't yet been attributed to a specific subsystem).
+
+**TID1 (`pc=0x00210e78`)**: disassembly shows this address is literally the first instruction of
+the generic per-syscall trampoline table Round 595 already decoded (`0x00210e70`-onward, `jr ra`/
+`nop` stubs, one per real EE kernel syscall number) - specifically a `jr ra; nop` stub with no
+`syscall` instruction before it, i.e. either an unused/reserved table slot or (more likely) simply
+the return address the thread happened to be resting at after its last real syscall trampoline call
+returned. Not a distinct function of its own - no further lead here.
+
+**TID0 (`pc=0x00081fc0`)**: disassembly is much more conclusive. The address sits inside a tight,
+literal infinite loop: six `nop`s (`0x00081fc0-0x00081fd4`) followed by `b ->$0x00081FC0`
+(unconditional branch back to itself, `0x00081fd8`). **This is the real EE kernel's built-in idle
+thread** - the standard "do nothing when no other thread is ready" construct present in effectively
+every RTOS. Confirmed by context: immediately following this loop, at `0x00081FE0`, is the exact
+same generic kernel thread-start trampoline Round 467 already fully decoded (`lui sp,0x0008 / jalr
+v1 / addiu sp,0x1FC0`), and at `0x00081fec` is `li v1,-5; syscall` - the same thread-exit/error-return
+stub whose caller context Round 686's indirect-jalr investigation already characterized as
+kernel-level. All three pieces (idle loop, thread-start trampoline, exit stub) sit contiguously in
+the same tight kernel-bootstrap code page, confirming this whole `0x00081F00-0x00082010` region is
+genuine, mundane EE kernel infrastructure - not application-level Browser/navigation logic.
+
+**This completes a full sweep of all 10 real hardware threads captured in Round 688's thread table**,
+with every one now attributed to a known role:
+
+| TID | Role | Status |
+|---|---|---|
+| 0 | Kernel idle thread | mundane, ruled out (this round) |
+| 1 | Resting at syscall-trampoline return stub | inconclusive/uninteresting (this round) |
+| 2 | OSDSYS-core worker (parks at `0x00210e68`) | matches Round 596's own-emulator model |
+| 3 | Animation/carousel thread (`entry=0x00500000`) | long-documented since Round 596 |
+| 4 | Overlay module, genuinely `SleepThread`s (`0x0061b668`) | matches Round 677/678's model exactly |
+| 5 | Overlay module, perpetual VBLANK-animation loop | revised this session (Rounds 686-690) |
+| 6 | Disc-browser dispatcher (`entry=0x00204308`) | traced extensively (Rounds 596-599, 691) |
+| 7,8,9 | OSDSYS-core workers (park at `0x00210e68`) | match Round 596's own-emulator model |
+
+**None of the 10 threads' own per-tick bodies contain a call to `0x00203D78` or a write to `+0x444`
+in everything traced this session.** Combined with Round 685's direct observation that ordinary
+D-Pad navigation genuinely does not trigger the `0x00203D78` dispatcher breakpoint at all, this is
+now a reasonably strong (though not airtight - not every byte of every thread's full function body
+has been traced) negative result: **the real pad-to-panel-navigation translation is very plausibly
+NOT implemented as routine per-tick polling inside any of these 10 threads**, but instead through a
+more directly event-driven path - e.g. logic invoked straight from a SIO2/pad-interrupt handler, or
+from inside one of thread 6's sub-calls not yet disassembled (its function body extends well past
+the ~250 instructions traced in Round 691).
+
+**Classification.** No tracked-source change - pure static disassembly. Regression suite and Wii
+rebuild correctly skipped (docs-only round). Live PCSX2 session left connected and paused, unchanged.
+
+**Disposition.** The per-thread sweep this round's methodology enabled is now complete; continuing to
+scan more of thread 6's body (rather than switching threads) is likely the more productive next
+step, since thread 6 is still the only one of the 10 with direct, confirmed involvement in browser
+device-state bookkeeping (the `+0x1BA0` flag, the `0x164C` per-slot polling loop). A second
+productive angle, not yet tried this session: search for the real SIO2/pad-interrupt handler's own
+code (this project's own `ee_intc.c`/`iop_sio2.c` already model pad IRQ delivery) and check whether
+real OSDSYS registers a handler that calls directly into Browser code on each pad edge, bypassing
+per-tick thread polling entirely - which would explain why no thread body shows the trigger.

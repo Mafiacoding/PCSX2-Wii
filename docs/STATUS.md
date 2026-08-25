@@ -28564,3 +28564,55 @@ read, since the direct-`jal` search this round performed came back empty - or (b
 access to single-step from a real Circle press backward to its real calling function (the same
 methodology that produced Round 606's original capture, but this time continuing past the memory-
 read to a live disassembly/backtrace instead of stopping at the field-value observation).
+
+## Round 680: completed the indirect-call (jalr) sweep for the three known `+0x450` writer functions - all 35 jalr sites in OSDSYS's core region resolve to unrelated mechanisms, closing the direct-and-indirect static-call search entirely
+
+Direct continuation of Round 679's own recommended next step ("a dataflow-aware search for an
+indirect `jalr` call to the three writer functions").
+
+**Method.** Enumerated every `jalr` instruction in the already-generated full disassembly of
+`0x00200000-0x00220000` (35 total, `grep -c jalr`), then for each one walked backward up to 40
+instructions looking for a `lui <reg>,X` / `addiu|ori <reg>,<reg>,Y` pair that would construct one
+of the three known writer addresses (`0x00201104`, `0x00201118`, `0x00205118`) into the exact
+register the `jalr` uses. Zero matches - so a second pass printed the actual 15-instruction
+backward context for all 35 sites for direct visual inspection instead of relying purely on the
+automated pattern match (in case the disassembler's operand formatting missed a variant).
+
+**Result: all 35 sites are accounted for by two unrelated, already-understood mechanisms, none of
+which touch the writer functions.** (1) The large majority (`0x00211ED0`-`0x00214C64`, ~28 sites)
+all load their call target from the exact same fixed pointer-table base, `RAM[0x0028AA34 + k]` for
+various small `k` (`lw v0,-21964(reg)` where `reg` was just set via `lui reg,0x0029`) - a real
+callback/vtable this project has not previously needed to name, but which decodes unambiguously as
+a **string-formatting dispatcher**: several call sites feed it the literal ASCII bytes
+`0x28,0x6E,0x75,0x6C,0x29` (`(`,`n`,`u`,`l`,`)`) as immediate `addiu a0,zero,N` arguments right
+before the call - i.e. this is code assembling and printing the literal string `"(null)"`, the
+classic C-library `%s`-with-NULL-argument fallback. Entirely unrelated to browser-panel state. (2)
+The remaining sites (`0x0020C2F0`, `0x00212BE8`/`0x00212C24`, `0x0021300C`, `0x0021D64C`, and a
+handful more) are generic RPC/linked-list dispatch through caller-supplied function-pointer
+structs (`lw v0,28(s0)` / `lw a2,0(v0)` patterns) - the same class of real, already-documented SIF
+RPC completion-callback mechanism this project's own Round 301/355/386 work identified, not a
+browser-state writer.
+
+**Conclusion: the direct-and-indirect static-call search is now exhaustive and complete for
+OSDSYS's core `0x200000-0x220000` region.** Combined with Round 679's direct-`jal` sweep (zero
+matches) and this round's `jalr` sweep (zero matches, all 35 sites independently explained by
+unrelated mechanisms), there is no call of any kind - direct or register-indirect - to any of the
+three known `+0x450`/`+0x444` writer functions anywhere in this region beyond their own already-
+documented one-time init call sites. **Scope caveat, stated honestly**: this sweep only covers the
+`0x200000-0x220000` window this session has a full disassembly for; Round 610's own broader
+full-ELF literal-immediate scan (`0x200000-0x28D1EC`) was negative too, but that was a different
+search technique (immediate-value matching, not call-target resolution) and has not been repeated
+with this round's jalr/backward-dataflow method across the larger `0x220000-0x28D1EC` tail.
+
+**Classification.** No tracked-source change - pure static analysis of an already-generated
+disassembly dump (`/tmp/r672/full_disasm_200000.txt`), no new instrumentation or driver runs this
+round. Regression suite and Wii rebuild correctly skipped (docs-only round).
+
+**Disposition.** The Round 679 "concrete next step (a)" is now answered negatively and closed. The
+one remaining thread from Round 679's disposition is option (b): fresh live-PCSX2 access to
+single-step backward from an actual Circle press to its real calling function - the only
+methodology left that can find a caller this project's static tooling has now searched
+exhaustively (within the swept region) and come up empty. Given this project currently has no live
+PCSX2 connection available, this specific investigative thread is at a natural pause point pending
+either live access or extending the same jalr/dataflow sweep to the `0x220000-0x28D1EC` tail of the
+ELF (not yet disassembled in full this session).

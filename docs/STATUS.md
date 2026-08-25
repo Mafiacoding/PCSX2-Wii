@@ -27748,13 +27748,12 @@ correcting itself within the same round, which is exactly what the verification 
 Regression: 56/130 host-native unit tests pass unchanged (the other 74 fail on pre-existing,
 already-documented stale test-command issues from task #554/#605 - missing source files and `-lm`
 in `tests/README.md`'s command list, unrelated to this change, zero newly-introduced failures,
-zero new run failures). Wii cross-build could not be performed this round - devkitPPC is not
-installed in this fresh sandbox (lost in this window's earlier reset) and the official installer
-(`apt.devkitpro.org`) is behind bot-detection that blocked this session's `curl`; mitigated by a
-clean `gcc -Wall -Wextra` host compile of the changed file (no warnings) and the fact that the
-change touches no platform-specific code (only pre-existing, already-declared project functions/
-constants). This gap is flagged honestly rather than skipped silently - next session with toolchain
-access should run the deferred Wii build-health check.
+zero new run failures). Wii cross-build: initially thought devkitPPC was unavailable in this fresh sandbox (the
+env vars weren't set and the official installer is bot-gated) - the user pointed out it was already
+present, persisted under this session's outputs/build/devkitpro/ tree from an earlier round's setup
+work (see TOOLCHAIN_SETUP_NOTES.md there for how it was originally assembled). With
+DEVKITPRO/DEVKITPPC/PATH/LD_LIBRARY_PATH set accordingly, `make clean && make` completed with 0
+warnings, 0 errors, producing pcsx2-wii-git.elf and pcsx2-wii-git.dol.
 
 **Next.** Find what actually occupies/consumes the `0x00441F40` table slot's OTHER bindings (the
 1.87MB-length read), and separately, keep looking for the real caller of `padGetState()` itself to

@@ -28616,3 +28616,50 @@ exhaustively (within the swept region) and come up empty. Given this project cur
 PCSX2 connection available, this specific investigative thread is at a natural pause point pending
 either live access or extending the same jalr/dataflow sweep to the `0x220000-0x28D1EC` tail of the
 ELF (not yet disassembled in full this session).
+
+## Round 681: extended the jal/jalr static-call sweep to the previously-undisassembled `0x220000-0x28D1EC` tail - confirmed this region is data, not code, closing the full-ELF static call-graph search completely
+
+Direct continuation of Round 680's stated scope caveat: the jalr sweep had only covered
+`0x200000-0x220000` (the window this session already had a disassembly for); this round dumped
+and disassembled the remaining `0x220000-0x28D1EC` span (446,956 bytes / 111,739 instruction
+slots) to close that gap.
+
+**Method.** Reused the existing Round 672 RAM-dump driver (`r672_bin`, host-native, real
+BIOS+diskless boot, 35M-slice warmup - the same depth used throughout Rounds 678-680) to dump
+`RAM[0x00220000..0x0028D1EC)` to a fresh binary, then ran it through the Round 655 EE/R5900
+disassembler (`disasm_bin`) to produce a full instruction-per-line listing, exactly mirroring
+Round 679/680's method for the first region.
+
+**Result.** Zero `jal` instructions target any of the three known writer addresses (as before).
+16 raw `jalr`-pattern matches were found, but manual inspection of all 16 (full 5-line-before
+context) shows every single one is a **disassembler artifact from decoding non-code data**, not a
+real instruction: several sit inside runs of "unrecognized" opcodes and nonsensical operands
+(`sltiu fp,t7,11807`, `j 0x0B8BFD6C`, `ldr s6,16431(s5)`) typical of raw data misinterpreted as
+MIPS encoding; two (`0x0028A860`, `0x0028ACD0`) sit inside long all-zero-word runs immediately
+adjacent to the known `0x0028AA34` callback-table address identified in Round 679/680 (i.e. inside
+that very table's padding); one (`0x0028C800`) is immediately preceded by literal ASCII bytes
+`"    "` and `"0000"` (`0x20202020`, `0x30303030` x4) - a text/number-formatting buffer, not code;
+another pair (`0x00287E64`, `0x00287EAC`) sit inside a strictly monotonic countdown sequence of
+small integers, the signature of a lookup/offset table, not instructions.
+
+**Conclusion.** `0x00220000-0x0028D1EC` is OSDSYS's data segment (rodata/data), not executable
+code - consistent with, and now directly confirming, Round 679/680's own finding that the known
+callback table (`0x0028AA34`) and Round 632's label-string table (`0x0028B7A0-0x0028B810`) both
+sit inside exactly this range. Since this span contains no real machine code at all, it trivially
+contains zero calls of any kind (direct or indirect) to the three writer functions. **Combined with
+Round 679's direct-`jal` sweep and Round 680's indirect-`jalr` sweep of the `0x200000-0x220000`
+code region, the static call-graph search across the entire loaded ELF image is now complete and
+exhaustive**: there is no call - direct or register-indirect - to `0x00201104`, `0x00201118`, or
+`0x00205118` anywhere in OSDSYS's loaded image beyond their own already-documented one-time init
+call sites.
+
+**Classification.** No tracked-source change - pure static analysis of a freshly-generated
+disassembly dump. Regression suite and Wii rebuild correctly skipped (docs-only round).
+
+**Disposition.** This closes out the static half of Round 679's two offered next steps entirely.
+The only methodology left standing that could still find a real caller is live-PCSX2 single-
+stepping backward from an actual Circle/Cross press on real hardware - the option this project has
+deferred pending live access. Recommend the user's next choice: (a) fresh live-PCSX2 access to
+resolve this via real single-stepping, since static tooling has now been fully exhausted, or (b)
+pause this specific investigative thread here, given ~90 rounds (594-681) of both live and static
+evidence converging on the same wall.

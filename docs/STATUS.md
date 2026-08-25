@@ -28840,3 +28840,46 @@ Next investigative step: identify which EE syscall number (or periodic BIOS tick
 (`ee_core.c`) has a gap there. Live pcsx2-qt.exe session left paused (not reset) for continuity.
 
 Regression suite and Wii rebuild correctly skipped - no tracked source changed.
+
+## Round 685: live D-Pad navigation confirms a SECOND, finer-grained index distinct from +0x444; the 0x00203D78 dispatcher breakpoint never fires even during visible real panel navigation (task #447/#536)
+
+Direct follow-up to Round 684. With the live pcsx2-qt.exe session, set a code breakpoint at the
+real dispatcher entry `0x00203D78` (rather than a memory watchpoint) and let the emulator run
+completely freely via `pcsx2_continue` for over a minute of real wall-clock time (EE cycle
+counter advanced by billions across repeated samples). The breakpoint never fired during this
+free-run window, confirming Round 684's watchpoint-based "0 hits" results were NOT a tooling
+artifact of memory watchpoints under the JIT recompiler - the dispatcher genuinely does not run
+on any short, regular cadence.
+
+Then, with the emulator still running, sent real keyboard-mapped D-Pad/button presses (per Round
+606's confirmed bindings). This produced a directly visible result: PCSX2's own window showed the
+real OSDSYS Browser UI at panel "MEMORY CARD/1", and a Right-arrow press visibly moved the
+highlighted icon to "MEMORY CARD/2" - genuine live navigation, captured via screenshot. Despite
+this real, visible panel-index change, **the `0x00203D78` breakpoint still did not fire**, and a
+memory read of `+0x444` immediately after showed `0x01C00000` (a pointer-like value, not a small
+integer device-category index like the 14/10 values captured live in Round 684) while `+0x450`
+read 8.
+
+### Synthesis
+This indicates the real Browser UI has at least two distinct, independently-driven navigation
+indices: `+0x444` (the coarse device-*category* selector feeding the `0x00203D78` dispatcher's
+17-entry handler table, confirmed nonzero and changing in Round 684) and a separate, finer-grained
+*slot* index (e.g. memory card 1 vs. 2 within the Memory Card category) that the D-Pad Left/Right
+we exercised here actually drives - a different code path that does not touch `0x00203D78` at
+all. The `0x01C00000` reading suggests `+0x444` may be reused as a pointer/context field once a
+category is already selected and active, rather than staying a stable small integer - i.e. its
+role is more dynamic/state-dependent than the simple "device index" model used since Round 594.
+
+### Classification
+No tracked-source change - further live-hardware ground-truth gathering. Narrows task #447/#536
+further: the slot-level navigation (what we just visually confirmed working) is a distinct,
+likely simpler mechanism from the category-level `0x00203D78` dispatch chain, and may be a more
+tractable next target than continuing to chase the rarer category-level dispatch.
+
+### Disposition / next step
+Live session left paused (PC=0x007c4b60, same idle-thread resting point used throughout this
+investigation) for continuity. Next step: trace the code path actually driving the MC1<->MC2 slot
+navigation just observed (distinct from `0x00203D78`), since it fires reliably on ordinary D-Pad
+input and is therefore much easier to catch live than the rare category-dispatch path.
+
+Regression suite and Wii rebuild correctly skipped - no tracked source changed.

@@ -28794,3 +28794,49 @@ type, not the `+0x450` watch used in Round 682, which never fired because `+0x45
 writer in this session turned out to be reached via the `+0x444==10` dispatch path, itself
 downstream of the still-unknown `+0x444` writer) - the same live session is still connected and
 running, so this is directly actionable next.
+
+## Round 684: live PCSX2 catches +0x444 holding real nonzero values (14, then 10) during unprompted execution - dispatcher's caller resolves through a real EE syscall trampoline, not a simple poll loop (task #447/#536)
+
+Direct follow-up to Round 683's "our own emulator always sees +0x444=0" finding. With the live
+pcsx2-qt.exe session still connected and paused deep in the JP BIOS OSDSYS run (cycles ~247M),
+resumed execution (GUI Run + `pcsx2_continue`) and re-sampled state twice, with NO pad input
+from us in between.
+
+**Result: both samples landed inside the real writer function (`0x002010F0`, the "+0x450=6"
+writer identified in Round 682) at the exact instruction `sw zero, 0x444(v1)` - but the live
+memory read taken *before* that instruction executed showed `+0x444` holding a genuine nonzero
+value each time: 14 (0x0e) on the first sample, then 10 (0x0a) on the second, roughly 44M cycles
+later.** Backtraces confirmed the real call chain matches Round 682's table exactly:
+- `+0x444=14` -> dispatcher `0x00203D78` -> handler `0x002015D0` -> writer `0x002010F0`
+- `+0x444=10` -> dispatcher `0x00203D78` -> handler `0x00201408` -> writer `0x002010F0`
+
+This directly contradicts Round 683's own-emulator finding (dispatcher always reached with
+`+0x444==0`) - on real hardware, the panel index genuinely cycles through multiple nonzero
+values with no button presses, refuting the assumption that pad input is required to populate
+it. The real BIOS is doing this on its own, most likely as part of an idle carousel/auto-scan
+animation.
+
+Traced the dispatcher's own caller by reading the saved `$ra` off the stack at the dispatcher's
+frame (`sp+0x20` = `0x0041EB40`, encoded as raw bytes `b8 00 20 00` -> `0x002000B8`). Disassembling
+around that return address (`0x00200080-0x002000DC`) shows real EE kernel/BIOS code containing
+`syscall` instructions and several small stubs that set `$a0` and tail-jump (`j`, not `jal`) into
+a common trampoline at `0x00210B80` - the same "read a table entry, dispatch via the caller's
+inherited $ra" pattern as the generic thread-start trampoline found at `0x00081FE0` in Round 467,
+but this is OSDSYS's own BIOS-side equivalent. This means the dispatcher (`0x00203D78`) is
+reached via a real EE syscall/trampoline mechanism, not a straightforward polling loop callable
+directly from our own emulator's traced boot path - consistent with Round 683's finding that our
+diskless boot never sees this fire with a nonzero index.
+
+### Classification
+No tracked-source change. This is further live-hardware ground-truth gathering: it confirms (a)
+`+0x444` is a real, actively-cycling panel index on real hardware, not a static field, and (b) the
+mechanism that drives it sits behind a real EE syscall dispatch table our own boot trace hasn't
+reached, narrowing task #447/#536's remaining gap to "get our own emulator to reach/dispatch this
+same syscall trampoline region" rather than "find an unknown writer function."
+
+### Disposition / next step
+Next investigative step: identify which EE syscall number (or periodic BIOS tick) invokes
+`0x00210B80`->`0x00203D78`, and check whether our own emulator's syscall dispatch table
+(`ee_core.c`) has a gap there. Live pcsx2-qt.exe session left paused (not reset) for continuity.
+
+Regression suite and Wii rebuild correctly skipped - no tracked source changed.

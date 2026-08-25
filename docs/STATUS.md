@@ -28470,3 +28470,97 @@ dormancy, rather than there being two separate bugs.
 All instrumentation (the `ee_hle_thread.c` CreateThread/StartThread hooks, the nav-pulse driver)
 remains scratch-only under `/tmp/r671/srctree/` and `/tmp/r673/`; no tracked source changed. Host-
 native regression suite and Wii cross-build correctly skipped (docs-only round).
+
+## Round 679: tested CIRCLE/CROSS specifically (the exact real-hardware-proven +0x450 trigger, Round 606) against thread 4's dormancy and the OSDSYS Browser-state fields - no effect; instrumented the real event-type global thread 9's dispatcher reads and found it is a self-contained one-shot state variable, not an inter-thread mailbox
+
+Direct continuation of Round 678's own negative directional-pad result and the user's "yes" to keep
+chasing the state-5 blocker. Re-read this project's own much older Round 594-633 investigation
+history in full before continuing (previously only partially cited in this session) - it surfaced
+several already-established, highly relevant facts Round 678 did not yet have: Round 606 captured
+the ONLY real-hardware-observed `+0x450` transition in this project's history using **Circle**
+specifically (Browser <-> Memory Card panel, 5<->8), not a directional button; Round 631 found a
+real, working `thread3->WakeupThread(6)->thread6->WakeupThread(9)` chain firing every frame, with
+thread 9's own body (`0x00205DC0`) dispatching through a 6-way jump table on an event-type value
+read from a fixed global; and Round 630 already shipped a narrow, evidenced guard against the
+separate TIMER3/EXL=1 hard-lockup this session's Round 678 also independently reproduced (thread 3
+still dominates CPU time, `furthest_pc=0x8000A534`), confirming that specific crash is already
+neutralized and the boot is genuinely still alive, just perpetually idling.
+
+**Test 1: CIRCLE/CROSS specifically, held across multiple real frame-lengths, using the pad pipeline
+already proven correct end-to-end (Round 672-674).** Re-ran the Round 678 nav-pulse driver with only
+`IOP_PAD_BTN_CIRCLE`/`IOP_PAD_BTN_CROSS`, each pulse held for 3,000,000 slices (~24,000,000
+instructions, roughly 5 real EE frames per half-pulse, well above the single-frame granularity
+thread 6/9's wake cycle operates on). Result: `padGetState_hits`/`sibling_hits` climbed steadily
+throughout (100 -> 178), proving thread 6 genuinely re-read the live, changing pad state on every
+press exactly as Round 672-674 already established - but `+0x444`, `+0x450`, and `+0x454` stayed at
+`0`/`5`/`0` for the entire run, and the `WakeupThread`/`_iWakeupThread` target sweep showed no new
+targets (`{0,3,9}` and `{6}`, identical to Round 678's baseline). **The exact real-hardware-proven
+trigger button, held far longer than a real press, produces zero observable effect in this
+project's own diskless model** - a stronger, more targeted negative result than Round 678's
+directional-pad test, since this is no longer "the wrong buttons," it's "the right button, still
+nothing."
+
+**Test 2: instrumented the real event-type global Round 631/632 identified as thread 9's dispatch
+selector.** Disassembling `0x00206538`-`0x002065E8` (thread 9's message-receive/dispatch function)
+confirms `a2` (the value gating the `sltiu $v0,a2,6` / 6-entry jump-table dispatch Round 631 cited)
+is read via `lw a2,-24304(v0)` where `v0=lui $v0,0x0029` - i.e. from the fixed physical global
+`RAM[0x0028A110]`. Added a write-probe on this exact address to `ee_mem_write32()` (scratch
+`ee_core.c` only). Result across the full ~512,000,000-instruction survey (warmup + both button
+tests): **exactly 2 writes total**, both from addresses inside thread 9's own body
+(`pc=0x002059A4` writes `2`, `pc=0x00205B34` writes `0`), both occurring once, early, during
+thread 9's very first wake - never repeating on any subsequent wake cycle, and with no correlation
+to the timing of the CIRCLE/CROSS presses in Test 1 (which happened much later in the run).
+
+**Conclusion: the "message queue" framing from Round 631 was imprecise - this is a one-shot internal
+state variable, not a live inter-thread mailbox, and it is not the pad-to-menu translation path.**
+Thread 9 sets its own dispatch-selector field to `2` (entering one specific state-machine branch),
+runs it once, resets the field to `0`, and - per Round 613's own independent finding that thread 9
+totals only ~5,000 instructions across a 500M+-instruction run - essentially never revisits this
+code path again, regardless of pad activity. This rules out "find what should write a message
+for thread 9" as the real missing mechanism, since there is no evidence this specific dispatcher was
+ever meant to be pad-input-driven on a per-frame basis in the first place - real hardware's Circle-
+press-driven `+0x450` transition (Round 606) must be implemented by some other, still-unidentified
+piece of OSDSYS code that this project's boot trace has not yet been shown to execute at all.
+
+**Where this leaves the investigation, honestly.** After this session's Rounds 671-679 (9 rounds)
+plus the much larger Round 594-633 arc this round re-read in full, the concrete, disassembly-
+verified facts are: (1) the raw pad pipeline is proven correct end-to-end, byte-for-byte, for every
+button tested (Round 664-674, this round); (2) thread 4/5's `CreateThread`/`StartThread` call sites
+are correct, real, unconditional OSDSYS-core code (Round 678); (3) thread 6/9's real per-frame
+wake chain is genuine, working, non-stub code, but does not touch `+0x444`/`+0x450`/`+0x454` or
+target thread 4/5 under any input tested so far (Round 631, 678, this round); (4) the one hard
+lockup that could have masked further progress (TIMER3/EXL=1) was already fixed in Round 630 and
+does not gate the animation loop itself (confirmed independently by Round 630's own guard-fires-but-
+`max_osdsys_pc`-stays-frozen result). **No further disassembly lead is currently in hand for what
+code should perform the Circle-press-to-`+0x450`-write translation** - the three known writer
+functions (`0x00201104`/`0x00201118`/`0x00205118`, Round 594) are confirmed loaded and callable
+(Round 606 proved real hardware re-invokes them live) but this project's trace has never been shown
+to call any of them a second time, and no caller/dispatcher for that second invocation has been
+found despite direct instrumentation of the most promising candidate (thread 9's dispatch global).
+
+**Classification.** No tracked-source change - the `ee_mem_write32()` probe is scratch-only
+(`/tmp/r671/srctree/source/core/ee/ee_core.c`, never applied to the tracked tree), matching this
+project's standing convention for investigation-only rounds. Regression suite and Wii rebuild
+correctly skipped (docs-only round, per the same established precedent as Rounds 464/599/601/611).
+
+**Follow-up static scan (same round): no second caller of the three writer functions exists
+anywhere in OSDSYS's core dispatcher region.** Grepped the full `0x00200000-0x00220000` disassembly
+(the same region containing thread 6/9's dispatch chain, the label-registration code, and all three
+writer functions themselves) for any `jal 0x00201104` / `jal 0x00201118` / `jal 0x00205118` -
+zero matches. Combined with Round 610's own already-completed full-ELF scan for the `+0x444`/`+0x454`
+immediate literals (also negative), this rules out both a direct-call and a literal-immediate-write
+mechanism anywhere in the statically-loaded OSDSYS image; if a second call exists at all, it must be
+indirect (`jalr` through a register/table, which a text-based address grep cannot find) or the
+writer functions are reached from a currently-unloaded/dynamically-paged code region.
+
+**Disposition.** Per this project's own discipline against unevidenced fixes (Round 549's reverted
+FIO_F_CLOSE fix is the standing cautionary precedent), no synthetic "force `+0x450`" or "force
+`WakeupThread(4)`" fix is implemented this round, since doing so would fabricate behavior with no
+real-code call site backing it - exactly the category of change this project has repeatedly and
+correctly declined to ship. The concrete next step for whoever continues this thread: either (a)
+a dataflow-aware search for an INDIRECT (`jalr`) call to the three writer functions - tracing which
+registers ever get loaded with `0x00201104`/`0x00201118`/`0x00205118` via `lui`/`addiu` or a table
+read, since the direct-`jal` search this round performed came back empty - or (b) fresh live-PCSX2
+access to single-step from a real Circle press backward to its real calling function (the same
+methodology that produced Round 606's original capture, but this time continuing past the memory-
+read to a live disassembly/backtrace instead of stopping at the field-value observation).

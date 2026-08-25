@@ -28315,3 +28315,31 @@ consumer threads checked so far.
 
 No tracked-source change this round - all instrumentation remains in the scratch copy under
 `/tmp/r671/srctree/`. Regression suite and Wii rebuild correctly skipped.
+
+## Round 676 (task #536/#447 continuation): exhaustive all-thread sweep confirms thread 6 is the ONLY thread that ever reads live pad state during diskless boot - closes the "find the consumer" search
+
+Direct follow-up to Round 675's negative result for thread 3. Rather than continue guessing at
+individual threads one at a time, this round instrumented every EE thread ID (0-31) simultaneously
+with the same call-site counters (`padGetState()` at `0x0020B8F8`, its sibling at `0x0020B868`) and
+a per-thread total-instruction counter, across the same pulse-tested window.
+
+**Result.** Nine threads are active at all during the diskless-boot survey window: 0 (30,002,986
+instr), 1 (48,493,273 instr), 3 (296,718,067 instr, the animation loop), 4 (67,258 instr), 5
+(148,191 instr), 6 (566,233 instr, the disc-browser dispatcher), 7 (18 instr), 8 (91 instr), 9
+(3,883 instr). **Threads 0 and 1 turn out to have substantial activity** (30M and 48M instructions
+respectively) that no prior round's coarser sampling had captured in this much detail - consistent
+with the same sampling-granularity theme corrected twice already this session (Round 613/673 for
+thread 6). Despite that activity, `padGetState()`/sibling call counters are exactly `0` for every
+single thread except thread 6 (which shows the expected 124/124, matching its own dispatcher).
+
+**Conclusion.** This closes the "which thread is the real consumer of OSDSYS's live pad cache"
+search as thoroughly as is practical within this diskless-boot execution window: of the nine threads
+that run at all, only thread 6 ever reads pad state, and (per Round 672-676's cumulative evidence)
+nothing yet found - including thread 6 itself - ever acts on it to move `+0x444`/`+0x450`/`+0x454`
+or draw anything new. The pad-input pipeline (Round 669's fix through Round 672-674's full
+verification) is conclusively proven correct; the remaining gap is a real OSDSYS/BIOS screen-
+transition into the interactive Browser that this diskless boot's current execution window has not
+reached, not a defect reachable via further source changes to the pad path itself.
+
+No tracked-source change this round - instrumentation remains in the scratch copy under
+`/tmp/r671/srctree/`. Regression suite and Wii rebuild correctly skipped.

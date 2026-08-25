@@ -27958,3 +27958,66 @@ directly, the same technique that worked for finding the writes) - task #447/#62
 
 **Workflow note.** Regression suite and Wii rebuild correctly skipped (no tracked source changed this
 round - purely investigative, scratch-only instrumentation).
+
+## Round 668: root-caused `0x00287CD0`'s writer - it's OSDSYS's own ELF `.data` content, not a runtime store (task #447/#623)
+
+**Goal.** Round 667 left one concrete open question: who writes OSDSYS's context pointer
+(`0x00287CD0`) to its real value `0x001C0000`, and by extension the "pending event" flag at
+`struct_base+5684`? The user asked to "instrument everything and test the bios" - a full
+write-watch sweep across every plausible write path, plus a fresh full BIOS boot survey.
+
+**Methodology bug found and fixed first.** The initial watch, added to `ee_mem_write8/16/32/64()`,
+compared the raw `addr` parameter directly against the bare physical constant `0x00287CD0u`. This
+is wrong in general: real EE store instructions almost always target KSEG0 (`0x80000000`+) or
+KSEG1 (`0xA0000000`+) mirrors, not the bare physical address, so a naive equality check silently
+never matches. Fixed by normalizing with `addr & 0x1FFFFFFFu` (the same masking convention
+`ee_mem_ptr()` itself already uses) for all four accessors, including the 8-byte overlap range
+check in `ee_mem_write64()`, which had the same bug in its range form. Re-ran: still zero hits at
+the real transition (`instr=179,691,520`, confirmed via periodic read-poll in `ee_step()`).
+
+**Second, stronger fix.** Rather than trust any address-representation reconstruction, switched the
+watch to compare the *resolved pointer* `ee_mem_ptr()` already returns (`p`) against
+`st->ram + 0x00287CD0`, after translation - this catches a matching write regardless of whether the
+source `addr` was KUSEG (TLB-mapped), KSEG0, or KSEG1. Re-ran: still zero hits from any of the four
+CPU-store accessors at the real transition. This ruled out **every** CPU store-instruction path,
+definitively (not just the three KSEG representations checked earlier).
+
+**Found it.** Grepped the whole source tree for every place that writes into EE RAM without going
+through `ee_mem_write*()` (the same class of gap Round 668's earlier `dma_channel_receive_quadwords()`
+check was chasing). Found `sif_loadfile_ram_write8_delta()` in `ee_core.c` - a direct
+`st->ram[phys] = val` byte-write helper used by `sif_loadfile_elf_load()`'s PT_LOAD segment-copy
+loop (the real rom0: ELF loader feeding LF_F_ELF_LOAD, Round 554's lineage). Instrumenting this
+function directly caught it immediately:
+
+```
+[R668LOADFILE] sif_loadfile_ram_write8_delta phys=0x00287cd0 vaddr=0x00287cd0 delta=0 val=0x00 pc=0x00083a68 instr=179687443
+[R668LOADFILE] sif_loadfile_ram_write8_delta phys=0x00287cd1 vaddr=0x00287cd1 delta=0 val=0x00 pc=0x00083a68 instr=179687443
+[R668LOADFILE] sif_loadfile_ram_write8_delta phys=0x00287cd2 vaddr=0x00287cd2 delta=0 val=0x1c pc=0x00083a68 instr=179687443
+[R668LOADFILE] sif_loadfile_ram_write8_delta phys=0x00287cd3 vaddr=0x00287cd3 delta=0 val=0x00 pc=0x00083a68 instr=179687443
+```
+
+Four consecutive byte-writes at the same instruction count, little-endian value `0x001C0000` -
+exactly the value the periodic read-poll observed appearing at `instr=179,691,520` (the ~4000-
+instruction gap is explained by the poll's `& 0xFFFu` sampling cadence, not a discrepancy).
+
+**Conclusion.** `0x00287CD0` is not computed or written by any runtime kernel/BIOS instruction at
+all - it is simply part of OSDSYS's own ELF `.data` segment content, delivered verbatim by this
+project's rom0: ELF loader when OSDSYS's ELF is loaded (`p_vaddr=0x00287CD0` falls inside a
+`PT_LOAD` segment, and `0x001C0000` is whatever Sony's linker baked into that offset at build time -
+almost certainly OSDSYS's own statically-initialized "working memory base" pointer, matching
+Round 667's `struct_base = ctx_ptr + 0x8000 = 0x001C8000` resolution). This is real, correct,
+already-working behavior - not a bug, and not something requiring a source-level fix. It also
+retroactively confirms Round 668's earlier `dma_channel_receive_quadwords()` DMA-path negative
+result was correct: this field is populated once, at ELF-load time, via the loader's own C-level
+byte-copy helper, not via any DMA channel or CPU store the emulated program itself issues.
+
+**Disposition for task #447/#623.** This closes the specific "who writes `0x00287CD0`" question
+Round 667 left open. It does not, by itself, answer whether pad input ever changes OSDSYS's visible
+menu/UI state - that remains open, and the "pending event" flag's SET site (as opposed to its CLEAR
+site, caught in Round 667) is still uncaught. Given `sif_loadfile_ram_write8_delta()` is now a known,
+confirmed bypass path for RAM watches, any future write-watch instrumentation on this codebase must
+check both the four `ee_mem_write*()` accessors **and** this ELF-loader byte-write helper (and,
+by the same logic, the `dma_channel_receive_quadwords()` DMA-copy path) to be conclusive.
+
+**Workflow note.** Regression suite and Wii rebuild correctly skipped - purely investigative,
+scratch-only instrumentation (`/tmp/r667_verify/`), no tracked source changed this round.

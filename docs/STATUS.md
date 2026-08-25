@@ -28272,3 +28272,46 @@ against. The user's "fix it" instruction is addressed by this round's finding th
 fact, nothing left to fix on our side of the pipeline: Round 669's fix is now proven complete and
 correct: the remaining gap is locating (or ruling out) a further, still-undiscovered real BIOS
 transition into the interactive Browser screen.
+
+## Round 675 (task #536/#447 continuation): thread 3 (the always-running animation thread) confirmed to never touch the pad cache; a "thread 3 keeps restarting" hypothesis raised mid-round was tested and disproven
+
+Direct follow-up to Round 672-674's finding that the pad-input pipeline is live and correct up to
+OSDSYS's own working-memory cache at `RAM[0x1C95D8..0x1C95DC]`, but nothing yet found reads that
+cache back out. Thread 3 (entry `0x00500000`, priority 5, the one thread confirmed actually
+`RUNNING` for the overwhelming majority of wall-clock time in every prior round's survey) was the
+next obvious candidate consumer to check directly, rather than continuing to guess from thread 6's
+code alone.
+
+**Result: negative.** A dedicated per-thread PC-log + call-site counter (mirroring Round 673's
+thread-6 instrumentation) shows thread 3 never once executes any address inside thread 6's pad-
+dispatcher range (`0x00204560-0x002047D8`), never calls `padGetState()` (`0x0020B8F8`), and never
+calls its memcpy sibling (`0x0020B868`) - all three counters read exactly `0` across the same
+760M-instruction pulse-tested window used in Round 672-674. Thread 3 is not the consumer either.
+
+**A "thread 3 keeps restarting from its own entry point" hypothesis was raised and then disproven
+within this same round.** The PC log's first 8000 entries contained only 13 unique addresses, all
+inside a tiny `0x00500000-0x00500030` loop that turned out (once disassembled from a fresh RAM dump)
+to be a mundane 16-byte-at-a-time `sq zero` memset/BSS-clear loop (`v0` counting up from
+`0x00592D00` to `0x005A0E40`) - and since the log only ever showed this loop's addresses, it looked
+at first like thread 3 might be perpetually re-dispatched back to its own entry point before ever
+finishing this init memset (which would itself be a genuine scheduler bug worth chasing). Adding an
+explicit hit-counter at `pc==0x00500000` and a high-water-mark tracker disproved this cleanly:
+`entry_hits=1` (the loop's real entry is visited exactly once, not repeatedly) and
+`furthest_pc=0x8000A534` (deep in real EE kernel/exception-vector address space) with
+`thread3_total_instr` accounting for roughly 79% of all EE instructions executed since boot. The
+apparent "stuck in 13 addresses" look was purely an artifact of the fixed-size (8000-entry) log
+filling up during the memset's own legitimate, brief repetition near the very start of the window,
+before thread 3 moved on to a much larger amount of real code the log was simply too small to
+capture further. No restart bug exists; the hypothesis is correctly retracted here rather than
+carried forward as a false lead.
+
+**Conclusion.** Neither of the two most plausible real-BIOS consumer threads (6, the disc-browser
+dispatcher; 3, the always-running animation loop) reads OSDSYS's own live pad cache back out during
+our diskless boot. This is consistent with, and further supports, Round 672-674's synthesis: the
+gap is a further, still-unlocated real BIOS screen-transition (into the interactive multi-panel
+Browser Round 606 exercised on real hardware), not a defect in this project's pad-input pipeline,
+which is now confirmed correct on both the producer (Round 669/672-674) and the two most likely
+consumer threads checked so far.
+
+No tracked-source change this round - all instrumentation remains in the scratch copy under
+`/tmp/r671/srctree/`. Regression suite and Wii rebuild correctly skipped.

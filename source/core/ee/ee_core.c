@@ -4941,6 +4941,29 @@ static int ee_step(void)
                                         for (slot_i = 0; slot_i < 2; slot_i++) {
                                             uint32_t base = pad_area + (uint32_t)(slot_i * 64);
                                             ee_mem_write32(st, base + 0u, payload_len); /* real memcpy length (was hardcoded 1) */
+                                            /* Round 666 (task #447/#623): disassembly of EE 0x0020B868-
+                                             * 0x0020B8F4 (the "second consumer" identified in Round 664,
+                                             * this project's own /tmp/r665_osdsys_code.bin dump) shows its
+                                             * real memcpy(dest, pad_area+8, LEN) call at 0x0020B8D8 reads
+                                             * LEN via `lw a2, 0(s0)` where s0 = pad_area + 40 (or
+                                             * pad_area + 104 when the buffer-select shift picks the second
+                                             * 64-byte half, i.e. base+40 for slot_i=1 since base already
+                                             * includes the +64). This field was never written by this
+                                             * handler, so it held stale/uninitialized RAM - confirmed by
+                                             * direct instrumentation to read ~1.87MB, producing a massive
+                                             * out-of-bounds memcpy every time this consumer ran. Round 664
+                                             * had captured this same s0=pad_area+40 pointer via register
+                                             * trace and, not realizing it was a distinct real length field
+                                             * (mistaking it for a second, differently-bound source
+                                             * pointer), concluded the table binding was unreliable and
+                                             * retracted the "second consumer" fix claim. Round 666 proved
+                                             * via direct simultaneous instrumentation that the table at
+                                             * 0x00441F40/0x00441F60 is written exactly once and exactly
+                                             * equals pad_area (no mismatch at all) - the real bug was only
+                                             * ever this uninitialized length field. Mirroring payload_len
+                                             * here (verified in a scratch build: real_len_at_s0 now reads
+                                             * 5, matching payload_len, instead of ~1.87MB) fixes it. */
+                                            ee_mem_write32(st, base + 40u, payload_len);
                                             ee_mem_write8(st, base + 4u, state); /* state - now reflects the real iop_sio2 pad model */
                                             ee_mem_write8(st, base + 5u, 0u);   /* reqState = PAD_RSTAT_COMPLETE */
                                             ee_mem_write8(st, base + 6u, ok);   /* ok - now reflects real connected state */

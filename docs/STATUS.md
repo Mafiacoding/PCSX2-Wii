@@ -27837,3 +27837,69 @@ survey - not yet explained.
 
 
 
+
+## Round 666: reconciles Round 664's retraction - table binding was always correct; the real bug was an uninitialized length field, now fixed (task #447/#623)
+
+**Re-opened the Round 664 contradiction.** Round 664's register trace had found `padGetState()`'s
+table read resolving to `0x01FEFE40` while the "second consumer" (`0x0020B868`) read what looked
+like a 40-byte-offset pointer (`0x01FEFE68`) and a bogus 1.87MB length, leading to the conclusion
+that the `0x00441F40` table slot "is being rewritten between these two nearby reads" and isn't
+reliably bound to our `pad_area`. This round re-tested that conclusion directly instead of assuming
+it, per this project's standing self-correction discipline.
+
+**Write-watch instrumentation disproves the "rebound" theory.** A scratch build with a write-watch
+on `0x00441F40`/`0x00441F60` (port 0/port 1 table entries) across a fresh 300M-instruction diskless
+boot found each entry written **exactly once**, early in boot (instr~30.9M), from a single PC
+(`0x0020B794`), and never again for the rest of the run - not "rebound," genuinely static. A second,
+simultaneous probe printing our own PAD_BIND handler's `pad_area` value at the moment it processes
+each port found it **exactly equals** the table's one-time-written value for both ports
+(`0x01FEFE40`/`0x01FEFEC0`), with the table write occurring ~226 instructions before our handler
+runs on the same value. The binding is, and always was, correct.
+
+**Found the real bug via full disassembly of `0x0020B868-0x0020B8F4`.** The function reads the table
+entry into `$s0` (confirmed == `pad_area`), calls a helper (`0x00212C40`, likely a lock/wait), then
+computes a buffer-select shift `v1 = (payload_len < *(pad_area+64)) ? 64 : 0` and does
+`memcpy(dest, pad_area+v1+8, *(pad_area+v1+40))`. The **length argument comes from `pad_area+40`
+(or `+104` for the other buffer half) - a field this project's PAD_BIND handler never wrote**, left
+as uninitialized RAM. That, not a pointer mismatch, is what produced the "1.87MB length": a
+probe-timing artifact (Round 664's `$a2` capture ran before the delay-slot `lw` that loads the real
+length, catching a stale value) compounded the confusion, but the underlying gap - `pad_area+40`
+never initialized - is real and independently disassembly-confirmed, verified by reading raw memory
+at the real load address directly (bypassing the register-timing ambiguity entirely): it held
+1,873,368 before this round's fix, and reads a correct `5` (matching the real SIO2 digital payload
+length) after.
+
+**Fix.** `source/core/ee/ee_core.c`'s PAD_BIND handler now also writes `payload_len` to `base+40u` in
+the same per-slot loop that already writes `base+0u` - covering both `pad_area+40` and `pad_area+104`
+(the two addresses the real consumer's buffer-select logic can compute), since the loop already
+iterates `slot_i` in `{0,1}` with `base = pad_area + slot_i*64`.
+
+**Verification.** Scratch-tree A/B check: before the fix, the real memcpy's length-load address
+(`pad_area+40`/`+104`) held `1,873,368` (~1.87MB) at both hit sites across a 300M-instruction survey;
+after the fix, the same read consistently returns `5` (10/10 hits checked), matching `payload_len`
+exactly. This is a genuine, disassembly-confirmed bug fix: without it, this real consumer function
+would attempt a ~1.87MB `memcpy` out of a small heap buffer every time OSDSYS's per-tick service
+routine ran - a real out-of-bounds-copy risk, not merely inert dead code. Host-native regression
+suite: identical 68/130 pass before and after this change (confirmed via `git stash` A/B comparison
+against the exact same tree) - the 62 failures are the pre-existing, already-documented stale
+`tests/README.md` link-command gaps (task #554/#605, missing source files in some test compile
+commands), zero newly-introduced failures. Wii cross-build: `make clean && make` with
+DEVKITPRO/DEVKITPPC/PATH/LD_LIBRARY_PATH set to this session's persisted
+`outputs/build/devkitpro/devkitPPC/` toolchain completed with 0 warnings, 0 errors, producing
+`pcsx2-wii-git.elf`/`.dol`.
+
+**Correcting the record.** Round 664's retraction of "this fixes a second real consumer" was itself
+premature - the table binding was never broken, and the real consumer genuinely is fed by our
+PAD_BIND fix's data (both the `+8` SIO2 wire bytes and, as of this round, the `+40`/`+104` length
+field). The 40-byte offset Round 664 measured for `$s0` (`0x01FEFE68` = `pad_area+40`) was real and
+correctly measured - it just wasn't a second, differently-bound pointer as assumed; it was `$s0` mid
+function, already advanced past the table-lookup step to the length-field address, which is exactly
+where this round's fix now writes valid data. Task #447/#623's real chain - PAD_BIND -> `pad_area` ->
+`0x00441F40` table -> `0x0020B868` consumer's memcpy into OSDSYS's persistent per-port cache, and
+separately `padGetState()`'s own STABLE(6) read -> persisted struct field - is now confirmed
+correctly wired end-to-end, from RPC reply to both known real consumers.
+
+**Next.** Determine whether OSDSYS's persistent struct fields fed by these two consumers (the
+`0x1C95D8`/`0x1C95FC` per-port cache and `padGetState()`'s `struct_base+0x8000+5624` field) are
+ever read anywhere, and whether that read gates any visible menu/UI behavior - the natural next step
+toward task #447/#623's core question of real interactivity.

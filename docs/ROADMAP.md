@@ -1210,18 +1210,36 @@ programmable GPU nor any of those APIs).
       current no-disc boot path, so this doesn't (yet) change the
       steady-state outcome documented in the 5th/7th findings - see
       docs/STATUS.md's "Round 29 continued (8th change)" section.
-- [x] SPU2 (audio) - PARTIAL, register scaffold only (not needed for a
-      visual splash screen, added this round on a "time permitting"
-      basis alongside the IOP loader/VU opcode-table work).
-      `source/hw/iop_spu2.c` models the real, cited IOP-side base
-      address (0x1F900000) and SPU2's real 16-bit-native register
-      granularity (also 32-bit for LW/SW-based code), wired into
-      `iop_core.c`'s `iop_mem_read16`/`write16`/`read32`/`write32`
-      dispatch (16-bit MMIO dispatch didn't exist there at all before
-      this round - only RAM/BIOS passthrough). No per-register
-      (voice/ADSR/volume) semantics or actual audio synthesis/DMA
-      pipeline are modeled - a real, addressable, persistent register
-      file, not a real sound chip.
+- [x] SPU2 (audio) - PARTIAL, real register scaffold (Round 185/524)
+      PLUS a real ADSR/ADPCM synthesis engine (Round 711, task #536
+      audio track). `source/hw/iop_spu2.c` models the real, cited
+      IOP-side base address (0x1F900000) and SPU2's real 16-bit-native
+      register granularity (also 32-bit for LW/SW-based code), wired
+      into `iop_core.c`'s `iop_mem_read16`/`write16`/`read32`/
+      `write32` dispatch, with real KON-clears-ENDX and CTRL->STATX
+      mirroring (Round 524). `source/hw/spu2_mixer.c` (new, Round 711)
+      adds a genuine synthesis engine on top: real, psx-spx-cited
+      ADPCM block decode (predictor table + formula), real ADSR
+      envelope generation (exact bit layout + envelope-stepping
+      pseudocode), real 44100Hz pitch-driven playback (linear, not
+      Gaussian, interpolation - documented simplification), real
+      KON/KOFF-triggered voice lifecycle including ENDX auto-set on
+      loop-end, and real per-voice/master Fixed-Volume-Mode mixing to
+      a stereo S16 output buffer - hooked into `iop_spu2.c`'s existing
+      KON0/KON1/KOFF0/KOFF1 register-write side effects. Verified via
+      a new `tests/test_spu2_mixer.c` (9 checks, hand-computable
+      synthetic ADPCM data) plus the pre-existing `tests/
+      test_iop_spu2.c` (10 checks, unaffected). NOT yet done: real
+      IOP-DMA-channel-7 waveform delivery into the engine's own new
+      2MB local `spu2_ram` buffer (the buffer and `spu2_mixer_get_ram()`
+      API exist and are DMA-ready, mirroring `gs_mem.c`'s real-local-
+      memory precedent, but the channel-7 `_try_transfer()` wiring
+      itself, mirroring `iop_dma.c`'s existing SIF0/SIF2 pattern, is
+      explicitly deferred) - so real BIOS/game code doesn't yet drive
+      real audio output end-to-end; the synthesis engine itself is
+      real and tested in isolation. No Sweep volume mode, Reverb,
+      Noise, or Pitch Modulation - documented, not fabricated, scope
+      limits.
 - [x] Pad/memory card - PRESENT, real protocols for both halves of
       the SIO2 bus: memory card (Round 146, task #299) and controller
       (Round 184, task #350, digital; Round 195, task #361, analog

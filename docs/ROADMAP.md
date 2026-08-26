@@ -1229,17 +1229,28 @@ programmable GPU nor any of those APIs).
       KON0/KON1/KOFF0/KOFF1 register-write side effects. Verified via
       a new `tests/test_spu2_mixer.c` (9 checks, hand-computable
       synthetic ADPCM data) plus the pre-existing `tests/
-      test_iop_spu2.c` (10 checks, unaffected). NOT yet done: real
-      IOP-DMA-channel-7 waveform delivery into the engine's own new
-      2MB local `spu2_ram` buffer (the buffer and `spu2_mixer_get_ram()`
-      API exist and are DMA-ready, mirroring `gs_mem.c`'s real-local-
-      memory precedent, but the channel-7 `_try_transfer()` wiring
-      itself, mirroring `iop_dma.c`'s existing SIF0/SIF2 pattern, is
-      explicitly deferred) - so real BIOS/game code doesn't yet drive
-      real audio output end-to-end; the synthesis engine itself is
-      real and tested in isolation. No Sweep volume mode, Reverb,
-      Noise, or Pitch Modulation - documented, not fabricated, scope
-      limits.
+      test_iop_spu2.c` (10 checks, unaffected). Round 712 (task #683)
+      closed the remaining gap: `iop_dma_spu2_try_transfer()`
+      (`source/hw/iop_dma.c`) wires real IOP-DMA channel-7
+      (base 0x1F801500) waveform delivery into the engine's local
+      `spu2_ram` buffer, mirroring the existing SIF0/SIF2
+      `_try_transfer()` pattern - real STR-bit-gated transfer, real
+      TSA-register (8-byte-unit) addressing and auto-advance, real
+      per-channel completion IRQ. Verified via `tests/
+      test_iop_dma_spu2.c` (9 checks). A real, tested, end-to-end
+      DMA-to-synthesis pipeline now exists. Honest empirical result
+      from a 100M-instruction diskless-boot sound-reachability survey
+      (`tools/round712-sound-reachability/driver.c`): the diskless
+      JP-BIOS boot never actually issues a channel-7 kick or a KON
+      write in that window (transfer count and KON count both stay at
+      0) - consistent with this project's own extensive task #447
+      findings that disc-browser/audio-driver code paths are largely
+      unreached without a mounted disc, not a defect in this pipeline.
+      Testing against a real disc-mounted boot (where Round 473 logged
+      ~42 real SIF_SID_SPU2DRV RPC calls) is the natural next check,
+      not yet attempted. No Sweep volume mode, Reverb, Noise, Pitch
+      Modulation, or Core1-specific TSA routing - documented, not
+      fabricated, scope limits.
 - [x] Pad/memory card - PRESENT, real protocols for both halves of
       the SIO2 bus: memory card (Round 146, task #299) and controller
       (Round 184, task #350, digital; Round 195, task #361, analog

@@ -198,4 +198,9 @@ int iop_dma_channel_write_bytes(int channel, const uint8_t *data, uint32_t nbyte
  */
 uint32_t iop_dma_get_sif2_transfer_count(void);
 
+/* Round 712 (task #683): counts real, completed IOP-RAM-to-SPU2-RAM
+ * channel-7 transfers, mirroring iop_dma_get_sif2_transfer_count()'s
+ * own diagnostic precedent. */
+uint32_t iop_dma_get_spu2_transfer_count(void);
+
 #endif

@@ -459,11 +459,30 @@ modeled here). Fixed by directly poking the underlying state
 (`g_dma.icr`) to simulate a hardware-originated flag, the same
 approach `tests/test_sif.c` uses for SIF's SMFLAG, then performing a
 separate write that doesn't target that bit to trigger the master-bit
-recompute against the pre-set flag. 20/20 checks pass. Self-contained (`#include`s `iop_dma.c` directly):
+recompute against the pre-set flag. 20/20 checks pass. Self-contained (`#include`s `iop_dma.c` directly). Round 712: `iop_dma.c` now
+also depends on `iop_spu2.c`/`spu2_mixer.c` (real channel-7 SPU2 DMA
+waveform delivery, task #683) - both added below:
 
 ```sh
-gcc -I../include -I../source -o test_iop_dma tests/test_iop_dma.c
+gcc -I../include -I../source -o test_iop_dma tests/test_iop_dma.c ../source/hw/iop_spu2.c ../source/hw/spu2_mixer.c
 ./test_iop_dma
+```
+
+`test_iop_dma_spu2.c` covers Round 712's real IOP DMA channel-7 (SPU2)
+waveform-delivery path - task #683, the DMA wiring Round 711's audio
+synthesis engine explicitly left open. See `iop_dma.c`'s own
+`iop_dma_spu2_try_transfer()` doc comment for the full citation trail.
+9/9 checks pass: real STR-bit-gated IOP-RAM-to-SPU2-RAM byte transfer;
+correct destination via the real TSA register (8-byte-unit convention,
+matching SSA/LSA); real TSA auto-advance after a transfer so
+consecutive DMA blocks chain correctly; explicit TSA reprogramming
+(real BIOS/game per-voice-upload usage) correctly redirects the
+destination; out-of-bounds IOP-RAM source safely dropped. Externally
+linked (needs the full dependency set, not self-contained):
+
+```sh
+gcc -I../include -I../source -o test_iop_dma_spu2 tests/test_iop_dma_spu2.c ../source/core/bios_loader.c ../source/core/checkpoint.c ../source/core/ee/ee_core.c ../source/core/ee/ee_hle_thread.c ../source/core/ee_elf_loader.c ../source/core/iso_loader.c ../source/core/iop/iop_core.c ../source/core/system.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/ee_sio.c ../source/hw/ee_timers.c ../source/hw/gif.c ../source/hw/gs.c ../source/hw/gs_mem.c ../source/hw/iop_asyncio.c ../source/hw/iop_cdrom_legacy.c ../source/hw/iop_cdvd.c ../source/hw/iop_dma.c ../source/hw/iop_elf.c ../source/hw/iop_excb.c ../source/hw/iop_heap.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_events.c ../source/hw/iop_hle_heap.c ../source/hw/iop_hle_intr.c ../source/hw/iop_hle_modules.c ../source/hw/iop_hle_thread.c ../source/hw/iop_icfg.c ../source/hw/iop_intc.c ../source/hw/iop_module_loader.c ../source/hw/iop_sio2.c ../source/hw/iop_spu2.c ../source/hw/iop_spu_legacy.c ../source/hw/iop_timers.c ../source/hw/ipu.c ../source/hw/mch.c ../source/hw/sif.c ../source/hw/spu2_mixer.c ../source/hw/vif.c ../source/hw/vu.c -lm
+./test_iop_dma_spu2
 ```
 
 Note: iop_core.c now depends on iop_dma.c too (wired into

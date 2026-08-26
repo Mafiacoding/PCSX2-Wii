@@ -30123,3 +30123,22 @@ No tracked-source (`include/`/`source/`) change this round - regression suite an
 **Honest negative finding:** screenshot-polling (the methodology used successfully in Round 719/720/721) is not fine-grained enough to catch OSDSYS's own logo/menu screen during a disc-auto-boot transition - it happens faster than two sequential tool round-trips. This doesn't mean OSDSYS's screen never renders (Round 604-608 already showed the real menu DOES render and IS interactive, in a different, non-auto-boot context); it means catching that specific brief window during auto-boot needs a breakpoint-based approach (e.g. break shortly after the EE reset vector, single-step/continue in small increments while checking GS state), not screenshot polling. Not attempted this round - flagged as the concrete follow-up if the user wants OSDSYS's own transitional screen specifically captured.
 
 No tracked-source (`include/`/`source/`) change this round - regression suite and Wii cross-build correctly skipped (docs-only-round precedent).
+
+## Round 723: Gran Turismo 3 Full Boot (per user request) - real interactive UI (SELECT LANGUAGE) captured, useful visual reference
+
+**User request:** "Try Gran Turismo Full boot including the video sequence maybe it gives us clues once they are working" - wanted a look at GT3's boot (known for real FMV/movie playback) as another data point for what "working" display setup looks like.
+
+**What was done:** shut down Tekken cleanly, right-clicked Gran Turismo 3 - A-Spec in the library, selected "Full Boot" (same rigor as Round 722), and watched with screenshots every ~2-3 real seconds across the boot sequence.
+
+**What was captured, in order:**
+1. Early boot: faint partial content at frame edges, FPS dropped to ~22 (heavy content decode starting).
+2. A real toast: "Memory Card 'Mcd001.ps2' was saved to storage" - confirms genuine McServ/memory-card I/O is happening during this boot (a real memory card is present and being written to, unlike this project's own diskless boot which never got that far).
+3. A real rendered disclaimer/URL screen: "http://www.scee.com/gt3" - correct anti-aliased text over a transitional dark background. PCSX2 also surfaced its own advisory here: "Current Blending Accuracy is Basic. Recommended Blending Accuracy for this game is High" - confirming GT3 exercises GS blending modes fairly heavily even this early.
+4. A brief "No Image" frame (transitional gap, FPS still active at 32/50 - not a stall, just between renders).
+5. A fully-rendered, richly detailed, real interactive **SELECT LANGUAGE** menu: bold anti-aliased "SELECT LANGUAGE" title text, a red-tinted racing-scene background image, and a language option row with "Español" text plus a small textured Spain flag icon. `pcsx2_status` confirmed this is a live, running (not crashed) state; paused it afterward at `EE PC=0x00081fc0` - an EE-kernel idle/dispatch address (consistent with the game correctly idling while waiting for real pad input to pick a language), not a corrupted or wandered-off PC.
+
+**Significance:** this is the richest real-hardware visual reference captured yet in this project - unlike Tekken's title screen (a single large background + logo) or the 3D Pinball error box (flat fill + text), GT3's language-select screen demonstrates multiple real GS techniques working together at once on genuine PCSX2: alpha-blended background art, crisp anti-aliased UI text, and small textured icon sprites (the flag), all composited correctly. This is a strong concrete target for what "a real menu" should look like, useful context for any future work on this project's own OSDSYS-menu-equivalent rendering.
+
+**Not yet captured:** the actual intro FMV/movie sequence (Sony/Polyphony Digital logo videos) that GT3 is known for - by the time the first screenshot was taken, the boot had already progressed past any such video into the disclaimer/menu screens, the same screenshot-polling limitation already flagged in Round 722. If real MPEG/IPU video playback specifically needs to be inspected, it would need either a much tighter screenshot cadence right at boot start, or a breakpoint placed on the real IPU FIFO/DMA registers to catch the decode window precisely.
+
+No tracked-source (`include/`/`source/`) change this round - regression suite and Wii cross-build correctly skipped (docs-only-round precedent).

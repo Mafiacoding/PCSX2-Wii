@@ -59,6 +59,21 @@ static uint8_t g_sresult_buf[PARAM_BUF_MAX];
 static int     g_sresult_count;
 static int     g_sresult_pos;
 
+/* Round 732 (task #447, fresh GT3-in-game-code context): live dispatch
+ * counters/last-issued-command latches, purely diagnostic (mirrors the
+ * existing iop_cdvd_get_last_ncommand()'s already-established
+ * "project-internal accessor, not real hardware state" convention -
+ * see that function's own header comment). Needed to answer a
+ * concrete empirical question a checkpoint-resumed GT3 survey can't
+ * answer any other way: does GT3's own real IOP-side code ever issue
+ * a FURTHER N-command/S-command after its first on-screen frame, or
+ * has it stopped calling into this file entirely (in which case the
+ * stall is upstream of CDVD dispatch, not inside it). */
+static uint64_t g_ncmd_call_count;
+static uint64_t g_scmd_call_count;
+static uint8_t  g_last_ncmd_issued;
+static uint8_t  g_last_scmd_issued;
+
 /* Round 206: this interface's own disc-image binding (separate from
  * iop_cdrom_legacy.c's - see iop_cdvd.h's citation for why). */
 static iso_image_t g_disc;
@@ -78,6 +93,12 @@ void iop_cdvd_init(void)
     g_sparam_count = 0;
     g_sresult_count = 0;
     g_sresult_pos = 0;
+    /* Round 732: reset alongside every other dispatch-side state above -
+     * a soft register reset legitimately restarts these too. */
+    g_ncmd_call_count = 0;
+    g_scmd_call_count = 0;
+    g_last_ncmd_issued = 0;
+    g_last_scmd_issued = 0;
     /* Round 206: deliberately does NOT touch g_disc_mounted/g_disc -
      * mirrors iop_cdrom_legacy_init()'s own precedent of resetting
      * register state on init while leaving disc-mount state to the
@@ -179,6 +200,9 @@ static void dispatch_ncmd(uint8_t cmd)
 {
     uint8_t irq_bits = ISTAT_COMMAND_COMPLETE; /* every real N-command raises this per ps2tek's "All N commands raise IRQ2" preamble */
 
+    g_ncmd_call_count++; /* Round 732 - see field comment */
+    g_last_ncmd_issued = cmd;
+
     if (cmd == NCMD_READCD || cmd == NCMD_READDVD) {
         if (g_disc_mounted && g_param_count >= 8) {
             uint32_t sector = (uint32_t)g_param_buf[0]
@@ -242,6 +266,9 @@ static void dispatch_ncmd(uint8_t cmd)
  * data" philosophy exactly. */
 static void dispatch_scmd(uint8_t cmd)
 {
+    g_scmd_call_count++; /* Round 732 - see field comment */
+    g_last_scmd_issued = cmd;
+
     g_sresult_count = 0;
     g_sresult_pos = 0;
 
@@ -403,6 +430,14 @@ int iop_cdvd_mmio_write8(uint32_t addr, uint8_t value)
 }
 
 uint8_t iop_cdvd_get_last_ncommand(void) { return g_regs[OFF_NCMD]; }
+
+/* Round 732 (task #447): diagnostic-only getters for the counters/
+ * latches above - same "project-internal accessor" convention as
+ * iop_cdvd_get_last_ncommand() immediately above. */
+uint64_t iop_cdvd_get_ncmd_call_count(void) { return g_ncmd_call_count; }
+uint64_t iop_cdvd_get_scmd_call_count(void) { return g_scmd_call_count; }
+uint8_t  iop_cdvd_get_last_ncmd_issued(void) { return g_last_ncmd_issued; }
+uint8_t  iop_cdvd_get_last_scmd_issued(void) { return g_last_scmd_issued; }
 
 /* Round 347 (IOP RPC re-entry architecture): non-consuming peek at
  * the real OFF_ERROR register - unlike iop_cdvd_mmio_read8()'s own

@@ -230,6 +230,17 @@ int iop_cdvd_mmio_write8(uint32_t addr, uint8_t value);
  * directly without decoding register semantics themselves. */
 uint8_t iop_cdvd_get_last_ncommand(void);
 
+/* Round 732 (task #447, fresh GT3-in-game-code context): live call
+ * counters + last-issued-command latches for both dispatch functions -
+ * see iop_cdvd.c's own field comment for the exact rationale. Lets a
+ * checkpoint-resumed survey answer, empirically, whether real game
+ * code is still issuing CDVD commands during an observed stall, or
+ * has stopped calling into this subsystem entirely. */
+uint64_t iop_cdvd_get_ncmd_call_count(void);
+uint64_t iop_cdvd_get_scmd_call_count(void);
+uint8_t  iop_cdvd_get_last_ncmd_issued(void);
+uint8_t  iop_cdvd_get_last_scmd_issued(void);
+
 /* Round 347 (IOP RPC re-entry architecture): non-consuming peek at
  * the real OFF_ERROR register - see iop_cdvd.c's own definition
  * comment for the full rationale (project-internal only, never

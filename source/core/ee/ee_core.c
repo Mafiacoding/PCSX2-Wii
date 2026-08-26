@@ -659,6 +659,43 @@ static void ee_check_dmac_interrupt(ee_state_t *st, uint32_t this_pc)
  * the bound EE-side pad_area buffer. This is the fix. */
 static uint32_t g_ee_pad_area_bound[2] = { 0u, 0u };
 
+/* Round 736 (task #447 continuation): purely observational log of every
+ * real AddIntcHandler(cause, handler_func, next) call (sysnum 16 only -
+ * NOT RemoveIntcHandler/17). This does not change how the syscall is
+ * handled at all - it's still let through to raise a real MIPS Syscall
+ * exception exactly as before (see the sysnum==16||17 block's own long-
+ * standing comment for why: the real, already-resident BIOS kernel code
+ * must perform the actual per-cause handler-table write itself, this
+ * project has no business fabricating that table). This log exists
+ * solely to answer, without further guesswork, Round 735's open
+ * question: does GT3's thread 4 or thread 5 module (or anything else)
+ * ever register an interrupt handler whose target address lands back
+ * inside the 0x0079xxxx-0x007bxxxx job-queue region Round 735 found -
+ * which would be the real completion mechanism for thread 5's stuck
+ * WaitJob() poll. Capped ring buffer, never wired into any behavior. */
+#define EE_ADDINTC_LOG_CAP 64
+typedef struct {
+    uint32_t cause;
+    uint32_t handler_addr;
+    uint32_t next;
+    uint32_t call_pc;
+} ee_addintc_log_entry_t;
+static ee_addintc_log_entry_t g_addintc_log[EE_ADDINTC_LOG_CAP];
+static uint32_t g_addintc_log_count = 0; /* total calls seen, may exceed CAP */
+
+uint32_t ee_core_get_addintc_log_count(void) { return g_addintc_log_count; }
+
+int ee_core_get_addintc_log_entry(uint32_t idx, uint32_t *cause, uint32_t *handler_addr,
+                                   uint32_t *next, uint32_t *call_pc)
+{
+    if (idx >= EE_ADDINTC_LOG_CAP || idx >= g_addintc_log_count) return -1;
+    if (cause) *cause = g_addintc_log[idx].cause;
+    if (handler_addr) *handler_addr = g_addintc_log[idx].handler_addr;
+    if (next) *next = g_addintc_log[idx].next;
+    if (call_pc) *call_pc = g_addintc_log[idx].call_pc;
+    return 0;
+}
+
 /* Writes the real, already-cited SIO2 wire-protocol pad state (state/
  * reqState/ok/payload_len bytes plus the pad_process_command()-shaped
  * reply bytes: dummy/ID/buttons[/analog axes]) into both 64-byte
@@ -2660,6 +2697,7 @@ int ee_core_init(const bios_image_t *bios)
     memset(g_ee_sema, 0, sizeof(g_ee_sema)); /* task #188: reset semaphore table on (re-)init */
     ee_hle_thread_init(); /* Round 569: real EE thread/sema scheduler init - see include/core/ee/ee_hle_thread.h */
     mch_init(); /* EE-side MCH_RICM/MCH_DRD RDRAM auto-init registers - see core/hw/mch.h */
+    g_addintc_log_count = 0; /* Round 736: reset AddIntcHandler observation log on (re-)init */
 
     g_state.ram = memalign(32, EE_RAM_SIZE);
     if (!g_state.ram) {
@@ -4052,6 +4090,15 @@ static int ee_step(void)
                  * whole emulated machine outright) or fabricating a
                  * software table this project cannot verify the real
                  * layout of. */
+                if (sysnum == 16 && g_addintc_log_count < EE_ADDINTC_LOG_CAP) {
+                    /* Round 736: observational only, see field comment
+                     * above - does not alter control flow at all. */
+                    g_addintc_log[g_addintc_log_count].cause        = (uint32_t)GPR(4); /* $a0 */
+                    g_addintc_log[g_addintc_log_count].handler_addr = (uint32_t)GPR(5); /* $a1 */
+                    g_addintc_log[g_addintc_log_count].next         = (uint32_t)GPR(6); /* $a2 */
+                    g_addintc_log[g_addintc_log_count].call_pc      = this_pc;
+                }
+                if (sysnum == 16) g_addintc_log_count++;
                 ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
                 break;
             }

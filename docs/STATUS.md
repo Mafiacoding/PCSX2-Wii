@@ -29493,3 +29493,283 @@ mechanism" (now answered) but whether our own emulated OSDSYS code ever reaches 
 `+0x444`/`+0x450`/`+0x454`-polling dispatch code in thread 6's role during a diskless boot, and if not,
 what's blocking it from getting there - a natural next round's starting point, now that the ground-truth
 target mechanism is fully known rather than being reverse-engineered from scratch.
+
+## Round 695: our own diskless boot DOES reach thread 6's real dispatch body and DOES call WakeupThread() repeatedly - but always with a garbage/uninitialized thread-ID argument, confirming Round 683's "nothing writes +0x444" gap is the single remaining blocker
+
+Direct follow-up to Round 694, picking up its own stated next step for task #536: check whether this
+project's own diskless-boot trace reaches the equivalent of thread 6's real dispatch body found live
+this session (Rounds 692-694), and whether its `WakeupThread()` calls ever fire meaningfully.
+
+**Method.** Built a scratch instrumented copy of `ee_core.c` (`/tmp/r695`, NOT tracked source - same
+established methodology as Round 682/683's scratch hit-counter technique) adding hit-counters at
+`pc==0x00204308` (thread 6's real entry, per Round 691) and the three real `WakeupThread()` call
+sites found live this session (`0x002047CC`, gated by the `+0x444` switch; `0x002047E8`, gated by
+`+0x450==9`; `0x00204828`, unconditional), logging `a0` (the real `WakeupThread(thid)` argument) and
+`+0x444`/`+0x450`/`+0x454` at each hit. Compiled and ran a 60M-slice diskless JP BIOS boot survey
+(`tools/round695-thread6-survey/driver.c`, same host-native pattern as `tools/round588-.../driver.c`).
+
+**Result:**
+
+| site | hits | last `a0` | last `+0x444` | last `+0x450` |
+|---|---|---|---|---|
+| thread6 entry (`0x00204308`) | 1 | - | - | - |
+| `0x002047CC` (`+0x444` switch) | 0 | - | - | - |
+| `0x002047E8` (`+0x450==9` gate) | 0 | - | - | - |
+| `0x00204828` (unconditional) | **83** | **0x001C0000** | 0x00000000 | 0x00000005 |
+
+Thread 6's real entry point is reached exactly once - consistent with Round 683's sibling finding
+that the `0x00203D78` per-panel dispatcher is also reached exactly once early in boot. The two
+*gated* `WakeupThread()` sites never fire, exactly as expected: `+0x444` is always `0` (Round 683's
+already-documented root gap) and `+0x450` never reaches `9` (matches this project's own established
+"settles at 5, never 9" finding, and Round 687's reconciliation that 9 was likely never the right
+target anyway).
+
+**The real finding is the third, unconditional site.** `0x00204828` (`jal ->0x00210E70`, reached
+regardless of which branches above are taken) fires 83 times across the 60M-slice survey - i.e.
+thread 6 is genuinely alive, looping, and repeatedly invoking the real `WakeupThread()` syscall in
+our own emulation, not stuck or unreached. **But every single call passes `a0 = 0x001C0000`** - not
+a valid small thread ID (this project's own TCB table uses small integer indices, and this session's
+live capture on real hardware saw `a0=9`, a normal in-range value). `0x001C0000` is suspiciously
+exactly the base address of the `0x1C0xxx` OSDSYS state region this whole investigation has centered
+on since Round 591 - strongly suggesting the real `struct_ptr+4` field (the thread-ID source
+Round 693 identified) never gets written with an actual thread ID in our trace, and instead still
+holds whatever pointer-sized value happened to occupy that memory before (plausibly the struct's own
+base address, from some initialization pattern not yet reached). Cross-checked against our tracked
+`ee_hle_thread.c`'s real `WakeupThread` handler (lines 488-505): `tcb(thid)` on an out-of-range ID
+like `0x1C0000` returns NULL, so the call silently no-ops (`EE_RET(-1)`) - confirming these 83 calls
+are real but functionally inert, not a crash or a hidden success.
+
+**Synthesis.** This directly confirms, at a new level of precision, Round 683's original diagnosis:
+**this project's own diskless boot's control flow and dispatch logic (both the outer thread-6 body
+and the inner `0x00203D78` panel dispatcher) are structurally intact and actively running - the sole
+missing piece is whatever real BIOS mechanism is supposed to write a valid, meaningful value into
+`+0x444` (and, it now appears, into `struct_ptr+4`, the thread-ID field feeding `WakeupThread`)
+during normal operation.** Nothing in this round's evidence suggests our own thread-6/dispatcher
+implementation itself needs a fix - it does exactly what the live-hardware-confirmed real code does,
+call for call, given the (uninitialized) state it's fed.
+
+**Classification.** No tracked-source change - `ee_core.c` was modified only in the scratch copy at
+`/tmp/r695`, never in `/tmp/pcsx2-wii-git`. Regression suite and Wii rebuild correctly skipped
+(docs-only round, consistent with every prior round in this investigative arc that added scratch-only
+instrumentation).
+
+**Disposition.** The task #447/#536 investigation now has an unusually complete picture: the full
+real dispatch mechanism is known end-to-end (Rounds 692-694), our own emulator's equivalent code
+is confirmed present, reachable, and behaviorally correct given its inputs (this round), and the
+single remaining open question is exactly and only: what real BIOS code writes the first nonzero
+value into `+0x444`/`struct_ptr+4`, and why does our diskless (no memory card, no disc) boot never
+reach it. Round 684's live-hardware finding that `+0x444` cycles through values (14, then 10) with
+*zero* pad input from the operator is the strongest lead: whatever writes it is very likely part of
+an idle/auto-scan carousel triggered by simple elapsed time or VBLANK count, not pad input directly -
+worth checking whether our own diskless boot's thread 3 (the confirmed animation/carousel thread)
+or its VBLANK-count-driven timing ever reaches parity with real hardware's behavior over a long
+enough survey window, as the next concrete angle.
+
+
+## Round 696-697: implement +0x444 idle-carousel driver (task #447/#536) - closes the Round 683-695 gap, fixed a self-inflicted regression along the way
+
+**User instruction.** Explicit, direct authorization this round to override the project's normal
+"don't implement speculative fixes without evidence" discipline: "if it doesnt drive the idle make
+it doit" - i.e. implement a fix that drives real values into `+0x444` (RAM `0x001C0444`), the field
+Round 682-695 exhaustively proved is (a) read by our own already-correct, already-reachable thread-6-
+equivalent dispatch body, (b) cycled through real nonzero values (14, then 10) by real hardware with
+*zero* pad input (Round 684, live-captured), and (c) never written to at all during our own diskless
+boot (Round 695's scratch survey: 83 real `WakeupThread()` calls, always with a garbage `0x1C0000`
+thread-ID, because nothing upstream ever populates the field that feeds it).
+
+**Implementation.** New function `ee_check_browser_idle_carousel()` added to `source/core/ee/ee_core.c`,
+modeled directly on the sibling `ee_check_browser_menu_escalation_heuristic()` (Round 610)'s established
+conventions and wired into the same two call sites (the WaitSema-park branch and the main per-instruction
+epilogue). Guards: diskless-only (`iop_cdvd_get_disc_type() == IOP_CDVD_TYPE_NODISC`); only runs once
+the Browser has reached its real idle state (`+0x450 == 5`, the sibling function's own target value);
+rate-limited to one step per ~60-frame (~1s real PS2 time) window; never clobbers a real in-progress
+value (only writes when `+0x444 == 0`). Cycles through Round 682's decoded valid panel-handler indices
+(`1..15, 17` - skipping the dead case 16) via a static `panel_sequence[]`/`seq_index`. Explicitly
+NOT claimed to be the real writer function or exact real timing - an honestly-scoped, evidence-shaped
+approximation of the observed real behavior, same standard as the Round 610 sibling and Round 630's
+precedent for this kind of pragmatic fix.
+
+**Regression found and fixed (the actual bulk of this round's work).** The first-draft version of this
+function unconditionally called `ee_mem_read32(st, 0x001C0450u)` as its second check, with no delay
+gate. Running the host-native regression suite (after first correcting the suite's own methodology -
+see below) showed 45 of 130 tests newly failing, all with corrupted CPU register results from the very
+first instruction. Root cause, confirmed via a step-by-step reduction of the new function down to a
+single line at a time: `0x001C0450 < 0x80000000u` is a raw KUSEG-style address, so `ee_mem_ptr()`
+(the function underlying `ee_mem_read32`) routes it through `ee_tlb_translate()` rather than treating
+it as a direct physical/RAM offset; on a freshly-reset core (`instructions_executed == 0`, no TLB
+entries programmed - exactly the state of every host-native unit test, and also the very first few
+real EE instructions of any boot) that translation fails, and the resulting TLB Refill exception
+silently hijacks `$pc` on every subsequent instruction step (confirmed directly: `$pc` observed jumping
+from the test program's own address straight to `0xbfc00204`, a BEV=1 boot exception vector, after
+just one instruction, then parking at `0xbfc00384` for the rest of the run). The sibling escalation
+function never hit this because its own 120-frame delay gate (`EE_BROWSER_ESCALATION_FRAME_DELAY`)
+means its one-shot read of the neighboring `+0x454` field never actually executes in a tiny unit test
+(the guard returns first, every time) - the read was real but effectively dead code from the test
+suite's perspective. **Fix:** added the exact same 120-frame gate to `ee_check_browser_idle_carousel()`
+before its first `ee_mem_read32()` call, guaranteeing it can never fire earlier than the already-proven-
+safe sibling. Verified: re-running the (corrected) regression suite against the gated version returns
+to the exact pre-patch baseline, PASS=129/FAIL=1 (the one failure, `test_gs_reglist_image`, is
+pre-existing and unrelated to `ee_core.c` - confirmed by running the identical suite against an
+unmodified `git show HEAD:source/core/ee/ee_core.c` checkout, same single failure).
+
+**Regression-suite methodology also corrected this round.** The existing `/tmp/libcore.a`-based test
+runner linked every test file against a single prebuilt archive of all 40 `source/**/*.c` objects,
+including a separately-compiled `ee_core.o`. For the ~45 test files that `#include "core/ee/ee_core.c"`
+directly (a deliberate self-contained test pattern, confirmed via `grep`), this caused duplicate-symbol
+link errors that were silently masking the real pass/fail signal entirely (build failures, not test
+failures). Fixed by excluding each self-contained test's own directly-`#include`d object from its link
+line (`ar d` on a per-test scratch copy of the archive) and wrapping the remaining archive members in
+`-Wl,--start-group ... --end-group` (needed because GNU ld's single-pass archive scan doesn't always
+resolve the multi-directional cross-references between the 40 mutually-dependent hardware-model
+objects otherwise). This is a test-infrastructure fix only - no tracked test file or `tests/README.md`
+was touched; `tests/README.md`'s already-known staleness (task #554) remains a separate, unresolved
+pre-existing gap.
+
+**Safety incident, self-caught.** Mid-investigation, an earlier `git stash`/`git stash pop` cycle (used
+to isolate whether the 45 failures were pre-existing) revealed 4 tracked files
+(`.gitignore`/`COPYING.GPLv3`/`driver_r313.c`/`ee_core.o`, all last touched in commit `2ed9532`) had
+been deleted from the working tree - almost certainly collateral damage from an earlier, overly broad
+`find . -maxdepth 1 -type f -executable -newer Makefile -exec rm -f {}` cleanup command matching
+files with an (apparently pre-existing, unrelated) executable bit set. Caught via `git status --short`
+immediately after the stash pop, before any commit could make the loss permanent; fully restored via
+`git checkout -- .gitignore COPYING.GPLv3 driver_r313.c ee_core.o` and verified byte-for-byte (sizes:
+244B/35147B/16818B/813044B) against the pre-deletion state. No data was lost; noting here only as a
+process lesson - broad `find -delete` patterns should not be run against the tracked repo root.
+
+**Boot-survey verification (does the fix actually drive the carousel).** Host-native diskless JP BIOS
+survey, run in ~40-70M-instruction checkpointed chunks (via `checkpoint_save()`/`checkpoint_load()`
+across multiple tool calls - the ~560K instr/sec host-native throughput makes a single-call run to the
+~590M-instruction 120-frame gate impractical). Confirmed: `+0x450` reaches `5` (Browser idle) by
+instruction ~560M; `+0x444` then transitions from `0` to `1` (the first `panel_sequence[]` entry) by
+instruction ~880M, exactly as designed. However, a further ~320M-instruction chunk (to instruction
+~1.2B) showed `+0x444` still stuck at `1` - it never advanced to the next value. This is NOT a bug in
+the new function's own logic (the "don't clobber" guard is working exactly as designed: it correctly
+refuses to overwrite `+0x444` again until something resets it back to `0`); it is a direct, expected
+consequence of Round 683's original finding that our own thread-6-equivalent dispatch body only ever
+runs ONCE in a diskless boot survey. Since nothing re-invokes that dispatch body, nothing ever consumes/
+resets `+0x444`, so the carousel's own "don't clobber" guard permanently blocks further advancement
+after the first tick. The fix does exactly what it was asked to do - it drives a real, valid, evidence-
+matched value into `+0x444` where before there was only ever `0` - but by itself this does not yet
+produce any NEW visible dispatch activity, because the consuming code path (thread 6's per-tick body)
+isn't itself re-scheduled. This precisely narrows the next real blocker for task #447/#536: getting
+thread 6 (or its equivalent) to run MORE than once per diskless boot, not the carousel's value itself.
+
+**Verification.** Host-native regression suite (corrected methodology): PASS=129/FAIL=1, matching the
+pre-patch baseline exactly (zero net regressions). Wii cross-build (devkitPPC r8.1.0/libogc, toolchain
+recovered from `outputs/build/devkitpro/`, `libmpfr.so.4` resolved via `LD_LIBRARY_PATH`): clean,
+0 warnings, 0 errors, `pcsx2-wii-git.dol` produced. Boot survey: `+0x444` confirmed transitioning
+0->1 as designed; single-tick-then-stuck behavior root-caused to the pre-existing (not newly
+introduced) thread-6-single-invocation gap, not to this round's fix.
+
+**Disposition.** Task #447/#536's "does our own boot drive the idle carousel" question is now answered:
+yes, mechanically, exactly as designed and evidence-scoped - and the investigation has converged on a
+single, precisely-stated next blocker (thread-6 re-invocation) for any future round that wants to push
+this further toward visible OSDSYS panel content.
+
+
+## Round 698 (task #447/#536, user's explicit follow-on: "figure out what needs to be done to build more display output"): synthesis - the next concrete blocker is thread 6's single-invocation limit, not the carousel value itself
+
+**Question posed.** Now that Round 696-697 confirmed the `+0x444` carousel fix mechanically works (writes a real value, gets read by the already-correct dispatch chain once), what's the next concrete step toward MORE visible display output?
+
+**Synthesis of this round's fresh finding plus prior, already-established history (no new source change - docs-only round, regression/Wii build correctly skipped):**
+
+1. **This round's own boot survey (Round 696-697) directly confirmed**: `+0x444` transitions `0` -> `1` once (~instruction 880M), then stays stuck at `1` through at least instruction 1.2B, because the carousel's own "don't clobber" guard correctly refuses to write a new value until something resets `+0x444` back to `0` - and nothing does, because (per Round 683's original finding, re-confirmed here) our own diskless boot's thread-6-equivalent dispatch body (`0x00204308`, the function that reads `+0x444`/`+0x450`/`+0x454` and calls the real `WakeupThread()` chain) only ever executes **once** in the entire survey.
+
+2. **Real hardware does not behave this way.** Round 690's live disassembly of the real console's equivalent code (thread 5, closely related to thread 6 in this project's numbering) found it to be "a perpetual per-VBLANK animation-update loop, not a thread that ever reaches SleepThread under normal operation." Round 684 directly live-captured `+0x444` cycling through *multiple* real values (14, then 10) over time with zero pad input - only possible if the real dispatch body is re-invoked repeatedly, not once.
+
+3. **This project's own diskless boot does not re-invoke it.** The mechanism that would normally cause periodic re-invocation - the EE's forced-preemption/thread-scheduler path (`ee_hle_thread_check_preempt()`, Round 597-598) combined with VBLANK-interrupt-driven dispatch - has a long, well-documented history of stalls in exactly this region: Round 613-614 found COP0 `Status.EXL` getting permanently stuck at slice ~155,480,000 (a TIMER3-driven NULL-pointer TLB Refill through the generic ERET-glue trampoline, `0x00081FE0`); Round 630 shipped a narrowly-scoped guard that stops the resulting crash/lockup (`Status.EXL` no longer gets stuck) but explicitly did NOT unstick OSDSYS's own code progress (Round 630's own measurement: `max_osdsys_pc` stayed frozen at `0x00200D28` from slice 20M through slice 161M, both before and after the guard fired - "the diskless boot was already permanently stuck in the wireframe-animation loop well before TIMER3 ever overflowed"). Rounds 634-695 made substantial further progress past that specific point (GIF IMAGE-mode fixes, real textured draws confirmed on screen by Round 641, the full pad-navigation dispatch mechanism fully decoded by Round 693-694) - but today's fresh empirical check shows the *net effect*, as of the current tree, is still that thread 6's dispatch body fires once and never again during a long diskless survey.
+
+**Recommendation for the next round that picks this up:** the highest-value next investigative step is *not* another change to the carousel or its values - it is determining precisely why thread 6 (or whatever currently schedules its per-tick dispatch body) never gets re-invoked a second time in our diskless boot, and fixing that scheduling gap so it fires periodically (ideally per-VBLANK, matching Round 690's real-hardware model). Once that's true, this round's already-shipped carousel will automatically start cycling through multiple panel indices exactly as designed (the "don't clobber" guard already handles this correctly - it just needs a consumer to actually consume/reset the value), and each new panel index reaching the already-decoded `0x00203D78` dispatch table (Round 682) is the most direct, already-evidenced path to NEW GS/GIF draw activity beyond what's already on screen. Concretely: instrument every `SleepThread`/`WakeupThread`/preemption event touching thread 6's TCB across a long diskless survey (the same technique Round 613's `[R613EDGE]`-style tracker used) to find out whether thread 6 (a) never gets a second `WakeupThread()` at all, (b) gets one but the preemption/scheduler guard added since Round 598/625 (mid-exception, ERET-glue-trampoline-window guards) is now incorrectly blocking it, or (c) some other, not-yet-characterized gap. No source change made or attempted this round - this is intentionally scoped as investigation-and-recommendation only, consistent with the project's standing discipline against unevidenced speculative fixes (the Round 696 carousel fix was the one, explicitly user-authorized exception this session).
+
+
+## Round 699 (task #447/#536, continuing autonomously per user's "do all the tasks by yourself until i am home"): thread 6 bursts 59 real WakeupThread() calls early, then goes permanently dormant well before the carousel's own first write - rules out the old Status.EXL-stuck hypothesis as the current cause
+
+**Method.** Scratch-instrumented copy of `ee_core.c` (`/tmp/r699`, never committed) hooking `pc==0x00204308` (thread 6 dispatch-body entry, Round 693's citation), `pc==0x00204830` (the third, unconditional `WakeupThread()` call site inside that body, Round 693's exact live-captured backtrace address), and the two case-gated call sites (`0x002047CC`, `0x002047E8`) for comparison, plus COP0 Status at the last observed wakeup call. Checkpoint-chained diskless JP BIOS survey (`system_init()` -> repeated `system_run_interleaved(45,000,000)` + `checkpoint_save()`/`checkpoint_load()` across multiple tool calls, same technique as Round 696-697's boot-survey verification) run out to 1.8 billion cumulative instructions.
+
+**Finding 1 (new, corrects/refines Round 683/695's "runs exactly once" framing): thread 6 is not a true one-shot - it bursts real activity over an extended early window, then goes permanently dormant.** `pc==0x00204308` (the literal function-entry instruction) is hit exactly once, at instruction 76,728,859 - matching Round 683/695's original characterization. But the unconditional `WakeupThread()` call site at `0x00204830` fired **59 times** between that single entry and instruction 359,997,715, each time with a real, in-range thread-ID argument (`a0=9`, the exact same value Round 693 live-captured on real hardware) - not the garbage `0x1C0000` Round 695's pre-Round-696-fix survey found. This is explained by thread 6's own internal loop structure: the literal entry instruction is only executed once per real OS-level thread creation/first-dispatch, and the body's own internal per-tick loop re-enters further down (some instruction address other than the literal `0x00204308` entry point) on each subsequent wakeup/resume - consistent with a real kernel worker-thread pattern (`SleepThread()` -> woken -> loop back to the top of the tick body without re-executing the function prologue).
+
+**Finding 2: thread 6 goes permanently, completely dormant after instruction ~360,000,000 - both `thread6_entry_hits` and `wakeup_call_hits` are exactly 0 for the entire remaining 1.44-billion-instruction survey (through instruction 1,799,996,615).** This dormancy point is well BEFORE this round's own carousel fix (Round 696-697) ever performs its first write (`+0x444` transitions 0->1 around instruction ~720-880M in these survey runs, depending on exact instrumentation overhead) - directly confirming Round 698's synthesis: the carousel write lands with no active consumer left to read/reset it, because thread 6 had already gone dormant roughly 360-500 million instructions earlier.
+
+**Finding 3 (rules out a leading old hypothesis): COP0 Status is healthy (`0x70030c11`, `EXL=0`/`IE=1`) at instruction 1,799,996,615 - not stuck.** Round 613-614's original diagnosis (`Status.EXL` getting permanently stuck at 1 around cumulative slice ~155,480,000, from a TIMER3-driven NULL-pointer TLB Refill) was measured on a much older tree revision; Round 630 already shipped a targeted guard for the specific crash that finding described. This round's fresh check on the CURRENT tree confirms Status genuinely is NOT stuck at the point thread 6 goes dormant (~360M) or at any point through 1.8B - so whatever currently stops thread 6 from being re-scheduled is a *different* mechanism than the old EXL-stuck fault, not a recurrence of it. The EE's resting PC by the end of the survey (`0x0061BBE0`+ range) is also well past the `0x00200000-0x00480000` OSDSYS code range documented in most earlier rounds, suggesting the boot has progressed into new, less-charted code territory since the last deep disassembly pass (Rounds 630-695 were largely focused on the `0x00200000-0x00480000` region).
+
+**Disposition.** This significantly narrows Round 698's open question. The next concrete step is no longer "does thread 6 ever get invoked more than once" (yes, 59 times, all real and valid) but specifically: **what event or condition at/around instruction ~360-500M stops thread 6 from ever being woken again**, given Status is provably healthy at that point (ruling out the old EXL-stuck class of fault). Candidates for a future round to check, in priority order: (a) whether thread 6 itself calls `SleepThread()`/exits/gets killed and is never targeted by a subsequent `WakeupThread()` from its own real producer (the mechanism that called `WakeupThread(6)` 59 times might itself stop running); (b) whether the EE's resting PC region (`0x0061BBE0`+, not previously disassembled in this investigation arc) represents a new, distinct code path/loop that the boot has moved into, one that no longer touches thread 6's real producer function at all; (c) whether this project's own HLE thread scheduler (`ee_hle_thread.c`) has a starvation/priority interaction that silently stops re-scheduling thread 6 specifically once other threads dominate. No tracked-source change made this round - pure instrumented investigation, so regression suite and Wii cross-build correctly skipped per established convention.
+
+## Round 700 (task #673/#582/#583 continuation): thread 6's "dormancy" resolved - it's SEMA-parked, not un-signaled; WakeupThread(6) production never stops; the real point of interest has shifted to thread 4, now running deep in new code territory
+
+Direct continuation of Round 699's own recommended next step: determine whether `WakeupThread(6)` calls (from thread 6's real producer, presumably thread 3's per-VBLANK routine per Round 672-681) continue past the ~360-500M instruction point where Round 699 found thread 6 going dormant, and whether the target is found already-non-WAIT (a starvation signal) at those later calls.
+
+**Method.** Built a scratch-only instrumented copy (`/tmp/r700`, never committed) hooking `ee_hle_thread.c`'s `WakeupThread`/`_iWakeupThread` syscall handler (sysnum 51/-52) to record, for every call targeting thid==6: the call count, the instruction number, whether the target's status was already non-WAIT, and - new this round - the target's exact `status`/`wait_type` at the moment of the call (distinguishing "matched the real SLEEP-wait transition path" vs. "fell into the real else-branch no-op/wakeup_count++ path" vs. other). Also added the same `ee_core.c` pc-hit counters Round 699 used (`pc==0x00204308` thread-6-entry, `pc==0x00204830` the known unconditional wakeup call site). Ran a checkpoint-chained survey (`tools/round700-wake6-producer/driver.c`, same technique as Round 699) out to a cumulative 2,159,995,606 instructions - materially past both Round 699's dormancy point and this round's own carousel-write window.
+
+**Finding 1: `WakeupThread(6)` production never stops.** Every sampled window (checked repeatedly between instr ~360M and ~2.16B) shows ~73 fresh `WakeupThread(6)` calls, with `last_wake6_instr` tracking right up to the edge of each window - the real producer (thread 3's per-VBLANK routine, per Round 672-681) is still calling `WakeupThread(6)` on a healthy, sustained cadence at instruction 2.16 billion, just as it was at instruction 360 million. Round 699's framing of "thread 6 going dormant" was measuring the wrong signal.
+
+**Finding 2 (root cause of the apparent dormancy): thread 6 is genuinely parked in a semaphore wait (`wait_type=EE_TSW_SEMA`, `wait_id=2`), and `WakeupThread()` is correctly a no-op against a SEMA-waiting thread by design.** Direct inspection of `ee_hle_thread.c`'s real `WakeupThread` logic (lines 493-499) confirms: it only transitions a target out of WAIT when `status==EE_THS_WAIT && wait_type==EE_TSW_SLEEP`; for any other wait reason (including SEMA) it silently increments `wakeup_count` and does nothing else - this is correct, intentional real-PS2-kernel semantics (`WakeupThread` only ever resumes a `SleepThread` park; it was never going to affect a `WaitSema` park). Every one of the 73-per-window `WakeupThread(6)` calls sampled this round hit exactly this no-op branch (`matched_sleep=0`, `noop_wait_sema=73`, `noop_other=0` in every sample from instr ~360M through 2.16B). A full 9-thread status dump at instr 2,159,995,606 confirms thread 6's live state directly: `status=WAIT(0x4)`, `wait_type=SEMA(2)`, `wait_id=2`, `wakeup_count=364` (the accumulated no-op count) - **this is exactly the same semaphore instance (`wait_id=2`) Round 599 already identified and diagncosed as OSDSYS's real `CD_NCMD_CDDASTREAM` heartbeat semaphore**, not a different or new blocker.
+
+**Finding 3 (materially updates the scheduler picture Round 598-604 described): thread 3 (the OSDSYS animation-loop thread, entry `0x500000`) is no longer the running thread - it is itself now `WAIT+SLEEP`. Thread 4 (entry `0x600000`) is now `RUN` and has progressed deep into its own code (`pc=0x61bbf4`, ~114KB past its entry point) - squarely inside the "new, previously-undisassembled code territory" (`0x0061BBE0`+) Round 699 flagged.** Full snapshot at instr 2,159,995,606:
+
+| tid | status | wait_type | wait_id | wakeup_count | entry |
+|---|---|---|---|---|---|
+| 1 | READY | - | - | 0 | 0x0 |
+| 2 | READY | - | - | 0 | 0x20c260 |
+| 3 | WAIT | SLEEP | - | 0 | 0x500000 |
+| 4 | **RUN** | - | - | 0 | 0x600000 |
+| 5 | WAIT | SLEEP | - | 0 | 0x7a0000 |
+| 6 | WAIT | SEMA | 2 | 364 | 0x204308 |
+| 7 | WAIT | SLEEP | - | 0 | 0x203d78 |
+| 8 | WAIT | SLEEP | - | 0 | 0x214a70 |
+| 9 | WAIT | SLEEP | - | 0 | 0x205dc0 |
+
+Threads 3/5/7/8/9 all sit in genuine `SLEEP` waits (the primitive `WakeupThread` *would* actually resume, if their real producers ever called it on them) while only thread 6 uses `SEMA`. Thread 4 is the sole thread with real, ongoing forward progress at this depth of the boot.
+
+**Conclusion / reframing of task #673.** The original framing ("thread 6 never gets re-invoked a second time") is answered: thread 6 is not being starved or abandoned by its producer - the producer (thread 3's `WakeupThread(6)`) fires continuously and correctly, forever. Thread 6 simply isn't listening on that primitive right now; it's parked on `WaitSema(id=2)`, exactly the same real CDDASTREAM-heartbeat semaphore Round 599 already found. What's genuinely still unverified at the *current*, much deeper (2.16-billion-instruction) boot depth is whether the real `SignalSema(2)` producer Round 599 confirmed healthy (up to only 140M instructions, on a much earlier tree) is *still* firing - that determines whether thread 6's heartbeat is still alive or has itself gone quiet. Given thread 4 has visibly taken over real CPU time and is running deep in fresh, undisassembled code (`0x600000`-based module, now past `0x61bbf4`), the more promising next lead is identifying what thread 4's code at `0x0061BBE0`+ actually is and whether it is itself the real driver of further boot progress (a genuine, actively-running subsystem) rather than continuing to chase thread 6, which may simply be correctly idle pending a real menu-selection event this diskless synthetic boot never supplies.
+
+**Classification.** No tracked-source change - `ee_hle_thread.c`'s `WakeupThread` no-op-on-SEMA-wait behavior is confirmed CORRECT (matches real PS2 kernel semantics), not a bug to fix. All instrumentation lived in `/tmp/r700`, never committed. Regression suite and Wii cross-build correctly skipped (docs-only round, no tracked source changed).
+
+**Disposition.** Task #673 closed as answered (thread 6's non-re-invocation via `WakeupThread` is correct-by-design, not a starvation bug). Next round should disassemble thread 4's real code around `0x0061BBE0`-`0x0061BC00` (entry `0x600000`) to identify what module/subsystem this is and whether it represents genuine further boot progress worth following, and/or re-run Round 599's `SignalSema(2)`/`WaitSema(2)` producer-health check at the current ~2-billion-instruction depth to see if thread 6's real heartbeat is still alive this deep into the boot.
+
+## Round 701 (direct continuation of Round 700's own disposition note): the real SignalSema(2) producer for thread 6 also stops - Round 599's "healthy heartbeat" finding does not hold at current boot depth
+
+Direct continuation of Round 700's own next-step recommendation: re-run Round 599's `SignalSema(2)`/`WaitSema(2)` producer-health check at the current, much deeper (~2-billion-instruction) boot depth, since Round 599's original "sustained, healthy, climbing signal_total" finding was only measured out to 140,000,000 instructions on a much earlier tree revision.
+
+**Method.** Built a fresh scratch-only instrumented copy (`/tmp/r701`, never committed) adding a single counter to `ee_hle_thread.c`'s real `SignalSema`/`iSignalSema` handler (sysnum 66/-67): every call targeting `semid==2` increments `g_r701_signal_sema2_calls` and records `g_r701_signal_sema2_last_instr`. Paired with the existing `ee_hle_thread_get_status/get_wait_type/get_wakeup_count(6)` accessors (Round 612). Ran a fresh checkpoint-chained survey (`tools/round701-sema2-health/driver.c`) out to 1,999,997,449 instructions, sampled every ~160-240M instructions.
+
+**Finding: the real SignalSema(2) producer is healthy early (matching Round 599 exactly) but goes completely silent well before 1.2 billion instructions, and stays silent through 2 billion.** Measured progression:
+- instr 79,999,048: `SignalSema(2)_calls_this_run=67` (thread 6 itself still `WAIT+SLEEP` at this point, not yet SEMA-parked) - matches Round 599's original "sustained, climbing" characterization almost exactly.
+- instr 239,998,965: thread 6 has transitioned to `WAIT+SEMA` (`wait_id=2`), `wakeup_count=31` already accumulating from no-op `WakeupThread(6)` calls (Round 700's mechanism) - but `SignalSema(2)_calls_this_run=0` for this window.
+- instr 1,199,998,575: `wakeup_count=226`, still `SignalSema(2)_calls_this_run=0`.
+- instr 1,999,997,449 (survey end): `wakeup_count=389`, still `SignalSema(2)_calls_this_run=0`. EE `pc=0x0061BBF4` - the identical resting point Round 700 found thread 4 (entry `0x600000`) parked at.
+
+So somewhere between instruction ~80M and ~240M, the real `CD_NCMD_CDDASTREAM`-heartbeat producer (Round 599's identified mechanism, call site `0x0021304c`) stops calling `SignalSema(2)` entirely, and never resumes through the full 2-billion-instruction remainder of the survey - a materially different, and more complete, picture than Round 599's "sustained forever" conclusion, which was simply never tested past 140M instructions.
+
+**Conclusion.** Task #582/583/673's underlying question ("what should wake thread 6") is now answered as completely as this project's boot fixture allows: thread 6's real wake mechanism (`SignalSema(id=2)`, driven by the `CD_NCMD_CDDASTREAM` heartbeat RPC reply per Round 599) is correctly implemented and does fire, early - but the heartbeat itself stops being issued/answered well before the 240M-instruction mark, for reasons upstream of thread 6 entirely (likely the same broader dormancy affecting XGKICK past 720-810M per task #644, and consistent with Round 699/700's finding that essentially all of this boot's dynamic activity funnels into thread 4's code at `0x600000`-based, `0x0061BBE0`+ territory by this point). Thread 6 is not broken; its entire upstream stimulus chain has gone quiet.
+
+**Classification.** No tracked-source change - this is a pure read of existing behavior; the `SignalSema` counter lived only in `/tmp/r701`, never committed. Regression suite and Wii cross-build correctly skipped (docs-only round, no tracked source changed).
+
+**Disposition.** Tasks #582/#583/#673 are now closed with a complete, current-tree answer: thread 6's wake mechanism is correct and not the blocker; the blocker is that its real upstream producer (the CDDASTREAM heartbeat cycle) stops firing somewhere in the 80-240M instruction range. The single most concrete next step for continuing task #536/#447's "more display output" goal is disassembling thread 4's code at/around `0x0061BBE0` (entry `0x600000`) - identified by both Round 700 and this round as the actual active, running subsystem this deep into the boot - to determine what it is doing and whether the CDDASTREAM/heartbeat producer's silence is a consequence of thread 4 monopolizing something (a lock, an RPC channel, or simply CPU time at a priority that starves whichever thread issues the heartbeat).
+
+## Round 702 (task #674, direct continuation of Round 700/701): thread 4's "new code territory" is a real, correct VBLANK-wait primitive - not a stall, not unexplored progress
+
+Direct continuation of Round 700/701's recommended next step: disassemble thread 4's (entry `0x600000`) resting code around `0x0061BBE0`-`0x0061BC00`, which both prior rounds flagged as new, previously-undisassembled territory and the sole location of live EE activity at ~2-billion-instruction boot depth.
+
+**Method.** Extended the Round 701 scratch checkpoint (`/tmp/r702`, never committed) to 1,927,997,242 instructions (pc settled at `0x0061BBF0`, matching Round 700/701's resting point almost exactly), then dumped EE RAM `0x600000`-`0x630000` (thread 4's module) to a flat file and ran it through the Round 655 EE/R5900 disassembler.
+
+**Finding: the code at `0x0061BBD0`-`0x0061BC00` is a real, correctly-formed "wait for VBLANK_START and acknowledge" kernel primitive, not stalled or garbage code.**
+```
+0x61BBD0: lui v1, 0x1000
+0x61BBD4: addiu v0, zero, 4
+0x61BBD8: ori v1, v1, 0xF000      ; v1 = 0x1000F000 = real EE INTC_STAT register
+0x61BBDC: sw v0, 0(v1)            ; ack bit 2 (VBLANK_START) up front
+0x61BBE0: lw v0, 0(v1)            ; -- poll loop --
+0x61BBE4: andi v0, v0, 0x0004     ; isolate bit 2 (VBLANK_START, EE INTC cause #2)
+0x61BBE8-F0: nop, nop, nop
+0x61BBF4: beq v0, zero, 0x61BBE0  ; loop while VBLANK_START not yet pending
+0x61BBF8: addiu v0, zero, 4
+0x61BBFC: sw v0, 0(v1)            ; ack VBLANK_START again
+0x61BC00: jr ra                   ; return
+```
+`0x1000F000` is this project's real `EE_INTC_STAT` register (`source/hw/ee_intc.c`); bit 2 is EE INTC cause #2, VBLANK_START. This is architecturally identical to the real PS2 kernel's canonical "wait for next VBLANK, ack it" primitive (the same class of function real games call every frame for vsync pacing) - correctly formed, not a decode error or wild jump. The caller immediately following (`0x61BC08`+) is a small wrapper that calls this wait function then a second helper at `0x61BAD0`, consistent with a real per-frame update dispatcher.
+
+**Conclusion: this is NOT evidence of stalled/broken code, and likely explains why thread 4's pc keeps landing here across huge instruction-count samples.** A tight, correct VBLANK-wait loop is exactly where any real or emulated PS2 thread spends the overwhelming majority of its idle time between frames (matching the same pattern Round 610-611 already measured for VBLANK_START/END firing every ~4.9M-instruction frame period, ~146 times across a 720M-instruction window) - landing on this address in a snapshot is the expected/likely outcome of sampling at almost any point, not a sign this thread is uniquely stuck or that boot has "wandered into new code" in a concerning sense. It does, however, confirm thread 4 IS the real, currently-scheduled, correctly-functioning thread (not idle/dead), cycling once per VBLANK exactly as designed - which reframes Round 700/701's open question: the interesting next question is not "what is thread 4 doing at its VBLANK wait" (answered: nothing unusual) but "what does thread 4 do in the brief window between VBLANK acks" (the actual per-frame work, at `0x61BC08`-`0x61BCC8`+, calling `0x61BAD0` and conditionally `0x61C348`/`0x61C140`) - that is where any real per-frame rendering/logic work, if present, would live.
+
+**Classification.** No tracked-source change - pure disassembly/read of existing emulated behavior; the dump/disassembly tooling lived only in `/tmp/r702` (scratch driver) and reused the already-committed `tools/round655-ee-disasm/disasm.c`. Regression suite and Wii cross-build correctly skipped (docs-only round, no tracked source changed).
+
+**Disposition.** Task #674 (this round's own goal) is answered: thread 4's resting point is a legitimate, correctly-implemented VBLANK-wait primitive, not a bug or an unexplained stall. The concrete next step for task #536/#447's "more display output" goal is to disassemble thread 4's actual per-frame body (the code between VBLANK acks, particularly the calls to `0x61BAD0`, `0x61C348`, and `0x61C140` visible in this round's dump) to determine whether it performs any real rendering/GS work each frame, or is itself just idling on something else (e.g. waiting for a menu-selection event this diskless synthetic boot never supplies, echoing thread 6/7/8/9's condition from Round 700).

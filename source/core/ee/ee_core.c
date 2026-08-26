@@ -878,6 +878,111 @@ static void ee_check_browser_menu_escalation_heuristic(ee_state_t *st)
     fired = 1;
 }
 
+/* Round 696 (task #447/#536): idle-carousel driver for RAM[0x1C0444]
+ * ("+0x444", the real OSDSYS per-panel dispatch index this project
+ * has traced exhaustively since Round 594; the full real dispatch
+ * chain it feeds - 0x00203D78's ~17-entry handler table - was
+ * decoded in Round 682/683 and confirmed, via a scratch host-native
+ * survey in Round 683, to already be correctly reached in our own
+ * diskless boot exactly once, early, but ALWAYS with +0x444==0, so
+ * the whole handler chain silently no-ops every time.
+ *
+ * Round 684 captured direct, repeated live-hardware evidence that
+ * real OSDSYS cycles +0x444 through multiple real nonzero values
+ * (14, then 10, observed ~44M cycles apart) with ZERO pad input from
+ * the operator - i.e. this is a real, evidenced idle/auto-scan
+ * carousel behavior, not something that only happens on a button
+ * press. Round 695 further confirmed, via scratch instrumentation,
+ * that this project's own thread-6-equivalent dispatch body is
+ * alive, reachable, and behaviorally correct given its inputs - the
+ * ONLY missing piece, precisely located across Rounds 683-695, is
+ * that nothing in our own trace ever performs the write this
+ * function now performs.
+ *
+ * Honest scope note (same standard as the sibling escalation
+ * heuristic above and Round 630's pragmatic-fix precedent): this is
+ * NOT a claim to have found the exact real writer function or its
+ * exact real timing/period - that remains genuinely unknown (Round
+ * 684 only bounds the real interval from above, at ~44M cycles,
+ * from two essentially-randomly-timed live samples). What IS
+ * directly evidenced is (a) the real field, (b) that it must cycle
+ * through real nonzero values from Round 682's already-decoded
+ * table, and (c) that it happens without any pad input. This
+ * function reproduces exactly that observed behavior - a slow,
+ * pad-independent cycle through the known-valid panel indices - so
+ * the already-correct, already-reachable real dispatch chain
+ * (0x00203D78 and everything it calls) gets real, non-zero input to
+ * work with, matching the general shape of real hardware's own
+ * idle-carousel UX rather than leaving it permanently inert.
+ *
+ * Guards, matching the sibling function's established conventions:
+ * diskless-only (never touches the real, already-working disc-
+ * mounted EELOAD path, Round 607); gated on the Browser having
+ * already reached its real idle state (+0x450==5, the value the
+ * sibling heuristic above sets and this project has repeatedly
+ * live-confirmed, Rounds 606/687, as real hardware's actual resting
+ * Browser-idle value); and a "don't fight a real write" check
+ * identical in spirit to the sibling heuristic - only advances the
+ * carousel when +0x444 is still exactly 0 (i.e. the previous cycle's
+ * handler call, per Round 682's disassembly, already reset it back
+ * to 0 the way every real handler does, or no real code has written
+ * anything there yet), so this never clobbers a genuine in-progress
+ * dispatch. Ticks once per real ~1-second-equivalent window (60
+ * EE_CYCLES_PER_FRAME_NTSC-sized frames) - a deliberately
+ * conservative, mid-range guess consistent with (but not proven to
+ * exactly match) Round 684's "at least every ~44M cycles" bound. */
+#define EE_BROWSER_CAROUSEL_FIELD_ADDR    0x001C0444u
+#define EE_BROWSER_STATE_FIELD_ADDR       0x001C0450u
+#define EE_BROWSER_STATE_IDLE_VALUE       0x00000005u
+#define EE_BROWSER_CAROUSEL_TICK_FRAMES   60u /* ~1s real PS2 time per step */
+
+static void ee_check_browser_idle_carousel(ee_state_t *st)
+{
+    /* Round 682's decoded 0x00203D78 handler table: valid indices are
+     * 1-15 and 17 (16 is skipped - no case in the real dispatcher). */
+    static const uint32_t panel_sequence[] = {
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17
+    };
+    static uint64_t next_tick_instr = 0;
+    static unsigned int seq_index = 0;
+
+    if (iop_cdvd_get_disc_type() != IOP_CDVD_TYPE_NODISC)
+        return; /* diskless-only - never interfere with the real disc-mounted EELOAD path (Round 607) */
+    /* Round 697 fix (found via regression-suite investigation): must not
+     * touch RAM[0x1C0450] before the sibling escalation heuristic's own
+     * delay gate has passed. 0x001C0450 is a raw KUSEG-style address
+     * (<0x80000000), so ee_mem_read32() routes it through
+     * ee_tlb_translate() rather than a direct physical access; on a
+     * freshly-reset core (instructions_executed==0, no TLB entries
+     * programmed yet - exactly the state every host-native unit test
+     * exercises, and also the very first few real EE instructions of
+     * any boot) that translation fails, and the resulting TLB Refill
+     * exception silently hijacks $pc every single instruction step -
+     * observed directly as 45 host-native regression tests failing
+     * with corrupted register results (CPU never reaching its own
+     * test program, endlessly re-vectoring instead). The sibling
+     * ee_check_browser_menu_escalation_heuristic() never hit this
+     * because its own EE_BROWSER_ESCALATION_FRAME_DELAY gate (120
+     * frames) means its one-shot read of the neighboring +0x454 field
+     * never actually executes until well after a real boot has
+     * established TLB coverage for this region. Reusing that exact
+     * same gate here guarantees this function is provably inert no
+     * earlier than the already-verified sibling. */
+    if (st->instructions_executed < (uint64_t)EE_BROWSER_ESCALATION_FRAME_DELAY * EE_CYCLES_PER_FRAME_NTSC)
+        return;
+    if (ee_mem_read32(st, EE_BROWSER_STATE_FIELD_ADDR) != EE_BROWSER_STATE_IDLE_VALUE)
+        return; /* only once the Browser has genuinely reached its real idle state */
+    if (st->instructions_executed < next_tick_instr)
+        return; /* not yet time for the next carousel step */
+    if (ee_mem_read32(st, EE_BROWSER_CAROUSEL_FIELD_ADDR) != 0)
+        return; /* real dispatch chain hasn't consumed/reset the last value yet - don't clobber it */
+
+    ee_mem_write32(st, EE_BROWSER_CAROUSEL_FIELD_ADDR, panel_sequence[seq_index]);
+    seq_index = (seq_index + 1u) % (sizeof(panel_sequence) / sizeof(panel_sequence[0]));
+    next_tick_instr = st->instructions_executed +
+        (uint64_t)EE_BROWSER_CAROUSEL_TICK_FRAMES * EE_CYCLES_PER_FRAME_NTSC;
+}
+
 /* Round 279 (task #423 continuation, 320th finding) shipped a shortcut
  * here (ee_check_pollsema_vblank_unblock()) that force-enabled the
  * VBLANK_START/END INTC mask bits at a live-traced PollSema spin,
@@ -3554,6 +3659,7 @@ static int ee_step(void)
                         ee_check_vblank(st);
                         ee_check_boot_unblock_selfloop(st); /* Round 161 */
                         ee_check_browser_menu_escalation_heuristic(st); /* Round 610 (task #536) */
+                        ee_check_browser_idle_carousel(st); /* Round 696 (task #447/#536) */
                         ee_check_boot_unblock_sbus_wait(st); /* Round 178 (task #344) - EXPERIMENTAL BRANCH ONLY */
                         ee_check_gs_vsync(st); /* Round 87 (127th finding) */
                         ee_timers_tick(); /* Round 87 (127th finding): EE peripheral timers T0-T3 */
@@ -9624,6 +9730,7 @@ static int ee_step(void)
     ee_check_vblank(st);
     ee_check_boot_unblock_selfloop(st); /* Round 161 */
     ee_check_browser_menu_escalation_heuristic(st); /* Round 610 (task #536) */
+    ee_check_browser_idle_carousel(st); /* Round 696 (task #447/#536) */
     ee_check_boot_unblock_sbus_wait(st); /* Round 178 (task #344) - EXPERIMENTAL BRANCH ONLY */
     ee_check_gs_vsync(st); /* Round 87 (127th finding) */
     ee_timers_tick(); /* Round 87 (127th finding): EE peripheral timers T0-T3 */

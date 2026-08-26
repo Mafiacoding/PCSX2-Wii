@@ -94,13 +94,18 @@ int main(int argc, char **argv)
     int tid = ee_hle_thread_get_current_thread_id();
     printf("[R730-FB] ran %llu, total_instr=%llu pc=0x%08x halted=%u tid=%d "
            "vu1_instr=%llu gif_path1=%llu qw_seen=%llu pmode=0x%02x "
-           "dispfb1=0x%08x dispfb2=0x%08x draw_fbp=%u draw_fbw=%u\n",
+           "dispfb1=0x%08x dispfb2=0x%08x draw_fbp=%u draw_fbw=%u "
+           "triangles=%llu lines=%llu sprites=%llu points=%llu\n",
            (unsigned long long)done, (unsigned long long)ee->instructions_executed, ee->pc, ee->halted, tid,
            (unsigned long long)(vu1 ? vu1->instructions_executed : 0),
            (unsigned long long)(gif ? gif->gif_path1_transfers : 0),
            (unsigned long long)(gif ? gif->quadwords_seen : 0),
            (unsigned)gs->pmode, (unsigned)gs->dispfb1, (unsigned)gs->dispfb2,
-           gif ? gif->fbp : 0, gif ? gif->fbw : 0);
+           gif ? gif->fbp : 0, gif ? gif->fbw : 0,
+           (unsigned long long)(gif ? gif->triangles_drawn : 0),
+           (unsigned long long)(gif ? gif->lines_drawn : 0),
+           (unsigned long long)(gif ? gif->sprites_drawn : 0),
+           (unsigned long long)(gif ? gif->points_drawn : 0));
 
     char path[512];
     uint32_t bp, bw;

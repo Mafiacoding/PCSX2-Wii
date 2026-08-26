@@ -30142,3 +30142,17 @@ No tracked-source (`include/`/`source/`) change this round - regression suite an
 **Not yet captured:** the actual intro FMV/movie sequence (Sony/Polyphony Digital logo videos) that GT3 is known for - by the time the first screenshot was taken, the boot had already progressed past any such video into the disclaimer/menu screens, the same screenshot-polling limitation already flagged in Round 722. If real MPEG/IPU video playback specifically needs to be inspected, it would need either a much tighter screenshot cadence right at boot start, or a breakpoint placed on the real IPU FIFO/DMA registers to catch the decode window precisely.
 
 No tracked-source (`include/`/`source/`) change this round - regression suite and Wii cross-build correctly skipped (docs-only-round precedent).
+
+## Round 724: tried "Boot and Debug" per user suggestion - useful but doesn't solve the FMV-capture timing gap
+
+**User suggestion:** "there is also an option which is called boot and debug maybe it helps" - noticed this option in the right-click boot menu (alongside Default/Fast/Full Boot) and asked whether it helps with precise capture.
+
+**What was done:** shut down GT3 cleanly, right-clicked it again, selected "Boot and Debug" this time.
+
+**What it actually does:** unlike Full Boot (which free-runs immediately), Boot and Debug starts the VM and then halts automatically at a fixed early breakpoint - landed at `EE PC=0x00200008`, `Cycles=50,781,838` - which is inside OSDSYS's own loaded-ELF entry region (the same `0x00200000+` range this project has disassembled extensively since Round 349). This is a genuinely useful, real vantage point: BIOS init has already completed but OSDSYS/game code proper hasn't run yet.
+
+**Limitation found:** once `pcsx2_continue` is called from that breakpoint, execution resumes at normal real-time speed (confirmed: status bar showed "Speed: 100%" immediately after resuming) - it does not single-step or throttle. Two consecutive screenshot calls after resuming already showed real gameplay-adjacent content, and a status check showed `EE PC=0x010135d8` (inside GT3's own game-code region, distinct from OSDSYS's `0x00200000` range) at `Cycles=3,727,134,195` - meaning the boot had already run for billions of cycles between the two tool calls. So Boot and Debug gives a better *starting point* (skips straight past raw BIOS init to the OSDSYS entry) but does not, by itself, solve the screenshot-polling timing gap already flagged in Rounds 722-723 for catching the FMV/intro-video window specifically - that would still need either a real conditional breakpoint on IPU FIFO/DMA register activity, or single-instruction/step-based advancement instead of `pcsx2_continue`.
+
+**Verdict:** worth keeping in the toolkit (useful known-good starting PC for any future work that specifically needs to start right at OSDSYS's entry rather than raw BIOS reset), but not a magic bullet for the video-capture problem raised in Round 723.
+
+No tracked-source (`include/`/`source/`) change this round - regression suite and Wii cross-build correctly skipped (docs-only-round precedent).

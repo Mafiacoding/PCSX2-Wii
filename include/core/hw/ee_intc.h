@@ -66,4 +66,9 @@ void ee_intc_raise(int irq);
  * Cause.IP7 pattern for this new external line. */
 int ee_intc_pending(void);
 
+/* Round 716 (task #696-699): real per-cause IRQ-raise hit counter,
+ * mirroring ee_timers_get_irq_count() (Round 715). Purely diagnostic -
+ * does not affect emulated behavior. */
+uint32_t ee_intc_get_raise_count(int irq);
+
 #endif

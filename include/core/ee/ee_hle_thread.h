@@ -227,6 +227,20 @@ uint64_t ee_hle_thread_get_signal_calls(int semid);
  * diagnostic-injection precedent this follows. */
 void ee_hle_thread_debug_force_wakeup(int thid);
 
+/* Round 734 diagnostic-only (task #447 continuation): applies the real
+ * RotateThreadReadyQueue(priority) transition (find the earliest-
+ * ready_seq RUN/READY thread at that priority, give it a fresh
+ * ready_seq) and immediately calls the real reschedule() so a context
+ * switch can actually take effect - unlike Round 733's force_wakeup
+ * (which only flips status, never itself triggers a switch). NOT wired
+ * into any EE syscall path; exists solely for scratch-driver injection
+ * to observe what a starved same-priority thread does once it actually
+ * gets scheduled. See ee_hle_thread.c's own definition for the full
+ * rationale and why this is explicitly NOT a proposal to make the
+ * scheduler auto-rotate on its own (would contradict Round 712's own
+ * cited real-EE-kernel research). */
+void ee_hle_thread_debug_force_rotate(ee_state_t *st, int priority);
+
 /* Round 733 continuation: live call counter for RotateThreadReadyQueue
  * (sysnum 43/-44) - see ee_hle_thread.c's field comment. Answers
  * whether GT3's own code ever invokes the real PS2 kernel's documented

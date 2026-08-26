@@ -290,6 +290,42 @@ static void reschedule(ee_state_t *st)
     }
 }
 
+/* Round 734 diagnostic-only (task #447, GT3 stall investigation
+ * continuation, user: "maybe its time we write our self some code
+ * RotateThreadReadyQueue" - see this round's clarification: NOT a
+ * proposal to make our scheduler auto-rotate on its own, since Round
+ * 712's own cited research already established real EE kernel hardware
+ * has no automatic timeslicing among equal-priority threads - that
+ * would be fabricating non-real behavior (the exact Round 549 mistake).
+ * Instead, this is a scratch-driver-callable injection point, applying
+ * the EXACT same real transition as the sysnum==43/-44
+ * RotateThreadReadyQueue handler below (mirrored, not called - that
+ * handler is inlined in ee_hle_thread_try_handle()), immediately
+ * followed by a real reschedule() so a context switch can actually
+ * happen. This exists purely to test what threads 3/5 DO once they
+ * finally get real CPU time - the Round 733 force_wakeup experiment
+ * flipped their status to READY but never called reschedule()
+ * afterward, so pick_next_ready()'s FIFO tiebreak (thread 4's
+ * long-standing, older ready_seq always wins) meant nothing ever
+ * visibly changed. This function is NOT wired into any EE syscall path
+ * and never fires during organic emulation. */
+void ee_hle_thread_debug_force_rotate(ee_state_t *st, int priority)
+{
+    int earliest = 0;
+    uint32_t earliest_seq = 0xFFFFFFFFu;
+    for (int i = 0; i < EE_HLE_THREAD_MAX_THREADS; i++) {
+        ee_tcb_t *t = &g.threads[i];
+        if (t->in_use && (int32_t)t->priority == priority &&
+            (t->status == EE_THS_READY || t->status == EE_THS_RUN) &&
+            t->ready_seq < earliest_seq) {
+            earliest = i + 1;
+            earliest_seq = t->ready_seq;
+        }
+    }
+    if (earliest) tcb(earliest)->ready_seq = g.ready_seq_counter++;
+    reschedule(st);
+}
+
 /* Wakes the earliest (FIFO, real default SA_THFIFO-equivalent - this
  * project's ee_sema_t doesn't expose a real SA_THPRI attribute bit in
  * its own already-established field layout, so FIFO-only is the

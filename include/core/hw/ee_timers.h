@@ -112,4 +112,18 @@ void ee_timers_tick(void);
 
 ee_timers_state_t *ee_timers_get_state(void);
 
+/* Round 715 (task #693/#694, per the user's explicit "focus only on
+ * this timer issue" instruction): per-timer real IRQ-raise hit
+ * counter (compare-match OR overflow, whichever actually calls
+ * ee_intc_raise() - see ee_timers_tick()'s own doc comment), mirroring
+ * this project's established hit-counter diagnostic convention
+ * (iop_dma_get_sif2_transfer_count(), dispatch_ncmd() count, etc.).
+ * Lets a boot survey empirically confirm real IRQ cadence (does a
+ * given timer fire once, or does it keep firing forever as a real
+ * periodic heartbeat would) - independent of guessing from register
+ * snapshots alone, which can't distinguish "never armed" from "armed,
+ * fired once, then silently suppressed" from "armed and firing
+ * correctly but too slowly to have fired again yet". */
+uint32_t ee_timers_get_irq_count(int idx);
+
 #endif

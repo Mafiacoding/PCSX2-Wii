@@ -30,6 +30,14 @@ static const ee_timer_range_t s_ranges[EE_TIMERS_COUNT] = {
 static const int s_irq_bit[EE_TIMERS_COUNT] = { 9, 10, 11, 12 };
 
 static ee_timers_state_t g_timers;
+static uint32_t g_irq_count[EE_TIMERS_COUNT];
+
+uint32_t ee_timers_get_irq_count(int idx)
+{
+    if (idx < 0 || idx >= EE_TIMERS_COUNT)
+        return 0;
+    return g_irq_count[idx];
+}
 
 /* Round 127 (task #172/#247, 167th finding): real EE clock is
  * 294,912,000 Hz; real NTSC horizontal-sync (HSYNC) line rate is
@@ -49,6 +57,7 @@ static uint64_t g_bus_tick_counter = 0;
 void ee_timers_init(void)
 {
     memset(&g_timers, 0, sizeof(g_timers));
+    memset(&g_irq_count, 0, sizeof(g_irq_count));
     g_bus_tick_counter = 0;
 }
 
@@ -177,6 +186,7 @@ void ee_timers_tick(void)
             t->mode |= EE_CNT_MODE_EQUF;
             if (t->mode & EE_CNT_MODE_CMP_ENABLE) {
                 ee_intc_raise(s_irq_bit[i]);
+                g_irq_count[i]++;
                 if (!(t->mode & EE_CNT_MODE_REPEAT_IRQ))
                     t->mode &= ~EE_CNT_MODE_CMP_ENABLE; /* real: one-shot disables further compare IRQs until MODE is rewritten */
             }
@@ -193,6 +203,7 @@ void ee_timers_tick(void)
             t->mode |= EE_CNT_MODE_OVFF;
             if (t->mode & EE_CNT_MODE_OVF_ENABLE) {
                 ee_intc_raise(s_irq_bit[i]);
+                g_irq_count[i]++;
                 if (!(t->mode & EE_CNT_MODE_REPEAT_IRQ))
                     t->mode &= ~EE_CNT_MODE_OVF_ENABLE;
             }

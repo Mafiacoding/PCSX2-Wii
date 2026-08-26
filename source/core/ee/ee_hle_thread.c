@@ -69,9 +69,55 @@ static struct {
     ee_sema_internal_t semas[EE_HLE_THREAD_MAX_SEMAS];
 } g;
 
+/* Round 733 (task #447, GT3-in-game-code stall investigation, user:
+ * "use all sources available to track down this issue and fix them
+ * once and for all"): live per-target call counters for WakeupThread/
+ * _iWakeupThread and SignalSema/iSignalSema - diagnostic-only, same
+ * "project-internal accessor" convention as Round 732's CDVD dispatch
+ * counters (iop_cdvd.c). Deliberately NOT part of the checkpointed `g`
+ * blob (mirrors Round 732's choice not to checkpoint its counters
+ * either) - these answer a live, per-process-run empirical question
+ * ("does ANY thread ever call WakeupThread(3) or WakeupThread(5) - GT3's
+ * own two real, currently-sleeping worker threads found parked with
+ * wait_type=TSW_SLEEP/wakeup_count=0 - or SignalSema on whatever they
+ * might really be gated behind"), not something that needs to survive
+ * a save/resume cycle. */
+static uint64_t g_wakeup_call_count[EE_HLE_THREAD_MAX_THREADS + 1];
+static uint64_t g_signal_call_count[EE_HLE_THREAD_MAX_SEMAS + 1];
+
+/* Round 733 continuation (task #447): the force-wake diagnostic proved
+ * threads 3/5 stay READY-but-never-scheduled forever even once woken,
+ * because pick_next_ready()'s FIFO tiebreak always favors whichever
+ * same-priority thread has the OLDEST ready_seq - and the currently-
+ * RUNNING thread never loses that advantage unless something calls
+ * RotateThreadReadyQueue() (sysnum 43/-44) on its own priority level
+ * (the real PS2 kernel's documented fairness mechanism - real games
+ * that run multiple same-priority worker threads are expected to call
+ * this periodically, typically from their main-loop/VSync handler).
+ * This counter answers the empirical question "does GT3's thread 4
+ * ever actually call it" - decisive for classifying whether this is a
+ * real emulator dispatch gap or genuinely-not-yet-reached game code. */
+static uint64_t g_rotate_call_count;
+uint64_t ee_hle_thread_get_rotate_calls(void) { return g_rotate_call_count; }
+
 void ee_hle_thread_init(void)
 {
     memset(&g, 0, sizeof(g));
+    memset(g_wakeup_call_count, 0, sizeof(g_wakeup_call_count));
+    memset(g_signal_call_count, 0, sizeof(g_signal_call_count));
+    g_rotate_call_count = 0;
+}
+
+uint64_t ee_hle_thread_get_wakeup_calls(int thid)
+{
+    if (thid < 0 || thid > EE_HLE_THREAD_MAX_THREADS) return 0;
+    return g_wakeup_call_count[thid];
+}
+
+uint64_t ee_hle_thread_get_signal_calls(int semid)
+{
+    if (semid < 0 || semid > EE_HLE_THREAD_MAX_SEMAS) return 0;
+    return g_signal_call_count[semid];
 }
 
 void ee_hle_thread_get_checkpoint_blob(void **ptr, uint32_t *size)
@@ -84,6 +130,30 @@ static ee_tcb_t *tcb(int thid) /* thid is 1-based */
 {
     if (thid < 1 || thid > EE_HLE_THREAD_MAX_THREADS) return NULL;
     return &g.threads[thid - 1];
+}
+
+/* Round 733 diagnostic-only (task #447, GT3 stall investigation): forces
+ * a WAIT/SLEEP thread to READY, using the EXACT same real-hardware
+ * transition as the sysnum==51 WakeupThread handler below (mirrors it
+ * rather than calling it, since that handler is inlined in
+ * ee_hle_thread_try_handle() and not separately callable). This is NOT
+ * wired into any EE syscall path and never fires during organic
+ * emulation - it exists purely so a scratch driver can test the
+ * hypothesis "would GT3's threads 3/5 go on to do real work (e.g. issue
+ * a CDVD read) if something had woken them", without first having to
+ * locate why the real wake call never happens. Same diagnostic-injection
+ * precedent as Round 568's synthetic WaitSema(0) signal test. */
+void ee_hle_thread_debug_force_wakeup(int thid)
+{
+    ee_tcb_t *t = tcb(thid);
+    if (!t || !t->in_use) return;
+    if (t->status == EE_THS_WAIT && t->wait_type == EE_TSW_SLEEP) {
+        t->status = EE_THS_READY;
+        t->wait_type = EE_TSW_NONE;
+        t->ready_seq = g.ready_seq_counter++;
+    } else {
+        t->wakeup_count++;
+    }
 }
 
 static int alloc_tcb_slot(void)
@@ -411,6 +481,7 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
         return 1;
     }
     if (sysnum == 43 || sysnum == -44) {
+        g_rotate_call_count++; /* Round 733 - see field comment */
         /* RotateThreadReadyQueue(int priority) - 0 = caller's own
          * current priority. Same real-equivalent implementation as
          * the IOP side: give the earliest-ready_seq thread at that
@@ -488,6 +559,7 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
     if (sysnum == 51 || sysnum == -52) {
         /* WakeupThread(int thid) / _iWakeupThread(int thid) */
         int thid = (int)(int32_t)st->gpr[4].ud0;
+        if (thid >= 0 && thid <= EE_HLE_THREAD_MAX_THREADS) g_wakeup_call_count[thid]++; /* Round 733 - see field comment */
         ee_tcb_t *t = tcb(thid);
         if (t && t->in_use) {
             if (t->status == EE_THS_WAIT && t->wait_type == EE_TSW_SLEEP) {
@@ -588,6 +660,7 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
          * optimization for reschedule()), but it no longer gates
          * whether count is incremented. */
         int semid = (int)(int32_t)st->gpr[4].ud0;
+        if (semid >= 0 && semid <= EE_HLE_THREAD_MAX_SEMAS) g_signal_call_count[semid]++; /* Round 733 - see field comment */
         ee_sema_internal_t *s = sema(semid);
         if (s && s->in_use) {
             if (s->count < s->max_count) {

@@ -30611,3 +30611,37 @@ TIDs 2, 6, 7, 8, 9 are ALL parked at the identical PC (`0x00210e68`), identical 
 **Files changed:** `docs/STATUS.md` only.
 
 **Next steps.** (1) Investigate the `gif->fbp=0` draw-target dump's dither-pattern anomaly - check whether it's a genuine PSM-format mismatch in the dump tool (an easy, low-risk fix if so) versus a real emulator addressing bug (would need the same careful evidence-gathering as Round 639's original gs_mem base-pointer investigation). (2) Push the survey further still (well past 7B) to see whether the 247 organic triangles' pixels eventually appear in a correctly-identified buffer, or whether they too are Z-test-gated the way Round 731's first synthetic attempts were. (3) If a genuine fill-visibility gap is confirmed (not a dump-tool bug), that would be the first evidenced *organic* (non-synthetic) triangle-fill blocker on the disc-boot path, distinct from Round 545's diskless-boot "no vertex kicks under a triangle PRIM at all" framing - GT3 clearly does issue real triangle PRIMs, so the remaining question is purely about where/whether their fill becomes visible.
+
+## Round 747 (task #447, GT3 disc-boot path continuation): correlated the organic-triangle appearance with a Z-test-rejection spike; ruled out framebuffer/Z-buffer address aliasing as the cause; root cause of invisible fill still open
+
+**Motivation.** Direct follow-up to Round 746's two open questions: whether the 247 organically-drawn GT3 triangles are (a) heavily Z-test-rejected the way Round 731's original synthetic Z=0 triangles were, or (b) landing in a framebuffer/context different from the one being dumped as DISPFB2. A sandbox reset between rounds wiped all `/tmp` state (including the 6.96B-instruction checkpoint chain built in Round 746), so this round's checkpoint chain was rebuilt from a cold boot.
+
+**Method.** Wrote `/tmp/gt3/chain_driver2.c`, extending Round 729/746's `chain_driver.c` checkpoint-chaining pattern with new per-invocation diagnostics: `gif->triangles_drawn/lines_drawn/sprites_drawn/points_drawn/pixels_ztest_failed`, plus current/ctx1/ctx2 `fbp/fbw/zte/ztst/zbp/zbuf_configured` (the last two added mid-round once the initial ztest-failure spike was found, requiring the real `GS_ZTST_*`/`zbuf_configured` field names from `include/core/hw/gif.h`). Re-ran the exact same real JP BIOS + real GT3 ISO cold boot as Round 746, chained forward via repeated `checkpoint_save()`/`checkpoint_load()` across ten ~70,000,000-slice invocations (~110-150s wall-clock each, one hard 178s-per-call ceiling hit and safely recovered from by re-running at a smaller budget, since the failed call never reached `checkpoint_save()`).
+
+**Result: found direct, tight correlation between the triangle-count jump and a Z-test-rejection spike; ruled out address-collision.**
+| cumulative instr | triangles_drawn | pixels_ztest_failed | ctx1 zte/ztst | cur/ctx1 fbp | cur/ctx1 zbp |
+|---|---|---|---|---|---|
+| 800M | 0 | 0 | 1/2 (GEQUAL) | 0 | - |
+| 1.36B | 0 | 660 | 1/2 (GEQUAL) | 0 | - |
+| 2.08B | 0 | 660 | 1/1 (ALWAYS) | 0 | - |
+| 2.72B | 0 | 660 | 1/1 (ALWAYS) | 0 | - |
+| 3.28B | 0 | 660 | 1/1 (ALWAYS) | 0 | - |
+| 3.84B | 0 | 660 | 1/1 (ALWAYS) | 0 | - |
+| 4.40B | 0 | 660 | 1/3 (GREATER) | 0 | - |
+| 4.96B | 0 | 660 | 1/1 (ALWAYS) | 70 | - |
+| **5.52B** | **247** | **857,694** | 1/1 (ALWAYS) | 70 | - |
+| 6.08B | 247 | 857,694 | 1/1 (ALWAYS) | 70 | 140 |
+
+The triangle count and `pixels_ztest_failed` both jump in the exact same 70,000,000-slice (~560M-instruction) window (4.96B->5.52B): triangles 0->247, Z-test rejections +857,034 in that one window (vs. only +0 in every other window sampled). This is strong direct evidence the 247 triangles are real geometry being rasterized with the overwhelming majority of their fragments Z-test-rejected - the same failure signature Round 731 originally found and fixed for its synthetic Z=0 triangles, though this round did not yet prove the specific mechanism.
+
+**Ruled out address aliasing.** At the 6.08B checkpoint, `ctx1_fbp=70, ctx1_zbp=140` - exactly 70 GS pages apart, and 70 pages is precisely `640*224*4 bytes / 8192 bytes-per-page` (the real size of GT3's own 640x224 32bpp framebuffer). This is a clean, non-overlapping layout (framebuffer occupies pages [70,140), Z-buffer occupies [140,210)) - directly ruling out a Round-639-style base-pointer collision between the color and depth buffers for this context.
+
+**ztst enum verified against real hardware encoding.** `include/core/hw/gif.h` defines `GS_ZTST_NEVER=0, GS_ZTST_ALWAYS=1, GS_ZTST_GEQUAL=2, GS_ZTST_GREATER=3`, matching the real PS2 GS TEST register's documented ZTST field encoding exactly - not a mislabeled/off-by-one enum. By the time of the 5.52B/6.08B snapshots, `ctx1_ztst` had settled to `1` (ALWAYS), which per `rasterize_triangle()`'s own switch statement makes `z_pass=1` unconditionally - meaning the actual mass rejection did not happen under the ztst value we observe in the snapshot; it must have happened earlier in the same 560M-instruction window, under whichever GEQUAL/GREATER setting was active at the moment the triangles were actually drawn (this round's 70M-slice sampling granularity is too coarse to catch the exact instant).
+
+**Classification: real, evidenced correlation found; root cause (legitimate depth occlusion vs. a genuine Z-buffer-content bug, e.g. an uncleared/garbage Z-buffer at scene start) still open - no fix implemented, per this project's no-fabricated-fix discipline.** The clean, non-colliding fbp/zbp layout and the hardware-matching ztst encoding both argue against an addressing or enum bug. The remaining open question is whether GT3 ever issues a real Z-buffer-clear draw (the standard PS2 technique: a full-screen sprite/quad with Z-test disabled, writing a fixed Z value) before these 247 triangles, and what the actual stored Z values are at a few sample coordinates - neither checked yet.
+
+**No tracked-source change.** `/tmp/gt3/chain_driver2.c` is a new scratch tool (never committed, mirrors the existing `tools/round729-gt3-discboot/` convention), diagnostic-only, no `include/`/`source/` file touched. Regression suite and Wii cross-build correctly skipped (docs-only round). Checkpoint/BIOS/ISO files stayed in `/tmp/` scratch only; leak-check confirmed clean before this round's commit.
+
+**Files changed:** `docs/STATUS.md` only.
+
+**Next steps.** (1) Build a finer-grained (sub-70M-slice) instrument bracketing the exact triangle-draw window (4.96B-5.52B) to capture the real `ztst` value active at the moment of the Z-test spike, replacing this round's between-snapshot inference with direct observation. (2) Check whether GT3 issues a real Z-buffer-clear draw before this window - if the Z-buffer was never cleared (stale/garbage initial content), that would explain near-universal rejection under GEQUAL/GREATER without any emulator bug being required, or conversely, if a genuine clear happens but rejection still dominates, that would point to a real bug in Z-value production/storage. (3) Sample a handful of stored Z values at `zbp=140` directly (already possible via `gs_mem_read_psmct32`) to distinguish "populated but occluding" from "all-zero/garbage".

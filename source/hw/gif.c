@@ -1592,12 +1592,31 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
     case GS_REG_FRAME_1: {
         /* FBP: bits 0-8, FBW: bits 9-14 (units of 64px - real hardware
          * convention), PSM: bits 15-20 (ignored, PSMCT32 assumed).
-         * FBP here is used directly as our gs_mem "bp" word-offset
-         * convention - not a claim it matches real hardware block
-         * addressing (see gs_mem.h). Round 27: also mirrors into
-         * ctx1_fbp/ctx1_fbw (context 1's permanent storage - see
-         * gif.h's dual-context field comment). */
-        uint32_t fbp = data_lo & 0x1FFu;
+         *
+         * Round 748 fix: FBP is a real "Address/2048 words" page index
+         * on actual hardware (8192 bytes/unit - see gs_mem.h's Round
+         * 640 comment), the SAME unit gs_decode_dispfb() already
+         * scales by (*2048) for DISPFB1/DISPFB2. Previously FBP was
+         * stored raw/unscaled here and fed directly into gs_mem_read/
+         * write_psmct32()'s "word offset" bp parameter - Round 640
+         * explicitly considered this exact question for FRAME/ZBUF and
+         * concluded "no aliasing was observed for that register pair",
+         * but that was wrong: GT3's real disc-boot fbp=70/zbp=140
+         * landed only 280/560 bytes apart under the old raw-field
+         * convention (should be 573,440/1,146,880 bytes apart),
+         * causing the color framebuffer and Z-buffer to alias almost
+         * completely - see docs/STATUS.md Round 747/748 for the full
+         * evidence trail (pixel-identical draw-target/Z-buffer PPM
+         * dumps). Scaling here (matching gs_decode_dispfb's existing,
+         * already-correct, already-tested convention) makes FRAME's
+         * bp consistent with DISPFB's bp for the first time - every
+         * downstream consumer (gs_finish_pixel, rasterize_triangle's
+         * Z-test, gs_activate_context's ctx1/ctx2 copy) already treats
+         * g_gif.fbp/zbp as an opaque pre-scaled word offset and needs
+         * no further change. Round 27: also mirrors into ctx1_fbp/
+         * ctx1_fbw (context 1's permanent storage - see gif.h's
+         * dual-context field comment). */
+        uint32_t fbp = (data_lo & 0x1FFu) * 2048u;
         uint32_t fbw_field = (data_lo >> 9) & 0x3Fu;
         uint32_t fbw = fbw_field * 64u;
         if (fbw == 0) fbw = 640; /* guard against a zero FBW making every pixel alias */
@@ -1610,8 +1629,9 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
         /* Context 2's FRAME - identical bitfield to FRAME_1 above,
          * written ONLY into ctx2_fbp/ctx2_fbw (context 2 only becomes
          * "live" in the flat/active fields once a primitive is
-         * actually drawn with PRIM.CTXT=1 - see gs_activate_context()). */
-        uint32_t fbp = data_lo & 0x1FFu;
+         * actually drawn with PRIM.CTXT=1 - see gs_activate_context()).
+         * Round 748: same *2048 page-scale fix as FRAME_1 above. */
+        uint32_t fbp = (data_lo & 0x1FFu) * 2048u;
         uint32_t fbw_field = (data_lo >> 9) & 0x3Fu;
         uint32_t fbw = fbw_field * 64u;
         if (fbw == 0) fbw = 640;
@@ -1865,7 +1885,12 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
          * rasterize_sprite(). zbuf_configured is this project's own
          * safety gate - see gif.h's field comment. Round 27: also
          * mirrors into ctx1_zbp/ctx1_zmsk/ctx1_zbuf_configured. */
-        g_gif.zbp = data_lo & 0x1FFu;
+        /* Round 748: same *2048 page-scale fix as FRAME_1/2 above -
+         * ZBUF's bp field is the same real "Address/2048 words" unit,
+         * previously left raw/unscaled (the specific gap Round 640
+         * checked for and incorrectly cleared - see FRAME_1's comment
+         * above for the full citation). */
+        g_gif.zbp = (data_lo & 0x1FFu) * 2048u;
         g_gif.zmsk = (int)(data_hi & 0x1u);
         g_gif.zbuf_configured = 1;
         g_gif.ctx1_zbp = g_gif.zbp;
@@ -1874,8 +1899,9 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
     } break;
     case GS_REG_ZBUF_2: {
         /* Context 2's ZBUF - identical bitfield to ZBUF_1 above,
-         * written ONLY into the ctx2_zxxx permanent fields. */
-        g_gif.ctx2_zbp = data_lo & 0x1FFu;
+         * written ONLY into the ctx2_zxxx permanent fields. Round 748:
+         * same *2048 page-scale fix. */
+        g_gif.ctx2_zbp = (data_lo & 0x1FFu) * 2048u;
         g_gif.ctx2_zmsk = (int)(data_hi & 0x1u);
         g_gif.ctx2_zbuf_configured = 1;
     } break;

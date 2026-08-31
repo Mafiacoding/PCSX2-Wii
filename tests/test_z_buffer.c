@@ -158,7 +158,12 @@ int main(void)
         setup_frame();
         setup_zbuf(32u, 0u);
         gif_state_t *st = gif_get_state();
-        CHECK(st->zbp == 32u, "ZBUF_1: ZBP field parsed correctly");
+        /* Round 748: ZBUF.ZBP is real-hardware page-granularity (Address/
+         * 2048 words) - gif.c's ZBUF_1 handler now scales the raw field
+         * by *2048 at decode time (matching gs_decode_dispfb()'s existing
+         * DISPFB convention), so the stored word offset is 32*2048, not
+         * the raw field value 32 itself. See docs/STATUS.md Round 748. */
+        CHECK(st->zbp == 32u * 2048u, "ZBUF_1: ZBP field parsed correctly (scaled *2048, real page-granularity)");
         CHECK(st->zmsk == 0, "ZBUF_1: ZMSK field parsed correctly (0)");
         CHECK(st->zbuf_configured == 1, "ZBUF_1: zbuf_configured gate set after an explicit write");
 
@@ -184,7 +189,7 @@ int main(void)
         draw_triangle(PRIM_TYPE_TRIANGLE, 0xFF0000FFu,
                        0, 0, 0u, 9, 0, 300u, 0, 9, 600u);
 
-        uint32_t stored_z = gs_mem_read_psmct32(32u, 64u, 3u, 3u);
+        uint32_t stored_z = gs_mem_read_psmct32(32u * 2048u, 64u, 3u, 3u);
         CHECK(stored_z == 300u, "Z buffer: centroid Z is the true barycentric average (0+300+600)/3 = 300, not a guess");
     }
 
@@ -213,7 +218,7 @@ int main(void)
         draw_triangle(PRIM_TYPE_TRIANGLE, 0x00FF0000u, 0, 0, 150u, 20, 0, 150u, 0, 20, 150u);
         uint32_t after_c = gs_mem_read_psmct32(0u, 64u, 5u, 5u);
         CHECK(after_c == 0x00FF0000u, "Depth test: a nearer-or-equal fragment (Z=150 >= stored 100) under GEQUAL DOES overwrite color");
-        CHECK(gs_mem_read_psmct32(32u, 64u, 5u, 5u) == 150u, "Depth test: Z buffer updated to the passing fragment's Z (150)");
+        CHECK(gs_mem_read_psmct32(32u * 2048u, 64u, 5u, 5u) == 150u, "Depth test: Z buffer updated to the passing fragment's Z (150)");
     }
 
     /* --- ZTST_NEVER: every fragment rejected regardless of Z --- */
@@ -240,12 +245,12 @@ int main(void)
         setup_zbuf(32u, 0u);
         setup_test(1u, GS_ZTST_ALWAYS);
         draw_triangle(PRIM_TYPE_TRIANGLE, 0x000000FFu, 0, 0, 10u, 20, 0, 10u, 0, 20, 10u);
-        CHECK(gs_mem_read_psmct32(32u, 64u, 5u, 5u) == 10u, "ZMSK=0: Z buffer written normally");
+        CHECK(gs_mem_read_psmct32(32u * 2048u, 64u, 5u, 5u) == 10u, "ZMSK=0: Z buffer written normally");
 
         setup_zbuf(32u, 1u); /* now ZMSK=1 */
         draw_triangle(PRIM_TYPE_TRIANGLE, 0x0000FF00u, 0, 0, 999u, 20, 0, 999u, 0, 20, 999u);
         CHECK(gs_mem_read_psmct32(0u, 64u, 5u, 5u) == 0x0000FF00u, "ZMSK=1: color is still written normally (ALWAYS test)");
-        CHECK(gs_mem_read_psmct32(32u, 64u, 5u, 5u) == 10u, "ZMSK=1: Z buffer was NOT updated (still the old value, 10, not 999)");
+        CHECK(gs_mem_read_psmct32(32u * 2048u, 64u, 5u, 5u) == 10u, "ZMSK=1: Z buffer was NOT updated (still the old value, 10, not 999)");
 
         /* Prove the stale Z is really what's being compared against:
          * switch back to GEQUAL with ZMSK=0, draw at Z=15 (>= stale
@@ -282,7 +287,7 @@ int main(void)
         /* v0 Z=5 (should be ignored), v1(completing) Z=200 (flat Z for the whole sprite). */
         draw_sprite(0x000000FFu, 0, 0, 5u, 10, 10, 200u);
         CHECK(gs_mem_read_psmct32(0u, 64u, 5u, 5u) == 0x000000FFu, "SPRITE: first draw establishes color/Z=200 (flat, from the completing vertex)");
-        CHECK(gs_mem_read_psmct32(32u, 64u, 5u, 5u) == 200u, "SPRITE: Z buffer holds the completing vertex's Z (200), not the first vertex's (5)");
+        CHECK(gs_mem_read_psmct32(32u * 2048u, 64u, 5u, 5u) == 200u, "SPRITE: Z buffer holds the completing vertex's Z (200), not the first vertex's (5)");
 
         /* Completing Z=100 (not > stored 200) - GREATER must reject. */
         draw_sprite(0x0000FF00u, 0, 0, 999u, 10, 10, 100u);

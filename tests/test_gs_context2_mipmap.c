@@ -121,9 +121,13 @@ int main(void)
     gif_process_quadwords(DMA_CHANNEL_GIF, buf, (uint32_t)(off / 16));
 
     uint32_t ctx1_px = gs_mem_read_psmct32(0, 640, 3, 3);
-    /* FBP=20 -> block-based address; read back through the same
-     * gs_mem addressing this project already uses elsewhere (bp=20). */
-    uint32_t ctx2_px = gs_mem_read_psmct32(20, 640, 3, 3);
+    /* Round 748: FRAME.FBP is real-hardware page-granularity
+     * (Address/2048 words) - gif.c's FRAME_2 handler now scales the
+     * raw field 20 by *2048 at decode time (matching
+     * gs_decode_dispfb()'s existing DISPFB convention - see
+     * docs/STATUS.md Round 748), so the actual stored word offset is
+     * 20*2048, not 20 itself. */
+    uint32_t ctx2_px = gs_mem_read_psmct32(20u * 2048u, 640, 3, 3);
 
     CHECK(ctx1_px == mip3_color,
           "context 1 (mipmapping configured via TEX1_1/MIPTBP1_1) samples its own mip level 3, unaffected by context 2's config");

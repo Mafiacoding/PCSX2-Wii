@@ -10587,10 +10587,30 @@ BITBLTBUF.SBP/DBP and TEX0.TBP0/CBP = 256 bytes/unit ("block", 64x finer) - cros
 project's own pulled `GSRegs.h` reference source (field widths + `Block()<<5` helpers match exactly).
 Implemented as additive `gs_mem_read/write_psmct32_blk()` wrappers (pre-scale bp by 64, call through to the
 existing unchanged plain functions) wired into gif.c's 3 real block-scale call sites (CLUT read, texture read,
-IMAGE-mode transfer write) - the FBP/ZBP call sites and gs_mem.c itself are untouched. 11 existing test files'
+IMAGE-mode transfer write) - the FBP/ZBP call sites and gs_mem.c itself are untouched.
+[Round 748 correction: this round's claim that FRAME.FBP/ZBUF.ZBP didn't need the same page-scale treatment
+was wrong - see the "Round 748" section below for the fix, found via a pixel-identical-PPM proof that the
+color and Z buffers were aliasing.] 11 existing test files'
 texture/CLUT seed-writes updated to match; one genuine pre-existing test bug (mis-encoded FRAME_2 FBP field)
 found and fixed along the way. New regression test added. Full 47-binary regression suite passes, Wii
 cross-build clean. Verified via before/after PPM framebuffer diff on an identical 100M-slice diskless boot
 survey: the exact collision zone (framebuffer rows 22-43) goes from spurious grayscale/white aliased pixel
 data to clean black background, with zero change to boot progress (identical EE instruction count and halt
 PC in both runs). Docs, commit, rsync, leak-check done.
+
+## Round 748: FRAME.FBP/ZBUF.ZBP page-scale addressing bug found and fixed (corrects Round 640)
+
+Round 640 (above) explicitly checked FRAME.FBP/ZBUF.ZBP for the same aliasing class of bug found in
+BITBLTBUF/TEX0, and incorrectly concluded no fix was needed. Direct evidence this round (a pixel-identical
+PPM comparison of GT3's color framebuffer vs. its Z-buffer, both dumped from the same GS-memory-backed
+checkpoint) proved the two were in fact aliasing: `source/hw/gif.c`'s FRAME_1/FRAME_2/ZBUF_1/ZBUF_2 handlers
+stored the raw 9-bit register field directly, while real hardware's FBP/ZBP fields are page-granularity
+(*2048 words = 8192 bytes/unit) - the same convention `gs_decode_dispfb()` in `gs_wii_output.c` already used
+correctly for the display circuit. Fixed by scaling the raw field by `*2048u` at register-decode time in all
+four handlers; every downstream consumer needed no change since `g_gif.fbp`/`zbp` were already treated as
+opaque pre-scaled word offsets. 4 test files (`test_z_buffer.c`, `test_gif_line.c`, `test_gs_context2.c`,
+`test_gs_context2_mipmap.c`) updated to apply the same scale to their direct `gs_mem_read/write_psmct32()`
+calls, which had bypassed the register-decode path. Wii cross-build clean. Full GT3 checkpoint re-run to
+visually confirm the dither pattern is resolved is deferred to a future round (the existing checkpoint
+predates the fix and can't cleanly validate it; a fresh multi-billion-instruction run doesn't fit in one
+round's budget). See docs/STATUS.md "Round 748" for the full citation and evidence trail.

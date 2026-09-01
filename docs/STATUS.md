@@ -31124,6 +31124,100 @@ The captured register dump shows `$ra=0x00000C4C` exactly - i.e. this function's
 
 **Part 2 (per the user's instruction, "push the 10b" after diagnosing): pushed the chain forward one more 150,000,000-instruction slice, `total_instr=10,080,000,000 -> 11,280,000,000`, as an empirical test of the self-loop hypothesis above.** Result: IOP `pc` after the push cycled only among `0x00000C50/C58/C6C/C80/C88` and EE `pc` only among values in `0x80005E68-0x8000626C` - i.e. both cores stayed provably confined to the exact same tight instruction ranges disassembled above, and `SIF_SMFLAG` still reads real `0x00000000`. This is exactly what the `$ra`-clobber self-loop hypothesis predicts (a closed cycle with no way out) and rules out the possibility that the earlier 10.08B sample was a rare, still-eventually-resolving coincidence. Checkpoint saved and backed up at `/tmp/ckpt_gt3_11_28b_backup.bin` (never committed - real-disc-derived, confined to `/tmp/` per the leak-prevention rule). Recommendation for the next round stands unchanged from above: disassemble `0x00001358` and this subroutine's real caller before attempting any source fix, since further blind chain-growth from here is now doubly confirmed not to help on its own.
 
+## Round 767 (task #762, docs-only): re-ran GT3 chain against the Status.IsC-fixed tree - confirms the fix unblocked massive real forward progress, then found and precisely characterized a NEW, downstream infinite loop
+
+**Task**: Round 766 fixed the missing COP0 Status.IsC support, but the old
+10.08B/11.28B GT3 checkpoints were captured against the corrupted (pre-fix)
+tree and are not valid continuation points. This round boots GT3 fresh
+(`chain_driver start`) against the fixed tree (`/tmp/r766tree`) and grows
+the chain to see how far the IOP/EE now progress.
+
+**Result 1 - the IsC fix is confirmed to unblock real, substantial forward
+progress.** The old tree was completely frozen (EE/IOP pc never changed)
+by ~600M instructions, in the Round 765 self-loop. The fixed tree runs
+past that point cleanly: by ~1.2B instructions both EE and IOP pc are
+actively cycling through many different addresses (not frozen), and by
+~3.6B instructions the EE side reaches a **new milestone**: register
+state shows `gpr[5]=0x5344534f`, `gpr[7]` pointing at a buffer, and a
+direct read of IOP low RAM (`ckpt_inspect`) shows the literal ASCII
+string **"rom0:OSDSYS"** at IOP RAM 0x008-0x018 (bytes `72 6f 6d 30 3a
+4f 53 44 53 59 53 00` = "rom0:OSDSYS\0"). This is real, further BIOS
+boot progress - the boot sequence is now attempting to load the actual
+PS2 system-menu executable, well past everything the old corrupted tree
+ever reached.
+
+**Result 2 - a new, distinct infinite loop was found and fully
+characterized (not yet fixed).** By ~2.4B-3.7B instructions, both EE and
+IOP settle into a narrow, unmoving PC band: EE polls `SIF_SMFLAG`
+(0x1000F230) waiting for bit 0x00040000 (a legitimate, correctly-modeled
+SIF wait - real code, not a bug), while **IOP genuinely spins forever**
+at pc=0x00102354-0x0010237C. Root-caused via three layers of live
+instrumentation this round:
+
+1. A fine-grained per-instruction pc/register trace (`/tmp/loopwatch2.c`,
+   scratch) showed IOP visiting pc=0x00102354 (loop top) every exactly 11
+   instructions, forever, with `$sp=$fp=0xFFFFFF40` and `$ra=0x00100000`
+   **constant on every single hit** (2,000,000+ hits sampled, all
+   identical) - and crucially `Status(cop0[12])=0` throughout, so this is
+   NOT an exception/interrupt re-vectoring (which would show Status.EXL
+   set or EPC changing) - it is a genuine, ordinary code loop that never
+   terminates.
+2. Disassembling IOP RAM 0x00102354-0x0010237C (`/tmp/disasm`) shows a
+   completely ordinary, textbook **bounded 17-iteration zero-fill loop**
+   (`lw v0,88(fp)` / increment / `sw v0,88(fp)` / `slti v0,v0,17` / `sw
+   zero,table(at)` / `bne v0,zero,loop_top`) that should terminate
+   normally. But `iop_mem_ptr()`'s bounds check (`source/core/iop/
+   iop_core.c`) treats `fp+88 = 0xFFFFFF98` as out-of-range (`phys =
+   addr & 0x1FFFFFFF` = 0x1FFFFF98, far past `st->ram_size`), so every
+   store to the loop's own counter is silently dropped and every load
+   reads back 0 - the counter can never advance past 0, so the "bne"
+   branches back unconditionally forever. Confirmed directly:
+   `/tmp/loopwatch.c` read the counter via `iop_mem_read32(fp+88)` on
+   2,000,000 consecutive hits and it was 0 every single time.
+3. Disassembling the function's own real prologue, just before the loop
+   (IOP RAM 0x00102260-0x00102290), shows the classic, already-documented
+   (Round 29/416, `source/hw/iop_module_loader.c`'s own `BOOT_INFO_RAM_MB`/
+   `INITIAL_SP` comments) real-hardware idiom: `mtc0 zero,$12` (clears
+   IsC - confirms this code path is unrelated to the Round 766 fix, this
+   is a second, independent issue) / `lw v0,0(a0)` / `sll sp,v0,20`
+   (sp = v0 * 0x100000) / `addiu sp,sp,-64` / ... / `addiu sp,sp,-128`.
+   The observed sp=0xFFFFFF40 is an exact arithmetic match for `v0=0`
+   through this exact sequence (`0 - 64 - 128 = -192 = 0xFFFFFF40`), not
+   the expected `v0=2` (BOOT_INFO_RAM_MB) which would correctly give
+   `sp=0x1FFF40` (a valid, in-range top-of-RAM stack address).
+
+**Not yet resolved**: this looks like the same real-hardware idiom/bug
+CLASS already fixed once for SYSMEM specifically (module-entry code
+computing its own stack from a boot-info RAM-size word), recurring here
+in a different piece of code - but `iop_module_loader.c`'s own module-
+dispatch code (`iop_module_loader_boot()`/`advance_to_next_module()`)
+was checked this round and DOES correctly set `$a0=g.boot_info_addr`
+(with `BOOT_INFO_RAM_MB=2` already written to offset 0) for every module
+entry, so this is not simply a repeat of the same dispatch-code gap. By
+the time the currently-saved checkpoint was captured, `$a0` has already
+been reused internally as a general-purpose temp (observed a0=0xFFFFFF98
+= fp+88 mid-loop), so this checkpoint alone cannot show what `$a0`
+genuinely held at the moment this function was first entered - that
+requires either a checkpoint from strictly before this function's first
+dispatch (not currently available; the existing chain was already inside
+this loop by 2.4B) or a slow from-scratch instrumented run watching for
+the first hit. Left as an explicit next task rather than guessing at a
+fix, per this project's no-fabrication discipline.
+
+**Overall**: real, honest progress this round - the Round 766 fix is
+verified working as intended (unblocked ~3x more real boot progress,
+reaching an actual "rom0:OSDSYS" load attempt), and a second, previously-
+invisible bug (masked by the first one) has been precisely characterized
+down to the exact instruction and exact arithmetic, ready for a future
+round to pin down the real entry-time `$a0`/caller and implement an
+evidenced fix.
+
+No tracked source changed this round (pure diagnostic/investigative round
+using scratch tools in `/tmp/`, same convention as Round 754-759's
+investigation arc) - regression suite and Wii rebuild correctly skipped
+per this project's docs-only-round policy. Docs, commit, rsync, leak-
+check done below.
+
 ## Round 766 (task #761): ROOT CAUSE FOUND AND FIXED - missing COP0 Status.IsC (Isolate Cache) support was corrupting SYSMEM's own resident code
 
 Continuing directly from Round 765's open question ("is the SYSMEM $ra-clobber pattern a genuine emulator bug, a real Sony bug, or a wrong-decode artifact"). This round answers it definitively and ships a fix - the "$ra-clobber" framing itself turns out to be wrong; the real bug is upstream of that.

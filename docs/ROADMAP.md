@@ -10728,3 +10728,24 @@ bytes, exactly as expected). 133/134 regression (same pre-existing unrelated fai
 (0 warnings/errors). Not yet re-run against the GT3 chain from a fresh cold boot - the existing 10.08B/11.28B
 checkpoints were captured against the old, corrupted tree and aren't valid starting points for the fixed one.
 See docs/STATUS.md "Round 766" for the full writeup.
+
+## Round 767 (docs-only): re-ran GT3 chain against the Status.IsC-fixed tree - fix confirmed working, then found a new downstream infinite loop
+
+Booted GT3 fresh against the fixed tree. Confirms the Round 766 fix genuinely unblocks real forward progress:
+the old tree was completely frozen by ~600M instructions; the fixed tree runs actively past 1B, and by ~3.6B
+instructions IOP RAM shows the literal string "rom0:OSDSYS" being processed - a real, further BIOS milestone
+(attempting to load the actual PS2 system menu). By ~2.4B-3.7B instructions a NEW infinite loop is hit: IOP
+spins forever in a normally-bounded 17-iteration zero-fill loop at 0x00102354-0x0010237C, because its own loop
+counter lives at `$fp+88 = 0xFFFFFF98`, which `iop_mem_ptr()`'s bounds check correctly rejects as out-of-range
+(so the counter's own store/load round-trips to a permanent 0, and the loop's `bne` never falls through).
+Traced back further: `$sp/$fp=0xFFFFFF40` is an exact arithmetic match for the function's own real prologue
+(`lw v0,0(a0); sll sp,v0,20; addiu sp,sp,-64; ...; addiu sp,sp,-128`) executing with `v0=0` instead of the
+expected `v0=2` (BOOT_INFO_RAM_MB) - the same real-hardware "derive stack from RAM-size boot-info word" idiom
+already fixed once for SYSMEM specifically (Round 29/416). `iop_module_loader.c`'s module-dispatch code was
+re-checked and correctly sets `$a0=boot_info_addr` for every module entry, so this isn't a simple repeat of
+that same dispatch gap - by the time of the saved checkpoint, `$a0` has already been reused as a scratch
+register internally, so the genuine entry-time value that triggered this couldn't be recovered from this
+checkpoint alone. No fix implemented this round - root cause narrowed to the exact instruction and exact
+arithmetic, but the real caller/condition needs a checkpoint from strictly before this function's first
+dispatch (or a slow instrumented from-scratch run) to pin down further. No tracked source changed - docs-only,
+regression/Wii-build correctly skipped. See docs/STATUS.md "Round 767" for the full writeup.

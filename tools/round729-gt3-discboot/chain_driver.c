@@ -42,6 +42,25 @@ int main(int argc, char **argv)
     if (strcmp(mode, "start") == 0) {
         if (system_init(&bios, &bios) != 0) { fprintf(stderr, "system_init fail\n"); return 1; }
         if (iop_cdvd_mount_iso(disc_path) != 0) { fprintf(stderr, "disc mount fail\n"); return 1; }
+        /* Round 750 (task #730) fix: iop_cdvd_mount_iso() only sets
+         * g_disc_mounted - it does NOT set the CDVD disc-TYPE register,
+         * so iop_cdvd_get_disc_type() kept reading back IOP_CDVD_TYPE_
+         * NODISC for this driver's entire run, exactly the same class of
+         * bug main.c's own Round 610 fix already documents ("a disc-
+         * mounted boot trace and a genuinely diskless boot trace were
+         * found to be byte-identical because iop_cdvd_get_disc_type()
+         * read back NODISC in both cases"). That silently fooled the
+         * "diskless-only" guards in ee_check_browser_idle_carousel() and
+         * ee_check_browser_menu_escalation_heuristic() (both gate on
+         * iop_cdvd_get_disc_type() != IOP_CDVD_TYPE_NODISC) into firing
+         * on this genuinely disc-mounted GT3 boot, raw-dereferencing
+         * KUSEG addresses 0x1C0444/0x1C0450/0x1C0454 that real disc-boot
+         * code never establishes TLB coverage for (Round 607: real
+         * disc-auto-boot uses the EELOAD chain, never the Browser
+         * struct) - producing the permanent TLB Refill exception loop
+         * root-caused this round. Mirrors main.c's own already-correct
+         * mount+set_disc_present pairing (source/main.c line ~451). */
+        iop_cdvd_set_disc_present(0x12 /* CDVD_TYPE_PS2CD, Round 170's cited constant */);
     } else {
         if (checkpoint_load(ckpt_path, &bios, &bios, disc_path) != 0) { fprintf(stderr, "checkpoint_load fail\n"); return 1; }
     }

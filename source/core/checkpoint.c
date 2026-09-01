@@ -102,6 +102,18 @@ int checkpoint_save(const char *path)
         void *ithr_blob = iop_hle_thread_get_checkpoint_blob(&ithr_size);
         if (write_block(f, "ITHR", ithr_blob, ithr_size) < 0) goto fail;
     }
+    /* Round 750 (task #730) fix: see iop_cdvd.h's iop_cdvd_checkpoint_t
+     * citation - this module's register/dispatch state (including the
+     * disc-TYPE register) was never captured by any block here before,
+     * silently resetting to fresh-init "no disc" defaults on every
+     * single checkpoint resume regardless of what iop_cdvd_set_disc_
+     * present() had set earlier. Same bug class as Round 649's GSM0 gap
+     * and Round 659's ITHR gap directly above. */
+    {
+        iop_cdvd_checkpoint_t cdvd_ckpt;
+        iop_cdvd_checkpoint_save(&cdvd_ckpt);
+        if (write_block(f, "ICDV", &cdvd_ckpt, sizeof(cdvd_ckpt)) < 0) goto fail;
+    }
     if (write_block(f, "MCH0", mch_get_state(), sizeof(*mch_get_state())) < 0) goto fail;
     if (write_block(f, "SIF0", sif_get_state(), sizeof(*sif_get_state())) < 0) goto fail;
     if (write_block(f, "VIF0", vif0_get_state(), sizeof(*vif0_get_state())) < 0) goto fail;
@@ -223,6 +235,13 @@ int checkpoint_load(const char *path, const bios_image_t *ee_bios,
         EXPECT("ITHR", generic, sizeof(generic), &size);
         if (size != ithr_cap) goto fail_close; /* struct-layout mismatch - fail safely, per this file's own documented contract */
         memcpy(ithr_dest, generic, size);
+    }
+    EXPECT("ICDV", generic, sizeof(generic), &size);
+    {
+        iop_cdvd_checkpoint_t cdvd_ckpt;
+        if (size != sizeof(cdvd_ckpt)) goto fail_close; /* struct-layout mismatch - fail safely, per this file's own documented contract */
+        memcpy(&cdvd_ckpt, generic, size);
+        iop_cdvd_checkpoint_load(&cdvd_ckpt);
     }
     EXPECT("MCH0", generic, sizeof(generic), &size); memcpy(mch_get_state(), generic, size);
     EXPECT("SIF0", generic, sizeof(generic), &size); memcpy(sif_get_state(), generic, size);

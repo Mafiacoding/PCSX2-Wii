@@ -194,6 +194,45 @@ int iop_cdvd_disc_read_sector(uint32_t lba, uint8_t *buf)
     return iso_read_sector(&g_disc, lba, buf);
 }
 
+/* Round 750 (task #730) fix - see iop_cdvd.h's iop_cdvd_checkpoint_t
+ * citation for the full root-cause writeup (this module's register/
+ * dispatch state was never captured by any checkpoint.c block, so it
+ * silently reset to fresh-init defaults - including the disc-TYPE
+ * register - on every single checkpoint resume). Deliberately excludes
+ * g_disc/g_disc_mounted (already handled by iop_cdvd_rebind_iso(), see
+ * that function's own Round 449 citation). */
+void iop_cdvd_checkpoint_save(iop_cdvd_checkpoint_t *out)
+{
+    memcpy(out->regs, g_regs, sizeof(g_regs));
+    memcpy(out->param_buf, g_param_buf, sizeof(g_param_buf));
+    out->param_count = g_param_count;
+    memcpy(out->sparam_buf, g_sparam_buf, sizeof(g_sparam_buf));
+    out->sparam_count = g_sparam_count;
+    memcpy(out->sresult_buf, g_sresult_buf, sizeof(g_sresult_buf));
+    out->sresult_count = g_sresult_count;
+    out->sresult_pos = g_sresult_pos;
+    out->ncmd_call_count = g_ncmd_call_count;
+    out->scmd_call_count = g_scmd_call_count;
+    out->last_ncmd_issued = g_last_ncmd_issued;
+    out->last_scmd_issued = g_last_scmd_issued;
+}
+
+void iop_cdvd_checkpoint_load(const iop_cdvd_checkpoint_t *in)
+{
+    memcpy(g_regs, in->regs, sizeof(g_regs));
+    memcpy(g_param_buf, in->param_buf, sizeof(g_param_buf));
+    g_param_count = in->param_count;
+    memcpy(g_sparam_buf, in->sparam_buf, sizeof(g_sparam_buf));
+    g_sparam_count = in->sparam_count;
+    memcpy(g_sresult_buf, in->sresult_buf, sizeof(g_sresult_buf));
+    g_sresult_count = in->sresult_count;
+    g_sresult_pos = in->sresult_pos;
+    g_ncmd_call_count = in->ncmd_call_count;
+    g_scmd_call_count = in->scmd_call_count;
+    g_last_ncmd_issued = in->last_ncmd_issued;
+    g_last_scmd_issued = in->last_scmd_issued;
+}
+
 /* Round 206: real N-command dispatch, run when OFF_NCMD is written.
  * See iop_cdvd.h's citation for exact real semantics/scope. */
 static void dispatch_ncmd(uint8_t cmd)

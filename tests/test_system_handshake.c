@@ -161,23 +161,24 @@ int main(void)
      * 100 instructions and the poll loops only need to spin a few
      * times waiting for the other side).
      *
-     * Task #178 note: the EE side's BREAK now raises a genuine
+     * Task #178/#735 note: BOTH sides' BREAK now raises a genuine
      * Breakpoint exception (ExcCode 9) instead of unconditionally
-     * halting - real R5900 hardware never stops executing just
-     * because it hit a BREAK, and system_run_interleaved()'s own
-     * ee->halted && iop->halted gate (source/core/system.c) is real,
-     * shared production code also used by main.c's actual boot path,
-     * so it must NOT be changed to paper over this - it is now exactly
-     * as correct as the rest of task #178's change. This means EE will
-     * never set ee->halted from this test's own program anymore (its
-     * BREAK vectors into the zero-filled remainder of ee_bios and
-     * spins through harmless NOPs), so system_run_interleaved() is
-     * expected to hit the slice cap and return 0 here - only the IOP
-     * side still halts via its own (untouched) unconditional-BREAK
-     * convention. The cap is generous enough that both sides' real
-     * handshake logic (the actual thing under test) completes long
-     * before it's reached, which is verified directly below instead of
-     * via "both cores halted". */
+     * halting - real R5900/R3000A hardware never stops executing just
+     * because it hit a BREAK (task #178 fixed the EE side; task #735
+     * brought the IOP side to the same real-hardware behavior, using
+     * the exact same EPC/Cause/Status-vector mechanism this file's
+     * SYSCALL/TGE/Reserved-Instruction cases already used). And
+     * system_run_interleaved()'s own ee->halted && iop->halted gate
+     * (source/core/system.c) is real, shared production code also
+     * used by main.c's actual boot path, so it must NOT be changed to
+     * paper over this. Neither side will ever set its own *->halted
+     * from this test's own program anymore (each BREAK vectors into
+     * the zero-filled remainder of its own bios image and spins
+     * through harmless NOPs), so system_run_interleaved() is expected
+     * to hit the slice cap and return 0 here. The cap is generous
+     * enough that both sides' real handshake logic (the actual thing
+     * under test) completes long before it's reached, which is
+     * verified directly below instead of via "both cores halted". */
     system_run_interleaved(2000);
 
     ee_state_t  *ee  = ee_core_get_state();
@@ -186,8 +187,13 @@ int main(void)
 
     CHECK(((ee->cop0[13] >> 2) & 0x1Fu) == 9u && (ee->cop0[12] & 0x2u) != 0u,
           "EE reached its BREAK as a real Breakpoint exception (ExcCode 9), not an unconditional halt");
-    CHECK(iop->halted == 1 && strstr(iop->halt_reason, "BREAK") != NULL,
-          "IOP core halted cleanly on BREAK (IOP-side BREAK is untouched by task #178)");
+    /* IOP has no Status.EXL (that's an R4000+/MIPS III addition the
+     * R3000A pre-dates) - exception_pending is this project's own
+     * IOP-side "an exception was just delivered and not yet RFE'd"
+     * indicator (see iop_core.h's field comment, task #156), the
+     * direct analog of the EE check just above. */
+    CHECK(((iop->cop0[13] >> 2) & 0x1Fu) == 9u && iop->exception_pending != 0,
+          "IOP reached its BREAK as a real Breakpoint exception (ExcCode 9), not an unconditional halt (task #735)");
 
     CHECK(sif->mscom == 0x1234u, "EE's MSCOM write landed in shared SIF state");
     CHECK((sif->msflag & 1u) == 1u, "EE's MSFLAG OR-write set bit 0");

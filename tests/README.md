@@ -10,7 +10,7 @@ values (cross-checked against PCSX2's own semantics for the opcodes
 covered). Run it with:
 
 ```sh
-gcc -I../include -I../source -o test_ee tests/test_ee_core.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee tests/test_ee_core.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee
 ```
 
@@ -32,7 +32,7 @@ write32` route the IOP-side SIF mirror window (0x1D000000-0x1D0000FF)
 through it. Run it the same way:
 
 ```sh
-gcc -I../include -I../source -o test_iop tests/test_iop_core.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c
+gcc -I../include -I../source -o test_iop tests/test_iop_core.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_events.c ../source/hw/iop_cdvd.c ../source/core/iso_loader.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_hle_heap.c ../source/hw/iop_heap.c ../source/hw/iop_hle_intr.c ../source/hw/iop_hle_thread.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/iop_asyncio.c ../source/hw/iop_cdrom_legacy.c ../source/hw/iop_icfg.c ../source/hw/iop_sio2.c ../source/hw/iop_spu_legacy.c -lm
 ./test_iop
 ```
 
@@ -54,7 +54,7 @@ from the struct itself, while the still-unknown offsets
 fabricated. 7 checks.
 
 ```sh
-gcc -I../include -I../source -o test_iop_module_loader_bootinfo tests/test_iop_module_loader_bootinfo.c ../source/core/iop/iop_core.c ../source/hw/iop_elf.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_cdvd.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c
+gcc -I../include -I../source -o test_iop_module_loader_bootinfo tests/test_iop_module_loader_bootinfo.c ../source/core/iop/iop_core.c ../source/hw/iop_elf.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_events.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_cdvd.c ../source/core/iso_loader.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c -lm
 ./test_iop_module_loader_bootinfo
 ```
 
@@ -70,7 +70,7 @@ sub-blocks. Fixed with an explicit (base, size, channel) range table
 instead of address masking. Run it the same way:
 
 ```sh
-gcc -I../include -I../source -o test_dma tests/test_dma_core.c
+gcc -I../include -I../source -o test_dma tests/test_dma_core.c -lm
 ./test_dma
 ```
 
@@ -83,7 +83,7 @@ into the 64-bit register, matching real EE/PCSX2 LW semantics). Needs
 `dma.c` linked in as well as `ee_core.c`:
 
 ```sh
-gcc -I../include -I../source -o test_ee_dma tests/test_ee_dma_bus.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_dma tests/test_ee_dma_bus.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_dma
 ```
 
@@ -98,7 +98,7 @@ CSR register behave like a plain store and made IMR wrongly
 write-1-to-clear. Fixed before it was ever committed. Run it with:
 
 ```sh
-gcc -I../include -I../source -o test_gs tests/test_gs_registers.c
+gcc -I../include -I../source -o test_gs tests/test_gs_registers.c -lm
 ./test_gs
 ```
 
@@ -108,7 +108,7 @@ load/store). Needs `dma.c` and `gs.c` linked in too, since ee_core.c
 now depends on both:
 
 ```sh
-gcc -I../include -I../source -o test_ee_unaligned tests/test_ee_unaligned.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_unaligned tests/test_ee_unaligned.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_unaligned
 ```
 
@@ -128,7 +128,7 @@ DIV.S/ABS.S/NEG.S, MTC1/MFC1, C.EQ.S) with real float arithmetic.
 Needs dma.c and gs.c linked too:
 
 ```sh
-gcc -I../include -I../source -o test_ee_fpu tests/test_ee_fpu.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_fpu tests/test_ee_fpu.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_fpu
 ```
 
@@ -138,7 +138,7 @@ gcc -I../include -I../source -o test_ee_fpu tests/test_ee_fpu.c ../source/hw/dma
 isolation:
 
 ```sh
-gcc -I../include -I../source -o test_gs_mem tests/test_gs_mem.c
+gcc -I../include -I../source -o test_gs_mem tests/test_gs_mem.c -lm
 ./test_gs_mem
 ```
 
@@ -150,7 +150,7 @@ that the right pixels get written AND that pixels outside the blit
 region are left untouched):
 
 ```sh
-gcc -I../include -I../source -o test_gs_output tests/test_gs_output.c
+gcc -I../include -I../source -o test_gs_output tests/test_gs_output.c -lm
 ./test_gs_output
 ```
 
@@ -171,7 +171,7 @@ misbehaving silently. Doesn't need dma.c linked separately since it
 #includes it directly:
 
 ```sh
-gcc -I../include -I../source -o test_dma_chain tests/test_dma_chain.c
+gcc -I../include -I../source -o test_dma_chain tests/test_dma_chain.c -lm
 ./test_dma_chain
 ```
 
@@ -199,7 +199,7 @@ actually fails with duplicate-symbol linker errors since it's already
 pulled in via #include; fixed here):
 
 ```sh
-gcc -I../include -I../source -o test_gif tests/test_gif.c
+gcc -I../include -I../source -o test_gif tests/test_gif.c -lm
 ./test_gif
 ```
 
@@ -217,7 +217,7 @@ sequence so stale vertices from a previous primitive type can't leak
 into a new one.
 
 ```sh
-gcc -I../include -I../source -o test_gif_triangle tests/test_gif_triangle.c
+gcc -I../include -I../source -o test_gif_triangle tests/test_gif_triangle.c -lm
 ./test_gif_triangle
 ```
 
@@ -235,7 +235,7 @@ per-vertex colors still uses only the last vertex's color everywhere
 and the unrelated SPRITE path still flat-fills correctly.
 
 ```sh
-gcc -I../include -I../source -o test_gif_gouraud tests/test_gif_gouraud.c
+gcc -I../include -I../source -o test_gif_gouraud tests/test_gif_gouraud.c -lm
 ./test_gif_gouraud
 ```
 
@@ -253,7 +253,7 @@ set, and the same red/green/blue/centroid sample-point checks as
 `test_gif_gouraud.c` pass through the real DMA path.
 
 ```sh
-gcc -I../include -I../source -o test_dma_gif_demo tests/test_dma_gif_demo.c
+gcc -I../include -I../source -o test_dma_gif_demo tests/test_dma_gif_demo.c -lm
 ./test_dma_gif_demo
 ```
 
@@ -273,7 +273,7 @@ calling into ee_core.c/vu.c for MSCAL/MSCNT/MSCALF/MPG) - now built as
 separate translation units like `test_system_handshake.c`:
 
 ```sh
-gcc -I../include -I../source -o test_vif tests/test_vif.c ../source/core/ee/ee_core.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gs_mem.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/sif.c ../source/hw/mch.c ../source/hw/vu.c
+gcc -I../include -I../source -o test_vif tests/test_vif.c ../source/core/ee/ee_core.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gs_mem.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/sif.c ../source/hw/mch.c ../source/hw/vu.c -lm
 ./test_vif
 ```
 
@@ -305,7 +305,7 @@ memory fields (from round 13) while keeping its own, separate micro-
 instruction memory.
 
 ```sh
-gcc -I../include -I../source -o test_vu_micro tests/test_vu_micro.c ../source/core/ee/ee_core.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gs_mem.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/sif.c ../source/hw/mch.c ../source/hw/vu.c
+gcc -I../include -I../source -o test_vu_micro tests/test_vu_micro.c ../source/core/ee/ee_core.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gs_mem.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/sif.c ../source/hw/mch.c ../source/hw/vu.c -lm
 ./test_vu_micro
 ```
 
@@ -328,7 +328,7 @@ test never touches ST/Q, so FST=1/UV mode is what it always actually
 intended - see task #88's own test file below for why this mattered).
 
 ```sh
-gcc -I../include -I../source -o test_gif_texture tests/test_gif_texture.c
+gcc -I../include -I../source -o test_gif_texture tests/test_gif_texture.c -lm
 ./test_gif_texture
 ```
 
@@ -352,7 +352,7 @@ was a test bug only; `gif.c`'s own (unchanged) UV handling was already
 correct.
 
 ```sh
-gcc -I../include -I../source -o test_gif_stq_sprite tests/test_gif_stq_sprite.c
+gcc -I../include -I../source -o test_gif_stq_sprite tests/test_gif_stq_sprite.c -lm
 ./test_gif_stq_sprite
 ```
 
@@ -382,7 +382,7 @@ does now. Self-contained (`#include`s `sif.c` directly, no extra
 link deps):
 
 ```sh
-gcc -I../include -I../source -o test_sif tests/test_sif.c
+gcc -I../include -I../source -o test_sif tests/test_sif.c -lm
 ./test_sif
 ```
 
@@ -406,7 +406,7 @@ simple). Needs the full EE+IOP+hardware-model dependency set linked
 in:
 
 ```sh
-gcc -I../include -I../source -o test_system_handshake tests/test_system_handshake.c ../source/core/ee/ee_core.c ../source/core/iop/iop_core.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c
+gcc -I../include -I../source -o test_system_handshake tests/test_system_handshake.c ../source/core/ee/ee_core.c ../source/core/iop/iop_core.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_events.c ../source/hw/iop_cdvd.c ../source/core/iso_loader.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_hle_heap.c ../source/hw/iop_heap.c ../source/hw/iop_hle_intr.c ../source/hw/iop_hle_thread.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/core/ee/ee_hle_thread.c ../source/hw/ee_sio.c ../source/hw/ee_timers.c ../source/hw/iop_asyncio.c ../source/hw/iop_cdrom_legacy.c ../source/hw/iop_icfg.c ../source/hw/iop_sio2.c ../source/hw/iop_spu_legacy.c ../source/hw/ipu.c -lm
 ./test_system_handshake
 ```
 
@@ -426,7 +426,7 @@ to set a pending-interrupt bit. 11/11 checks passed on the first run.
 Self-contained (`#include`s `iop_intc.c` directly):
 
 ```sh
-gcc -I../include -I../source -o test_iop_intc tests/test_iop_intc.c
+gcc -I../include -I../source -o test_iop_intc tests/test_iop_intc.c -lm
 ./test_iop_intc
 ```
 
@@ -464,7 +464,7 @@ also depends on `iop_spu2.c`/`spu2_mixer.c` (real channel-7 SPU2 DMA
 waveform delivery, task #683) - both added below:
 
 ```sh
-gcc -I../include -I../source -o test_iop_dma tests/test_iop_dma.c ../source/hw/iop_spu2.c ../source/hw/spu2_mixer.c
+gcc -I../include -I../source -o test_iop_dma tests/test_iop_dma.c ../source/hw/iop_spu2.c ../source/hw/spu2_mixer.c -lm
 ./test_iop_dma
 ```
 
@@ -508,7 +508,7 @@ unclaimed. 10/10 checks pass. Self-contained (`#include`s
 `iop_timers.c` directly):
 
 ```sh
-gcc -I../include -I../source -o test_iop_timers tests/test_iop_timers.c
+gcc -I../include -I../source -o test_iop_timers tests/test_iop_timers.c -lm
 ./test_iop_timers
 ```
 
@@ -551,7 +551,7 @@ pass. Needs the full IOP hardware-model dependency set linked (same
 as `test_iop_core.c`):
 
 ```sh
-gcc -I../include -I../source -o test_iop_hle_bios tests/test_iop_hle_bios.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c
+gcc -I../include -I../source -o test_iop_hle_bios tests/test_iop_hle_bios.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_events.c ../source/hw/iop_cdvd.c ../source/core/iso_loader.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_hle_heap.c ../source/hw/iop_heap.c ../source/hw/iop_hle_intr.c ../source/hw/iop_hle_thread.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/iop_asyncio.c ../source/hw/iop_cdrom_legacy.c ../source/hw/iop_icfg.c ../source/hw/iop_sio2.c ../source/hw/iop_spu_legacy.c -lm
 ./test_iop_hle_bios
 ```
 
@@ -584,7 +584,7 @@ the core with a descriptive reason. Needs the same link set as
 `test_iop_hle_bios.c`:
 
 ```sh
-gcc -I../include -I../source -o test_iop_hle_bios_functions tests/test_iop_hle_bios_functions.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c
+gcc -I../include -I../source -o test_iop_hle_bios_functions tests/test_iop_hle_bios_functions.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_events.c ../source/hw/iop_cdvd.c ../source/core/iso_loader.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_hle_heap.c ../source/hw/iop_heap.c ../source/hw/iop_hle_intr.c ../source/hw/iop_hle_thread.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c -lm
 ./test_iop_hle_bios_functions
 ```
 
@@ -600,7 +600,7 @@ overflowing). 14/14 checks pass. Self-contained (`#include`s
 `iop_hle_modules.c` directly):
 
 ```sh
-gcc -I../include -I../source -o test_iop_hle_modules tests/test_iop_hle_modules.c
+gcc -I../include -I../source -o test_iop_hle_modules tests/test_iop_hle_modules.c -lm
 ./test_iop_hle_modules
 ```
 
@@ -633,7 +633,7 @@ dump. 5/5 checks pass. Self-contained (`#include`s `bios_loader.c`
 directly):
 
 ```sh
-gcc -I../include -I../source -o test_bios_loader tests/test_bios_loader.c
+gcc -I../include -I../source -o test_bios_loader tests/test_bios_loader.c -lm
 ./test_bios_loader
 ```
 
@@ -667,7 +667,7 @@ unimplemented opcode. Needs the same link set as the other ee_core.c
 tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop0_special tests/test_ee_cop0_special.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_cop0_special tests/test_ee_cop0_special.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop0_special
 ```
 
@@ -712,7 +712,7 @@ single-steps that BREAK and checks the new auto-return behavior
 explicitly). Needs the same link set as `test_iop_core.c`:
 
 ```sh
-gcc -I../include -I../source -o test_iop_syscall tests/test_iop_syscall.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c
+gcc -I../include -I../source -o test_iop_syscall tests/test_iop_syscall.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_events.c ../source/hw/iop_cdvd.c ../source/core/iso_loader.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_hle_heap.c ../source/hw/iop_heap.c ../source/hw/iop_hle_intr.c ../source/hw/iop_hle_thread.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c -lm
 ./test_iop_syscall
 ```
 
@@ -756,7 +756,7 @@ reserved region in the documented BIOS RAM map. Needs the same link
 set as `test_iop_core.c`:
 
 ```sh
-gcc -I../include -I../source -o test_iop_hle_exception_install tests/test_iop_hle_exception_install.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c
+gcc -I../include -I../source -o test_iop_hle_exception_install tests/test_iop_hle_exception_install.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_events.c ../source/hw/iop_cdvd.c ../source/core/iso_loader.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_hle_heap.c ../source/hw/iop_heap.c ../source/hw/iop_hle_intr.c ../source/hw/iop_hle_thread.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/iop_asyncio.c ../source/hw/iop_cdrom_legacy.c ../source/hw/iop_icfg.c ../source/hw/iop_sio2.c ../source/hw/iop_spu_legacy.c -lm
 ./test_iop_hle_exception_install
 ```
 
@@ -773,7 +773,7 @@ are left untouched (no overrun), and the rt==$0 no-read behavior.
 Needs the same link set as the other `ee_core.c` tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_lqsq tests/test_ee_lqsq.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_lqsq tests/test_ee_lqsq.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_lqsq
 ```
 
@@ -802,7 +802,7 @@ unconditional jumps). Needs the same link set as the other `ee_core.c`
 tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_fpu2 tests/test_ee_fpu2.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_fpu2 tests/test_ee_fpu2.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_fpu2
 ```
 
@@ -828,7 +828,7 @@ difference, not just a documentation footnote. Needs the same link
 set as the other `ee_core.c` tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_fpu3 tests/test_ee_fpu3.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_fpu3 tests/test_ee_fpu3.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_fpu3
 ```
 
@@ -858,7 +858,7 @@ PADDH (rs+rt), not a uniform 8-lane op. Needs the same link set as the
 other `ee_core.c` tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_mmi_compare tests/test_ee_mmi_compare.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_mmi_compare tests/test_ee_mmi_compare.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_mmi_compare
 ```
 
@@ -880,7 +880,7 @@ original 16-bit pixel value is recovered exactly. Needs the same link
 set as the other `ee_core.c` tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_mmi_sat tests/test_ee_mmi_sat.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_mmi_sat tests/test_ee_mmi_sat.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_mmi_sat
 ```
 
@@ -905,7 +905,7 @@ silently pass the other's test). Needs the same link set as the
 other `ee_core.c` tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_mmi_permute tests/test_ee_mmi_permute.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_mmi_permute tests/test_ee_mmi_permute.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_mmi_permute
 ```
 
@@ -930,7 +930,7 @@ value stored into a GPR). Needs the same link set as the other
 `ee_core.c` tests:
 
 ```sh
-gcc -I../include -I../source -o test_ee_mmi_pvshift tests/test_ee_mmi_pvshift.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_mmi_pvshift tests/test_ee_mmi_pvshift.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_mmi_pvshift
 ```
 
@@ -956,7 +956,7 @@ spelling out the exact real-BIOS branch condition (`SLTI $at,$k0,89`)
 this fixes.
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop0_prid tests/test_ee_cop0_prid.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_cop0_prid tests/test_ee_cop0_prid.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop0_prid
 ```
 
@@ -985,7 +985,7 @@ handler installed, so running to a BREAK that will never come would
 hang forever).
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop0_tlb tests/test_ee_cop0_tlb.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_cop0_tlb tests/test_ee_cop0_tlb.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop0_tlb
 ```
 
@@ -1011,7 +1011,7 @@ read-then-write of the same address would otherwise raise two
 conflicting exceptions for a single guest instruction.
 
 ```sh
-gcc -I../include -I../source -o test_ee_exceptions tests/test_ee_exceptions.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_exceptions tests/test_ee_exceptions.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_exceptions
 ```
 
@@ -1035,7 +1035,7 @@ scratchpad's special, TLB-bypassing nature was known - moved to
 `0x71000000` to keep testing genuine TLB translation.
 
 ```sh
-gcc -I../include -I../source -o test_ee_scratchpad_count tests/test_ee_scratchpad_count.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_scratchpad_count tests/test_ee_scratchpad_count.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_scratchpad_count
 ```
 
@@ -1075,7 +1075,7 @@ further, more precise wall - see docs/STATUS.md and docs/ROADMAP.md's
 "round 9" sections.
 
 ```sh
-gcc -I../include -I../source -o test_ee_timer_interrupt tests/test_ee_timer_interrupt.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_timer_interrupt tests/test_ee_timer_interrupt.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_timer_interrupt
 ```
 
@@ -1098,7 +1098,7 @@ echoes back `MCH_RICM & 0x1F`; SOP!=0 always reads back 0 regardless
 of SA; unrelated addresses aren't claimed.
 
 ```sh
-gcc -I../include -I../source -o test_mch tests/test_mch.c
+gcc -I../include -I../source -o test_mch tests/test_mch.c -lm
 ./test_mch
 ```
 
@@ -1121,7 +1121,7 @@ exact address forms (`0xB000F430`/`0xB000F440`) the real BIOS boot
 path that motivated this whole round uses.
 
 ```sh
-gcc -I../include -I../source -o test_ee_hw_kseg_masking tests/test_ee_hw_kseg_masking.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_hw_kseg_masking tests/test_ee_hw_kseg_masking.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_hw_kseg_masking
 ```
 
@@ -1138,7 +1138,7 @@ DADDI/DADDIU are implemented identically here too - a documented,
 consistent simplification, not a new inconsistency.
 
 ```sh
-gcc -I../include -I../source -o test_ee_daddi tests/test_ee_daddi.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_daddi tests/test_ee_daddi.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_daddi
 ```
 
@@ -1161,7 +1161,7 @@ funct field once `rs`'s top bit is set) is confirmed NOT implemented
 and is the next honest wall - see docs/STATUS.md's "round 12" section.
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop2_ctrl tests/test_ee_cop2_ctrl.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_cop2_ctrl tests/test_ee_cop2_ctrl.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_ctrl
 ```
 
@@ -1177,7 +1177,7 @@ VSQI stores all 4 VF lanes to the correct address and post-increments
 the address register afterward.
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop2_vu0 tests/test_ee_cop2_vu0.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_cop2_vu0 tests/test_ee_cop2_vu0.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_vu0
 ```
 
@@ -1196,7 +1196,7 @@ own `_vuIADDI`, not a plain two's-complement extend) is verified with
 both a positive and a negative immediate; VIADDI to VI0 is a no-op.
 
 ```sh
-gcc -I../include -I../source -o test_ee_cop2_arith2 tests/test_ee_cop2_arith2.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_cop2_arith2 tests/test_ee_cop2_arith2.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_cop2_arith2
 ```
 
@@ -1209,7 +1209,7 @@ misaligned one that crosses an 8-byte block boundary; an `SDL`+`SDR`
 round-trip via the same idiom writes and reads back correctly.
 
 ```sh
-gcc -I../include -I../source -o test_ee_ldl_ldr_sdl_sdr tests/test_ee_ldl_ldr_sdl_sdr.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_ldl_ldr_sdl_sdr tests/test_ee_ldl_ldr_sdl_sdr.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_ldl_ldr_sdl_sdr
 ```
 
@@ -1228,7 +1228,7 @@ BIOS ROM address still works exactly as before (correct link-register
 value), proving the guard doesn't break legitimate control flow.
 
 ```sh
-gcc -I../include -I../source -o test_iop_pc_guard tests/test_iop_pc_guard.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c
+gcc -I../include -I../source -o test_iop_pc_guard tests/test_iop_pc_guard.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_events.c ../source/hw/iop_cdvd.c ../source/core/iso_loader.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_hle_heap.c ../source/hw/iop_heap.c ../source/hw/iop_hle_intr.c ../source/hw/iop_hle_thread.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/iop_asyncio.c ../source/hw/iop_cdrom_legacy.c ../source/hw/iop_icfg.c ../source/hw/iop_sio2.c ../source/hw/iop_spu_legacy.c -lm
 ./test_iop_pc_guard
 ```
 
@@ -1259,7 +1259,7 @@ as it did before this round; and SPRITE's flat "completing vertex" Z
 convention together with its own GREATER-mode depth test.
 
 ```sh
-gcc -I../include -I../source -o test_z_buffer tests/test_z_buffer.c ../source/hw/gif.c ../source/hw/gs_mem.c
+gcc -I../include -I../source -o test_z_buffer tests/test_z_buffer.c ../source/hw/gif.c ../source/hw/gs_mem.c -lm
 ./test_z_buffer
 ```
 
@@ -1285,7 +1285,7 @@ actual drawn color pixel (a real trap this round's own test-writing
 fell into first, documented here so it isn't rediscovered blindly).
 
 ```sh
-gcc -I../include -I../source -o test_gif_line tests/test_gif_line.c ../source/hw/gif.c ../source/hw/gs_mem.c
+gcc -I../include -I../source -o test_gif_line tests/test_gif_line.c ../source/hw/gif.c ../source/hw/gs_mem.c -lm
 ./test_gif_line
 ```
 
@@ -1304,7 +1304,7 @@ found with correct names/counts, and a malformed image (bad ELF magic)
 is rejected with a clear error rather than silently accepted.
 
 ```sh
-gcc -I../include -I../source -o test_iop_elf tests/test_iop_elf.c ../source/hw/iop_elf.c ../source/core/iop/iop_core.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+gcc -I../include -I../source -o test_iop_elf tests/test_iop_elf.c ../source/hw/iop_elf.c ../source/core/iop/iop_core.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_events.c ../source/hw/iop_cdvd.c ../source/core/iso_loader.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_hle_heap.c ../source/hw/iop_heap.c ../source/hw/iop_hle_intr.c ../source/hw/iop_hle_thread.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c -lm
 ./test_iop_elf
 ```
 
@@ -1328,7 +1328,7 @@ exists - it's a genuinely matched (if degenerate/no-effect) ADDbc/LQ
 pair.
 
 ```sh
-gcc -I../include -I../source -o test_vu_micro tests/test_vu_micro.c ../source/core/ee/ee_core.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gs_mem.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/sif.c ../source/hw/mch.c ../source/hw/vu.c
+gcc -I../include -I../source -o test_vu_micro tests/test_vu_micro.c ../source/core/ee/ee_core.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gs_mem.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/sif.c ../source/hw/mch.c ../source/hw/vu.c -lm
 ./test_vu_micro
 ```
 
@@ -1345,7 +1345,7 @@ through `iop_core.c`'s real `iop_mem_read16`/`write16`/`read32`/
 accidentally swallowing unrelated ordinary IOP RAM addresses.
 
 ```sh
-gcc -I../include -I../source -o test_iop_spu2 tests/test_iop_spu2.c ../source/core/iop/iop_core.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+gcc -I../include -I../source -o test_iop_spu2 tests/test_iop_spu2.c ../source/core/iop/iop_core.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_events.c ../source/hw/iop_cdvd.c ../source/core/iso_loader.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_hle_heap.c ../source/hw/iop_heap.c ../source/hw/iop_hle_intr.c ../source/hw/iop_hle_thread.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c -lm
 ./test_iop_spu2
 ```
 
@@ -1368,7 +1368,7 @@ following `BREAK` (proving the CO-format path no longer falls into
 the "unimplemented" halt default).
 
 ```sh
-gcc -I../include -I../source -o test_iop_rfe tests/test_iop_rfe.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+gcc -I../include -I../source -o test_iop_rfe tests/test_iop_rfe.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_events.c ../source/hw/iop_cdvd.c ../source/core/iso_loader.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_hle_heap.c ../source/hw/iop_heap.c ../source/hw/iop_hle_intr.c ../source/hw/iop_hle_thread.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/iop_asyncio.c ../source/hw/iop_cdrom_legacy.c ../source/hw/iop_icfg.c ../source/hw/iop_sio2.c ../source/hw/iop_spu_legacy.c -lm
 ./test_iop_rfe
 ```
 
@@ -1390,7 +1390,7 @@ marker instruction executes normally and the instruction count before
 the (expected, unrelated) halt is exact.
 
 ```sh
-gcc -I../include -I../source -o test_iop_hw_interrupt tests/test_iop_hw_interrupt.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+gcc -I../include -I../source -o test_iop_hw_interrupt tests/test_iop_hw_interrupt.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_events.c ../source/hw/iop_cdvd.c ../source/core/iso_loader.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_hle_heap.c ../source/hw/iop_heap.c ../source/hw/iop_hle_intr.c ../source/hw/iop_hle_thread.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/iop_asyncio.c ../source/hw/iop_cdrom_legacy.c ../source/hw/iop_icfg.c ../source/hw/iop_sio2.c ../source/hw/iop_spu_legacy.c -lm
 ./test_iop_hw_interrupt
 ```
 
@@ -1410,7 +1410,7 @@ outcome), out-of-range priority handled safely, and the real C0-table
 $a0/$a1, correct chain mutation, correct return-to-$ra).
 
 ```sh
-gcc -I../include -I../source -o test_iop_excb tests/test_iop_excb.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+gcc -I../include -I../source -o test_iop_excb tests/test_iop_excb.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_events.c ../source/hw/iop_cdvd.c ../source/core/iso_loader.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_hle_heap.c ../source/hw/iop_heap.c ../source/hw/iop_hle_intr.c ../source/hw/iop_hle_thread.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c -lm
 ./test_iop_excb
 ```
 
@@ -1434,7 +1434,7 @@ direction differs by operand sign); and a regression check that
 `ALPHA_1` being configured has zero effect when `PRIM.ABE`=0.
 
 ```sh
-gcc -I../include -I../source -o test_gs_alpha tests/test_gs_alpha.c ../source/hw/gif.c ../source/hw/gs_mem.c
+gcc -I../include -I../source -o test_gs_alpha tests/test_gs_alpha.c ../source/hw/gif.c ../source/hw/gs_mem.c -lm
 ./test_gs_alpha
 ```
 
@@ -1457,7 +1457,7 @@ proving the default (unset) PSM samples directly, CLUT path not
 engaged.
 
 ```sh
-gcc -I../include -I../source -o test_gs_clut tests/test_gs_clut.c
+gcc -I../include -I../source -o test_gs_clut tests/test_gs_clut.c -lm
 ./test_gs_clut
 ```
 
@@ -1482,7 +1482,7 @@ check that the new function and the pre-existing linear one genuinely
 disagree at a non-degenerate coordinate (not accidentally aliased).
 
 ```sh
-gcc -I../include -I../source -o test_gs_swizzle tests/test_gs_swizzle.c ../source/hw/gs_mem.c
+gcc -I../include -I../source -o test_gs_swizzle tests/test_gs_swizzle.c ../source/hw/gs_mem.c -lm
 ./test_gs_swizzle
 ```
 
@@ -1507,7 +1507,7 @@ no prior TRXDIR trigger, verifying gs_mem stays untouched while the
 stream stays in sync for the packet after.
 
 ```sh
-gcc -I../include -I../source -o test_gs_reglist_image tests/test_gs_reglist_image.c
+gcc -I../include -I../source -o test_gs_reglist_image tests/test_gs_reglist_image.c -lm
 ./test_gs_reglist_image
 ```
 
@@ -1530,7 +1530,7 @@ ctx1/ctx2/ctx1 draw sequence proving neither context's state leaks
 into or gets clobbered by the other.
 
 ```sh
-gcc -I../include -I../source -o test_gs_context2 tests/test_gs_context2.c
+gcc -I../include -I../source -o test_gs_context2 tests/test_gs_context2.c -lm
 ./test_gs_context2
 ```
 
@@ -1626,7 +1626,7 @@ constant when RAM[0x100] is still 0 (preserving every pre-Round-29
 test's assumptions).
 
 ```sh
-gcc -I../include -I../source -o test_iop_kmem_alloc tests/test_iop_kmem_alloc.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+gcc -I../include -I../source -o test_iop_kmem_alloc tests/test_iop_kmem_alloc.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_events.c ../source/hw/iop_cdvd.c ../source/core/iso_loader.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_hle_heap.c ../source/hw/iop_heap.c ../source/hw/iop_hle_intr.c ../source/hw/iop_hle_thread.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c -lm
 ./test_iop_kmem_alloc
 ```
 
@@ -1659,7 +1659,7 @@ touching SR at all, matching the real dispatcher's "let the next chain
 element try" contract.
 
 ```sh
-gcc -I../include -I../source -o test_iop_syscall_handler tests/test_iop_syscall_handler.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+gcc -I../include -I../source -o test_iop_syscall_handler tests/test_iop_syscall_handler.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_events.c ../source/hw/iop_cdvd.c ../source/core/iso_loader.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_hle_heap.c ../source/hw/iop_heap.c ../source/hw/iop_hle_intr.c ../source/hw/iop_hle_thread.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c -lm
 ./test_iop_syscall_handler
 ```
 
@@ -1680,7 +1680,7 @@ remaining independent of each other (calling one doesn't corrupt the
 other's effect).
 
 ```sh
-gcc -I../include -I../source -o test_iop_hook_entry_int tests/test_iop_hook_entry_int.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+gcc -I../include -I../source -o test_iop_hook_entry_int tests/test_iop_hook_entry_int.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_events.c ../source/hw/iop_cdvd.c ../source/core/iso_loader.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_hle_heap.c ../source/hw/iop_heap.c ../source/hw/iop_hle_intr.c ../source/hw/iop_hle_thread.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c -lm
 ./test_iop_hook_entry_int
 ```
 
@@ -1697,7 +1697,7 @@ counted; both are idempotent (repeat calls stay safe, matching real
 hardware's own "already registered" behavior).
 
 ```sh
-gcc -I../include -I../source -o test_iop_device_registration tests/test_iop_device_registration.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c
+gcc -I../include -I../source -o test_iop_device_registration tests/test_iop_device_registration.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_events.c ../source/hw/iop_cdvd.c ../source/core/iso_loader.c ../source/hw/iop_hle_modules.c ../source/hw/iop_module_loader.c ../source/hw/iop_hle_heap.c ../source/hw/iop_heap.c ../source/hw/iop_hle_intr.c ../source/hw/iop_hle_thread.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/iop_excb.c -lm
 ./test_iop_device_registration
 ```
 
@@ -1716,7 +1716,7 @@ busy forever; the real 4KB-page register mirroring PCSX2's own
 correctly rejected.
 
 ```sh
-gcc -I../include -o test_iop_cdvd tests/test_iop_cdvd.c ../source/hw/iop_cdvd.c
+gcc -I../include -o test_iop_cdvd tests/test_iop_cdvd.c ../source/hw/iop_cdvd.c ../source/core/iso_loader.c -lm
 ./test_iop_cdvd
 ```
 
@@ -1972,7 +1972,7 @@ match isn't overbroad; and the actual interpreter-facing entry point
 halting when the signature is reached.
 
 ```sh
-gcc -I../include -I../source -o test_iop_loadcore_panic_bypass tests/test_iop_loadcore_panic_bypass.c ../source/core/iop/iop_core.c ../source/hw/iop_elf.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_cdvd.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c
+gcc -I../include -I../source -o test_iop_loadcore_panic_bypass tests/test_iop_loadcore_panic_bypass.c ../source/core/iop/iop_core.c ../source/hw/iop_elf.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_events.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_cdvd.c ../source/core/iso_loader.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c -lm
 ./test_iop_loadcore_panic_bypass
 ```
 
@@ -2007,7 +2007,7 @@ require implementing whatever real kernel service this repeated
 syscall actually expects.
 
 ```sh
-gcc -I../include -I../source -o test_iop_tge tests/test_iop_tge.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_cdvd.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c
+gcc -I../include -I../source -o test_iop_tge tests/test_iop_tge.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_events.c ../source/hw/iop_cdvd.c ../source/core/iso_loader.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_module_loader.c ../source/hw/iop_hle_heap.c ../source/hw/iop_heap.c ../source/hw/iop_hle_intr.c ../source/hw/iop_hle_thread.c ../source/hw/iop_elf.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/iop_asyncio.c ../source/hw/iop_cdrom_legacy.c ../source/hw/iop_icfg.c ../source/hw/iop_sio2.c ../source/hw/iop_spu_legacy.c -lm
 ./test_iop_tge
 ```
 
@@ -2049,7 +2049,7 @@ bypass, 13 via this new one) - the boot sequence now reaches its own
 natural, honest end-of-list halt instead of spinning forever.
 
 ```sh
-gcc -I../include -I../source -o test_iop_trap_stub_bypass tests/test_iop_trap_stub_bypass.c ../source/core/iop/iop_core.c ../source/hw/iop_elf.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_cdvd.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c
+gcc -I../include -I../source -o test_iop_trap_stub_bypass tests/test_iop_trap_stub_bypass.c ../source/core/iop/iop_core.c ../source/hw/iop_elf.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_events.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_cdvd.c ../source/core/iso_loader.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c -lm
 ./test_iop_trap_stub_bypass
 ```
 
@@ -2090,7 +2090,7 @@ incidental, unexplained difference was observed: SIF_MSFLG now reads
 0 and the EE remains in its known SIF-polling steady state.
 
 ```sh
-gcc -I../include -I../source -o test_iop_registration_walk_panic_bypass tests/test_iop_registration_walk_panic_bypass.c ../source/core/iop/iop_core.c ../source/hw/iop_elf.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_cdvd.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c
+gcc -I../include -I../source -o test_iop_registration_walk_panic_bypass tests/test_iop_registration_walk_panic_bypass.c ../source/core/iop/iop_core.c ../source/hw/iop_elf.c ../source/hw/sif.c ../source/hw/iop_intc.c ../source/hw/iop_dma.c ../source/hw/iop_timers.c ../source/hw/iop_hle_bios.c ../source/hw/iop_hle_events.c ../source/hw/iop_hle_modules.c ../source/hw/iop_excb.c ../source/hw/iop_cdvd.c ../source/core/iso_loader.c ../source/hw/spu2_mixer.c ../source/hw/iop_spu2.c -lm
 ./test_iop_registration_walk_panic_bypass
 ```
 
@@ -2123,7 +2123,7 @@ a second MTSA proves it's a real re-write (not OR/append), and MFSA
 with rd=$0 leaves $0 hardwired at zero.
 
 ```sh
-gcc -I../include -I../source -o test_ee_sa_reg tests/test_ee_sa_reg.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c
+gcc -I../include -I../source -o test_ee_sa_reg tests/test_ee_sa_reg.c ../source/hw/dma.c ../source/hw/ee_intc.c ../source/hw/gs.c ../source/hw/gif.c ../source/hw/vif.c ../source/hw/vu.c ../source/hw/gs_mem.c ../source/hw/sif.c ../source/hw/mch.c -lm
 ./test_ee_sa_reg
 ```
 

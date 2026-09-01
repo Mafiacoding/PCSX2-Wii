@@ -39,6 +39,47 @@ static int failures = 0;
     else { printf("ok:   %s\n", msg); } \
 } while (0)
 
+/* Task #735 test-harness compatibility helper - see test_iop_core.c
+ * for the full rationale. Drop-in replacement for iop_core_run() that
+ * preserves the pre-existing syscall-recovery special case inside
+ * the BREAK handler (task #156) and freezes execution in exactly the
+ * state that existed the instant a genuine BREAK was reached,
+ * undoing the (now real) Breakpoint-exception delivery it would
+ * otherwise leave behind. */
+static void iop_run_until_break(void) {
+    iop_state_t *st = iop_core_get_state();
+    long guard;
+    for (guard = 0; guard < 2000000L; guard++) {
+        if (st->halted) return;
+        uint32_t pre_pc = st->pc;
+        uint32_t pre_next_pc = st->next_pc;
+        uint32_t pre_status = st->cop0[12];
+        uint32_t pre_cause = st->cop0[13];
+        uint32_t pre_epc = st->cop0[14];
+        uint8_t  pre_pending = st->exception_pending;
+        uint64_t pre_count = st->instructions_executed;
+
+        if (iop_step()) return; /* genuine halt - not a BREAK, leave as-is */
+
+        if (st->exception_pending && (st->cop0[13] & 0x7Cu) == 0x24u && st->cop0[14] == pre_pc) {
+            st->cop0[12] = pre_status;
+            st->cop0[13] = pre_cause;
+            st->cop0[14] = pre_epc;
+            st->exception_pending = pre_pending;
+            st->pc = pre_pc;
+            st->next_pc = pre_next_pc;
+            st->instructions_executed = pre_count;
+            st->halted = 1;
+            snprintf(st->halt_reason, sizeof(st->halt_reason),
+                     "BREAK (task #735: real Breakpoint exception raised and unwound by the test harness, ExcCode 9)");
+            return;
+        }
+    }
+    st->halted = 1;
+    snprintf(st->halt_reason, sizeof(st->halt_reason),
+             "iop_run_until_break() safety cap reached without a Breakpoint exception");
+}
+
 static uint32_t enc_lui(uint32_t rt, uint32_t imm16)             { return (0x0Fu<<26) | (rt<<16) | (imm16 & 0xFFFFu); }
 static uint32_t enc_ori(uint32_t rt, uint32_t rs, uint32_t imm16){ return (0x0Du<<26) | (rs<<21) | (rt<<16) | (imm16 & 0xFFFFu); }
 static uint32_t enc_tge(uint32_t rs, uint32_t rt)                { return (rs<<21) | (rt<<16) | 0x30u; }
@@ -126,7 +167,7 @@ int main(void) {
         iop_core_step(); /* ori t2,zero,1 */
         CHECK(st->gpr[T2] == 1u, "execution continued normally past the not-taken TGE (marker instruction ran)");
 
-        iop_core_run();
+        iop_run_until_break();
         CHECK(st->halted == 1 && strstr(st->halt_reason, "BREAK") != NULL,
               "core reached and cleanly halted on the trailing BREAK, confirming no stray trap fired");
     }

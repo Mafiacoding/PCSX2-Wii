@@ -1390,8 +1390,48 @@ static int iop_step(void)
                 st->next_pc = epc + 8u;
                 break;
             }
-            halt("BREAK");
-            return 1;
+            /* Round 752 (task #735): real R3000A/MIPS I hardware never
+             * stops executing just because it decoded a BREAK - it
+             * raises a genuine Breakpoint exception (ExcCode 9) and
+             * vectors through the normal exception path, exactly like
+             * every other trap-like class already implemented in this
+             * file (SYSCALL above, TGE/Trap and Reserved Instruction
+             * below). This project's own EE core already made this
+             * exact fix (see ee_core.c's SPECIAL funct 0x0D case,
+             * task #178) after finding a real, intentional BREAK
+             * physically present in the BIOS image - the unconditional
+             * halt() here was the same kind of pragmatic placeholder,
+             * predating real IOP exception delivery, that task #178
+             * already identified and fixed on the EE side.
+             *
+             * Round 751's major finding motivates fixing this now: a
+             * real, ordinary divide-by-zero guard idiom in genuine IOP
+             * kernel/module code (0x00119650-0x0011977C, reached deep
+             * in the GT3 checkpoint chain past 6B instructions) hits
+             * this BREAK when the divisor is zero. Real hardware would
+             * vector to the kernel's installed Breakpoint handler
+             * (which may resume past it, matching common real debug-
+             * trap semantics) rather than permanently killing the IOP
+             * core - which is exactly what was silently happening
+             * here, deadlocking every EE-side SBUS mailbox-flag poll
+             * loop that depends on the IOP staying alive.
+             *
+             * Mirrors this file's own established general-exception-
+             * vector mechanism exactly (EPC=this instruction's own
+             * address, PC vectors to 0xBFC00180/0x80000080 depending
+             * on Status.BEV, same Status KU/IE stack left-shift-by-2
+             * push) - identical in form to the SYSCALL/TGE/Reserved-
+             * Instruction cases above/below, just ExcCode=9 instead. */
+            st->cop0[13] = (st->cop0[13] & ~0x7Fu) | 0x24u; /* Cause.ExcCode = 9 (Breakpoint) */
+            st->cop0[14] = this_pc; /* EPC */
+            {
+                uint32_t vector = (st->cop0[12] & 0x400000u) ? 0xBFC00180u : 0x80000080u; /* Status.BEV */
+                st->pc = vector;
+                st->next_pc = vector + 4;
+            }
+            st->cop0[12] = (st->cop0[12] & ~0x3Fu) | ((st->cop0[12] & 0x0Fu) << 2); /* Status stack push */
+            st->exception_pending = 1; /* task #156 - see iop_core.h's field comment */
+            break;
         case 0x10: /* MFHI */ if (rd) GPR(rd) = st->hi; break;
         case 0x11: /* MTHI */ st->hi = GPR(rs); break;
         case 0x12: /* MFLO */ if (rd) GPR(rd) = st->lo; break;

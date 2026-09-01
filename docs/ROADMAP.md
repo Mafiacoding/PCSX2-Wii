@@ -10614,3 +10614,20 @@ calls, which had bypassed the register-decode path. Wii cross-build clean. Full 
 visually confirm the dither pattern is resolved is deferred to a future round (the existing checkpoint
 predates the fix and can't cleanly validate it; a fresh multi-billion-instruction run doesn't fit in one
 round's budget). See docs/STATUS.md "Round 748" for the full citation and evidence trail.
+
+## Round 760: SYSMEM/EXCEPMAN fixed-address IOP module loading (real hardware addressing)
+
+`source/hw/iop_module_loader.c`'s generic bump allocator previously placed every IOP module, including
+SYSMEM and EXCEPMAN, at emulator-assigned addresses. Real hardware always loads these two lowest-numbered
+kernel modules at fixed addresses (`0x00000830` and `0x00003430`), confirmed against the uploaded
+reimplementation source and cross-verified against real BIOS ROM bytes (task #748). Added a small fixed-
+address lookup used only for these two module names; every other module's address is unchanged (bump
+allocator still runs for byte-for-byte compatibility, just doesn't set the load address for these two).
+Full 132-test regression suite: 131/132 pass, the one failure pre-existing and unrelated (confirmed via
+baseline comparison). Wii cross-build clean, 0 warnings/errors. A/B checkpoint comparison against the
+Round-173 GT3 wall shows the fix changes the wall's failure symptom (`pc=0x4B8` -> `pc=0xA4000000`) without
+changing its depth, as expected - this fix corrects addressing, it does not supply the still-missing real
+Sony low-kernel code content at `0x44C` that Round 759 identified as the wall's actual, non-fabricable root
+cause. See docs/STATUS.md "Round 760" for the full citation, verification detail, and this round's
+supplementary fresh-GT3-chain investigation (corroborates, does not newly resolve, Round 751's T3/HBLNK
+real-timer explanation).

@@ -373,6 +373,49 @@ static int module_has_i_twin(const char *name)
     return 0;
 }
 
+/* Round 760 (task #747-749): real PS2 IOP hardware does NOT load
+ * every module the same way. Per this project's own uploaded 2002-
+ * 2003 [RO]man clean-room reimplementation source (sysmem.c's own
+ * header: "[loaded @] 00000830-00001500"; excepman.c's own header:
+ * "[loaded @] 00003430-00003D00") - independently cross-verified
+ * this round by parsing THIS EXACT uploaded scph10000.bin's real
+ * ROMDIR and confirming both modules' real payload file offsets
+ * match those documented comments exactly (docs/STATUS.md Round
+ * 760) - SYSMEM and EXCEPMAN load at fixed, hardcoded low IOP RAM
+ * addresses, not a relocatable/dynamic one. This matches independent
+ * public documentation (ps2tek/forum research, same round) that
+ * IOPBOOT loads SYSMEM (and LOADCORE) directly, before LOADCORE's
+ * own general module-boot sequence (which loads EXCEPMAN first)
+ * even begins - a different, more primitive mechanism than the
+ * uniform ROMDIR-driven loop this function implements for every
+ * other module.
+ *
+ * This explains why SYSMEM's own real, unrelocated (Round 758)
+ * ordinal-10 (QueryBlockSize) export stub hardcodes an absolute
+ * jump to 0x0000044C (Round 755): a real, deliberate reference into
+ * EXCEPMAN's own fixed-address `common[16]` exception-dispatch
+ * table (Round 757/759/760 - see excepman.c's own `common=0x440`
+ * assignment and its trailing struct-layout comment, `first` at
+ * 0x400-0x43F immediately followed by `common` at 0x440-0x47F) -
+ * only sensible on hardware where these two modules are NOT
+ * relocated arbitrarily far from that shared low-memory region, as
+ * this project's uniform bump_alloc(>=0x100000) scheme (until this
+ * round) always did.
+ *
+ * Returns 0 for every module NOT in this small, evidenced set - the
+ * normal bump_alloc() path (this function's own caller-visible
+ * behavior) is unchanged for everything else. Deliberately NOT
+ * extended to LOADCORE/INTRMAN/IOMAN/etc without the same direct,
+ * cross-verified evidence this round obtained for these specific
+ * two - see docs/STATUS.md Round 760's own "not yet extended"
+ * note. */
+static uint32_t kernel_tier_fixed_address(const char *name)
+{
+    if (strcmp(name, "SYSMEM") == 0)   return 0x00000830u;
+    if (strcmp(name, "EXCEPMAN") == 0) return 0x00003430u;
+    return 0;
+}
+
 /* Loads one module by ROMDIR name and registers its own exports.
  * Returns its entry point (or 0 on any failure - missing ROMDIR
  * entry, malformed ELF, etc; the caller decides whether to skip it).
@@ -402,7 +445,15 @@ static uint32_t load_only_one(iop_state_t *st, const char *name, iop_elf_load_re
     if (!rd || rd->size == 0) return 0;
     if ((uint64_t)rd->payload_off + rd->size > st->bios->size) return 0;
 
-    uint32_t load_addr = bump_alloc(rd->size + 0x1000u /* headroom for bss + tables, generous */);
+    /* Round 760 (task #747-749): consumed unconditionally, for EVERY
+     * module, purely to keep the bump allocator's running counter -
+     * and therefore every OTHER (non-kernel-tier) module's own bump-
+     * allocated address - byte-for-byte identical to every prior
+     * round's behavior. See kernel_tier_fixed_address()'s own comment
+     * for why SYSMEM/EXCEPMAN specifically don't use this value. */
+    uint32_t bump_addr = bump_alloc(rd->size + 0x1000u /* headroom for bss + tables, generous */);
+    uint32_t fixed_addr = kernel_tier_fixed_address(name);
+    uint32_t load_addr = fixed_addr ? fixed_addr : bump_addr;
 
     const char *err = NULL;
     int rc = iop_elf_load(st, st->bios->data + rd->payload_off, rd->size, load_addr, out, &err);
@@ -411,10 +462,18 @@ static uint32_t load_only_one(iop_state_t *st, const char *name, iop_elf_load_re
 #endif
     if (rc != 0) return 0;
 
-    /* Advance the bump allocator to the module's real end (we
-     * over-allocated headroom above; this reclaims the unused part
-     * for the NEXT module, keeping IOP RAM usage honest). */
-    g.bump_next = (out->load_end + 15u) & ~15u;
+    if (!fixed_addr) {
+        /* Advance the bump allocator to the module's real end (we
+         * over-allocated headroom above; this reclaims the unused
+         * part for the NEXT module, keeping IOP RAM usage honest). */
+        g.bump_next = (out->load_end + 15u) & ~15u;
+    }
+    /* else: bump_addr's slot is deliberately left reserved/unused -
+     * a few KB of permanently-wasted IOP RAM, harmless - so every
+     * subsequently-bump-allocated module's own address stays exactly
+     * where it already was before this round's fix. Only SYSMEM's
+     * and EXCEPMAN's own load address (and therefore entry point and
+     * exported-symbol addresses) actually changes. */
 
     g.stats.modules_loaded++;
 

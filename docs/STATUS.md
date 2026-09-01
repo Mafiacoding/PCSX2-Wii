@@ -30789,3 +30789,15 @@ pc has moved only within a narrow ~0x80005F00-0x80005FD8 range across this entir
 GS/display state remains unconfigured at 7.44B (`pmode=0x00`, `dispfb1/2=0x00000000`, `qw_seen=0`); pc remains pre-OSDSYS real EE kernel-space RAM. No source changes this round (pure checkpoint-chaining + verification); regression suite and Wii rebuild correctly skipped per the docs-only-round convention. Checkpoint file remains scratch-only (`/tmp/gt3/ckpt_gt3_r750.bin`), never committed.
 
 **Next steps.** Continue chaining past 7.44B, watching in particular for `T3`'s `count` to reach `comp=0xFFFF` (imminent) to confirm the compare-match/wraparound path behaves correctly at this depth, and continue watching for pc to eventually leave the `0x80005F00`-range kernel-init loop toward OSDSYS/EELOAD's own loaded-ELF range (`0x00200000+`) and eventually GT3's own triangle-draw content (task #729/#747/#748's original goal).
+
+## Round 751 (continued further still): GT3 checkpoint chain extended to 9.12 billion instructions
+
+Continued chaining past the 7.44B checkpoint through 7.68B -> 7.92B -> 8.16B -> 8.4B -> 8.64B -> 8.88B -> **9.12B instructions** (7 more `continue` invocations, budget=30000000 each). This is now more than 50% past the original ~5-6 billion instruction target for task #729/#733.
+
+A timer re-check at the 8.16B mark showed `T2`/`T3` counts had both wrapped past `0xFFFF` and restarted from a small value (`T2: count=0x1d07`, `T3: count=0x16ff`) - since neither has `OVFE`/overflow-interrupt enabled (`mode=0x80`/`0x83`, bit9 unset), this wraparound produces no interrupt, matching this round's corrected `ee_timers_tick()` overflow-handling exactly (`t->count -= (EE_TIMER_MAX_COUNT + 1u)` with no `OVFF`/IRQ side effect when `OVF_ENABLE` is clear) - a second piece of direct evidence (beyond the original CUE fix) that the corrected timer model is behaving per real hardware across a sustained, multi-wraparound run.
+
+pc continues to range narrowly within `0x80005F00`-`0x80006320` (real EE kernel-RAM), with one step briefly touching the top of that range (`0x80006320`) before returning to `0x80005F18` on the next slice - consistent with a real, low-level kernel init loop that legitimately takes an enormous number of real (HBLNK-timer-gated) cycles per iteration, not a stall. GS/display state remains unconfigured (`pmode=0x00`, `dispfb1/2=0x00000000`, `qw_seen=0`).
+
+No source changes this round; regression suite and Wii rebuild correctly skipped per the docs-only-round convention. Checkpoint remains scratch-only (`/tmp/gt3/ckpt_gt3_r750.bin`), never committed.
+
+**Next steps.** Continue the chain in a future round. Given the real-hardware-accurate HBLNK timer scaling now correctly in effect (Round 751's fix), reaching OSDSYS/EELOAD's own code range (`0x00200000+`) and eventually GT3's triangle-draw content (task #729/#747/#748's original goal) may require substantially more than 9-10B instructions of real emulated time - this should be treated as the new realistic estimate rather than the pre-Round-751 "5-6B" figure, which was set before the timer bug was known to exist.

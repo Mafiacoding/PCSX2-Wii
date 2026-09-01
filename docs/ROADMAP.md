@@ -10917,3 +10917,22 @@ standing reminder: still all-zero for both at this point, consistent
 with display setup being a genuine downstream milestone past this
 early kernel-level sync primitive. No fix needed - confirms Round 772
 generalizes across 3 distinct real titles.
+
+## Round 774 (task #447 follow-up): real MTSAB/MTSAH opcode fix +
+correction of Round 773's WaitSema-park classification
+
+Third real disc (King of Fighters 2000-2001, Europe) revealed its real
+blocker was a different, unrelated REGIMM opcode gap (MTSAB/MTSAH, the
+one remaining "not yet implemented" MMI-family gap this file's own
+header already flagged) upstream of WaitSema entirely - fixed, cited
+against real PCSX2 interpreter source. WaitSema/SignalSema/
+iSignalSema themselves were code-reviewed against the user's 7-point
+checklist and confirmed already correct - no fix needed there. An
+instrumented (not disassembly-only) re-verification post-fix found
+KOF makes genuine, continuous forward progress for 1.28B+ real
+instructions with zero WaitSema entries, and that the specific address
+Round 773 identified as a "WaitSema stub" is actually all-zero memory
+- correcting Round 773's disassembly-only classification method as
+unreliable without instrumented confirmation. 133/134 host-native
+tests pass (1 pre-existing, unrelated GS failure); Wii cross-build
+clean.

@@ -31956,3 +31956,126 @@ convention): `tools/round729-gt3-discboot/r773_syscnf_dump.c`,
 `tools/round729-gt3-discboot/r773_park_dump.c` (both committed as
 scratch tooling source only - no BIOS/disc/checkpoint binary content
 committed alongside them).
+
+## Round 774 (task #447 follow-up): real MTSAB/MTSAH opcode gap fixed
+for King of Fighters 2000-2001 (Europe); Round 773's WaitSema-park
+classification for these titles corrected by instrumented evidence
+
+User uploaded a third real disc, King of Fighters 2000-2001 (Europe)
+(verified genuine: `SLES_528.76`, PAL, VER 1.01, via the same
+`iso_loader.c`-based SYSTEM.CNF dump used for Rounds 772/773), with an
+explicit instruction to fix the `WaitSema` syscall path per a detailed
+7-point checklist (syscall-68 dispatch table entry, kernel-stub
+calling convention, `$a0` semid argument, `$v0` result/blocking
+semantics, blocked-thread resume, delay-slot/EPC handling, cross-title
+comparison) and to instrument WaitSema with syscall number/semid/
+count/thread-id/block-wake/`$v0` if execution still hangs.
+
+**Step 1 - code review against the 7-point checklist.** Direct reading
+of `ee_core.c`'s existing `sysnum==68` (WaitSema, ~line 3726),
+`sysnum==66||sysnum==-67` (SignalSema/iSignalSema), and `sysnum==69`
+(CreateSema) blocks found all 7 points already correctly implemented
+and honestly cited: syscall 68 dispatches to WaitSema exactly at the
+line the user cited; the generic pre-switch `this_pc`/`fallthrough_pc`
+rotation (shared by every instruction, not syscall-specific) correctly
+preserves the kernel-stub calling convention and resumes at
+`this_pc+4` (the instruction after `syscall`), never treating `syscall`
+as a subroutine call or touching `$ra`; `$a0` is read as the semid and
+validated against `g_ee_sema[EE_MAX_SEMAPHORES]`; `$v0` returns 0 and
+decrements the real count when available, or (this project's
+documented, cited "no real thread scheduler" simplification, task
+#192/Round 303) re-parks on the same instruction while explicitly
+re-running the full per-step interrupt/pending-check epilogue
+(timer/INTC/DMAC/VBLANK/RPC/CDVD-NCMD) that a normal instruction's
+`return 1` would otherwise skip, plus a temporary `Status.IE=1`
+presentation standing in for a real context-switched thread; blocked-
+thread resume works through this same busy-park-plus-interrupt-pump
+mechanism (SignalSema/iSignalSema increment the real count, and the
+next re-executed WaitSema sees it); delay-slot/EPC handling is generic
+and already correct. **No fix was needed or made to the WaitSema/
+SignalSema/iSignalSema implementation itself** - it was already right.
+
+**Step 2 - KOF's real blocker was a different, unrelated real opcode
+gap, upstream of WaitSema entirely.** Running the Round 772 fastboot
+fix against KOF's disc halted at instr=30,011,982, pc=0x0010008C, on
+`halt("unimplemented REGIMM opcode")` - a genuine crt0/init
+instruction (word `0x04190000`, REGIMM rt=0x19 = MTSAH), not a
+WaitSema-related fault at all. MTSAB (rt=0x18) and MTSAH (rt=0x19) are
+real R5900-specific REGIMM-space instructions (confirmed against the
+already-vendored real PCSX2 reference source,
+`docs/reference/pcsx2/pcsx2/R5900OpcodeTables.cpp`'s REGIMM row and
+`R5900OpcodeImpl.cpp`'s real semantics) that set the SA (shift-amount)
+register this project already models (`st->sa_reg`, task #177,
+already used by `QFSRV`/`MFSA`/`MTSA`) for byte/halfword-granularity
+unaligned QWORD load/store alignment - this file's own header comment
+already honestly flagged them as the one remaining gap ("MTSA/MTSAB/
+MTSAH... none of which exist yet"). Implemented both real opcodes
+verbatim from PCSX2's own interpreter (`MTSAB: sa = (rs&0xF)^(imm&0xF)`,
+`MTSAH: sa = ((rs&0x7)^(imm&0x7))<<1`), non-branching, matching this
+REGIMM switch's existing TGEI/TGEIU-style "do the op, fall through"
+convention. This is the round's one real tracked-source fix.
+
+**Step 3 - MAJOR CORRECTION to Round 773: the "genuine WaitSema busy-
+park" classification for Tekken (full)/Klonoa 2/KOF was wrong,
+disproven by instrumented evidence.** Round 773 concluded (from
+disassembly alone - matching bytes at the resting PC against the known
+WaitSema kernel-stub pattern) that these titles were busy-parking in a
+real, repeatedly-re-executing WaitSema syscall. This round built a
+properly instrumented scratch driver (hooks inserted directly into the
+tracked `sysnum==68`/`66`/`-67` dispatch cases, compiled only against
+a disposable `/tmp/` copy, never the tracked tree) and, separately, an
+unconditional top-of-`ee_step()` logger (`r774_log_step_top`) plus a
+TLB-miss/null-jalr-guard logger, run against KOF post-MTSAB/MTSAH-fix
+for 1.28+ billion real EE instructions. Result: **zero WaitSema/
+SignalSema/iSignalSema entries the entire run** - `pc` and
+`instructions_executed` both climb continuously and genuinely (not
+frozen at all; an earlier same-run reading that looked "frozen" was
+itself an artifact of a too-aggressive same-PC early-stop heuristic
+coincidentally triggering on a real, periodically-repeating PC value,
+not an actual freeze), cycling through a handful of addresses in real
+EE kernel code (`0x8000db30`-`0x8000e548`, a real 16-byte-quadword
+bzero loop and a real `0x1000F000` hardware-register poll loop - both
+disassembled and confirmed as genuine, mundane BIOS/kernel init code,
+not error loops) and real early game code (`0x00100bf0`-`0x00100c30`).
+Critically, a fresh RAM dump of the exact address Round 773 identified
+as KOF's "WaitSema stub" (`0x0010b924`) now reads as **all zeros** -
+that memory was never real code at the point Round 773's disassembly
+sampled it; the earlier "matches the WaitSema stub pattern" finding
+was a misread, not a real busy-park. **This does not necessarily mean
+Round 773's Tekken(full)/Klonoa2 classification is also wrong** (those
+were not re-instrumented this round, since KOF's real blocker turned
+out to be upstream and unrelated to WaitSema) - it means that
+classification method (visual disassembly match alone, without an
+instrumented call-count) is unreliable and should not be trusted again
+without instrumented confirmation. Flagged here rather than silently
+left as-is, per this project's anti-fabrication discipline.
+
+**Conclusion for task #447/user's WaitSema request:** WaitSema itself
+has no bug - the checklist's 7 points were already correctly
+implemented, and the actual blocker for KOF at this checkpoint was a
+genuine, unrelated, now-fixed REGIMM opcode gap. `DISPFB2`/`DISPLAY2`
+were not touched, per the user's explicit instruction, and remain
+correctly zero (real display setup is still downstream of this
+checkpoint for all three titles).
+
+**Mandatory workflow:** host-native regression suite re-run against
+the full current tree (rebuilt via a shared-object-archive link step
+for speed, since `tests/README.md`'s per-test file lists are stale
+again for several tests added after Round 605 - a pre-existing,
+already-tracked doc-staleness issue, not addressed this round): 133/
+134 tests pass; the one failure (`test_gs_reglist_image`, an IMAGE-
+mode row-wrap issue) is a pre-existing, unrelated GS bug - that test
+`#include`s only `hw/gs_mem.c`/`hw/gif.c`, never `ee_core.c`, so this
+round's MTSAB/MTSAH change cannot have caused or affected it. Wii
+cross-build (devkitPPC/libogc) rebuilt clean, `ee_core.c` compiles
+without warnings, `pcsx2-wii.elf`/`.dol` produced successfully. Leak-
+check clean (`git diff --cached --name-only | grep -iE
+'\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'` - no matches).
+
+Files added (scratch, never committed):
+`tools/round729-gt3-discboot/r774_step_verify.c`,
+`tools/round729-gt3-discboot/r774_multi_dump.c` (both real-disc-
+derived tool output stayed in `/tmp/`, never rsynced/committed).
+`tools/round729-gt3-discboot/r774_kof_waitsema_verify.c` (the initial
+instrumentation driver referenced above) is committed as tooling
+source only.

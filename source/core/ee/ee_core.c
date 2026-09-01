@@ -62,9 +62,9 @@
  *     VU0 data staging.
  *
  * Still NOT implemented (halts cleanly, does not crash):
- *   - The other ~23 MMI opcodes (QFSRV - needs the SA hardware
- *     register and MTSA/MTSAB/MTSAH to set it, none of which exist
- *     yet; PMADDW/H, PMSUBW/H, PMULTW/H, PDIVW/PDIVBW, PMULTUW/
+ *   - The other ~21 MMI opcodes (QFSRV/MFSA/MTSA/MTSAB/MTSAH are now
+ *     ALL implemented as of Round 774 - see the REGIMM switch and the
+ *     SPECIAL funct 0x28/0x29 cases; PMADDW/H, PMSUBW/H, PMULTW/H, PDIVW/PDIVBW, PMULTUW/
  *     PDIVUW/PMADDUW - the remaining MMI2/MMI3 HI/LO-touching
  *     arithmetic, some with documented real-hardware rounding quirks
  *     in PCSX2's own source worth extra care when ported; PMFHL/PMTHL
@@ -7283,6 +7283,46 @@ static int ee_step(void)
         case 0x13: /* BGEZALL - same unconditional-link caveat as BLTZALL. */
             LINK(31);
             if ((int64_t)GPR(rs) >= 0) BRANCH_TO(this_pc + 4 + (imm << 2)); else { st->pc = fallthrough_pc + 4; st->next_pc = fallthrough_pc + 8; }
+            break;
+        /* Round 774 (task #447 follow-up, King of Fighters 2000-2001
+         * disc-boot real halt): MTSAB/MTSAH - real R5900-specific
+         * REGIMM-space instructions (rt=0x18/0x19 per real PCSX2's own
+         * R5900OpcodeTables.cpp REGIMM row - cross-checked directly
+         * against docs/reference/pcsx2/pcsx2/R5900OpcodeTables.cpp,
+         * already vendored into this repo). Real, non-branching -
+         * unlike every other REGIMM opcode implemented above, these
+         * don't touch pc/next_pc at all, matching TGEI/TGEIU/etc's
+         * "just do the real op and fall through" convention. This
+         * project already has the real SA (shift-amount) hardware
+         * register (st->sa_reg, task #177's MFSA/MTSA, already wired
+         * into QFSRV) - MTSAB/MTSAH were the two real ways real EE
+         * code sets it for byte/halfword-granularity unaligned
+         * QWORD load/store alignment (per the R5900 Core Users
+         * Manual), and were the two real REGIMM-space "still NOT
+         * implemented" gap this file's own header comment already
+         * flagged honestly (see the "MTSA/MTSAB/MTSAH... none of
+         * which exist yet" note near the top of this file).
+         * Real semantics, copied verbatim from PCSX2's own
+         * R5900OpcodeImpl.cpp MTSAB()/MTSAH() (GPL-3.0, already the
+         * license basis for this whole file per its header comment):
+         *   MTSAB:  cpuRegs.sa = (GPR[rs].UL[0] & 0xF) ^ (imm & 0xF);
+         *   MTSAH:  cpuRegs.sa = ((GPR[rs].UL[0] & 0x7) ^ (imm & 0x7)) << 1;
+         * (imm here is the real sign-extended 16-bit immediate field;
+         * only its low 3-4 bits ever survive the mask, so the sign
+         * extension is immaterial to the result - matches PCSX2's own
+         * use of the raw _Imm_ field without any special unsigned
+         * cast.) First hit: King of Fighters 2000-2001 (Europe) real
+         * disc-boot (SLES_528.76) halted here at instr=30,011,982,
+         * pc=0x0010008C, a genuine early crt0/init instruction (word
+         * 0x04190000 = REGIMM rt=0x19/MTSAH) - not a wandered-off-path
+         * corruption, and unrelated to task #447's WaitSema syscall
+         * path (which this specific disc never even reaches without
+         * this fix). */
+        case 0x18: /* MTSAB */
+            st->sa_reg = (uint32_t)((rs32 & 0xFu) ^ ((uint32_t)imm & 0xFu));
+            break;
+        case 0x19: /* MTSAH */
+            st->sa_reg = (uint32_t)(((rs32 & 0x7u) ^ ((uint32_t)imm & 0x7u)) << 1);
             break;
         default:
             halt("unimplemented REGIMM opcode");

@@ -438,26 +438,17 @@ static int module_has_i_twin(const char *name)
  *      + relocations + symbol tables) versus only its .text/.data
  *      footprint once actually resident in RAM, not a contradiction.
  *
+ * TIMEMANP/TIMEMANI both cite "00007D00" as their real load start -
+ * included below (Round 763, task #758 follow-up), now that
+ * load_only_one()'s own new P-twin-skip guard (see that function's
+ * header comment) makes sharing one fixed address safe: real hardware
+ * only ever needs the "I" twin's code actually resident (this
+ * project's own already-established module_has_i_twin() citation
+ * trail), so the P twin's own load is now skipped entirely - not just
+ * its export registration, as before - whenever a real fixed address
+ * would otherwise make the two twins' loads collide in memory.
+ *
  * NOT included despite a documented address:
- *   - TIMEMANP/TIMEMANI both cite "00007D00" as their real load
- *     start. This project's own load_only_one()/load_all_modules()
- *     architecture front-loads (parses+relocates+registers exports
- *     for) EVERY listed module before running ANY entry point (see
- *     load_all_modules()'s own header comment) - so if both twins
- *     shared one fixed address here, the I-twin's later load would
- *     silently overwrite the P-twin's already-relocated code in
- *     memory before the P-twin's own already-computed entry point
- *     ever runs, corrupting whichever twin loads first. Real
- *     hardware's own twin-selection mechanism does not have this
- *     failure mode (each twin's own real _start() independently
- *     decides at RUN time whether to no-op, not at LOAD time via a
- *     memory collision this project's own loader would introduce).
- *     Fixing this safely needs an architecture change (e.g.
- *     interleaving each module's load with its own entry-point call,
- *     matching module_has_i_twin()'s own already-cited real
- *     precedent for real hardware behavior) that is out of scope for
- *     this round's narrow, evidence-only audit - left for a future
- *     round rather than rushed.
  *   - THREADMAN and SIO2MAN's own uploaded source files' "[loaded @]"
  *     comments have no determinable address (literally unknown/absent
  *     in the source) - no evidence to act on, excluded.
@@ -472,6 +463,8 @@ static uint32_t kernel_tier_fixed_address(const char *name)
     if (strcmp(name, "EXCEPMAN") == 0) return 0x00003430u;
     if (strcmp(name, "SSBUSC") == 0)   return 0x00005C00u;
     if (strcmp(name, "DMACMAN") == 0)  return 0x00006000u;
+    if (strcmp(name, "TIMEMANP") == 0) return 0x00007D00u;
+    if (strcmp(name, "TIMEMANI") == 0) return 0x00007D00u;
     if (strcmp(name, "EECONF") == 0)   return 0x0000AA00u;
     if (strcmp(name, "VBLANK") == 0)   return 0x00011F00u;
     if (strcmp(name, "IOMAN") == 0)    return 0x00012900u;
@@ -479,6 +472,53 @@ static uint32_t kernel_tier_fixed_address(const char *name)
     if (strcmp(name, "SIFMAN") == 0)   return 0x00016900u;
     if (strcmp(name, "SIFCMD") == 0)   return 0x00017D00u;
     if (strcmp(name, "REBOOT") == 0)   return 0x0001A800u;
+    return 0;
+}
+
+/* Round 763 (task #758 follow-up): a "P" twin whose real "I"
+ * counterpart is ALSO present in the modlist AND which
+ * kernel_tier_fixed_address() would place at the exact same fixed
+ * address as that I-twin (currently only TIMEMANP/TIMEMANI - see that
+ * function's own comment) must not be loaded at all, not merely have
+ * its export registration skipped (module_has_i_twin()'s existing,
+ * narrower guard). load_all_modules() front-loads every listed
+ * module - parses, relocates, and computes an entry point for all of
+ * them - before invoking ANY entry point; if both twins shared one
+ * fixed load address, the later-loading twin (always the "I" twin,
+ * per every real ROMDIR/IOPBTCONF ordering observed so far - see
+ * kernel_tier_fixed_address()'s own citation) would silently overwrite
+ * the earlier-loading "P" twin's already-relocated code in memory
+ * before the P-twin's own already-computed entry point ever runs,
+ * corrupting whichever twin loaded first. Skipping the P-twin's load
+ * outright sidesteps this cleanly: real hardware never actually needs
+ * the P-twin's own code content once its I-twin is present (the same
+ * real fact module_has_i_twin() already cites for export selection),
+ * so there is nothing lost by not loading it.
+ *
+ * Deliberately narrow: only fires when kernel_tier_fixed_address()
+ * returns a NON-ZERO, EQUAL address for both names - a bump-allocated
+ * P/I pair (e.g. INTRMANP/INTRMANI, which this function has no
+ * evidence to fixed-address) is completely unaffected and keeps
+ * loading both twins exactly as every prior round already verified,
+ * since bump_alloc() never produces a collision between two modules
+ * loaded in sequence. */
+static int is_skippable_fixed_p_twin(const char *name)
+{
+    size_t len = strlen(name);
+    if (len == 0 || len >= MODNAME_MAX || name[len - 1] != 'P')
+        return 0;
+    uint32_t p_addr = kernel_tier_fixed_address(name);
+    if (p_addr == 0) return 0;
+    char twin[MODNAME_MAX];
+    memcpy(twin, name, len - 1);
+    twin[len - 1] = 'I';
+    twin[len] = '\0';
+    uint32_t i_addr = kernel_tier_fixed_address(twin);
+    if (i_addr != p_addr) return 0;
+    for (int i = 0; i < g.modlist_count; i++) {
+        if (strcmp(g.modlist[i], twin) == 0)
+            return 1;
+    }
     return 0;
 }
 
@@ -503,6 +543,16 @@ static uint32_t kernel_tier_fixed_address(const char *name)
 static uint32_t load_only_one(iop_state_t *st, const char *name, iop_elf_load_result_t *out)
 {
     g.stats.modules_attempted++;
+
+    /* Round 763 (task #758 follow-up): skip this module's load
+     * entirely - not just its export registration - when it is a "P"
+     * twin whose real "I" counterpart would collide with it at the
+     * same fixed load address; see is_skippable_fixed_p_twin()'s own
+     * header comment for the full rationale. This must happen before
+     * any ROMDIR lookup/relocation work below, and before
+     * bump_alloc() is ever called for this name, so a skipped P-twin
+     * leaves no bump-allocator side effect either. */
+    if (is_skippable_fixed_p_twin(name)) return 0;
 
     const romdir_entry_t *rd = romdir_find(name);
 #ifdef IOP_MODLOADER_DEBUG

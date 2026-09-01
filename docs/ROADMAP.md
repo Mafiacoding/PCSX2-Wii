@@ -10666,3 +10666,16 @@ overwrite the first's already-relocated code before its entry point runs, a real
 architecture change first. `THREADMAN`/`SIO2MAN` excluded outright (no determinable address in source). Full
 133-test regression suite passes (1 pre-existing unrelated failure), Wii cross-build clean (0 warnings/errors).
 No fresh GT3 re-verification this round - see docs/STATUS.md "Round 762" for the full writeup.
+
+## Round 763: TIMEMANP/TIMEMANI fixed-address collision fixed
+
+Closes the item Round 762 explicitly deferred. `is_skippable_fixed_p_twin()` (new, `source/hw/iop_module_loader.c`)
+now makes it safe to give TIMEMANP and TIMEMANI the same real fixed address (`0x00007D00`, per their own uploaded
+source headers): when a "P"-twin module's real "I" counterpart is present in the modlist AND both would collide
+at the same fixed address, the P-twin's load is skipped entirely (not just its export registration, which
+`module_has_i_twin()` already handled) - real hardware never needs the P-twin's own code once its I-twin exists,
+so nothing is lost. Deliberately narrow: only fires on an actual address collision, so INTRMANP/INTRMANI (no
+fixed address for either name) is completely unaffected and keeps its existing, already-verified behavior. 11-check
+regression test added (`tests/test_iop_module_loader_p_twin_skip.c`), full 134-test suite passes (1 pre-existing
+unrelated failure), Wii cross-build clean. Not yet re-verified against a fresh GT3 chain - see docs/STATUS.md
+"Round 763" for the full writeup.

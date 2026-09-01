@@ -30734,3 +30734,38 @@ Together these meant `iop_cdvd_get_disc_type()` read back `IOP_CDVD_TYPE_NODISC`
 **Files changed:** `tools/round729-gt3-discboot/chain_driver.c`, `include/core/hw/iop_cdvd.h`, `source/hw/iop_cdvd.c`, `source/core/checkpoint.c`, `docs/STATUS.md`.
 
 **Next steps.** Resume the GT3 checkpoint chain (now using the fixed driver, starting fresh - the old `ckpt_r749.bin`/`ckpt_r750.bin` scratch checkpoints were captured under the buggy sequence and can't be salvaged) forward to the ~5-6 billion instruction depth needed to finally re-verify Round 748's dither/Z-test fix (task #729's original, still-unmet goal).
+
+## Round 751 (task #733/#734): fixed a real EE peripheral-timer MODE bit-position bug that had been silently wrong since Round 87 - root cause of the new stall hit while resuming the GT3 checkpoint chain
+
+**Context.** Resuming task #733 (chaining the GT3 checkpoint forward from Round 750's fix toward the ~5-6B instruction depth needed for task #729), the chain advanced cleanly 2.4B -> 2.64B -> 2.88B -> 3.12B instructions, but `pc` stopped advancing meaningfully - it stayed within a tiny 24-byte range (`0x9FC41048`-`0x9FC41060`) across the last three `continue` invocations (720M+ instructions with zero GS/VU1 activity). This looked like a new stall, distinct from Round 750's TLB storm.
+
+**Diagnosis.** Disassembled the loop with `tools/round655-ee-disasm` (`0x9FC00000` base): it's a completely ordinary real BIOS pattern - write `T0_MODE=0x83`, snapshot `T0_COUNT` into `$v1`, then `lw $v0,T0_COUNT; beq $v1,$v0,loop` (wait for the free-running counter to tick at least once). A scratch dump of the checkpoint's `ee_timers_state_t` (via a corrected `ee_timers_get_state()` accessor - `ETMR` is already checkpointed correctly, ruling out a checkpoint gap this time) showed `T0: count=0 mode=0x83 CUE=0` - the real hardware-timer wait was never going to resolve, because our own model thought the counter was never started.
+
+Cross-checked this project's `ee_timers.h` `EE_CNT_MODE_*` bit-position `#define`s against real PCSX2 source (`pcsx2-master.zip`, `pcsx2/Counters.h`'s `EECNT_MODE` bitfield struct, confirmed against `Counters.cpp`'s `rcntWmode()` - its `value & 0x3ff` / `value & 0xc00` write-mask split is the exact real bit layout). Result: **every bit position from ZeroReturn onward was wrong**, apparently never actually cross-checked against real hardware when first written in Round 87/127 - just guessed from the register *names* alone:
+
+| field | this project (wrong) | real hardware |
+|---|---|---|
+| ZeroReturn (ZRET) | bit5 | bit6 |
+| IsCounting (CUE) | bit10 | **bit7** |
+| TargetInterrupt (CMPE) | bit6 | bit8 |
+| OverflowInterrupt (OVFE) | bit7 | bit9 |
+| TargetReached (EQUF) | bit11 | bit10 |
+| OverflowReached (OVFF) | bit12 | bit11 |
+| "REPEAT_IRQ"/"TOGGLE_IRQ" (bits8-9) | invented | **do not exist on real hardware** |
+
+The real BIOS write `T0_MODE=0x83` (`CLKS=3` + real bit7 set) is a completely ordinary "configure HBLNK clock source and start counting" write. Under this project's wrong mapping, bit7 landed on `EE_CNT_MODE_OVF_ENABLE` instead of `CUE` (really bit10, never set by this write) - so `ee_timers_tick()`'s `if (!(t->mode & EE_CNT_MODE_CUE)) continue;` guard kept every EE peripheral timer permanently stopped for this entire boot, and the real BIOS's ordinary timer busy-wait span forever. This bug has been present, silently, since Round 87 (the peripheral-timer model's introduction) - it simply hadn't been hit by a boot path that reached this particular delay loop until this round's much deeper GT3 checkpoint chain (3.12B+ instructions).
+
+Also found, while cross-referencing `Counters.cpp`'s `_cpuTestTarget()`/`_cpuTestOverflow()`: real hardware re-arms target/overflow IRQs purely via the `TargetReached`/`OverflowReached` flag (only cleared by software rewriting MODE with that bit set to 1) - it never auto-disables `TargetInterrupt`/`OverflowInterrupt` themselves the way this project's old code did (gated on an invented `REPEAT_IRQ` bit that doesn't exist in the real register at all).
+
+**Fix (tracked source).**
+- `include/core/hw/ee_timers.h`: corrected all `EE_CNT_MODE_*` bit positions to match the real `EECNT_MODE` layout; removed the invented `REPEAT_IRQ`/`TOGGLE_IRQ` bits; added `EE_CNT_MODE_GATE_SOURCE` (bit3, not modeled) to keep the bit map complete and documented. Full citation trail in the header comment.
+- `source/hw/ee_timers.c` (`ee_timers_tick()`): corrected the compare-match/overflow IRQ logic to gate re-firing on the `EQUF`/`OVFF` flag itself (matching real `_cpuTestTarget()`/`_cpuTestOverflow()` exactly) instead of auto-clearing `CMP_ENABLE`/`OVF_ENABLE`. Also nested the flag-set inside the enable-bit check (previously EQUF/OVFF were set unconditionally on every match/overflow regardless of whether the enable bit was set at all - another deviation from real semantics, fixed alongside).
+- `ee_timers_mmio_write32()`'s write-1-to-clear logic was already structurally correct (uses the macros by name) - no changes needed there, it automatically picked up the corrected bit positions.
+
+**Verification.** Rebuilt the scratch GT3 chain driver against the fixed tree and resumed from the exact stalled checkpoint (`pc=0x9FC41048`, `instr=3.12B`, `T0 mode=0x83 CUE=0` under the old mapping). A corrected diagnostic (fixing its own stale hardcoded bit-shift constants to use the header macros) confirmed `CUE=1` is now read correctly from the identical `mode=0x83` register value. Running one more `continue` (30,000,000 budget, same as every other chain step this round) advanced `pc` from the frozen `0x9FC41048` all the way to `0x80005F18` - real EE kernel-space RAM, a huge, genuine forward jump confirming the busy-wait resolved and boot progress resumed.
+
+**Regression / build.** `tests/test_ee_timer_interrupt.c` (COP0 Count/Compare timer mechanism, a separate subsystem from these EE peripheral counters) - all checks pass, confirming this fix didn't touch the unrelated COP0 timer path. `tests/test_iop_timers.c` (the IOP's own, structurally-separate timer implementation) - 0 failures, confirming no cross-contamination between the EE and IOP timer models. `ee_timers.c`/`checkpoint.c` compile clean with `-Wall`, zero warnings. Wii cross-build (devkitPPC 8.1.0): clean, `pcsx2-wii.dol` produced.
+
+**Files changed:** `include/core/hw/ee_timers.h`, `source/hw/ee_timers.c`, `docs/STATUS.md`.
+
+**Next steps.** Resume the GT3 checkpoint chain (task #733) from its now-unstuck state toward the ~5-6 billion instruction depth needed to re-verify Round 748's dither/Z-test fix (task #729's still-unmet goal). Given this round's finding, also worth flagging for a future round: this bug class (mode-register bit positions guessed from names rather than cross-checked against a real source citation) may be worth a targeted audit of this project's *other* register-bit `#define` blocks that predate the Round 511+ era of consistently requiring a citation for every bit.

@@ -31310,3 +31310,86 @@ Continuing directly from Round 765's open question ("is the SYSMEM $ra-clobber p
 **Not yet done:** the fixed tree has NOT yet been re-run against the GT3 checkpoint chain to see whether this resolves the Round 764/765 stall (task #760's `$ra`-into-own-body self-loop was itself just a downstream symptom of the corruption this fix addresses - with SYSMEM's code now staying intact, that specific closed loop should no longer be reachable, but what happens instead is unverified). That re-run, from a fresh cold boot (the existing 10.08B/11.28B checkpoints were captured against the OLD, corrupted tree and are not valid starting points for the fixed one), is the natural next step.
 
 **Files changed:** `source/core/iop/iop_core.c` (Status.IsC gate in `iop_mem_write8/16/32()`). No new tests added this round (existing suite already exercises `iop_mem_write*` extensively for other purposes and continues to pass; a dedicated IsC-specific regression test is a reasonable follow-up but wasn't blocking for this fix given the strength of the direct real-ROM-byte-comparison verification above). `docs/STATUS.md`/`docs/ROADMAP.md` (this entry). Leak-check run and confirmed clean before commit.
+
+## Round 769 (task #763): ROOT CAUSE FOUND AND FIXED - synthetic trampoline/boot_info header collided with LOADCORE's own real code, causing a spurious second entry with garbage a0=1
+
+**Task**: Round 768 caught pc=0x00102260 (LOADCORE's real entry point) being
+hit a second time, ~101M instructions into boot, with `$a0=1` instead of a
+valid boot_info pointer - clearly wrong, but the real caller and mechanism
+were unknown. This round traces it to ground.
+
+**Investigation.** Built a scratch tree (`/tmp/r768tree`) with progressively
+more precise instrumentation: a ring-buffer PC-history watch inside
+`iop_step()` (4096 entries, collapsing consecutive duplicates), an
+env-var-gated live write-watch inside `iop_mem_write32()` targeting the
+trampoline/boot_info region (`0x00100000-0x0010002F`), and exact-moment
+`fwrite()` dumps of IOP RAM at the instant of the bad call. A debug build
+(`-DIOP_MODLOADER_DEBUG`) confirmed the real boot order (29 modules) and
+that **LOADCORE's real entry point is 0x00102260**, and that LOADCORE is
+the *first* bump-allocated (non-fixed-address) module - loading immediately
+after wherever the synthetic trampoline/boot_info header happened to sit.
+
+**Root cause.** `iop_module_loader_boot()` used to allocate the synthetic
+trampoline (`g.trampoline_addr`, a "j &lt;self&gt;" landing pad written to
+`BUMP_BASE=0x00100000`) and `g.boot_info_addr` via `bump_alloc()` *before*
+calling `load_all_modules()`. That placed the trampoline at the very start
+of bump-allocated memory, and LOADCORE - the first module to actually get
+bump-allocated - landed immediately after it, at addresses very close to
+0x00100000. The write-watch caught the exact culprit: LOADCORE's own real,
+compiled init code (at pc≈0x001023d4/0x001023d8, part of its own
+registration-list bookkeeping, completely unrelated to and unaware of this
+project's synthetic trampoline convention) computes and writes to address
+exactly 0x00100000 as part of its own internal table logic - silently
+overwriting the trampoline's "j &lt;self&gt;" instruction with unrelated data
+(0x00102230, itself a legitimate LOADCORE-internal computed address).
+Because `g.trampoline_addr` is reused as `$ra` for the *entire rest of
+boot* (not regenerated per module), the next module's `jr $ra` executes
+the corrupted word as a bogus instruction, faults almost immediately, and
+this project's synthetic "resume at EPC+4" trap handler (already documented
+in `iop_core.c`) causes a slow one-word-at-a-time crawl forward through IOP
+RAM (an interrupt firing after literally every instruction) until it
+happens to land back on LOADCORE's own entry point (0x00102260) by sheer
+chance - triggering a wholly spurious second invocation of LOADCORE's
+`_start`, with `$a0` holding whatever incidental garbage the crawl left in
+that register (observed as literal `1`). That corrupted `$a0=1` then
+propagates through LOADCORE's init arithmetic, producing the Round 767
+stack-pointer collapse (`sp` -&gt; `0xFFFFFF40`) and the 17-iteration infinite
+zero-fill loop at pc=0x00102354.
+
+**The fix.** Reordered `iop_module_loader_boot()` (`source/hw/iop_module_loader.c`)
+so `load_all_modules(st)` runs *first*, and `g.trampoline_addr`/
+`g.boot_info_addr` are `bump_alloc()`'d only *after* - guaranteeing the
+synthetic header lands in memory no real module has already claimed or
+could write to as part of its own legitimate internal logic. Verified this
+doesn't break `build_real_registration_list(st)` (still called after both
+`load_all_modules()` and the header allocation, still has
+`g.boot_info_addr` and every module's real `load_addr` available) or the
+final `st->gpr[31]/gpr[29]/gpr[4]` dispatch setup (still happens last,
+using the now-correctly-allocated addresses).
+
+**Verification.** Rebuilt the same instrumentation against the fixed tree
+and re-ran a fresh GT3 checkpoint-chain boot survey: the write-watch that
+used to fire once at instr=925 (LOADCORE's own store landing on
+0x00100000) now never fires at all across a fresh 2.4B-instruction survey,
+and the a0=1 spurious-recall of LOADCORE's entry point (Round 768's
+original symptom) no longer occurs either - the IOP now reaches a genuine
+halted state (pc=0x000014D0) instead of infinite-looping.
+
+**Regression/build.** Full 131-test host-native suite: 75 pass, 55
+build_fail (all pre-existing, unrelated stale-documentation gaps per Round
+554/623 - verified none reference `iop_module_loader`/`trampoline`/
+`boot_info` symbols), 1 run_fail (pre-existing, unrelated), 0 timeouts.
+Wii/devkitPPC cross-build: clean, `pcsx2-wii.elf`/`pcsx2-wii.dol` produced,
+no compile or link errors.
+
+**Not yet done:** the new post-fix resting state (IOP halted at
+pc=0x000014D0, EE spinning near pc=0x82180-0x82198) has not yet been
+further characterized to determine whether it's a benign park or a new,
+different stall worth investigating - that's the natural next step,
+along with the user's standing request to capture a rendered image if the
+boot demonstrably progresses further as a result of this fix.
+
+**Files changed:** `source/hw/iop_module_loader.c` (trampoline/boot_info
+allocation reordered to after `load_all_modules()`). `docs/STATUS.md`/
+`docs/ROADMAP.md` (this entry). Leak-check run and confirmed clean before
+commit.

@@ -944,6 +944,50 @@ int iop_module_loader_boot(iop_state_t *st)
         fprintf(stderr, "[modloader]   [%d] '%s'\n", dbgi, g.modlist[dbgi]);
 #endif
 
+    /* Round 769 (task #763): front-load every listed module BEFORE
+     * allocating the trampoline/boot_info header - see
+     * load_all_modules()'s header comment above. This order swap (the
+     * header used to be allocated FIRST, at the raw BUMP_BASE
+     * address, before any module occupied bump-allocated memory) is
+     * itself this round's fix - see the trampoline_addr/boot_info_addr
+     * allocation block below for the full rationale. */
+    load_all_modules(st);
+
+    /* Round 769 (task #763): allocate the trampoline/boot_info header
+     * AFTER load_all_modules(), not before. Live write-instrumentation
+     * this round caught LOADCORE's own real init code (entry
+     * 0x00102260, loaded at the raw BUMP_BASE address under the old
+     * ordering) performing a genuine, correct store to physical
+     * address 0x00100000 as part of its own real internal
+     * bookkeeping - completely unrelated to and unaware of this
+     * project's synthetic trampoline mechanism, which used to also
+     * live at that exact address. That store silently overwrote the
+     * trampoline's "j <self>" landing-pad instruction with unrelated
+     * data. Since g.trampoline_addr is reused (not regenerated) as
+     * every module's $ra for the REST of the boot, every later
+     * module's "jr $ra" return-to-loader then executed the corrupted
+     * word as a bogus instruction instead of parking safely, faulted
+     * almost immediately, and this project's synthetic exception
+     * handler's "resume at EPC+4" caused a slow, one-word-at-a-time
+     * crawl forward through IOP RAM (visible as an interrupt firing
+     * after literally every single instruction) until it happened to
+     * land back on LOADCORE's own entry point (0x00102260) by sheer
+     * chance - triggering a wholly spurious second invocation of
+     * LOADCORE's init code, with $a0 holding whatever incidental
+     * garbage was left in that register by the crawl (observed as
+     * literal 1) instead of any real argument. Allocating the
+     * trampoline/boot_info header from bump_alloc() only AFTER every
+     * real module has already claimed its own bump-allocated space
+     * (load_all_modules(), just above) guarantees this header lands
+     * in memory no real module's own code could already be using -
+     * closing the collision at its root instead of special-casing the
+     * resulting corruption after the fact. Verified via a live GT3
+     * checkpoint-chain boot survey: the write-watch that used to fire
+     * once at instr=925 (LOADCORE's own store landing on 0x00100000)
+     * now never fires at all across a fresh 2.4B-instruction survey,
+     * and the a0=1 spurious-recall of LOADCORE's entry point (task
+     * #763's original symptom) no longer occurs either - the IOP now
+     * reaches a genuine halted state instead of infinite-looping. */
     g.trampoline_addr = bump_alloc(8);
     /* Content is never actually fetched-and-decoded (the trap check
      * in iop_module_loader_try_handle() runs before fetch, exactly
@@ -965,11 +1009,6 @@ int iop_module_loader_boot(iop_state_t *st)
         iop_mem_write32(st, scratch, 0u);
         iop_mem_write32(st, g.boot_info_addr + BOOT_INFO_OFF_SCRATCH_PTR, scratch);
     }
-
-    /* Round 29 continued (31st change): front-load every listed
-     * module before running any entry point - see load_all_modules()'s
-     * header comment above. */
-    load_all_modules(st);
 
     /* Round 29 continued (task #151/#155): populate boot_info[0x18]/
      * [0x1C] with a real registration list - see

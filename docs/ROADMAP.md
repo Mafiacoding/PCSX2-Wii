@@ -10762,3 +10762,19 @@ shared subroutine with the wrong first argument. The other captured arguments (a
 register address 0xBF801528, a3=0x00155A9C) suggest this address is reused for more than just module-entry boot-
 info parsing. Real caller not yet traced - no fix implemented (no evidence yet for what the correct a0 should
 have been). No tracked source changed - docs-only. See docs/STATUS.md "Round 768" for the full writeup.
+
+## Round 769: ROOT CAUSE FOUND AND FIXED - synthetic trampoline/boot_info header collided with LOADCORE's own real code
+
+Traced Round 768's a0=1 bad call to its real cause with a live write-watch: `iop_module_loader_boot()` used to
+allocate the synthetic trampoline/boot_info header at BUMP_BASE (0x00100000) *before* running
+`load_all_modules()`, so LOADCORE (the first bump-allocated module) landed immediately after it. LOADCORE's own
+real init code writes to address 0x00100000 as part of its own internal registration-list bookkeeping (nothing
+to do with our trampoline convention), silently overwriting the trampoline's landing-pad instruction. Since that
+address is reused as $ra for the rest of boot, the next module's `jr $ra` executed the corrupted word, faulted,
+and the existing trap-handler crawl mechanism eventually landed back on LOADCORE's own entry point by chance -
+producing the spurious a0=1 re-entry. Fix: reorder so `load_all_modules(st)` runs first, and the trampoline/
+boot_info addresses are bump-allocated only after - guaranteeing no real module can collide with them. Verified
+via the same instrumentation (write-watch never fires, bad call never happens) across a fresh 2.4B-instruction
+GT3 survey; IOP now reaches a genuine halted state instead of infinite-looping. Regression suite (131 tests: 75
+pass, 56 pre-existing unrelated failures) and Wii cross-build both clean. See docs/STATUS.md "Round 769" for the
+full writeup.

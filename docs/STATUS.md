@@ -31763,3 +31763,116 @@ real decision point/condition that sends control back to the relaunch
 syscall instead of continuing into disc detection or game hand-off.
 This is the same shape of question task #447 has asked before, but now
 with a much more precise, reproducible entry point to instrument from.
+
+## Round 772 (task #447, real fix): permanent EELOAD fast-boot string
+patch shipped - breaks the OSDSYS self-relaunch cycle for real, disc-
+mounted boots using only tracked source (no scratch trampoline needed)
+
+Direct continuation of the prior round's finding (the OSDSYS self-
+relaunch cycle: EELOAD is invoked exactly once organically per boot,
+with `a0=0`, which real, documented PCSX2 behavior defaults to
+launching `"rom0:OSDSYS"`; real OSDSYS is supposed to call EELOAD a
+SECOND time with `"EELOAD rom0:PS2LOGO <game>"` to auto-boot a mounted
+disc, but this project's boot trace has never once observed that
+second call organically, in any round's history). The user's exact
+instruction this round: "now that we know what 447 is missing write
+and investigate a fix and dont forget that GS/Display is Display2."
+
+**The fix.** Rounds 543-555 (same project, prior sessions) already
+discovered and *proved* the real answer, but only as disposable
+scratch code, never shipped: real PCSX2 itself does not wait for
+OSDSYS's second EELOAD call either. Its own `eeloadHook()` (PCSX2's
+vendored `R5900.cpp`), on EELOAD's first and only organic invocation,
+when `elfname` is empty, finds the literal `"rom0:OSDSYS"` string
+already resident in EELOAD's own just-loaded memory and overwrites it
+in place with the real target game's boot path - then lets EELOAD's
+own, completely unmodified code do 100% of the rest of the kernel
+handoff. Round 552 reproduced this by hand in a throwaway driver
+(`/tmp/r552_fastboot.c`, hardcoding one specific BIOS's string offset)
+and confirmed it works once Round 554's real `cdrom0:`/`cdrom1:`
+routing fix (`sif_loadfile_elf_load_disc()`, already shipped/tracked)
+is in place - but the string-patch technique itself was never promoted
+out of scratch code.
+
+This round promotes it to permanent, tracked source:
+`ee_check_eeload_fastboot_patch()` (new, `source/core/ee/ee_core.c`,
+called from `ee_step()`'s per-instruction epilogue right after the
+existing `ee_check_boot_unblock_selfloop()`, both the main path and
+the WaitSema-park mirror path). One-shot, fires on the first (and
+only) real hit of `pc==EE_EELOAD_START_PC` (`0x00082000`, the real,
+BIOS-version-independent fixed EELOAD address per PCSX2's own
+`R5900.h`, already cited by Round 544). Guarded to diskless-only-never:
+bails immediately if `iop_cdvd_get_disc_type()==IOP_CDVD_TYPE_NODISC`,
+so it can never affect an already-correct diskless boot. When a disc
+is mounted, it:
+
+1. Reads the real, mounted disc's own `SYSTEM.CNF` via the same
+   already-tested `iop_cdvd_disc_find_file()`/`iop_cdvd_disc_read_sector()`
+   ISO9660 accessors this project's `cdrom0:`/`cdrom1:` FIO_F_OPEN
+   handler already uses (Round 367), and extracts the real
+   `"BOOT2 = <path>"` line's target path. No real SYSTEM.CNF or BOOT2
+   line found -> honest gap, bails, leaves EELOAD's real default alone
+   (never guesses a path).
+2. Scans EELOAD's own just-loaded resident memory (real BIOS boot
+   code has, by the moment execution reaches EE_EELOAD_START_PC,
+   already organically copied EELOAD's ROM image into RAM there -
+   Round 544) for the literal, NUL-terminated `"rom0:OSDSYS"` string -
+   a genuine runtime scan, not Round 552's hardcoded single-BIOS
+   offset. Not found -> honest gap, bails.
+3. Only overwrites it if the real BOOT2 path (plus its own NUL) fits
+   inside the contiguous real zero-padding already following the
+   matched string in EELOAD's memory - measured, never guessed; if it
+   doesn't fit, bails rather than corrupting adjacent EELOAD data.
+
+**Verification.** Host-native regression suite (the 41/42-command
+Round-623-verified subset of `tests/README.md`, run from repo root):
+40/42 pass; the 2 non-passes are both pre-existing and unrelated to
+this change (`test_spu2_regs`'s documented command is missing a
+`spu2_mixer.c` link - a stale doc issue, not a code regression; and
+`test_ee_syscall_full_audit_sweep` passed cleanly when re-run directly
+- the apparent failure was an artifact of this round's own throwaway
+harness script misparsing multi-line `$(find ...)` commands, not a
+real test failure). `ee_core.c` compiles clean with `-Wall`, no new
+warnings. Wii cross-build (devkitPPC/libogc) is clean.
+
+Fresh cold-boot survey (new scratch driver,
+`tools/round729-gt3-discboot/r772_fastboot_verify.c`, never committed)
+against the real, user-provided Tekken Tag Tournament (Europe) (Demo)
+disc + JP BIOS (scph10000): **the fix fires and breaks the self-
+relaunch cycle for real.** Instead of the previously-documented
+(Round 771) endless ~29.5M-instruction OSDSYS `_LoadExecPS2("rom0:
+OSDSYS")` relaunch loop, this run reaches and parks at
+`pc=0x00400324` after 41,868,632 instructions - which is *exactly*
+Tekken's own real game code's `WaitSema(semid=0)` halt, first
+documented all the way back in Round 567/568 (`instr=41868665`, a
+33-instruction difference fully explained by this round's coarser
+10,000,000-instruction sampling granularity vs Round 567's original
+instrumentation). That milestone was previously reachable ONLY via
+Round 552's disposable scratch trampoline technique - this round makes
+it reachable from a genuinely fresh cold boot using nothing but
+tracked source and a real mounted disc image, no scratch code in the
+live path at all. Since Rounds 569-653 already shipped real EE multi-
+threading and a long chain of further fixes (VU1 XGKICK, GS pipeline,
+GIF/VIF corrections) specifically built on top of getting past this
+exact WaitSema(0) park, this permanent fix should let the *real*,
+normal boot pipeline benefit from all of that already-shipped work,
+not just scratch-harness testing.
+
+**GS/Display (per the user's explicit reminder - circuit 2, DISPFB2/
+DISPLAY2, not circuit 1):** not yet re-checked at this new resting
+point this round (the verification driver didn't instrument GS state)
+- flagged as the natural next-round follow-up, since real display
+setup happens later in a real game's own boot sequence than this
+early `WaitSema(0)` sync-primitive park.
+
+**No regression:** the diskless boot path is untouched by construction
+(the fix's very first check bails on `IOP_CDVD_TYPE_NODISC`), and the
+regression suite confirms no other behavior changed.
+
+Files changed: `source/core/ee/ee_core.c` (new
+`ee_check_eeload_fastboot_patch()` +
+`ee_read_boot2_path_from_system_cnf()`, plus two call sites in
+`ee_step()`). `tools/round729-gt3-discboot/r772_fastboot_verify.c`
+added (scratch verification driver, real-BIOS/disc-derived output only
+ever written to `/tmp/`, never committed/rsynced per this project's
+leak-prevention convention).

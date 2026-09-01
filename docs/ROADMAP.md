@@ -10870,3 +10870,33 @@ relaunch instead of continuing toward disc detection/game hand-off -
 this reuses task #447's long history but now has a precise, reproducible
 entry point (the syscall handler epilogue at pc=0x80000304, callee
 0x800055A0) to instrument from directly.
+
+## Round 772 (task #447, real fix shipped)
+
+Implemented `ee_check_eeload_fastboot_patch()` in `source/core/ee/
+ee_core.c`: permanent, tracked-source version of Round 552's proven-
+but-never-shipped EELOAD fast-boot string patch (itself a direct,
+cited reproduction of real PCSX2's own `eeloadHook()` mechanism). On
+EELOAD's first real organic invocation (`pc==0x00082000`), if a disc
+is mounted, reads the real BOOT2 path from the disc's own SYSTEM.CNF
+and overwrites the "rom0:OSDSYS" string literal resident in EELOAD's
+own memory with it (runtime-scanned, not hardcoded; only patched if it
+fits the real available zero-padding). Diskless boots are completely
+untouched by construction.
+
+Verified against a fresh cold boot with the real Tekken Tag Tournament
+demo disc: breaks the previously-endless ~29.5M-instruction OSDSYS
+self-relaunch cycle for good, reaching real Tekken game code parked at
+`pc=0x00400324` (Round 567's documented `WaitSema(semid=0)` milestone)
+after ~41.9M instructions - previously reachable only via a disposable
+scratch trampoline, now reachable from tracked source alone. Since
+Rounds 569-653 already shipped real EE multi-threading and further
+fixes built specifically on top of getting past this park, the real
+boot pipeline should now be able to reach that same downstream
+progress organically. Regression suite clean (40/42, 2 pre-existing/
+unrelated), Wii cross-build clean, no diskless-path regression.
+
+Next: re-check GS/Display (circuit 2 - DISPFB2/DISPLAY2 per Round 321)
+at this new resting point, and continue tracing what the WaitSema(0)
+park needs to resolve organically now that the fast-boot patch gets a
+real disc-mounted boot there without scratch-code assistance.

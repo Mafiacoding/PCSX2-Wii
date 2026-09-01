@@ -915,6 +915,159 @@ static void ee_check_browser_menu_escalation_heuristic(ee_state_t *st)
     fired = 1;
 }
 
+/*
+ * Round 772 (task #447, real fix): permanent, tracked-source version of
+ * Round 552's proven-but-never-shipped "EELOAD fast-boot string patch".
+ *
+ * Full evidence chain (Rounds 543-555, 771, this round - see
+ * docs/STATUS.md for the complete writeup): this project's own EELOAD
+ * module (a fixed, BIOS-version-independent resident address, per
+ * PCSX2's own vendored R5900.h EELOAD_START=0x00082000 citation) is
+ * hit exactly ONCE per organic boot, always with a0=0/a1=0 - which
+ * real, documented PCSX2 behavior (R5900.cpp's own eeloadHook()
+ * comment, cited in Round 551/552) says means "no arguments -> launch
+ * rom0:OSDSYS by default". Real hardware/BIOS is then supposed to have
+ * OSDSYS itself call EELOAD a SECOND time with "EELOAD rom0:PS2LOGO
+ * <game ELF>" to auto-boot a mounted disc - Round 552's own docs entry
+ * states plainly this second invocation "has never been observed in
+ * this project's boot trace at all, in any historical or current
+ * checkpoint tested so far", and Round 771's fresh, much-deeper
+ * (SIFX-checkpoint-fix-unblocked) re-trace this session reconfirmed it
+ * again: a fresh cold boot's FIRST (and only) call to the real EELOAD
+ * entry function is directly "rom0:OSDSYS", with no PS2LOGO/EELOAD
+ * call ever preceding it.
+ *
+ * Real PCSX2 itself does not wait for that second invocation either -
+ * its own eeloadHook(), on EELOAD's first (and only) call, when
+ * elfname is empty, finds the literal "rom0:OSDSYS" string already
+ * resident in EELOAD's own just-loaded memory and overwrites it in
+ * place with the real target game's boot path, then lets EELOAD's own
+ * completely unmodified code do 100% of the rest of the kernel
+ * handoff - this is real, cited PCSX2 behavior (Round 552's citation),
+ * not a fabrication. Round 552 built this technique as a disposable
+ * scratch driver (never committed) and confirmed it works: patched
+ * with the real Tekken Tag Tournament Demo's own SYSTEM.CNF BOOT2
+ * path ("cdrom0:\SCED_500.41;1"), EELOAD ran ~14,000 further real
+ * instructions before parking in a genuine WaitSema(0) - which Round
+ * 554 (already shipped, tracked) then root-caused to a real bug in
+ * this project's own LF_F_ELF_LOAD RPC handler (rom0:-only routing)
+ * and fixed by adding sif_loadfile_elf_load_disc() for cdrom0:/
+ * cdrom1: - verified, after that fix, to let EELOAD's patched fast-
+ * boot path run 33+ million further clean instructions (Round 554),
+ * and up to 1.12 BILLION instructions with zero crashes in an extended
+ * survey (Round 555). What Round 552 never did was promote the
+ * string-patch technique itself out of scratch/disposable code and
+ * into this permanent tracked source - this function does exactly
+ * that, generalized (a runtime scan for the string, not a hardcoded
+ * offset for one specific BIOS test) and gated so it can never affect
+ * an already-correct diskless boot.
+ *
+ * Mechanism:
+ *   1. Only ever attempted once per boot (one-shot latch, same
+ *      convention as every sibling heuristic in this file).
+ *   2. Diskless boots are left completely untouched (iop_cdvd_get_
+ *      disc_type()==NODISC bails immediately) - Round 607 already
+ *      proved diskless boots must never be interfered with here.
+ *   3. Reads the real, mounted disc's own SYSTEM.CNF (via the same
+ *      already-tested iop_cdvd_disc_find_file()/iop_cdvd_disc_read_
+ *      sector() ISO9660 accessors this project's cdrom0:/cdrom1:
+ *      FIO_F_OPEN handler already uses, Round 367) and extracts the
+ *      real "BOOT2 = <path>" line's target path - if no real SYSTEM.CNF
+ *      or BOOT2 line is found, this is an honest gap: bail, do not
+ *      guess a path.
+ *   4. Scans EELOAD's own just-loaded resident memory (the real BIOS
+ *      boot code has, by the moment execution reaches EE_EELOAD_START_PC,
+ *      already organically copied EELOAD's ROM image into RAM there -
+ *      Round 544) for the literal, NUL-terminated "rom0:OSDSYS" string.
+ *      If not found at this BIOS version's layout, honest gap: bail.
+ *   5. Only overwrites it if the real BOOT2 path (plus its own NUL)
+ *      fits inside the contiguous real zero-padding already following
+ *      the matched string in EELOAD's memory - never writes past that
+ *      real, measured boundary into adjacent genuine EELOAD data.
+ */
+#define EE_EELOAD_START_PC   0x00082000u
+#define EE_EELOAD_SCAN_BYTES 0x00010000u /* 64KB - generous vs. Round 552's observed real offset (~0x7580) */
+
+static int ee_read_boot2_path_from_system_cnf(char *out, size_t out_size)
+{
+    uint32_t lba = 0, size = 0;
+    int found = iop_cdvd_disc_find_file("SYSTEM.CNF", &lba, &size);
+    if (!found) found = iop_cdvd_disc_find_file("SYSTEM.CNF;1", &lba, &size);
+    if (!found) return 0; /* honest gap - no real SYSTEM.CNF on the mounted disc */
+
+    uint8_t buf[2048]; /* real SYSTEM.CNF is always a few dozen bytes - one sector is always enough */
+    if (iop_cdvd_disc_read_sector(lba, buf) != 0) return 0;
+
+    uint32_t scan_len = size < sizeof(buf) ? size : (uint32_t)sizeof(buf);
+    const char *p = (const char *)buf;
+    const char *end = p + scan_len;
+    const char *tag = NULL;
+    for (const char *s = p; s + 5 <= end; s++) {
+        if (strncmp(s, "BOOT2", 5) == 0) { tag = s + 5; break; }
+    }
+    if (!tag) return 0; /* real SYSTEM.CNF present but no BOOT2 line - honest gap */
+    while (tag < end && (*tag == ' ' || *tag == '\t')) tag++;
+    if (tag >= end || *tag != '=') return 0;
+    tag++;
+    while (tag < end && (*tag == ' ' || *tag == '\t')) tag++;
+    size_t n = 0;
+    while (tag < end && *tag != '\r' && *tag != '\n' && *tag != 0 && n + 1 < out_size) {
+        out[n++] = *tag++;
+    }
+    out[n] = 0;
+    return n > 0;
+}
+
+static void ee_check_eeload_fastboot_patch(ee_state_t *st)
+{
+    static int attempted = 0; /* one-shot, whether or not it actually finds/patches anything */
+    if (attempted)
+        return;
+    if (st->pc != EE_EELOAD_START_PC)
+        return;
+    attempted = 1;
+
+    if (iop_cdvd_get_disc_type() == IOP_CDVD_TYPE_NODISC)
+        return; /* diskless boot - real BIOS's own "default to rom0:OSDSYS" behavior is already correct; never touch it (Round 607) */
+
+    char boot2[64];
+    if (!ee_read_boot2_path_from_system_cnf(boot2, sizeof(boot2)))
+        return; /* honest gap - no real, parseable BOOT2 target found; leave EELOAD's real default alone */
+
+    const char *needle = "rom0:OSDSYS";
+    size_t needle_len = strlen(needle);
+    uint32_t found_addr = 0;
+    for (uint32_t off = 0; off < EE_EELOAD_SCAN_BYTES; off++) {
+        uint32_t addr = EE_EELOAD_START_PC + off;
+        size_t k;
+        for (k = 0; k < needle_len; k++) {
+            if (ee_mem_read8(st, addr + (uint32_t)k) != (uint8_t)needle[k]) break;
+        }
+        if (k == needle_len && ee_mem_read8(st, addr + (uint32_t)needle_len) == 0) {
+            found_addr = addr;
+            break;
+        }
+    }
+    if (found_addr == 0)
+        return; /* honest gap - literal string not found at this BIOS version's real EELOAD layout; don't guess an offset (Round 552's own hardcoded-offset limitation, fixed here via scan instead of removed) */
+
+    /* Real available slot = the matched string's own bytes plus
+     * however many further real zero-padding bytes immediately follow
+     * it in EELOAD's resident memory - only patch if the new path (+
+     * its own NUL) fits entirely inside that already-zero space. */
+    size_t avail = needle_len;
+    uint32_t probe = found_addr + (uint32_t)needle_len;
+    while (avail < 255 && ee_mem_read8(st, probe) == 0) { avail++; probe++; }
+
+    size_t boot2_len = strlen(boot2);
+    if (boot2_len == 0 || boot2_len + 1 > avail)
+        return; /* real BOOT2 path doesn't fit in the real available slot - don't corrupt adjacent EELOAD data */
+
+    for (size_t k = 0; k < boot2_len; k++)
+        ee_mem_write8(st, found_addr + (uint32_t)k, (uint8_t)boot2[k]);
+    ee_mem_write8(st, found_addr + (uint32_t)boot2_len, 0);
+}
+
 /* Round 696 (task #447/#536): idle-carousel driver for RAM[0x1C0444]
  * ("+0x444", the real OSDSYS per-panel dispatch index this project
  * has traced exhaustively since Round 594; the full real dispatch
@@ -3696,6 +3849,7 @@ static int ee_step(void)
                         ee_latch_timer_interrupt(st);
                         ee_check_vblank(st);
                         ee_check_boot_unblock_selfloop(st); /* Round 161 */
+                        ee_check_eeload_fastboot_patch(st); /* Round 772 (task #447, real fix) */
                         ee_check_browser_menu_escalation_heuristic(st); /* Round 610 (task #536) */
                         ee_check_browser_idle_carousel(st); /* Round 696 (task #447/#536) */
                         ee_check_boot_unblock_sbus_wait(st); /* Round 178 (task #344) - EXPERIMENTAL BRANCH ONLY */
@@ -9776,6 +9930,7 @@ static int ee_step(void)
      * instruction boundary. */
     ee_check_vblank(st);
     ee_check_boot_unblock_selfloop(st); /* Round 161 */
+    ee_check_eeload_fastboot_patch(st); /* Round 772 (task #447, real fix) */
     ee_check_browser_menu_escalation_heuristic(st); /* Round 610 (task #536) */
     ee_check_browser_idle_carousel(st); /* Round 696 (task #447/#536) */
     ee_check_boot_unblock_sbus_wait(st); /* Round 178 (task #344) - EXPERIMENTAL BRANCH ONLY */

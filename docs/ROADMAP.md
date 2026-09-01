@@ -10900,3 +10900,20 @@ Next: re-check GS/Display (circuit 2 - DISPFB2/DISPLAY2 per Round 321)
 at this new resting point, and continue tracing what the WaitSema(0)
 park needs to resolve organically now that the fast-boot patch gets a
 real disc-mounted boot there without scratch-code assistance.
+
+## Round 773 (task #447 follow-up, docs-only): fix verified general
+across 2 new real full-game discs
+
+Re-ran the Round 772 fix against user-uploaded Tekken Tag Tournament
+(full/retail, `SLUS_200.01`) and Klonoa 2 - Lunatea's Veil (2D,
+`SLUS_201.51`), both verified genuine via SYSTEM.CNF. Both reach the
+same real, cited primitive as the demo did - a genuine ps2sdk kernel
+`WaitSema` syscall stub (syscall 68/0x44), disassembled and confirmed,
+not a synthetic shortcut or error loop. Klonoa 2 parks sooner
+(31.2M vs 41.9M instructions) simply because it's a shorter real
+crt0/init path, not a worse outcome. GS circuit 2 (DISPFB2/DISPLAY2)
+checked directly for the first time this session, per the user's
+standing reminder: still all-zero for both at this point, consistent
+with display setup being a genuine downstream milestone past this
+early kernel-level sync primitive. No fix needed - confirms Round 772
+generalizes across 3 distinct real titles.

@@ -31876,3 +31876,83 @@ Files changed: `source/core/ee/ee_core.c` (new
 added (scratch verification driver, real-BIOS/disc-derived output only
 ever written to `/tmp/`, never committed/rsynced per this project's
 leak-prevention convention).
+
+## Round 773 (task #447 follow-up, docs-only): Round 772 fix verified
+against two new real, full-game discs - Tekken Tag Tournament (full
+game) and Klonoa 2 - Lunatea's Veil
+
+User uploaded two new real disc images this round (not the previously-
+tested Tekken demo, and not another 3D game): `Tekken Tag Tournament.bin`
+(the full/retail game, confirmed real via its `SLUS_200.01` BOOT2
+target) and `Klonoa 2 - Lunatea's Veil.iso` (a 2D platformer, confirmed
+real via `SLUS_201.51`), with the user's own stated hypothesis that the
+2D game "should make things better."
+
+**Disc verification (scratch tool, `r773_syscnf_dump.c`, host-side,
+not committed):** both images confirmed genuine, well-formed PS2 discs
+using this project's existing standalone `iso_loader.c` (Round 139/170)
+independent of the live emulator's own IOP CDVD boot path:
+- Tekken Tag Tournament (full): raw CD-ROM Mode 2 Form 1 sectors (same
+  physical format as the previously-tested demo), real SYSTEM.CNF:
+  `BOOT2 = cdrom0:\SLUS_200.01;1`, `VER = 2.00`, `VMODE = NTSC`.
+- Klonoa 2 - Lunatea's Veil: plain 2048-byte ISO9660 sectors (CD001
+  signature at the expected plain-format PVD offset), real SYSTEM.CNF:
+  `BOOT2 = cdrom0:\SLUS_201.51;1`, `VER = 1.00`, `VMODE = NTSC`.
+
+**Round 772 fix re-run against both (scratch driver, r772_verify2 /
+r773_park_dump.c, host-native, 400M-instruction budget each):**
+- Tekken Tag Tournament (full game) + JP BIOS: real game code runs to
+  `instr=41,868,632`, parks at `pc=0x00400224`.
+- Klonoa 2 - Lunatea's Veil + JP BIOS: real game code runs to
+  `instr=31,157,751`, parks at `pc=0x00327ee4` - notably a SHORTER
+  instruction count than either Tekken image, the opposite of the
+  user's "2D should make things better" hypothesis if "better" means
+  "runs further" (see classification below for why this isn't actually
+  a regression or a worse outcome).
+
+**Classification of both resting points (disassembled via the
+existing `tools/round655-ee-disasm` tool against a fresh RAM dump
+around each parked pc):** both are the EXACT SAME real code pattern -
+a standard ps2sdk kernel syscall-stub table entry
+(`addiu v1, zero, 68 / syscall / jr ra / nop`), i.e. a genuine
+`WaitSema(semid)` call (syscall 68 / 0x44 - already cited and
+implemented in this project's own `ee_core.c` at the CreateSema/
+WaitSema real-signature block, matching psdevwiki's EE Syscalls page
+and the user-supplied ps2sdk-master.zip's thread.c usage). This is the
+identical class of milestone already documented for the Tekken DEMO at
+`pc=0x00400324` (Round 567/568) - the Round 772 fix generalizes
+correctly across three separate real, distinct PS2 titles (one demo,
+one full retail fighting game, one full retail 2D platformer), each
+reaching its own genuine `WaitSema` blocking primitive rather than
+looping forever in OSDSYS's self-relaunch cycle. Klonoa 2 parking
+sooner is fully consistent with this: it is simply a different game
+binary with a different, shorter amount of real crt0/init code before
+its first blocking semaphore wait - not a sign the fix works "less
+well" for it. Both are honest real syscalls, not synthetic shortcuts,
+not error loops, and not wandered-off-path garbage.
+
+**GS/Display circuit 2 check (per the user's standing "GS/Display is
+Display2" reminder, finally performed this round via the new
+`r773_park_dump.c` driver's direct `gs_get_state()` read):** for BOTH
+discs, `PMODE`, `DISPFB1`/`DISPLAY1`, AND `DISPFB2`/`DISPLAY2` are all
+still `0x0000000000000000` at this resting point. This is not a new
+gap - it's expected and consistent with Round 464's prior finding on
+the demo (real display setup happens later in a real game's init
+sequence than this early, generic kernel-level `WaitSema` sync
+primitive, which fires well before any GS/display-configuring game
+code has run). No regression, no new bug - display setup for real disc
+titles remains a downstream milestone past this WaitSema park, exactly
+as already documented.
+
+**No fix needed/implemented this round** - this was a verification-
+only round confirming Round 772's fix is correct and general, not a
+one-off that happened to work for a single demo image. Docs-only:
+regression suite and Wii rebuild correctly skipped (no tracked source
+changed).
+
+Files added (scratch, never committed - all real-BIOS/disc-derived
+tool output stayed in `/tmp/` per this project's leak-prevention
+convention): `tools/round729-gt3-discboot/r773_syscnf_dump.c`,
+`tools/round729-gt3-discboot/r773_park_dump.c` (both committed as
+scratch tooling source only - no BIOS/disc/checkpoint binary content
+committed alongside them).

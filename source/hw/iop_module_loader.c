@@ -404,15 +404,81 @@ static int module_has_i_twin(const char *name)
  *
  * Returns 0 for every module NOT in this small, evidenced set - the
  * normal bump_alloc() path (this function's own caller-visible
- * behavior) is unchanged for everything else. Deliberately NOT
- * extended to LOADCORE/INTRMAN/IOMAN/etc without the same direct,
- * cross-verified evidence this round obtained for these specific
- * two - see docs/STATUS.md Round 760's own "not yet extended"
- * note. */
+ * behavior) is unchanged for everything else.
+ *
+ * Round 762 (task #758, "do the subsystem" - the audit branch of the
+ * user's Round 761 instruction, NOT the fabrication branch; this
+ * round's additions are ordinary evidence-backed fixes, same
+ * discipline as every round before Round 761, not an extension of
+ * that round's narrow exception): grepped every uploaded 2002-2003
+ * IOP module reimplementation source file for the same "[loaded @]
+ * START-END" header-comment convention Round 760 used for SYSMEM/
+ * EXCEPMAN, and found it present in 13 more files. Cross-verified
+ * with TWO independent checks against this project's own live BIOS
+ * image (docs/STATUS.md Round 762 has the full walkthrough):
+ *
+ *   1. Every module below whose real ROMDIR entry could be located
+ *      appears in this exact BIOS's real IOPBTCONF boot list, and
+ *      the modules' fixed START addresses, sorted numerically, land
+ *      in EXACTLY the same order as IOPBTCONF's own real module
+ *      list order - SYSMEM, EXCEPMAN, SSBUSC, DMACMAN, EECONF,
+ *      VBLANK, IOMAN, STDIO, SIFMAN, SIFCMD, REBOOT - with every gap
+ *      between two adjacent addresses fully explained by an
+ *      intervening real IOPBTCONF module this project has no source
+ *      comment for (LOADCORE, INTRMANP/I, SYSCLIB, HEAPLIB,
+ *      THREADMAN, MODLOAD, ROMDRV, IGREETING). Zero overlaps and
+ *      zero order inversions across 9 independently-sourced
+ *      addresses is strong internal-consistency evidence these are
+ *      real, not transcription errors or guesses.
+ *   2. Each of these 9 modules' real ROMDIR payload size (this
+ *      project's own /tmp/romdir_dump.py, same RESET/ROMDIR-walk
+ *      technique already used for SYSMEM/EXCEPMAN) is consistently
+ *      LARGER than the source comment's own (END-START) span - the
+ *      expected, honest relationship for a real on-disk ELF (headers
+ *      + relocations + symbol tables) versus only its .text/.data
+ *      footprint once actually resident in RAM, not a contradiction.
+ *
+ * NOT included despite a documented address:
+ *   - TIMEMANP/TIMEMANI both cite "00007D00" as their real load
+ *     start. This project's own load_only_one()/load_all_modules()
+ *     architecture front-loads (parses+relocates+registers exports
+ *     for) EVERY listed module before running ANY entry point (see
+ *     load_all_modules()'s own header comment) - so if both twins
+ *     shared one fixed address here, the I-twin's later load would
+ *     silently overwrite the P-twin's already-relocated code in
+ *     memory before the P-twin's own already-computed entry point
+ *     ever runs, corrupting whichever twin loads first. Real
+ *     hardware's own twin-selection mechanism does not have this
+ *     failure mode (each twin's own real _start() independently
+ *     decides at RUN time whether to no-op, not at LOAD time via a
+ *     memory collision this project's own loader would introduce).
+ *     Fixing this safely needs an architecture change (e.g.
+ *     interleaving each module's load with its own entry-point call,
+ *     matching module_has_i_twin()'s own already-cited real
+ *     precedent for real hardware behavior) that is out of scope for
+ *     this round's narrow, evidence-only audit - left for a future
+ *     round rather than rushed.
+ *   - THREADMAN and SIO2MAN's own uploaded source files' "[loaded @]"
+ *     comments have no determinable address (literally unknown/absent
+ *     in the source) - no evidence to act on, excluded.
+ * EECONF and STDIO's source comments only document a START address
+ * (no END) - included anyway, since kernel_tier_fixed_address() only
+ * ever needs a start address (bump_addr's headroom-based end-of-
+ * module handling, above, is unaffected by not knowing a documented
+ * end). */
 static uint32_t kernel_tier_fixed_address(const char *name)
 {
     if (strcmp(name, "SYSMEM") == 0)   return 0x00000830u;
     if (strcmp(name, "EXCEPMAN") == 0) return 0x00003430u;
+    if (strcmp(name, "SSBUSC") == 0)   return 0x00005C00u;
+    if (strcmp(name, "DMACMAN") == 0)  return 0x00006000u;
+    if (strcmp(name, "EECONF") == 0)   return 0x0000AA00u;
+    if (strcmp(name, "VBLANK") == 0)   return 0x00011F00u;
+    if (strcmp(name, "IOMAN") == 0)    return 0x00012900u;
+    if (strcmp(name, "STDIO") == 0)    return 0x00016200u;
+    if (strcmp(name, "SIFMAN") == 0)   return 0x00016900u;
+    if (strcmp(name, "SIFCMD") == 0)   return 0x00017D00u;
+    if (strcmp(name, "REBOOT") == 0)   return 0x0001A800u;
     return 0;
 }
 

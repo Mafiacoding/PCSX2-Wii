@@ -10649,3 +10649,20 @@ extended to 4.08B cumulative instructions; IOP remained in the same slow, real-h
 wait Round 751 already documented, so whether this stand-in lets GT3 progress further past the Round-173 wall
 remains unverified and is left as an explicit open item for a future round. See docs/STATUS.md "Round 761" for
 the full writeup, citations, and honest limitations.
+
+## Round 762: fixed-address IOP module loading extended to 9 more modules (ordinary evidence-backed fix)
+
+**Not a continuation of Round 761's fabrication exception** - this round's change is fully evidence-backed,
+same discipline as every round before Round 761. Audited every uploaded IOP module reimplementation source file
+for the `[loaded @] START-END` convention Round 760 used for SYSMEM/EXCEPMAN, found it in 13 more files, and
+extended `kernel_tier_fixed_address()` (`source/hw/iop_module_loader.c`) with 9 of them: `SSBUSC`, `DMACMAN`,
+`EECONF`, `VBLANK`, `IOMAN`, `STDIO`, `SIFMAN`, `SIFCMD`, `REBOOT`. Cross-verified two ways against the live
+`PS2 Bios 30004R V6 Pal.bin`: (1) the 9 modules' addresses, sorted, land in exactly the same order as the real
+`IOPBTCONF` boot list pulled directly from ROM, with zero overlaps across all 9; (2) each module's real ROMDIR
+payload size is consistently larger than its source comment's documented span, the expected on-disk-ELF-vs-
+resident-footprint relationship. `TIMEMANP`/`TIMEMANI` share a documented address but were deliberately
+excluded - this project's front-loading module-load architecture would let the second-loading twin silently
+overwrite the first's already-relocated code before its entry point runs, a real collision risk needing an
+architecture change first. `THREADMAN`/`SIO2MAN` excluded outright (no determinable address in source). Full
+133-test regression suite passes (1 pre-existing unrelated failure), Wii cross-build clean (0 warnings/errors).
+No fresh GT3 re-verification this round - see docs/STATUS.md "Round 762" for the full writeup.

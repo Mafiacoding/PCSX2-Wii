@@ -10777,4 +10777,10 @@ boot_info addresses are bump-allocated only after - guaranteeing no real module 
 via the same instrumentation (write-watch never fires, bad call never happens) across a fresh 2.4B-instruction
 GT3 survey; IOP now reaches a genuine halted state instead of infinite-looping. Regression suite (131 tests: 75
 pass, 56 pre-existing unrelated failures) and Wii cross-build both clean. See docs/STATUS.md "Round 769" for the
-full writeup.
+full writeup. Follow-up characterization (same round): continued the chain
+1.2B more instructions past the fix - IOP's new halt at pc=0x000014D0 is
+the pre-existing, already-documented Round 173 diagnostic guard (real
+IOP thread-context/TCB gap, not a bug), and EE spins forever on a real
+SIF_SMFLAG register poll since the IOP will never signal again. GS state
+is still fully unconfigured (pmode/dispfb all zero), so no image was
+captured this round - honest negative, nothing to render yet.

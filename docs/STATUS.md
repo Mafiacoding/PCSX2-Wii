@@ -31382,12 +31382,40 @@ build_fail (all pre-existing, unrelated stale-documentation gaps per Round
 Wii/devkitPPC cross-build: clean, `pcsx2-wii.elf`/`pcsx2-wii.dol` produced,
 no compile or link errors.
 
-**Not yet done:** the new post-fix resting state (IOP halted at
-pc=0x000014D0, EE spinning near pc=0x82180-0x82198) has not yet been
-further characterized to determine whether it's a benign park or a new,
-different stall worth investigating - that's the natural next step,
-along with the user's standing request to capture a rendered image if the
-boot demonstrably progresses further as a result of this fix.
+**Post-fix resting state, characterized.** Continued the GT3 checkpoint
+chain from the fix-verification checkpoint (built fresh from the
+now-committed tracked tree) for a further 1.2B instructions
+(total_instr=3,759,998,712). IOP stays halted at pc=0x000014D0 the entire
+time - not a new bug. A live dump confirmed this is the *already-
+documented* Round 173 (task #338) diagnostic guard: "PC wandered into
+unpopulated low IOP kernel memory (real thread-context gap)" -
+0x000014D0 sits inside real IOP low-kernel memory that this project has
+never populated (no IOP TCB/multi-threading model - an already-scoped-
+out, substantial undertaking per that guard's own header comment), and
+the guard's zero-run detector correctly, immediately halts on it rather
+than letting the PC free-run through zero words. This is a clean, honest
+stop condition, not a corruption or infinite loop - confirming the
+Round 769 fix did its job: the pathological crawl/spurious-re-entry
+class of failure is gone, and the boot now runs into a real, previously
+un-reached, already-classified boundary instead.
+
+Meanwhile the EE keeps running (never halts), spinning in a genuine
+real-hardware polling loop at pc=0x00082180-0x00082198: `lw v0,0(v1);
+and v0,v0,a0; beq v0,zero,...` against address 0x1000F230 (real SIF_
+SMFLAG register - confirmed via the surrounding code at 0x821D8-0x821E8,
+which loads/stores that exact MMIO address). This is a real PS2 kernel
+SIF-handshake wait, not a bug - but since the IOP has now permanently
+parked and will never write SIF_SMFLAG again, the EE will spin here
+forever. GS state at this point remains completely unconfigured
+(pmode=0x00, dispfb1=0x00000000, dispfb2=0x00000000) - the boot has not
+yet reached any display-setup code, so per the user's standing "if it
+progresses, try to capture an image" request: real, meaningful forward
+progress WAS made (billions more instructions of genuine, non-corrupted
+IOP/EE code now execute that previously never could), but there is
+nothing GS-side yet to render - no image was captured this round, and
+none was fabricated. Escaping this specific spin (a real IOP TCB/
+threading model, per Round 173's own scoping) is a substantial follow-up
+undertaking, not a quick fix.
 
 **Files changed:** `source/hw/iop_module_loader.c` (trampoline/boot_info
 allocation reordered to after `load_all_modules()`). `docs/STATUS.md`/

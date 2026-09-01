@@ -31086,3 +31086,38 @@ Per the user's "do both" instruction (both the TIMEMANP/TIMEMANI fix above, and 
 **Checkpoint preserved.** `ckpt_gt3.bin` at `total_instr=10,080,000,000` is backed up at `/tmp/ckpt_gt3_10b_backup.bin` (never committed/rsynced - real-BIOS/disc-derived content, confined to `/tmp/` per the standing leak-prevention rule) so the next round can resume the targeted-instrumentation investigation from this exact depth rather than re-spending the compute already invested here.
 
 **Task #760 status: paused, not completed** - chain-growth itself made large numeric progress (5.28B -> 10.08B) but did not reach the actual Round-173/SYSMEM-ordinal-10 wall, and the newly-surfaced "zero drift across billions of instructions" finding means continuing to grind forward blindly is no longer clearly the right next move. Recommend the next round instrument this exact wait condition before deciding whether to keep growing the chain, treat it as evidence of a genuine bug needing a fix, or some combination of both.
+
+## Round 765 (task #760, docs-only): disassembled the exact IOP/EE stall - EE side is a real, legitimate SIF_SMFLAG wait; IOP side shows a concrete $ra-clobber self-loop candidate
+
+Per the user's explicit instruction: flag/disassemble the exact condition first, then push the chain forward. This entry covers the disassembly/diagnosis half.
+
+**Tooling.** Built `tools/round729-gt3-discboot/ckpt_inspect.c` (new, committed this round - reusable diagnostic, not scratch-only): loads a checkpoint and prints full EE/IOP GPR state, the three real SIF mailbox/flag registers (`sif_mmio_read32` on `0x1000F200`/`0x1000F210`/`0x1000F230`), IOP INTC `istat`/`imask`/`ictrl`, and dumps flat binary windows of both IOP RAM (`0x00000B00-0x00000E00`) and EE RAM (`0x80005D00-0x80006400`) around the two cores' stalled PCs for disassembly. Ran it against the Round 764 checkpoint (`total_instr=10,080,000,000`), then fed both dumps through the existing `tools/round655-ee-disasm/disasm.c` (already cross-referenced against this project's own interpreter tables, MIPS-I base compatible for both cores).
+
+**EE side: confirmed, not a mystery.** EE `pc=0x80005E5C`, mid-instruction inside a tiny loop at `0x80005E58-0x80005E6C`:
+```
+0x80005E58: lui  v0, 0xB000
+0x80005E5C: ori  v0, v0, 0xF230      <- pc parked exactly here
+0x80005E60: lw   a0, 0(v0)           ; a0 = SIF_SMFLAG (real hw 0xB000F230)
+```
+with a matching compare-and-retry pair 100+ bytes further in (`0x80005EB4-0x80005F2C`: `lw v0,0(v0)` / `beq a0,v0,+exit` / re-read-and-retry). This is byte-for-byte the same real SIF_SMFLAG debounce-wait subroutine the much earlier Round ~87-134 disassembly (found via STATUS.md history search, Round 764 follow-up) already identified - confirmed directly again here, not just by citation. `SIF_SMFLAG` reads real `0x00000000` (via `ckpt_inspect`'s SIF register dump). The EE is doing exactly what it should: correctly, legitimately waiting for the IOP side to write nonzero flag bits to this real hardware register. No fix needed here - this is real, working, evidenced code.
+
+**IOP side: the actual blocker, and a concrete candidate root cause.** IOP `pc=0x00000C60`, `next_pc=0x00000C64`, `$ra=0x00000C4C` - inside a small subroutine at `0x00000C3C-0x00000C8C` (within SYSMEM's real fixed-load range `0x830-0x1500`, per Round 760's fixed-address table). Full disassembly of that subroutine:
+```
+0x00000C3C: addiu sp, sp, -24        ; prologue - no "sw ra" anywhere in this function
+0x00000C40: nop
+0x00000C44: jal   0x00001358         ; sets $ra = 0x00000C4C (next instr + 4)
+0x00000C48: nop
+0x00000C4C: beq   v0, zero, 0x00000C7C   ; <-- $ra now points HERE, inside this same function
+0x00000C50: nop
+0x00000C54: lw    v0, 4(v0)
+...
+0x00000C88: jr    ra                 ; epilogue - jumps to whatever $ra currently holds
+0x00000C8C: addiu sp, sp, 24
+```
+The captured register dump shows `$ra=0x00000C4C` exactly - i.e. this function's *own internal* `jal` call already overwrote its return address, and the function never re-saves/restores a caller-supplied `$ra` anywhere in its body. Because the `jal` at `0xC44` executes unconditionally on every call (before any branch), `$ra` is clobbered every single invocation. When execution reaches the `jr ra` epilogue at `0xC88`, it does not return to this function's true original caller - it jumps to `0xC4C`, back inside its own body, immediately after the very `jal` that broke it. That produces a tight, closed loop (`0xC4C -> ... -> 0xC88 -> 0xC4C -> ...`) that re-tests the same condition against completely static register/memory state forever - a precise mechanical explanation for the "zero drift across 4.8B instructions" finding from Round 764: the loop isn't slowly progressing, it's provably stuck re-executing the exact same closed instruction cycle indefinitely.
+
+**IOP INTC state is a red herring for this specific loop.** `istat=0x00000801`, `imask=0x00000000`. Per this project's own `include/core/hw/iop_intc.h` documentation, bits 0 and 11 are the modeled VBLANK_IN/VBLANK_OUT lines - continuously-latching real per-field pulses, not DMA/SIF completion signals, and not gating this loop at all (the loop is a pure memory poll, not an interrupt wait). Confirmed by direct citation, not assumption - no action needed on IOP INTC masking to address this specific stall.
+
+**Not yet concluded whether this is a genuine emulator bug or a real-hardware-faithful path taken only because of an earlier divergence.** The `jal 0x1358` target and this subroutine's own caller are both outside the dumped `0x00000B00-0x00000E00` window, so it's not yet confirmed whether: (a) this is a genuine relocation/decode fault in this project's own module loader or interpreter causing a real Sony routine's bytes to be corrupted or misplaced, (b) this really is how the real ROM bytes read at this address and the routine is only reached in this self-trapping way because some earlier, upstream condition (which the loaded word from `sub_1358()+4` depends on) differs from real hardware and takes the "wrong" branch into this trap, or (c) - least likely given the clean, deliberate-looking `beq`/`lw`/`srl` structure around it - this project's own MIPS-I decode table has a subtle mnemonic gap for one of these specific opcodes. No source fix is implemented this round: per the project's evidence-first discipline, the next concrete, scoped step is disassembling `0x00001358` and locating/disassembling this subroutine's real caller (search the ROMDIR-resolved SYSMEM/EXCEPMAN code range for `jal 0x00000c3c` or `jalr` targeting it) to determine which of (a)/(b)/(c) actually applies before touching tracked source.
+
+**Files changed:** `tools/round729-gt3-discboot/ckpt_inspect.c` (new, committed - reusable checkpoint/register/memory inspector), `docs/STATUS.md`/`docs/ROADMAP.md` (this entry). No `source/`/`include/` files touched - regression suite and Wii rebuild correctly skipped per the docs-only convention. Leak-check run and confirmed clean (no `.bin`/`.iso`/`.elf`/bios/checkpoint content staged) before commit.

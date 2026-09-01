@@ -10691,3 +10691,18 @@ Round 751's "slow but eventually-resolving real T3/HBLNK wait" diagnosis, since 
 instrumentation pass on the exact wait condition before further blind chain-growing. Checkpoint preserved at
 `/tmp/ckpt_gt3_10b_backup.bin` (never committed, real-disc-derived). See docs/STATUS.md "Round 764" for the
 full writeup.
+
+## Round 765 (docs-only): disassembled the exact IOP/EE stall
+
+EE side confirmed real/correct: parked at `0x80005E5C`, mid a genuine SIF_SMFLAG (`0xB000F230`) debounce-wait
+loop - same routine the old Round ~87-134 disassembly identified, re-confirmed directly this round. IOP side:
+parked at `0x00000C60` inside a small SYSMEM-range subroutine (`0x00000C3C-0x00000C8C`) whose prologue calls
+`jal 0x00001358` without saving its own `$ra` first; captured register state shows `$ra=0x00000C4C` - exactly
+the address right after that `jal`, inside the function's own body. Its `jr ra` epilogue therefore jumps back
+into itself, not to its real caller, producing a tight closed self-loop that exactly explains Round 764's
+"zero drift across 4.8B instructions" finding. IOP INTC istat/imask (VBLANK bits per `iop_intc.h`) confirmed
+unrelated - this is a pure memory poll, not an interrupt wait. Not yet confirmed whether this is a genuine
+emulator bug or a real-hardware-faithful path reached only via an earlier upstream divergence - `0x1358` and
+this subroutine's real caller are both outside the dumped window and are the next concrete step. New reusable
+tool: `tools/round729-gt3-discboot/ckpt_inspect.c`. No source fix this round - docs-only, regression/Wii-build
+correctly skipped. See docs/STATUS.md "Round 765" for the full writeup.

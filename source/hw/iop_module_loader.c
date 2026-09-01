@@ -191,6 +191,20 @@ void iop_module_loader_reset(void)
     g.bump_next = BUMP_BASE;
 }
 
+/* Round 770 (task #764): see this function's own declaration in
+ * iop_module_loader.h for the full rationale - checkpoint.c had no
+ * block at all for this file's internal `g` state, causing
+ * checkpoint-chained resumes to spuriously re-run the entire one-shot
+ * boot dispatch the first time IOP PC organically ran off the end of
+ * all real, already-loaded module code. `g` is flat/pointer-free, so
+ * a raw blob is a safe, correct representation - same convention as
+ * iop_hle_thread_get_checkpoint_blob() (Round 659). */
+void *iop_module_loader_get_checkpoint_blob(uint32_t *size_out)
+{
+    if (size_out) *size_out = (uint32_t)sizeof(g);
+    return &g;
+}
+
 iop_module_loader_stats_t *iop_module_loader_get_stats(void) { return &g.stats; }
 
 int iop_module_loader_get_module_count(void) { return g.modlist_count; }

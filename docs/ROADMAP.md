@@ -10784,3 +10784,26 @@ IOP thread-context/TCB gap, not a bug), and EE spins forever on a real
 SIF_SMFLAG register poll since the IOP will never signal again. GS state
 is still fully unconfigured (pmode/dispfb all zero), so no image was
 captured this round - honest negative, nothing to render yet.
+
+**Round 770 correction (task #764):** the "IOP permanently halts at
+pc=0x000014D0" conclusion above was itself a checkpoint-chaining
+artifact, same root cause as Round 769's own a0=1 bug - `iop_module_
+loader.c`'s internal `g` struct (one-shot boot-dispatch guard, bump
+allocator, module tables) was never included in `checkpoint.c`'s
+save/load format, so every checkpoint resume spuriously re-triggered
+the full one-shot module boot dispatch the first time IOP PC organically
+ran off the end of loaded code. Fixed with a new `"IMLD"` checkpoint
+block (same pattern as Round 649/659/750's GSM0/ITHR/ICDV fixes). With
+the fix in place, the IOP does NOT halt: re-ran the GT3 chain fresh to
+2.16B instructions and the IOP continuously alternates between real work
+(pc≈0x00155B40) and the default interrupt vector (Round 174/340's
+documented unhandled-pending-interrupt behavior, firing on VBLANK).
+Round 769's identification of the EE's SIF_SMFLAG poll loop (pc=0x00082180)
+was correct and still holds; only the "IOP is dead so it'll never
+resolve" conclusion was wrong. New precise evidence: EE is waiting for
+bit 0x00040000 of SIF_SMFLAG, which currently reads 0x00030000 (bits
+16/17 set, bit 18 not). GS/Display still unconfigured (pmode/dispfb all
+zero) - OSDSYS's own module (0x00200000-0x00480000) is not yet reached;
+the EE is still one layer earlier, in EE-kernel/IOP SIF handshake code.
+See docs/STATUS.md "Round 770" for the full writeup and regression/build
+verification.

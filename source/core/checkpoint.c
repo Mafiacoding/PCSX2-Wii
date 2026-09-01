@@ -18,6 +18,7 @@
 #include "core/hw/iop_hle_bios.h"
 #include "core/hw/iop_hle_modules.h"
 #include "core/hw/iop_hle_thread.h"
+#include "core/hw/iop_module_loader.h"
 #include "core/hw/iop_intc.h"
 #include "core/hw/iop_timers.h"
 #include "core/hw/iop_heap.h"
@@ -113,6 +114,25 @@ int checkpoint_save(const char *path)
         iop_cdvd_checkpoint_t cdvd_ckpt;
         iop_cdvd_checkpoint_save(&cdvd_ckpt);
         if (write_block(f, "ICDV", &cdvd_ckpt, sizeof(cdvd_ckpt)) < 0) goto fail;
+    }
+    /* Round 770 (task #764) fix: see iop_module_loader.h's own
+     * iop_module_loader_get_checkpoint_blob() citation - this file's
+     * static `g` state (one-shot `attempted` flag, bump allocator
+     * cursor, per-module entry points, trampoline/boot_info addresses)
+     * was never captured by any block here before, silently resetting
+     * to fresh-init "boot not yet attempted" defaults on every single
+     * checkpoint resume - the exact same bug class as Round 649's GSM0
+     * gap, Round 659's ITHR gap, and Round 750's ICDV gap. Confirmed
+     * empirically this round: this gap caused chain_driver's "continue"
+     * mode to spuriously re-run the entire one-time module-boot
+     * dispatch (redispatching the IOP straight back to SYSMEM's entry
+     * point) the first time IOP PC organically ran off the end of all
+     * real, already-loaded module code - a checkpoint-chaining tooling
+     * artifact previously misread as a real interrupt-storm/wander bug. */
+    {
+        uint32_t imld_size = 0;
+        void *imld_blob = iop_module_loader_get_checkpoint_blob(&imld_size);
+        if (write_block(f, "IMLD", imld_blob, imld_size) < 0) goto fail;
     }
     if (write_block(f, "MCH0", mch_get_state(), sizeof(*mch_get_state())) < 0) goto fail;
     if (write_block(f, "SIF0", sif_get_state(), sizeof(*sif_get_state())) < 0) goto fail;
@@ -242,6 +262,13 @@ int checkpoint_load(const char *path, const bios_image_t *ee_bios,
         if (size != sizeof(cdvd_ckpt)) goto fail_close; /* struct-layout mismatch - fail safely, per this file's own documented contract */
         memcpy(&cdvd_ckpt, generic, size);
         iop_cdvd_checkpoint_load(&cdvd_ckpt);
+    }
+    {
+        uint32_t imld_cap = 0;
+        void *imld_dest = iop_module_loader_get_checkpoint_blob(&imld_cap);
+        EXPECT("IMLD", generic, sizeof(generic), &size);
+        if (size != imld_cap) goto fail_close; /* struct-layout mismatch - fail safely, per this file's own documented contract */
+        memcpy(imld_dest, generic, size);
     }
     EXPECT("MCH0", generic, sizeof(generic), &size); memcpy(mch_get_state(), generic, size);
     EXPECT("SIF0", generic, sizeof(generic), &size); memcpy(sif_get_state(), generic, size);

@@ -31421,3 +31421,124 @@ undertaking, not a quick fix.
 allocation reordered to after `load_all_modules()`). `docs/STATUS.md`/
 `docs/ROADMAP.md` (this entry). Leak-check run and confirmed clean before
 commit.
+
+## Round 770 (task #764): the real checkpoint gap, and a correction to Round 769
+
+**User directive.** "Configure GS/Display now, after that check if osdsys
+is finally reachable."
+
+**Root cause found.** `source/hw/iop_module_loader.c` keeps its own
+static `g` struct (one-shot `attempted` flag, bump-allocator cursor,
+per-module entry points, ELF/export/import bookkeeping) - the exact same
+class of bug fixed three times before for other subsystems (Round 649
+GSM0/gs_mem.c, Round 659 ITHR/iop_hle_thread.c, Round 750 ICDV/
+iop_cdvd.c): `checkpoint.c` had no save/load block for it at all. Every
+checkpoint-chained "continue" run therefore restarted `g` at its
+zero-initialized state. The first time IOP PC organically ran off the
+end of all real, already-loaded module code (the genuine, honest "ran
+off a cliff" condition), `iop_module_loader_boot()`'s one-shot guard
+(`if (g.attempted) return 0;`) saw `attempted=0` again and silently
+re-ran the ENTIRE 29-module boot dispatch a second time, redispatching
+the IOP straight back to SYSMEM's entry point. Confirmed live via a
+scratch-tree diagnostic print
+(`[R770-BOOT] called pc=0x00204000 attempted=0 instr=34962031
+bump_next=0x00000000 modlist_count=0`) at exactly the point this fired.
+
+This means **Round 769's own conclusion - "the IOP genuinely, permanently
+halts at pc=0x000014D0 (Round 173's diagnostic guard)" - was itself
+almost certainly a manifestation of this same still-unfixed bug**, not
+organic BIOS/IOP behavior. Round 769 used the same checkpoint-chaining
+methodology and never checkpointed `g`, so its own chain was exposed to
+the identical corruption; it happened to resolve into an early, genuine
+halt-guard hit rather than the interrupt-storm/spurious-redispatch
+pattern this round's earlier investigation caught directly. Both are the
+same root cause. This is a correction, not a new finding layered on top
+of a still-valid one.
+
+**Fix.** Added `iop_module_loader_get_checkpoint_blob()` (header +
+implementation in `iop_module_loader.c`/`.h`) returning a raw pointer +
+size to `g` - confirmed fully POD/pointer-free (fixed-size arrays only),
+same precedent as `iop_hle_thread_get_checkpoint_blob()`. Wired a new
+`"IMLD"` block into `checkpoint_save()`/`checkpoint_load()` in
+`source/core/checkpoint.c`, following the exact structure of every other
+block in that file.
+
+**Regression.** Host-native suite: of the 19 README-documented commands
+that reference `checkpoint.c` and/or `iop_module_loader.c`, 9 successfully
+link and run (the rest fail on pre-existing, unrelated missing-source-file
+gaps in those specific README command lines - e.g. missing
+`iop_cdrom_legacy.c`/`iop_asyncio.c`/`dma.c` - confirmed by the identical
+missing symbols recurring across tests that don't touch either changed
+file). All 9 pass with 0 failed checks, including `test_iop_dma_spu2`,
+the one test that links `checkpoint.c` and `iop_module_loader.c` together
+- the exact combination this fix touches. Wii/devkitPPC cross-build:
+clean, `pcsx2-wii.elf`/`pcsx2-wii.dol` produced, no errors (needed
+`LD_LIBRARY_PATH=$DEVKITPPC/lib` this session for `libmpfr.so.4`, a
+sandbox-environment quirk, not a project issue).
+
+**Re-ran the GT3 checkpoint chain from cold boot against the fixed
+tree**, to 2,159,998,712 real instructions (a fresh chain - old
+checkpoints are incompatible with the new file format and were
+discarded, not silently reused). Findings, all newly re-verified rather
+than assumed:
+
+- The IOP **never halts**. It continuously alternates between real work
+  at pc≈0x00155B40 and the default IOP exception vector (pc=0x80000080),
+  confirming Round 174/340's documented "unhandled-but-pending interrupt
+  falls through to the default vector and resumes at EPC" behavior is
+  firing repeatedly and harmlessly - not the Round-769-documented
+  permanent halt, which is now understood to have been the checkpoint
+  artifact. IOP INTC state: `istat=0x00000809 imask=0x0001000d` - bit 0
+  (VBLANK_START) is both pending and unmasked with no handler installed,
+  which is exactly what drives this cadence.
+
+- The EE is still parked in the same loop Round 769 correctly identified
+  and disassembled: pc=0x00082180-0x00082198, polling real MMIO
+  0x1000F230 (SIF_SMFLAG). Round 769's identification of *what* this
+  loop does was correct; only its conclusion about *why* it never
+  resolves (a dead IOP) was wrong. A live register dump now gives the
+  exact wait condition: `a0=0x00040000` (the poll mask), and
+  `SIF_SMFLAG=0x00030000` at this instant - bits 16/17 are set, bit 18
+  (0x00040000) is not, so the `and`+`beq` keeps looping. This is a
+  precise, evidenced target for a future round, not yet investigated
+  further this round (no fix implemented here - flagging it rather than
+  guessing at what should set that bit).
+
+- **GS/Display is still unconfigured** at this depth: `pmode=0x00
+  dispfb1=0x00000000 dispfb2=0x00000000`. Nothing has called SetGsCrt or
+  written a display-configuration register yet.
+
+- **OSDSYS reachability, directly answering the user's second question:**
+  not yet reached. The address range OSDSYS's own loaded ELF occupies
+  (0x00200000-0x00480000, per Round 274/360's own citations) is not
+  where the EE is executing - pc=0x00082180 is EE kernel-level code (the
+  low-address 0x00082xxx range, previously characterized across Rounds
+  429-441 as the EE kernel's own dispatch/BOOTEND-class polling region),
+  well before OSDSYS's module would even be loaded and handed control.
+  So OSDSYS has not been reached at this checkpoint depth - the boot is
+  still one layer earlier, in the EE-kernel/IOP SIF handshake that must
+  resolve first.
+
+**Answering the user's directive directly.** "Configure GS/Display now"
+- not done this round: the actual blocker is upstream of any GS/Display
+code path (EE hasn't even reached OSDSYS yet, let alone a display-setup
+syscall), so there was nothing evidenced to configure on the GS/Display
+side itself. What WAS necessary and done: fixing the checkpoint bug that
+was actively producing a false "permanently halted" reading, which had
+this investigation pointed at the wrong wall. "Check if OSDSYS is finally
+reachable" - answered: not yet, at 2.16B instructions into this GT3 disc
+boot; the EE is still resolving an earlier real-hardware SIF_SMFLAG
+handshake with the IOP, and OSDSYS's own module code is not yet loaded
+or executing.
+
+**Recommended next step (not started this round):** find the real IOP
+code that should OR bit 0x00040000 into SIF_SMFLAG, and why it isn't
+firing despite the IOP now genuinely, continuously executing (not dead)
+- this is now a live, tractable target rather than a dead end behind a
+false halt.
+
+**Files changed:** `include/core/hw/iop_module_loader.h`,
+`source/hw/iop_module_loader.c` (new `iop_module_loader_get_checkpoint_
+blob()`), `source/core/checkpoint.c` (new `"IMLD"` save/load block).
+`docs/STATUS.md`/`docs/ROADMAP.md` (this entry). Leak-check run and
+confirmed clean before commit.

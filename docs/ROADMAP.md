@@ -10706,3 +10706,25 @@ emulator bug or a real-hardware-faithful path reached only via an earlier upstre
 this subroutine's real caller are both outside the dumped window and are the next concrete step. New reusable
 tool: `tools/round729-gt3-discboot/ckpt_inspect.c`. No source fix this round - docs-only, regression/Wii-build
 correctly skipped. See docs/STATUS.md "Round 765" for the full writeup.
+
+## Round 766: ROOT CAUSE FOUND AND FIXED - missing COP0 Status.IsC support corrupting SYSMEM's own code
+
+Extracted the real SYSMEM ELF straight from the BIOS ROM and disassembled it: the real Sony code correctly
+saves/restores `$ra` around its internal `jal` (Round 765's "no `sw ra`" observation was accurate about the
+corrupted RAM but wrong about why - the real code is normal and correct). Ruled out a relocation bug (SYSMEM's
+real `.rel.text` table has no entries anywhere near the corrupted words; `iop_elf.c`'s relocation code re-read
+and confirmed correct, consistent with Round 758's independent finding). A live write-watch caught the real
+culprit: genuine Sony boot ROM code at `0x00103BE0-0x00103C70` executes the textbook R3000A cache-init idiom -
+`mtc0` sets Status.IsC (bit 16, "Isolate Cache"), then loops storing zero across `0x000-0xF80` in 128-byte
+strides, then clears IsC. On real hardware, stores made while IsC is set are redirected to the CPU's own cache
+and never touch RAM - this project's `iop_core.c` tracked the bit but never gated stores on it, so the store
+loop was corrupting real RAM instead, clobbering SYSMEM's own resident code (`0x830-0x1500`+) wherever the
+128-byte stride landed. Likely also the root cause of Round 754-759's still-open, adjacent `0x400-0x4C0`
+corruption finding. **Fix**: gated the raw-RAM-write tail of `iop_mem_write8/16/32()` behind
+`cop0[12] & 0x10000` (no-op while IsC is set), placed after all MMIO dispatch so hardware-register writes stay
+correctly unaffected. Verified via cold-boot + byte-for-byte comparison against the real ROM: SYSMEM's code is
+now provably intact (only the two legitimate, correctly-relocated `jal`/`j` targets differ from the raw ROM
+bytes, exactly as expected). 133/134 regression (same pre-existing unrelated failure), Wii cross-build clean
+(0 warnings/errors). Not yet re-run against the GT3 chain from a fresh cold boot - the existing 10.08B/11.28B
+checkpoints were captured against the old, corrupted tree and aren't valid starting points for the fixed one.
+See docs/STATUS.md "Round 766" for the full writeup.

@@ -10679,3 +10679,15 @@ fixed address for either name) is completely unaffected and keeps its existing, 
 regression test added (`tests/test_iop_module_loader_p_twin_skip.c`), full 134-test suite passes (1 pre-existing
 unrelated failure), Wii cross-build clean. Not yet re-verified against a fresh GT3 chain - see docs/STATUS.md
 "Round 763" for the full writeup.
+
+## Round 764 (docs-only): GT3 chain-growth resumed, surfaced a significant finding
+
+The Round 761 GT3 checkpoint was NOT lost after all (`/tmp` survived this session boundary) - resumed it against
+the current Round-763-fixed tree and grew it from `total_instr=5.28B` to `10.08B` across 4 chained continues.
+Across the full 4.8B newly-run instructions, IOP pc never left `0x00000C4C-0x00000C8C` and EE pc never left a
+handful of values in `0x80005E5C-0x80006274` - zero drift at any sampled point. This calls into some doubt
+Round 751's "slow but eventually-resolving real T3/HBLNK wait" diagnosis, since a real wait loop should show
+*some* incremental state change over that much simulated wall-clock time, not none at all. Recommend a targeted
+instrumentation pass on the exact wait condition before further blind chain-growing. Checkpoint preserved at
+`/tmp/ckpt_gt3_10b_backup.bin` (never committed, real-disc-derived). See docs/STATUS.md "Round 764" for the
+full writeup.

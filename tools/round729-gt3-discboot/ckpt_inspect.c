@@ -66,6 +66,14 @@ int main(int argc, char **argv)
     fclose(f);
     printf("wrote /tmp/ee_dump.bin (EE RAM 0x80005D00-0x80006400)\n");
 
+    /* Round 771 follow-up: dump a wider window covering the new
+     * post-SIFX-fix EE resting pc (0x8000e548) and its $ra
+     * (0x8000dbcc), to disassemble and identify the code region. */
+    f = fopen("/tmp/ee_dump_r771.bin", "wb");
+    fwrite(ee->ram + (0x8000d800u & 0x1FFFFFFFu), 1, 0x1000, f);
+    fclose(f);
+    printf("wrote /tmp/ee_dump_r771.bin (EE RAM 0x8000d800-0x8000e800)\n");
+
     /* Also dump the words the IOP loop's own pc range reads, in case
      * it's a data-poll rather than pure control flow: read out
      * 0x000-0x100 (kernel exception-vector/low-RAM area) and print

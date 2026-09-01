@@ -31542,3 +31542,133 @@ false halt.
 blob()`), `source/core/checkpoint.c` (new `"IMLD"` save/load block).
 `docs/STATUS.md`/`docs/ROADMAP.md` (this entry). Leak-check run and
 confirmed clean before commit.
+
+## Round 771 (task #764 continuation): fixed a second checkpoint-chaining state-loss bug (SIF boot-completion flags), and it unblocked real BIOS boot progress - EE confirmed executing genuine kernel "Initialize User Memory" / decompression code, not stuck
+
+User authorization: after Round 770 reported the EE parked at
+pc=0x00082180 polling real MMIO 0x1000F230 (SIF_SMFLAG) for bit
+0x00040000 (BOOTEND), and offered to keep chasing it, the user replied
+"yes."
+
+**Root cause, found before touching any code.** `source/hw/sif.c` had
+four file-static `int`s tracking the SIF_STAT_BOOTEND reassertion
+mechanism (`g_iop_boot_completed_once`, `g_ee_loadexecps2_seen`,
+`g_bootend_reassert_pending`, `g_bootend_reassert_ticks_left` - task
+#212/Round 441's own delayed-reassert design, gated on the first flag).
+None of these four were part of `sif_state_t`, and `checkpoint.c`'s
+existing `"SIF0"` block only covers `sif_state_t`. Every checkpoint-
+chained "continue" run in `chain_driver.c` is a fresh process that calls
+`checkpoint_load()` directly (not `system_init()`), so these four
+statics silently reset to their C zero-initialized state on every
+resume - permanently disabling the real BOOTEND reassert path for the
+rest of any checkpoint-chained survey, even though the underlying fact
+it tracks ("this project's own IOP module loader already finished
+loading every real ROMDIR module") remained true. This is the exact
+same bug class as four prior fixes in this project: Round 649 (`"GSM0"`,
+`gs_mem.c`), Round 659 (`"ITHR"`, `iop_hle_thread.c`), Round 750
+(`"ICDV"`, `iop_cdvd.c`), Round 770 (`"IMLD"`, `iop_module_loader.c`).
+It directly explains Round 770's finding: `SIF_SMFLAG` stuck at
+`0x00030000` (BOOTEND missing) for 2+ billion further instructions,
+with the EE spinning forever in its real SIF_SMFLAG poll loop.
+
+**Fix.** Grouped the four flags into a new `sif_extra_state_t` struct +
+`g_sif_extra` static in `source/hw/sif.c` (mirroring
+`iop_module_loader.c`'s own `g` struct convention), added
+`sif_get_checkpoint_extra_blob()` (declared in `include/core/hw/sif.h`,
+same raw-blob-pointer pattern as the four prior fixes), and wired a new
+`"SIFX"` block into `checkpoint_save()`/`checkpoint_load()` in
+`source/core/checkpoint.c`, right after the existing `"SIF0"` block.
+All four original file-static names were renamed to
+`g_sif_extra.<field>` throughout `sif.c` via `replace_all` edits and
+verified via `Read` at every call site (the SIF_SMFLAG/SIF_F250 MMIO
+write cases, the boot-completed/loadexecps2-seen note/getter pairs,
+`sif_ee_tick()`, and `sif_cmd_iop_init()`'s reset block) - no behavior
+changed, only where the four values live.
+
+**Regression.** Host-native suite: 9/9 relevant tests pass with 0
+failed checks, including `test_iop_dma_spu2` (the one test that links
+both `checkpoint.c` and `sif.c`). Wii/devkitPPC cross-build: clean,
+`pcsx2-wii.elf`/`.dol` produced, no errors.
+
+**Empirically confirmed the fix's real effect** with a fresh GT3
+checkpoint chain from cold boot (old checkpoints are incompatible with
+the new "SIFX" format and were discarded, not reused):
+
+- At 1,679,998,250 instructions (roughly Round 770's equivalent depth),
+  `SIF_SMFLAG=0x00070000` (SIFINIT|CMDINIT|BOOTEND all set) - versus
+  Round 770's `0x00030000` (BOOTEND missing). The reassert mechanism
+  the checkpoint gap had disabled is now firing correctly across the
+  checkpoint-resume boundary.
+
+- The EE has moved off the old poll loop (pc=0x00082180) entirely, onto
+  pc=0x8000e538/0x8000e548/0x8000e548-adjacent code. Disassembling that
+  region (via the Round 655 EE disassembler against a fresh EE RAM dump)
+  identified it precisely: `0x8000E508-0x8000E558` is a 16-byte-at-a-
+  time memory-zero loop (`sq zero,0(s0)` / `addiu s0,s0,16` / loop),
+  called from `0x8000dbcc` with `a0=0x00082000` and computing its end
+  bound via a helper at `0x80000C40` - i.e. it zeroes EE main RAM from
+  `0x00082000` (just past the resident kernel) up to `0x02000000` (end
+  of the 32MB EE RAM), ~31.5MB in 16-byte chunks. `0x8000E438-0x8000E4C8`
+  (also called from the same 0x8000dbcc dispatch sequence) is an FPU
+  reset (`mtc1 zero` to all 32 FPU registers, `ctc1 zero,$31`), and
+  `0x8000E560-0x8000E58C` clears bit 6 in both `INTC_STAT`/`INTC_MASK`
+  (uncached KSEG1 addresses `0xb000f000`/`0xb000f010`, matching real
+  PS2 register offsets 0x1000F000/0x1000F010 per this project's own
+  existing citations).
+
+- **Confirmed this is real, correct BIOS boot code, not a stall or a
+  bug**, by reading the actual EE RAM console-log string table the
+  caller at `0x8000dbcc` prints from (via `0x800073E8`, a print/log
+  function called with `a0` pointing into a string table at
+  `0x80016180`+): the five strings, in call order, are literally
+  `"# Initialize TIMER ...\n"`, `"# Initialize FPU ...\n"`,
+  `"# Initialize User Memory ...\n"`, `"# Initialize Scratch Pad ...\n"`,
+  `"# Restart Done.\n"`. This is the real PS2 EE kernel's own boot-time
+  hardware-initialization sequence, printing its own progress to the
+  debug console exactly as real hardware/PCSX2 does - the RAM-zero loop
+  at `0x8000E508` is literally "Initialize User Memory". At ~6
+  instructions/iteration over ~2M quadwords, this legitimately takes
+  tens of millions of instructions to complete, which is why repeated
+  60M-instruction `continue` slices kept landing inside it.
+
+- A further 60M-instruction continue step (total 2,639,997,218
+  instructions) moved the EE to pc=0x00100be0, in a completely
+  different function - disassembly (fresh EE RAM dump + Round 655
+  disassembler) shows a classic LZ-style match-copy decompression inner
+  loop (`lbu`/`sb`/decrement-count/loop, operating on a control struct
+  at `a3` with bitmask/run-length fields), copying real data from one
+  RAM region to another. This is architecturally consistent with the
+  kernel decompressing further BIOS resources after finishing hardware
+  init ("Restart Done") - i.e. the EE kept moving to genuinely new code
+  after the RAM-clear step, not stuck in a second loop.
+
+- **GS/Display is still unconfigured** at this depth (2.64B
+  instructions): `pmode=0x00 dispfb1=0x00000000 dispfb2=0x00000000`.
+  This is expected and consistent - the EE is still inside the kernel's
+  own restart/init sequence (TIMER/FPU/RAM/ScratchPad init, now into a
+  decompression stage), well before OSDSYS's own module
+  (0x00200000-0x00480000) would be loaded and configure a display.
+
+- **OSDSYS reachability:** not yet reached, but the wall Round 769/770
+  were stuck against (the permanently-disabled BOOTEND reassert) is
+  conclusively gone. The EE is now executing further real, previously-
+  unreached BIOS kernel boot code for the first time in this project's
+  GT3 checkpoint-chain history.
+
+**Answering the user's directive.** "Configure GS/Display now" - still
+not done, and still correctly not attempted: GS/Display configuration
+remains upstream-blocked by the EE kernel's own restart sequence, which
+is now progressing for real rather than being an artifact-masked dead
+loop. "Check if OSDSYS is finally reachable" - not yet at 2.64B
+instructions, but for the first time this survey is inside genuinely
+new, real boot code (confirmed via literal BIOS console-log strings)
+rather than re-treading a checkpoint artifact.
+
+**Files changed:** `include/core/hw/sif.h` (new
+`sif_get_checkpoint_extra_blob()` declaration), `source/hw/sif.c` (new
+`sif_extra_state_t`/`g_sif_extra`, accessor, renamed 4 statics),
+`source/core/checkpoint.c` (new `"SIFX"` save/load block right after
+`"SIF0"`). Also updated the scratch (never-committed, `tools/`-only)
+`tools/round729-gt3-discboot/ckpt_inspect.c` to additionally dump the
+EE RAM window around the new resting pc for disassembly. Leak-check run
+and confirmed clean before commit.

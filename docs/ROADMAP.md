@@ -10807,3 +10807,37 @@ zero) - OSDSYS's own module (0x00200000-0x00480000) is not yet reached;
 the EE is still one layer earlier, in EE-kernel/IOP SIF handshake code.
 See docs/STATUS.md "Round 770" for the full writeup and regression/build
 verification.
+
+## Round 771 (task #764 continuation)
+
+Fixed a second checkpoint-chaining state-loss bug: `sif.c`'s four SIF
+boot-completion/reassert flags (never part of `sif_state_t`/the
+existing `"SIF0"` checkpoint block) silently reset to 0 on every
+checkpoint-chained resume, permanently disabling the real
+SIF_STAT_BOOTEND reassert mechanism - the direct cause of Round 770's
+"EE stuck at pc=0x00082180" finding. Same bug class as 4 prior fixes
+(Rounds 649/659/750/770). Added `sif_extra_state_t`/`g_sif_extra` +
+`sif_get_checkpoint_extra_blob()` and a new `"SIFX"` checkpoint block.
+
+Re-ran the GT3 checkpoint chain from cold boot against the fixed tree
+and confirmed real effect: `SIF_SMFLAG=0x00070000` (BOOTEND now set,
+was `0x00030000`), and the EE moved off the old poll loop into new
+code. Disassembly + reading the real EE RAM console-log string table
+identified it precisely as the EE kernel's own boot-time hardware init
+sequence ("# Initialize TIMER/FPU/User Memory/Scratch Pad ... / Restart
+Done"), then (60M instructions later, at 2.64B total) a real LZ-style
+decompression loop at pc=0x00100be0 - genuinely new, previously-
+unreached BIOS code, confirmed via literal debug strings, not a
+checkpoint artifact or a new stall.
+
+GS/Display still unconfigured (pmode/dispfb1/dispfb2 all zero) at 2.64B
+instructions - expected, since the EE is still inside kernel restart/
+init, well before OSDSYS's own module would run. OSDSYS not yet
+reached, but for the first time this survey is executing genuinely new
+boot code rather than re-treading a checkpoint artifact.
+
+Next: continue the GT3 chain further to see where the decompression
+loop leads and whether GS/Display configuration is reached; if the
+chain plateaus again, disassemble whatever new resting point appears
+using the same method (Round 655 disassembler + reading any nearby
+debug-string table) before assuming a new bug.

@@ -101,6 +101,18 @@ int sif_iop_mmio_write32(uint32_t addr, uint32_t value);
 
 sif_state_t *sif_get_state(void);
 
+/* Round 771 (task #764 continuation): see source/hw/sif.c's own comment
+ * right above its `sif_extra_state_t` definition for the full grounding
+ * - the boot-completion/reassert flags (g_iop_boot_completed_once,
+ * g_ee_loadexecps2_seen, g_bootend_reassert_pending/_ticks_left) were
+ * never part of `sif_state_t` and so were never covered by checkpoint.c's
+ * existing "SIF0" block, silently resetting to 0 on every checkpoint-
+ * chained resume and permanently disabling the real SIF_STAT_BOOTEND
+ * reassert mechanism for the rest of any such survey - the same bug
+ * class as Round 649/659/750/770's fixes. Returns the blob pointer;
+ * *size_out receives its size in bytes (do not hardcode it in callers). */
+void *sif_get_checkpoint_extra_blob(uint32_t *size_out);
+
 /*
  * --- Minimal, explicitly-labeled IOP-side SIFCMD command-consumer
  * model (task #172/#186) ---

@@ -136,6 +136,16 @@ int checkpoint_save(const char *path)
     }
     if (write_block(f, "MCH0", mch_get_state(), sizeof(*mch_get_state())) < 0) goto fail;
     if (write_block(f, "SIF0", sif_get_state(), sizeof(*sif_get_state())) < 0) goto fail;
+    /* Round 771 (task #764 continuation): see sif.h's own
+     * sif_get_checkpoint_extra_blob() citation - the SIF_STAT_BOOTEND
+     * reassert flags were never part of sif_state_t/"SIF0" above and so
+     * silently reset on every checkpoint-chained resume, permanently
+     * disabling the real BOOTEND reassert mechanism mid-chain. */
+    {
+        uint32_t sifx_size = 0;
+        void *sifx_blob = sif_get_checkpoint_extra_blob(&sifx_size);
+        if (write_block(f, "SIFX", sifx_blob, sifx_size) < 0) goto fail;
+    }
     if (write_block(f, "VIF0", vif0_get_state(), sizeof(*vif0_get_state())) < 0) goto fail;
     if (write_block(f, "VIF1", vif1_get_state(), sizeof(*vif1_get_state())) < 0) goto fail;
     if (write_block(f, "VU10", vu1_get_state(), sizeof(*vu1_get_state())) < 0) goto fail;
@@ -272,6 +282,13 @@ int checkpoint_load(const char *path, const bios_image_t *ee_bios,
     }
     EXPECT("MCH0", generic, sizeof(generic), &size); memcpy(mch_get_state(), generic, size);
     EXPECT("SIF0", generic, sizeof(generic), &size); memcpy(sif_get_state(), generic, size);
+    {
+        uint32_t sifx_cap = 0;
+        void *sifx_dest = sif_get_checkpoint_extra_blob(&sifx_cap);
+        EXPECT("SIFX", generic, sizeof(generic), &size);
+        if (size != sifx_cap) goto fail_close; /* struct-layout mismatch - fail safely, per this file's own documented contract */
+        memcpy(sifx_dest, generic, size);
+    }
     EXPECT("VIF0", generic, sizeof(generic), &size); memcpy(vif0_get_state(), generic, size);
     EXPECT("VIF1", generic, sizeof(generic), &size); memcpy(vif1_get_state(), generic, size);
     EXPECT("VU10", generic, sizeof(generic), &size); memcpy(vu1_get_state(), generic, size);

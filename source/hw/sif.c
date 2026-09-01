@@ -25,29 +25,51 @@
 
 static sif_state_t g_sif;
 
-/* task #212 continuation (82nd/83rd findings): moved ahead of
- * sif_mmio_write32 (declaration-order fix, same class of bug as the
- * earlier g_bind_sid_table_* case in this file). */
-static int g_iop_boot_completed_once;
+/* Round 771 (task #764 continuation): task #212's boot-completion
+ * flags (g_sif_extra.iop_boot_completed_once, g_sif_extra.ee_loadexecps2_seen) and Round
+ * 441's delayed-reassert countdown (g_sif_extra.bootend_reassert_pending/
+ * _ticks_left) used to be four separate file-static ints, none of them
+ * part of `sif_state_t` and none of them covered by any checkpoint.c
+ * block - the exact same bug class already fixed four times before in
+ * this project for other subsystems (Round 649 GSM0/gs_mem.c, Round
+ * 659 ITHR/iop_hle_thread.c, Round 750 ICDV/iop_cdvd.c, Round 770 IMLD/
+ * iop_module_loader.c). Every checkpoint-chained "continue" run is a
+ * fresh process, so these four statics silently reset to 0/0/0/0 at
+ * the start of every resume - permanently disabling the SIF_SMFLAG
+ * BOOTEND reassert path (sif_mmio_write32's SIF_SMFLAG case below,
+ * gated on `g_sif_extra.iop_boot_completed_once`) for the rest of any
+ * checkpoint-chained survey, even though the real, once-true fact
+ * ("this project's own IOP module loader has already completed
+ * loading every real ROMDIR module") that flag represents remains
+ * true. Live-observed effect during a Round 770 GT3 checkpoint-chain
+ * re-survey: SIF_SMFLAG sat at 0x00030000 (SIFINIT|CMDINIT set, BOOTEND
+ * cleared) for 2+ billion further instructions with no reassert, and
+ * the EE's own real 0x00082180 SIF_SMFLAG poll loop (see sif.h's own
+ * citations on that address) spun forever as a direct result - not
+ * because the underlying real completion fact had become false, but
+ * because the checkpoint format silently discarded the flag that
+ * tracks it. Grouped into one small POD struct (mirroring
+ * iop_module_loader.c's own `g` struct convention) so a single raw-blob
+ * checkpoint accessor (sif_get_checkpoint_extra_blob(), see sif.h) can
+ * cover all four fields with the same safe, minimal pattern as the
+ * four prior fixes - not a claim that this changes any of the real,
+ * already-cited protocol/timing behavior documented at each field's
+ * original declaration site (preserved verbatim below), only that the
+ * values now survive a checkpoint round-trip. */
+typedef struct {
+    int32_t iop_boot_completed_once;   /* task #212 (82nd/83rd findings) */
+    int32_t ee_loadexecps2_seen;       /* Round 251 (task #411, 291st finding) */
+    int32_t bootend_reassert_pending;  /* Round 441 (task #212) */
+    int32_t bootend_reassert_ticks_left;
+} sif_extra_state_t;
 
-/* Round 251 (task #411, 291st finding): same declaration-order fix,
- * for the same reason - sif_mmio_write32's SIF_SMFLAG case (below)
- * needs to see this before its own first use. See the citation above
- * sif_note_ee_loadexecps2_seen()'s declaration in sif.h for the full
- * grounding of why this flag exists and what real gap it closes. */
-static int g_ee_loadexecps2_seen;
+static sif_extra_state_t g_sif_extra;
 
-/* Round 441 (task #212): delayed BOOTEND/SIFINIT/CMDINIT reassertion
- * state - see the full grounding in sif_mmio_write32()'s SIF_SMFLAG
- * case below and sif_ee_tick()'s own comment. Modeled as a simple
- * countdown (ticked once per real EE instruction, same convention as
- * ee_timers_tick()/ee_check_rpcinit_pending() etc. - see ee_core.c's
- * two call sites) rather than an absolute due-instruction-count, so
- * this file does not need to depend on ee_core.h/ee_state_t at all -
- * consistent with this file's existing, deliberately narrow surface
- * (see sif.h's own header comment on scope). */
-static int g_bootend_reassert_pending;
-static int g_bootend_reassert_ticks_left;
+void *sif_get_checkpoint_extra_blob(uint32_t *size_out)
+{
+    if (size_out) *size_out = (uint32_t)sizeof(g_sif_extra);
+    return &g_sif_extra;
+}
 
 /* Explicit, honestly-labeled approximation (not a claim of real SIF
  * cross-processor handshake latency, which is not cited/known) - see
@@ -130,9 +152,9 @@ int sif_mmio_write32(uint32_t addr, uint32_t value)
              * handshake) immediately, rather than leaving OSDSYS
              * parked forever on a flag this project's own model is
              * fully entitled to consider still true. */
-            if ((value & 0x00040000u) && g_iop_boot_completed_once) {
+            if ((value & 0x00040000u) && g_sif_extra.iop_boot_completed_once) {
                 /* Round 251 (task #411, 291st finding) ORIGINALLY
-                 * added a `g_ee_loadexecps2_seen` guard here, because
+                 * added a `g_sif_extra.ee_loadexecps2_seen` guard here, because
                  * an unconditional, SYNCHRONOUS re-signal (performed
                  * inline, in the same write call that just cleared
                  * the flag) made SIF_SMFLAG's SIFINIT/CMDINIT/BOOTEND
@@ -179,8 +201,8 @@ int sif_mmio_write32(uint32_t addr, uint32_t value)
                  * live-observed spinning at ~8-10 instructions per
                  * iteration) within a small, bounded number of real
                  * iterations - not an indefinite hang. */
-                g_bootend_reassert_pending = 1;
-                g_bootend_reassert_ticks_left = SIF_BOOTEND_REASSERT_DELAY_TICKS;
+                g_sif_extra.bootend_reassert_pending = 1;
+                g_sif_extra.bootend_reassert_ticks_left = SIF_BOOTEND_REASSERT_DELAY_TICKS;
             }
             return 1;
         case SIF_CTRL:
@@ -203,7 +225,7 @@ int sif_mmio_write32(uint32_t addr, uint32_t value)
         case SIF_F260:
             /* Round 264 (task #423, 304th finding): reactive real-
              * value response, same established pattern as SIF_SMFLAG
-             * above (the g_iop_boot_completed_once-gated re-signal) -
+             * above (the g_sif_extra.iop_boot_completed_once-gated re-signal) -
              * when the EE writes its own real "not yet ready" sentinel
              * (0xFF - confirmed via fresh disassembly of the real
              * sceSifInit()-equivalent routine reaching this exact
@@ -212,7 +234,7 @@ int sif_mmio_write32(uint32_t addr, uint32_t value)
              * own already-existing citation of that same routine
              * "clears SIF_F260 to 0xFF") AND the IOP's own real module
              * loading has already genuinely completed
-             * (g_iop_boot_completed_once, the same real flag the
+             * (g_sif_extra.iop_boot_completed_once, the same real flag the
              * SMFLAG path above already uses), respond immediately
              * with the real, already-cited hardware default
              * (0x1D000060, sif_init()'s own reset value) instead of
@@ -237,7 +259,7 @@ int sif_mmio_write32(uint32_t addr, uint32_t value)
              * panic; with both, the EE proceeds cleanly into real,
              * repeated interrupt/exception handling (COP0 context
              * save/restore at 0x80010FA8-0x80011044) with no crash. */
-            if (value == 0xFFu && g_iop_boot_completed_once) {
+            if (value == 0xFFu && g_sif_extra.iop_boot_completed_once) {
                 g_sif.f260 = 0x1D000060u;
             } else {
                 g_sif.f260 = value;
@@ -376,30 +398,30 @@ static uint32_t g_bind_sid_table_next;
 
 /* task #212 continuation (82nd/83rd findings) - see the full
  * grounding/citation in sif.h above sif_note_iop_boot_completed_once()'s
- * declaration. g_iop_boot_completed_once itself is declared earlier in
+ * declaration. g_sif_extra.iop_boot_completed_once itself is declared earlier in
  * this file (near g_sif) so sif_mmio_write32's SIF_SMFLAG case, which is
  * defined before this point, can see it - same fix pattern already
  * applied once before in this file for g_bind_sid_table_*. */
 
 void sif_note_iop_boot_completed_once(void)
 {
-    g_iop_boot_completed_once = 1;
+    g_sif_extra.iop_boot_completed_once = 1;
 }
 
 int sif_iop_boot_completed_once(void)
 {
-    return g_iop_boot_completed_once;
+    return g_sif_extra.iop_boot_completed_once;
 }
 
 /* Round 251 (task #411, 291st finding) - see sif.h for full grounding. */
 void sif_note_ee_loadexecps2_seen(void)
 {
-    g_ee_loadexecps2_seen = 1;
+    g_sif_extra.ee_loadexecps2_seen = 1;
 }
 
 int sif_ee_loadexecps2_seen(void)
 {
-    return g_ee_loadexecps2_seen;
+    return g_sif_extra.ee_loadexecps2_seen;
 }
 
 /* Round 441 (task #212): fires the BOOTEND/SIFINIT/CMDINIT reassertion
@@ -415,11 +437,11 @@ int sif_ee_loadexecps2_seen(void)
  * skip a beat" tick function). */
 void sif_ee_tick(void)
 {
-    if (!g_bootend_reassert_pending)
+    if (!g_sif_extra.bootend_reassert_pending)
         return;
-    if (--g_bootend_reassert_ticks_left > 0)
+    if (--g_sif_extra.bootend_reassert_ticks_left > 0)
         return;
-    g_bootend_reassert_pending = 0;
+    g_sif_extra.bootend_reassert_pending = 0;
     g_sif.smflag |= 0x00010000u /* SIF_STAT_SIFINIT */
                   |  0x00020000u /* SIF_STAT_CMDINIT */
                   |  0x00040000u /* SIF_STAT_BOOTEND */;
@@ -437,10 +459,10 @@ void sif_cmd_iop_init(void)
         g_bind_sid_table_sid[i] = 0;
     }
     g_bind_sid_table_next = 0;
-    g_iop_boot_completed_once = 0;
-    g_ee_loadexecps2_seen = 0;
-    g_bootend_reassert_pending = 0;
-    g_bootend_reassert_ticks_left = 0;
+    g_sif_extra.iop_boot_completed_once = 0;
+    g_sif_extra.ee_loadexecps2_seen = 0;
+    g_sif_extra.bootend_reassert_pending = 0;
+    g_sif_extra.bootend_reassert_ticks_left = 0;
 }
 
 void sif_cmd_iop_handle_init_cmd(uint32_t ee_recvbuf_addr)

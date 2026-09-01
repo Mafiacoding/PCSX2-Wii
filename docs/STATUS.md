@@ -31124,6 +31124,75 @@ The captured register dump shows `$ra=0x00000C4C` exactly - i.e. this function's
 
 **Part 2 (per the user's instruction, "push the 10b" after diagnosing): pushed the chain forward one more 150,000,000-instruction slice, `total_instr=10,080,000,000 -> 11,280,000,000`, as an empirical test of the self-loop hypothesis above.** Result: IOP `pc` after the push cycled only among `0x00000C50/C58/C6C/C80/C88` and EE `pc` only among values in `0x80005E68-0x8000626C` - i.e. both cores stayed provably confined to the exact same tight instruction ranges disassembled above, and `SIF_SMFLAG` still reads real `0x00000000`. This is exactly what the `$ra`-clobber self-loop hypothesis predicts (a closed cycle with no way out) and rules out the possibility that the earlier 10.08B sample was a rare, still-eventually-resolving coincidence. Checkpoint saved and backed up at `/tmp/ckpt_gt3_11_28b_backup.bin` (never committed - real-disc-derived, confined to `/tmp/` per the leak-prevention rule). Recommendation for the next round stands unchanged from above: disassemble `0x00001358` and this subroutine's real caller before attempting any source fix, since further blind chain-growth from here is now doubly confirmed not to help on its own.
 
+## Round 768 (task #763, docs-only): caught the entry-time a0/v0 of the Round 767 stall live - it is NOT a module-dispatch bug, it's a wrong-argument call into a shared subroutine
+
+**Task**: Round 767 found IOP infinite-looping at pc=0x00102354-0x0010237C
+because the function entered at pc=0x00102260 computes its stack pointer
+from `*a0` (expecting a0 to point at a boot-info struct whose first word
+is the RAM size in MB = 2) but was suspected of getting a0=(something
+that reads as 0) instead. This round adds a scratch watch (`iop_step()`,
+`/tmp/r768tree` only, never committed) that logs every hit of pc=0x00102260
+with full register state, then re-runs the GT3 chain from a cold boot to
+catch it live.
+
+**Result - definitively caught, and the picture is different from Round
+767's leading hypothesis.** pc=0x00102260 is hit at least twice across
+boot, not once:
+
+- **Hit #1, at instr=636** (essentially immediately after reset): `a0`
+  correctly points at a valid boot-info struct - `mem[a0+0]=0x00000002`
+  (RAM_MB=2, exactly right). This is the real, correct, working call -
+  almost certainly `iop_module_loader.c`'s own `iop_module_loader_boot()`
+  dispatching the first real module with the correctly-wired
+  `g.boot_info_addr`. Nothing wrong here; the loader's dispatch code
+  (re-checked again this round) is correct.
+- **Hit #2, at instr=101,278,702** (~101M instructions into boot, well
+  after SYSMEM/EXCEPMAN/etc. have all loaded and real code is running):
+  `a0=0x00000001` - not a pointer at all, just the small integer 1.
+  Byte-for-byte cross-referenced against the known "rom0:OSDSYS" string
+  location in IOP RAM (`docs/STATUS.md` Round 767's dump: "rom0" at
+  0x008, ":OSD" at 0x00C, "SYS\0" at 0x010) - `mem[a0+0]`, `mem[a0+4]`,
+  and `mem[a0+0xC]` observed this round (0x00000000, 0x72000000,
+  0x5344534f) are EXACTLY what an unaligned read starting at address 1
+  would produce from that same known string, confirming `a0=1` precisely
+  (not an approximation). The other real arguments captured at this same
+  call: `a1=0xFFFFFFF6` (-10 signed), `a2=0xBF801528` (a real KSEG1-
+  mapped IOP hardware-register address, PS1-legacy-range 0x1F801528),
+  `a3=0x00155A9C`. `$ra=0x00100000` and `$sp=0x001FC000` at this call
+  site exactly match the loader's own `trampoline_addr`/`INITIAL_SP`
+  constants (see Round 767's `iop_module_loader.c` citation) - but the
+  loader's dispatch code was re-verified this round to ALWAYS pass
+  `g.boot_info_addr` (a real, large, bump-allocated pointer) as `$a0`,
+  never a literal 1, so this is NOT a second loader-dispatch call. Most
+  likely explanation: this is a real, already-running function elsewhere
+  in a loaded module (not the loader itself) that happens to still be
+  carrying `$ra`/`$sp` values inherited from its own, earlier, correct
+  module-entry dispatch (i.e. a shallow, close-to-entry caller that
+  hasn't done its own `jal`/frame setup yet), and is calling into
+  0x00102260 - which is therefore NOT purely a "module entry point" but
+  a shared subroutine reused for a second, unrelated purpose (its other
+  three real arguments, -10/hardware-register-address/0x155A9C, look
+  like genuine call arguments to some kind of hardware-register wait/
+  retry utility, not a boot-info struct) - and whatever called it this
+  second time passed the wrong thing in `$a0`.
+
+**Not yet resolved**: the real caller of this second, bad invocation
+(the actual `jal`/`jr` instruction, and what real value it meant to pass
+instead of 1) has not yet been traced - this round's scratch watch only
+observed pc=0x00102260 itself, not its caller's `$ra`-implied return
+site. Task #763 is being kept open, retargeted at that backward trace,
+since the `a0=1` finding on its own is not yet enough to safely implement
+a fix (per this project's no-fabrication discipline - guessing what the
+caller "should" have passed would not be evidence-backed).
+
+No tracked source changed this round (the entrywatch hook lives only in
+a scratch tree copy under `/tmp/r768tree`, never touches the tracked
+repo) - regression suite and Wii rebuild correctly skipped per this
+project's docs-only-round policy. A fresh GT3 checkpoint (~4.47B
+instructions, same stall state as Round 767, IsC-fix-tree) and a fresh
+git bundle were saved to the user's output folder this round per their
+request, outside the tracked repo.
+
 ## Round 767 (task #762, docs-only): re-ran GT3 chain against the Status.IsC-fixed tree - confirms the fix unblocked massive real forward progress, then found and precisely characterized a NEW, downstream infinite loop
 
 **Task**: Round 766 fixed the missing COP0 Status.IsC support, but the old

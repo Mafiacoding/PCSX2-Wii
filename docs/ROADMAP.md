@@ -10749,3 +10749,16 @@ checkpoint alone. No fix implemented this round - root cause narrowed to the exa
 arithmetic, but the real caller/condition needs a checkpoint from strictly before this function's first
 dispatch (or a slow instrumented from-scratch run) to pin down further. No tracked source changed - docs-only,
 regression/Wii-build correctly skipped. See docs/STATUS.md "Round 767" for the full writeup.
+
+## Round 768 (docs-only): caught the Round 767 stall's entry live - not a loader bug, a wrong-argument call
+
+Added a scratch watch on pc=0x00102260 (never committed) and re-ran the GT3 chain from cold boot. Found this
+address is hit twice: once correctly at instr=636 (real module dispatch, a0 correctly points at boot-info with
+RAM_MB=2 - loader code confirmed correct), and once badly at instr=101,278,702 with a0=1 (a literal small
+integer, not a pointer - confirmed byte-for-byte via cross-reference against the known "rom0:OSDSYS" string
+location). $ra/$sp at the bad call match the loader's trampoline_addr/INITIAL_SP constants but the loader itself
+never passes a0=1, so this is some other, already-running code (not the loader) calling into 0x00102260 as a
+shared subroutine with the wrong first argument. The other captured arguments (a1=-10, a2=a real IOP hardware
+register address 0xBF801528, a3=0x00155A9C) suggest this address is reused for more than just module-entry boot-
+info parsing. Real caller not yet traced - no fix implemented (no evidence yet for what the correct a0 should
+have been). No tracked source changed - docs-only. See docs/STATUS.md "Round 768" for the full writeup.

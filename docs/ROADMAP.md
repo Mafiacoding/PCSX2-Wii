@@ -10841,3 +10841,32 @@ loop leads and whether GS/Display configuration is reached; if the
 chain plateaus again, disassemble whatever new resting point appears
 using the same method (Round 655 disassembler + reading any nearby
 debug-string table) before assuming a new bug.
+
+## Round 771 follow-up (same session, task #764 continuation)
+
+Traced the LZ decompression loop (pc=0x00100be0) found at the end of
+the SIFX-fix survey to its real context. Extending the checkpoint chain
+further showed the EE repeatedly revisiting the same 3 PCs rather than
+progressing - instrumented with scratch single-step drivers (never
+tracked) and found a precise, deterministic signature: the EE calls
+the real `_LoadExecPS2("rom0:OSDSYS", argc=2, ...)` BIOS syscall every
+~29.5M instructions, from the identical call site every time. Each
+cycle: OSDSYS launches -> 3 chained hardware-reinit passes -> LZ
+decompression of OSDSYS's own resources -> further execution -> and
+then the same relaunch syscall fires again.
+
+This is real, working BIOS code completing full laps, not a raw
+emulator stall - it looks like OSDSYS's own real fallback behavior when
+it can't successfully progress with the inserted disc, which lines up
+with this project's long-standing task #447 finding (OSDSYS's CD-ROM
+N-command dispatch never firing during organic boot). No tracked-source
+fix implemented this round (no re-verified evidence yet for exactly
+why disc detection still fails at this newly-reachable depth) - correctly
+docs-only, regression/Wii-build skipped.
+
+Next: instrument within a single ~29.5M-instruction cycle to find the
+exact decision point that sends control back to the ExecPS2("rom0:OSDSYS")
+relaunch instead of continuing toward disc detection/game hand-off -
+this reuses task #447's long history but now has a precise, reproducible
+entry point (the syscall handler epilogue at pc=0x80000304, callee
+0x800055A0) to instrument from directly.

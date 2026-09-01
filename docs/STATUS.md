@@ -31672,3 +31672,94 @@ rather than re-treading a checkpoint artifact.
 `tools/round729-gt3-discboot/ckpt_inspect.c` to additionally dump the
 EE RAM window around the new resting pc for disassembly. Leak-check run
 and confirmed clean before commit.
+
+## Round 771 follow-up (task #764 continuation, same session): traced the LZ decompression loop to its real context - found a precise, deterministic OSDSYS self-relaunch cycle every ~29.5M instructions
+
+Continuing directly from the SIFX-fix confirmation above, per user instruction to chase the newly-found LZ decompression loop next.
+
+**Extended the GT3 checkpoint chain three more 60M-instruction steps** (to
+3,119,996,710 total instructions). The EE kept revisiting the same
+three PCs across slices (`0x8000E538` - the User Memory zero-loop,
+`0x8000DB30` - a VBLANK-wait poll, `0x00100BE0` - the LZ decompression
+loop) rather than advancing into new territory, indicating a genuine
+repeating cycle rather than one-time linear boot progress.
+
+**Built a scratch single-step instrumentation driver** (`/tmp/restart_
+count.c`/`_2`/`_3`, `/tmp/execps2_probe.c` - all throwaway, never
+tracked) to count PC hits and capture `$ra`/argument registers over a
+500M-instruction EE-only step run from the current checkpoint. Findings:
+
+- The EE kernel's hardware re-init dispatcher (`0x8000D900`, called
+  with mask `a0=0x7F`) fires 51 times in 500M instructions; a specific
+  restart-pass entry point (`0x8000DAE8`, which begins with a VBLANK
+  ack+wait before re-running Timer/FPU/Memory/ScratchPad init) fires
+  17 times - a 3:1 ratio, because disassembly confirms there are
+  **three separate, near-identical Restart()-style functions
+  (`~0x8000DA48`, `0x8000DAE8`, `0x8000DBF8`) chained back to back**,
+  each calling the same `0x8000D900` dispatcher once. This is real,
+  intentional BIOS structure (confirmed via the same literal debug
+  strings as the prior finding), not a bug.
+
+- Every single hit of `0x8000DAE8` came from the **identical** `$ra`
+  (`0x80000304`) and `$sp` (`0x80018cf0`), spaced almost exactly
+  29,529,000 instructions apart (15 consecutive samples varied by
+  under 30 instructions each) - far too regular to be organic
+  branching; this is a real, periodic re-entry into the same call site.
+
+- Disassembling `0x80000200-0x80000378` confirms `0x80000304` is the
+  **return address inside the real EE syscall exception handler**
+  (`0x8000029C-0x80000328`: reads COP0 Cause, extracts the syscall
+  number, `jalr`s through the real BIOS syscall vector table at
+  `0x80014E80`, then restores EPC and `eret`s). So this is a genuine
+  EE **syscall** being dispatched repeatedly, roughly every 29.5M
+  instructions.
+
+- Instrumented the syscall handler's own callee entry (`0x800055A0`,
+  previously an unidentified function this project's own Round 465
+  citation explicitly flagged as receiving "our filename" - see task
+  #337/#353) and read its `$a0` as a string each time it fires: **every
+  single invocation is `_LoadExecPS2`-class call with
+  `a0="rom0:OSDSYS"`, `a1(argc)=2`, `a2(argv)=0x01fefdc0`,
+  `a3=0x002b0000`** - identical arguments every time.
+
+**Synthesis.** The EE is not stuck in a raw instruction-level loop; it
+is executing a real, working boot sequence that completes a full lap
+(OSDSYS launch -> hardware re-init -> LZ decompression of OSDSYS's own
+resources at `0x00100BE0` -> further OSDSYS execution) and then calls
+the real `_LoadExecPS2("rom0:OSDSYS", ...)` syscall **again**, restarting
+the whole cycle - precisely every ~29.5M instructions, indefinitely.
+This is consistent with a real, known PS2 BIOS fallback behavior: when
+OSDSYS cannot successfully progress with the inserted disc (i.e. it
+never gets far enough to hand off to the game), it relaunches itself
+rather than hanging. This lines up directly with this project's own
+long-standing, extensively-documented task #447 finding
+(`dispatch_ncmd()` never firing / OSDSYS's own real CD-ROM
+command-dispatch path never being reached during organic boot) -
+except this is now observed from a completely different angle (a
+precise, checkpoint-chain-verified periodic relaunch signature) and at
+a boot depth this project has never been able to reach cleanly before
+(the SIFX fix above is what made this survey possible in the first
+place).
+
+**No fix implemented this round** - per this project's no-fabrication
+discipline, the exact reason OSDSYS's disc-detection/N-command
+dispatch still fails to progress at this depth needs its own fresh,
+evidenced investigation (the extensive prior task #447 work predates
+both this session's SIF checkpoint fixes and this newly-confirmed
+precise relaunch-cycle signature, so old conclusions should be
+re-verified rather than assumed still accurate). No tracked source was
+changed this round (all instrumentation was scratch, `/tmp/`-only,
+never committed) - regression suite and Wii rebuild correctly skipped.
+
+**GS/Display status, re-confirmed:** still `pmode=0x00 dispfb1/2=0`
+throughout the entire relaunch cycle - consistent with OSDSYS never
+reaching the point where it would configure a real display (it keeps
+relaunching before getting there).
+
+**Next step (not yet started):** within one ~29.5M-instruction cycle,
+trace what specifically happens between the LZ decompression finishing
+and the `_LoadExecPS2("rom0:OSDSYS")` relaunch call - i.e. find the
+real decision point/condition that sends control back to the relaunch
+syscall instead of continuing into disc detection or game hand-off.
+This is the same shape of question task #447 has asked before, but now
+with a much more precise, reproducible entry point to instrument from.

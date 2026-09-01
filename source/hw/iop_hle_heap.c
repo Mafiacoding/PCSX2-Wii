@@ -40,6 +40,26 @@ uint32_t iop_hle_heap_sentinel_for_import(const char *module_name, uint32_t ordi
 
 int iop_hle_heap_try_handle(iop_state_t *st, uint32_t pc)
 {
+    /* Round 761 (task #762, user-approved fabrication - see this
+     * file's header for the full writeup): SYSMEM's real, hardcoded
+     * ordinal-10 (QueryBlockSize) jump target. Checked separately from
+     * the invented-sentinel range below since 0x0000044C is a real
+     * Sony address, not one this project chose. */
+    if (pc == IOP_HLE_HEAP_SYSMEM_ORDINAL10_QUERYBLOCKSIZE) {
+        /* int QueryBlockSize(void *address) - a0=address (real
+         * signature, ps2sdk sysmem.h ordinal 10). The computation
+         * itself is the real, already-tested Round 401 port
+         * (iop_heap_query_block_size()) - only the choice to intercept
+         * fetch at this exact real address is the fabricated part;
+         * see this file's header comment for the full distinction. */
+        uint32_t ra_q = st->gpr[31];
+        uint32_t address = st->gpr[4];
+        int32_t result = iop_heap_query_block_size(address);
+        st->gpr[2] = (uint32_t)result; /* real: -1 on miss, matches iop_heap_query_block_size()'s own convention */
+        st->pc = ra_q; st->next_pc = ra_q + 4u;
+        return 1;
+    }
+
     int in_range =
         (pc >= IOP_HLE_HEAP_ALLOC_SYS_MEMORY && pc <= IOP_HLE_HEAP_QUERY_TOTAL_FREE_MEM_SIZE);
     if (!in_range) return 0;

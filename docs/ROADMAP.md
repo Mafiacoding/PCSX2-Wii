@@ -10631,3 +10631,21 @@ Sony low-kernel code content at `0x44C` that Round 759 identified as the wall's 
 cause. See docs/STATUS.md "Round 760" for the full citation, verification detail, and this round's
 supplementary fresh-GT3-chain investigation (corroborates, does not newly resolve, Round 751's T3/HBLNK
 real-timer explanation).
+
+## Round 761: SYSMEM ordinal-10 (QueryBlockSize) HLE intercept - explicit, user-approved fabrication
+
+**Flagged prominently: this is a deliberate, one-off exception to this project's standing evidence-backed-fix
+discipline, done at the user's explicit, informed request** ("do the fabrication i know its a grey zone but we
+need to do it to understand how things need to work once done"), not a normal shipped fix. `include/core/hw/
+iop_hle_heap.h`/`source/hw/iop_hle_heap.c` now intercept instruction fetch at `0x0000044C` - SYSMEM's real,
+hardcoded ordinal-10 jump target (confirmed via ROM bytes, Round 748) - and answer with a real, already-tested
+Round 401 port of the real `QueryBlockSize(address)` free-list-walk logic (`iop_heap_query_block_size()`),
+rather than the genuinely unreconstructable real Sony code that lives at that address on real hardware. The
+only actually-fabricated part is the choice to intercept this one specific, well-identified real address at
+all; the underlying computation is real, already-tested code reused from Round 401, not invented. 10-check
+regression test added (`tests/test_iop_hle_sysmem_ordinal10.c`), full 133-test suite passes (1 pre-existing
+unrelated failure), Wii cross-build clean. Attempted to verify end-to-end against a fresh GT3 checkpoint chain
+extended to 4.08B cumulative instructions; IOP remained in the same slow, real-hardware-accurate T3/HBLNK-class
+wait Round 751 already documented, so whether this stand-in lets GT3 progress further past the Round-173 wall
+remains unverified and is left as an explicit open item for a future round. See docs/STATUS.md "Round 761" for
+the full writeup, citations, and honest limitations.

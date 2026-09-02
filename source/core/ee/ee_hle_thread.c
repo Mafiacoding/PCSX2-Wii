@@ -871,6 +871,24 @@ uint32_t ee_hle_thread_get_wakeup_count(int thid)
     return t ? t->wakeup_count : 0u;
 }
 
+/* Round 811 (task #811, backward-trace of GT3's WaitSema(5) call
+ * site per user's explicit request): expose a parked thread's full
+ * saved GPR context (this project's context-switch already stores
+ * all 32 real EE GPRs per-thread - see save_context()/ee_tcb_t.gpr
+ * above - there was just no accessor exposing it to host-native
+ * diagnostic drivers, unlike entry/saved_pc/wakeup_count above).
+ * reg is a raw EE register index (0=$zero..31=$ra); returns the
+ * low 64 bits (ud0) of that register's saved 128-bit value, which is
+ * sufficient for every real EE ABI use of $a0-$a3/$v0/$v1/$ra/$sp/$gp
+ * (none of which use the upper 64 bits of a 128-bit GPR in normal
+ * calling-convention code). */
+uint64_t ee_hle_thread_get_gpr(int thid, int reg)
+{
+    ee_tcb_t *t = tcb(thid);
+    if (!t || reg < 0 || reg > 31) return 0u;
+    return t->gpr[reg].ud0;
+}
+
 /* Round 597 (task #447/#536, following Round 596's finding): forced
  * preemption. This project's reschedule() is otherwise only invoked
  * from specific HLE syscall handlers above (StartThread/WakeupThread/

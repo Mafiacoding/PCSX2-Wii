@@ -33711,3 +33711,130 @@ continuation was, or capturing an *earlier* checkpoint (before
 `SCMD_CLOSECONFIG`'s 13th S-command fires) so the SIF/CDVD traces
 added this round can observe the lead-up to config-close and whatever
 was supposed to follow it, live.
+
+## Round 811b (task #811 continuation, per user's numbered backward-trace
+request): thread 1's real park PC corrected to `0x0101bb28`; containing
+function `WakeupThreadIfNotSelf` (0x0101c7e0) and its broadcast-loop caller
+(0x0100e6c8) fully decoded; a hard status/PC contradiction found and left
+UNRESOLVED - **no production-code change made**, per the user's explicit
+gate
+
+**Ground-truth correction (self-caught, not from the user):** the
+`0x0101bb00`/`0x0101bb08` PC given in the user's message belonged to
+whichever thread was live/current at the moment the earlier summary
+was written (thread 3), not thread 1's own saved context. A new
+diagnostic accessor, `ee_hle_thread_get_gpr(int thid, int reg)`, was
+added to `source/core/ee/ee_hle_thread.c` /
+`include/core/ee/ee_hle_thread.h` (read-only, follows the existing
+Round 613 accessor pattern exactly - `get_entry`/`get_saved_pc`/
+`get_wakeup_count`) to expose a thread's full 32-GPR saved context to
+host-native tools. A new driver,
+`tools/round729-gt3-discboot/r811b_thread1_gpr.c`, uses it to dump
+thread 1's real status/wait_type/wait_id/saved_pc plus all 32 GPRs at
+the earliest available GT3 checkpoint
+(`total_instr=678,449,972`). Result, cross-checked against the
+independent pre-existing `r808_thread_census.c` tool (identical
+output): thread 1's **real** saved PC is `0x0101bb28`, `status=0x4`
+(WAIT), `wait_type=2` (SEMA), `wait_id=5` - confirming the WaitSema(5)
+park is real, but at a different PC than previously assumed.
+
+**Containing function identified: `WakeupThreadIfNotSelf(target_tid)`
+at 0x0101c7e0.** Disassembled with the existing Round 655 EE
+disassembler (`/tmp/disasm`, fed by `r810_eeramdump.c` RAM windows at
+0x0101a000 and 0x0101c000). Standard prologue
+(`addiu sp,sp,-32 / sd ra,16(sp) / sd s0,0(sp)`), then: calls
+`GetThreadId()` (syscall stub at 0x0101ba80 range, sysnum -47) to get
+its own thread id into `$v0`, compares against the passed-in `$a0`
+(`beq s0,a0,...` self-check), and if different, calls
+`WakeupThread(target_tid)` (sysnum -52) via `jal 0x0101bb20`, then
+returns through the epilogue. Thread 1's saved GPR context is captured
+immediately after this inner `jal` returns (saved `$ra=0x0101c808`,
+the post-call `beq zero,zero,...` epilogue jump), with saved
+`$a0=3` - i.e., thread 1 had just called `WakeupThreadIfNotSelf(3)`
+(attempting to wake thread 3).
+
+**Caller traced one level up: a linked-list broadcast/notify-all-waiters
+loop at 0x0100e6c8-0x0100e6e8.** The real return address was read off
+thread 1's own stack (`RAM[$sp+16] = 0x0100e6e0`, matching the
+`sd ra,16(sp)` prologue slot - not simply `$ra` in the saved GPR dump,
+which only reflects the *inner* syscall-stub sub-call, not the outer
+caller). Disassembling at 0x0100e6c8 shows a list-walk: starting from
+`*(s1+64)`, for each node it calls `WakeupThreadIfNotSelf(node->tid)`
+(reading the target tid from `*(node+4)`, via `jal 0x0101c7e0`) before
+advancing to the next node via `*(node+0)`. This directly answers
+several of the user's six numbered questions: (1) containing function
+= 0x0101c7e0 with the prologue above as entry point; (2) thread 1
+reached it via the 0x0100e6d8 `jal` inside this broadcast-loop caller,
+itself a notify-all-waiters list walk; (3) the syscall immediately
+preceding the *outer* `WakeupThread` call is `GetThreadId()`
+(sysnum -47); (4) its return value is thread 1's own thread id
+(used in the `beq s0,a0` self-check, discarded once the check passes).
+
+**The open anomaly (questions 5/6 unresolved, flagged rather than
+guessed at):** thread 1's bookkeeping fields (`status=WAIT`,
+`wait_type=SEMA`, `wait_id=5`) can, per `ee_hle_thread.c`'s own
+source, only ever be set by the `WaitSema(68)` blocking branch - the
+sole writer of `wait_type=EE_TSW_SEMA` anywhere in the file (verified
+via `grep -n "wait_type = \|wait_id = \|->status = "` across the whole
+file) - and that branch always pins `pc=this_pc` (the syscall trap
+address itself) immediately before `reschedule()`/`save_context()`.
+But the saved pc/GPR context actually observed for thread 1 is
+definitively **not** a WaitSema trap - it is the return point of an
+unrelated `WakeupThread(3)` call, several function-call-levels deep
+inside a broadcast/notify loop. Read `reschedule()`, `pick_next_ready()`,
+`wake_one_sema_waiter()`, `ensure_root_thread()`, and
+`ee_hle_thread_check_preempt()` in full attempting to reconcile this;
+ruled out forced preemption (requires `status==RUN` already, which a
+WAIT-tagged thread would not have) and `load_context()`'s single call
+site (gated by `pick_next_ready()`'s RUN/READY-only filter, so it
+cannot silently re-park a thread mid-flight). Leading (unproven)
+hypothesis: `reschedule()`'s "nothing ready" branch explicitly leaves
+`g.current_thread_id` unchanged even when that thread's own status is
+not RUN/READY, and `WaitSema`'s *success* branch never resets
+`status`/`wait_type`/`wait_id` - so if semaphore 5's count became
+nonzero through some path other than `wake_one_sema_waiter()` (already
+established in Round 810 to never fire, since `SignalSema(5)` is never
+called), thread 1 could have silently passed a re-executed WaitSema(5)
+recheck and gone on to run real code (the broadcast loop, etc.) while
+its status/wait_type/wait_id bookkeeping remained stuck at stale
+WAIT/SEMA/5 values from an earlier, already-resolved park. **The
+mechanism by which semaphore 5's count would have become nonzero, if
+this hypothesis is correct, was not identified this round** - this is
+the critical open question for the next diagnostic step, and per the
+user's explicit "leave production code unchanged until the containing
+function and the preceding status transition are identified"
+constraint, no fix was attempted.
+
+**Files:** `source/core/ee/ee_hle_thread.c` /
+`include/core/ee/ee_hle_thread.h` - genuine, permanent, read-only
+diagnostic-accessor addition (`ee_hle_thread_get_gpr`), backed up
+first to `backups/round811b/` per the Round 779 rule (backup now
+deleted, change confirmed correct via independent cross-check against
+`r808_thread_census.c` and kept).
+`tools/round729-gt3-discboot/r811b_thread1_gpr.c` - new, permanent
+diagnostic driver. `tools/round655-ee-disasm/disasm.c` and
+`tools/round729-gt3-discboot/r810_eeramdump.c` - pre-existing tools,
+unmodified, used extensively this round (note: `disasm`'s count
+argument is decimal, not hex - passing a hex-formatted count string
+silently parses to 0 via `strtol(...,10)` and produces empty output).
+
+**Verification:** full 134-test host-native regression suite re-run
+in full (chunked across multiple sandbox calls due to the ~178s
+per-call wall-clock cap) against the `ee_hle_thread.c`/`.h` accessor
+addition - 133/134 pass; the sole failure (`test_gs_reglist_image`,
+GS IMAGE-mode row-wrap) is the pre-existing, already-tracked task #808
+bug, unrelated to this round's change. Wii cross-build (devkitPPC/
+libogc) completes cleanly with no new warnings or errors, producing
+`pcsx2-wii.dol`/`pcsx2-wii.elf`.
+
+**Next step (task #811, still open):** resolve the semaphore-5
+count/status contradiction - specifically, find what (if anything)
+caused semaphore 5's count to become nonzero without a `SignalSema(5)`
+call, or determine whether the "current_thread_id left unchanged"
+hypothesis is wrong and thread 1's saved context is stale/misleading
+for a different reason. An earlier checkpoint (before `SCMD_CLOSECONFIG`
+returns) combined with fine-grained per-instruction tracing of thread
+1's own PC (not just point-read snapshots) is likely required to watch
+the actual transition live, since static checkpoint inspection has now
+been pushed as far as it can go without observing execution in
+progress.

@@ -219,6 +219,8 @@ uint32_t ee_hle_thread_get_wait_id(int thid);
 uint32_t ee_hle_thread_get_entry(int thid);
 uint32_t ee_hle_thread_get_saved_pc(int thid);
 uint32_t ee_hle_thread_get_wakeup_count(int thid);
+/* Round 811: raw saved-GPR accessor (reg 0=$zero..31=$ra), low 64 bits. */
+uint64_t ee_hle_thread_get_gpr(int thid, int reg);
 
 /* Round 733 (task #447, GT3-in-game-code stall investigation): live,
  * per-process-run call counters for WakeupThread(thid)/SignalSema(semid)

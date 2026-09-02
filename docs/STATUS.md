@@ -33555,3 +33555,159 @@ chaining support) and the new `r810_cdvd_census.c`, both committed for
 reuse. Regression suite and Wii cross-build correctly skipped per the
 project's docs-only-round convention (no `source/`/`include/` file
 differs from the prior committed tree).
+
+## Round 811 (task #812): trace-only EE->IOP CDVD-request boundary audit for GT3 - DECISIVE NEGATIVE RESULT (caller never fires)
+
+Per the user's explicit spec (relayed from a second AI consulted on the
+task #447/#810 writeup): instrument the EE->IOP CDVD request boundary
+with reversible, build-gated tracing and use a 5-row interpretation
+matrix to find exactly where GT3's post-`SCMD_CLOSECONFIG` disc-read
+request disappears - *without* touching semaphore/scheduler code and
+*without* synthesizing `SignalSema(5)` or a speculative N-command
+dispatch. This round is purely observational; no fix was implemented.
+
+**Instrumentation added (backed up per Round 779's rule, reverted at
+the end of this round via `git checkout --`, confirmed zero diff):**
+
+- `source/hw/iop_cdvd.c`, gated behind `-DR811_CDVDTRACE`: a
+  `trace_cdvd_request()` helper; enter/exit tracing in `dispatch_ncmd()`
+  and `dispatch_scmd()`; a dedicated `SCMD_CLOSECONFIG` enter/exit trace
+  that also tracked "next command type" continuity; and a universal
+  register-write trace in `iop_cdvd_mmio_write8()` flagging
+  `OFF_SCOMMAND`/`OFF_NCMD` writes specifically.
+- `source/core/ee/ee_core.c`, same gate: a universal SIF RPC *bind*
+  trace inside the `cid == SIF_CMD_RPC_BIND` handling (logs `cd_ptr`,
+  `bind_sid`, caller `pc`), and a universal SIF RPC *call* trace inside
+  `cid == SIF_CMD_RPC_CALL` (logs `call_sid`, `rpc_number`,
+  `call_recvbuf`, `call_cd`, `pc`) placed right after `call_sid` lookup
+  - i.e. before any per-service branch, so it fires for every real
+  `sceSifCallRpc()`/`sceSifBindRpc()` GT3 issues regardless of whether
+  any branch below ends up handling it. This is a strict superset of
+  per-branch logging (deliberate simplification, not an oversight -
+  it also catches misrouted/unhandled sids that per-branch logging
+  would miss).
+
+Both files compile-clean individually under `-DR811_CDVDTRACE` and the
+default (non-gated) build is confirmed unaffected
+(`gcc ... source/hw/iop_cdvd.c` / `ee_core.c` with no
+`-DR811_CDVDTRACE` -> clean compile, no warnings).
+
+**Test driver:** `tools/round729-gt3-discboot/r811_cdvdtrace.c` (new,
+committed, kept - not diagnostic scaffolding but a reusable checkpoint-
+chaining survey driver in the established `r810_sigtrip.c` pattern:
+`save_ckpt_path` 5th arg chains across the sandbox's ~178s per-call
+wall-clock cap). Linked against the full ~35-file host-native source
+set (same list as `tests/README.md`'s `test_iop_dma_spu2` compile
+line) with `-DR811_CDVDTRACE`.
+
+**Run 1:** resumed from `/tmp/r781_gt3_test2.ckpt`
+(`total_instr=678,449,972`, `pc=0x0101bb00` - i.e. already essentially
+*at* thread 1's `WaitSema(5)` call site), ran 60 chunks x 1,000,000
+slices, saved to `/tmp/r811_c1.ckpt`
+(`total_instr=1,105,133,162`, `pc=0x0100d938`). Stderr trace captured
+to `/tmp/r811_trace1.log` (245 lines, all periodic progress/slice-cap
+messages - **zero** `SIF_RPC_BIND`, `SIF_RPC_CALL`, `CDVD_MMIO_WRITE`,
+or `SCMD_CLOSECONFIG` lines).
+
+**Run 2:** resumed from `/tmp/r811_c1.ckpt`, ran another 60 chunks,
+saved to `/tmp/r811_c2.ckpt` (`total_instr=1,274,181,436`,
+`pc=0x00000000` - this is the exact same terminal state Round 810
+already characterized: thread 3 has died and `reschedule()`'s
+documented fallback left the live context exactly as-is). Stderr trace
+(`/tmp/r811_trace2.log`) again shows **zero** trace lines of any kind.
+
+**Combined result across the full ~596M-instruction window
+(678,449,972 -> 1,274,181,436, i.e. from immediately before thread 1's
+`WaitSema(5)` park through thread 3's death and the terminal freeze):
+not one single `SIF_CMD_RPC_BIND`, not one `SIF_CMD_RPC_CALL` (for
+*any* sid, not just CDVD-related ones), and not one CDVD MMIO register
+write occurred.** `ncmd_call_count` stayed at 0 and `scmd_call_count`
+stayed at 13 (`last_scmd_issued=0x43`/`SCMD_CLOSECONFIG`) throughout -
+unchanged from the values already baked into the checkpoint, confirming
+no new S/N-command dispatch happened in this window either.
+
+**Verified the trace sites are correctly wired to fire unconditionally**
+whenever the enclosing `cid == SIF_CMD_RPC_BIND`/`SIF_CMD_RPC_CALL`
+blocks in `ee_step()` are entered - they are not gated behind any
+extra condition beyond "GT3 itself executed a real
+`sceSifBindRpc()`/`sceSifCallRpc()` call this step." Zero hits
+therefore means, unambiguously: **no EE code in any GT3 thread ever
+attempts a fresh SIF RPC call of any kind during this entire window.**
+
+**Matrix classification: Row 1 - "no EE-side trace at all -> GT3 never
+reaches the call."** This is a stronger, cleaner result than the
+matrix anticipated, because it applies not just to CDVD's SIF service
+but to *every* SIF RPC service - the boundary break is not a
+CDVD-specific routing/dispatch bug, a SIF misroute, or a
+`dispatch_ncmd()`-level filter gap (rows 2-4 of the matrix). It is that
+the calling code itself - whatever GT3 function was supposed to issue
+the next disc-read request after `SCMD_CLOSECONFIG` returned - never
+executes at all in this window. This directly answers the user's own
+conditional question ("is the missing edge in the caller, the
+pending-request state, or the N-command enqueue path?") with: **the
+caller.** Per the twice-stated hard constraint, no fix (SignalSema(5)
+synthesis or speculative N-command dispatch) has been implemented -
+this round is diagnostic-only, as instructed.
+
+**Context for why the caller never runs:** this converges cleanly with
+already-established findings (Round 808/809, task #810): thread 1
+parks permanently on `WaitSema(id=5)` almost immediately in this
+window (pc oscillates 0x0101bb00->0x0101bb08 in the very first chunk),
+after which the EE spends the rest of the observed window cycling
+through a tight, already-characterized loop region (~0x0100d920-
+0x0100d940) interleaved with brief returns to the 0x0101bb00 park
+site - consistent with other threads' per-tick scheduling activity
+(thread 2's WaitSema(0) service loop, thread 3's now-dead progress
+bar) rather than any new work. No thread in this window ever reaches
+whatever code path would call `sceSifCallRpc()`/`sceSifBindRpc()`
+again. Since `SCMD_CLOSECONFIG` itself (scmd=13, ending in 0x43) was
+already dispatched *before* this checkpoint was taken, the real gap is
+upstream of this checkpoint's start point: whatever GT3 code path is
+*supposed* to run after config-close completes to kick off a disc read
+never gets scheduled/executed, and thread 1's `WaitSema(5)` park
+appears to be that same code's *own* immediately-following instruction
+(the two are directly adjacent: 0x0101bb00 -> 0x0101bb08), meaning the
+disc-read request was expected to already exist by the time this
+thread parks - it doesn't, and nothing else ever re-attempts it.
+
+**Correction to Round 810's continuation section (self-discovered,
+flagging transparently per this project's anti-fabrication
+discipline):** that section's `rpc_bind_count=0` finding (from
+`r810_cdvd_census.c`'s static point-read immediately after
+`checkpoint_load()`, zero instructions executed) is **not reliable
+evidence** - `g_iop_cmd_rpc_bind_cd/count` in `sif.c` and
+`g_addintc_log`/`g_addintc_log_count` in `ee_core.c` are reset-on-init
+statics with **no corresponding checkpoint save/restore block**
+(verified by enumerating every `EXPECT`/`write_block` tag pair in
+`checkpoint.c`: no block exists for these globals). A zero-instruction
+static read after `checkpoint_load()` just observes the fresh-process
+default, not GT3's actual history. The equivalent `AddIntcHandler
+entries=0` conclusion from `r810_sigtrip.c` remains valid, because that
+tool's printout happens in-process *after* genuinely executing
+`system_run_interleaved()` chunks (not a point-read), so it correctly
+reflects the accumulated in-process log across both checkpoint-chain
+links. This round's own `SIF_RPC_BIND`/`SIF_RPC_CALL`=0 finding is
+**not** subject to this flaw, since it comes from live universal
+tracing during genuine execution across the full 596M-instruction
+window, not a static post-load read.
+
+**Files:** `tools/round729-gt3-discboot/r811_cdvdtrace.c` (new,
+committed, permanent - reusable checkpoint-chained CDVD/SIF survey
+driver). `source/hw/iop_cdvd.c` and `source/core/ee/ee_core.c` are
+back to their pre-round state (`R811_CDVDTRACE` instrumentation fully
+reverted, `git diff --stat` confirms zero diff against the prior
+commit for both files). `backups/round811/` deleted per Round 779's
+rule now that the diagnostic edits are confirmed cleanly reverted.
+Regression suite and Wii cross-build correctly skipped: no tracked
+`source/`/`include/` file differs from the prior committed tree
+(docs-only + new scratch-tool round).
+
+**Next step (task #811, not yet started):** find the real GT3 call
+site that was supposed to run after `SCMD_CLOSECONFIG` and issue the
+disc-read SIF RPC call - this requires either disassembling GT3's own
+code backward from the `0x0101bb08` `WaitSema(5)` instruction to find
+what function it's part of and what that function's intended
+continuation was, or capturing an *earlier* checkpoint (before
+`SCMD_CLOSECONFIG`'s 13th S-command fires) so the SIF/CDVD traces
+added this round can observe the lead-up to config-close and whatever
+was supposed to follow it, live.

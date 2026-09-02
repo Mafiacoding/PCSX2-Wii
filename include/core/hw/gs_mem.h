@@ -12,7 +12,12 @@
  * cache-friendly runs in the actual 1D eDRAM. This model uses plain
  * LINEAR addressing instead: pixel (x,y) at a given base pointer (bp)
  * and buffer width (bw) maps straightforwardly to
- * bp*256 + y*bw*64*4 + x*4 (word-aligned, PSMCT32 only). This is
+ * bp*4 + (y*bw + x)*4 (bp is a 4-byte-word offset, PSMCT32 only).
+ * [Round 640 correction: this comment previously said "bp*256 + ...",
+ * which never matched the actual implementation in gs_mem.c
+ * (pixel_offset() has always computed bp*4 + ...) - that was stale/
+ * aspirational documentation, not a real discrepancy in behavior.
+ * Fixed here to describe what the code actually does.] This is
  * good enough to get pixels into a scratch buffer and out to a
  * display for a first "something shows up" milestone, but it is NOT
  * bit-compatible with real GS memory layout - anything that reads GS
@@ -39,6 +44,52 @@ uint8_t *gs_mem_get(void); /* raw 4MB buffer, for tests/inspection */
  * functions is the caller's job, not handled here. */
 uint32_t gs_mem_read_psmct32(uint32_t bp, uint32_t bw, uint32_t x, uint32_t y);
 void     gs_mem_write_psmct32(uint32_t bp, uint32_t bw, uint32_t x, uint32_t y, uint32_t rgba);
+
+/* Round 640: real-unit "block-scale" wrappers for the GS registers that
+ * use the finer BP granularity - BITBLTBUF.SBP/DBP and TEX0.TBP0/CBP.
+ *
+ * Primary-source-verified real PS2 GS register semantics (see
+ * docs/STATUS.md "Round 640" section for full citations, cross-checked
+ * against this project's own pulled docs/reference/pcsx2/pcsx2/GS/
+ * GSRegs.h): FRAME.FBP and ZBUF.ZBP use "Address/2048 words" (8192
+ * bytes/unit, a full VRAM "page"). BITBLTBUF.SBP/DBP and TEX0.TBP0/CBP
+ * instead use "Address/64 words" (256 bytes/unit, a VRAM "block") - a
+ * 64x finer granularity than what gs_mem_read/write_psmct32()'s bp*4
+ * formula implicitly assumes. Using the plain functions for
+ * DBP/TBP0/CBP undercounts the real byte offset by a factor of 64,
+ * which is exactly why real, legitimate texture-upload bp values
+ * (e.g. 13440) were landing inside the framebuffer's own byte range
+ * instead of ~3.4MB away where they really belong (see
+ * docs/STATUS.md Round 639/640).
+ *
+ * [Round 748 correction: this comment previously claimed FRAME/ZBUF
+ * "keep using the plain gs_mem_read/write_psmct32() unchanged...
+ * closely enough that no aliasing was observed for that register
+ * pair" - that claim was WRONG, found and fixed in Round 748. FRAME/
+ * ZBUF's page-scale (*2048) is now applied at register-decode time in
+ * gif.c's GS_REG_FRAME_1/FRAME_2/ZBUF_1/ZBUF_2 handlers instead of via
+ * a wrapper here, since g_gif.fbp/zbp are consumed as opaque
+ * pre-scaled word offsets everywhere downstream - see docs/STATUS.md
+ * "Round 748" for the full citation and the pixel-identical-PPM proof
+ * that caught this. gs_mem_read/write_psmct32() and pixel_offset()
+ * themselves remain unchanged either way.]
+ *
+ * These wrappers are a thin, additive fix: bp*64 converts a real
+ * block-granularity bp into the "word offset" unit the existing,
+ * UNCHANGED pixel_offset() already expects, so FRAME/ZBUF call sites,
+ * the entire pre-existing GS test suite, and gs_mem_read/write_psmct32
+ * itself are untouched. Only gif.c's TBP0/CBP (texture/CLUT read) and
+ * DBP (IMAGE-mode transfer write) call sites are switched to these. */
+static inline uint32_t gs_mem_read_psmct32_blk(uint32_t bp, uint32_t bw, uint32_t x, uint32_t y)
+{
+    extern uint32_t gs_mem_read_psmct32(uint32_t bp, uint32_t bw, uint32_t x, uint32_t y);
+    return gs_mem_read_psmct32(bp * 64u, bw, x, y);
+}
+static inline void gs_mem_write_psmct32_blk(uint32_t bp, uint32_t bw, uint32_t x, uint32_t y, uint32_t rgba)
+{
+    extern void gs_mem_write_psmct32(uint32_t bp, uint32_t bw, uint32_t x, uint32_t y, uint32_t rgba);
+    gs_mem_write_psmct32(bp * 64u, bw, x, y, rgba);
+}
 
 /* Round 25: real PSMCT32 block-swizzled addressing (page/block level
  * only - see below), added as a SEPARATE, additional API alongside

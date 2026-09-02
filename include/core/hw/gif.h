@@ -742,6 +742,28 @@ typedef struct {
     int trx_active;
     uint32_t trx_cur_x, trx_cur_y;
 
+    /* Round 635 (task #536/#614): bounded, safe IMAGE-mode cross-call
+     * carry-over. Round 634 shipped a stateless fix for the stream-
+     * desync bug (garbage GIFtag parsed from a split transfer's
+     * continuation bytes) that DROPS the un-fit tail of an oversized
+     * IMAGE transfer rather than reconstructing it - safe, but means
+     * multi-call texture uploads (e.g. BIOS menu label glyphs) never
+     * fully land in GS memory. This field re-enables reconstruction,
+     * but bounded: process_one_packet() only sets it when the real
+     * shortfall is <= GIF_IMAGE_CARRY_MAX_QWORDS (see gif.c) AND
+     * trx_active is genuinely still set; gif_process_quadwords()
+     * immediately zeroes it (abandoning the carry, not endlessly
+     * consuming future calls' bytes) the moment trx_active reads
+     * false, whether because the transfer legitimately completed or
+     * was reset by something else. This directly patches the exact
+     * bug an earlier unbounded version of this carry-over had: once
+     * trx_active went false with a large/bogus owed_qwords still
+     * outstanding, every subsequent call's ENTIRE buffer got silently
+     * swallowed as phantom carry-over forever, freezing all further
+     * GS output (caught in host-native testing before shipping,
+     * documented in Round 634's writeup). 0 = no carry-over active. */
+    uint32_t image_carry_remaining_qwords;
+
     /* Z-buffer / depth-test state (task #89). zbp is the Z buffer's
      * base pointer, in OUR gs_mem bp convention (see gs_mem.h) - real
      * hardware's ZBUF register (GIFRegZBUF: ZBP:9, PSM:6, ZMSK:1) has
@@ -1161,6 +1183,24 @@ typedef struct {
      * is using the shared tag latch - see Gif.h's tGIF_P3CNT/
      * tGIF_P3TAG comments). */
     uint32_t gif_p3cnt, gif_p3tag;
+
+    /* Round 641 (task #536): internal (non-hardware-register) flag -
+     * mirrors the EOP (End Of Packet) bit of the most recently parsed
+     * GIF tag, on ANY path. Real hardware terminates a PATH1/2/3
+     * transfer at the first tag with EOP=1, regardless of how much
+     * more buffer/qwc the caller made available - see Gif.h's
+     * tGIF_TAG0::EOP and PCSX2's own GIF unit transfer loop, which
+     * checks tag.EOP after every packet. Added because vu.c's XGKICK
+     * handler (Round 571) intentionally passes a generous upper-bound
+     * qwc (everything from the kick address to the end of VU1 local
+     * memory - real hardware doesn't know the real length in advance
+     * either) and relies on the GIF-side parser to stop at the real
+     * transfer's actual end. Before this round, gif_process_quadwords()
+     * had no such stop condition and kept parsing tag after tag
+     * through whatever unrelated/stale data happened to sit in VU1
+     * memory past the real transfer's end, corrupting later register
+     * writes (see docs/STATUS.md Round 641 for the full writeup). */
+    uint32_t gif_last_eop;
 
     /* Round 577 (task #551): real diagnostic counter, not a hardware
      * register - counts every gif_process_quadwords(GIF_PATH_1, ...)

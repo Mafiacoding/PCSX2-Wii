@@ -69,9 +69,15 @@ int main(void)
 
         gif_process_quadwords(DMA_CHANNEL_GIF, buf, (uint32_t)(off / 16));
 
+        /* Round 748: FRAME.FBP is real-hardware page-granularity
+         * (Address/2048 words) - gif.c's FRAME_1/FRAME_2 handlers now
+         * scale the raw field by *2048 at decode time (matching
+         * gs_decode_dispfb()'s existing DISPFB convention - see
+         * docs/STATUS.md Round 748), so raw field 20 lands at word
+         * offset 20*2048, not 20 itself. */
         CHECK(gs_mem_read_psmct32(0, 640, 5, 5) == red, "context1 sprite (CTXT=0) landed in FRAME_1's target (bp=0)");
-        CHECK(gs_mem_read_psmct32(20, 640, 5, 5) == blue, "context2 sprite (CTXT=1) landed in FRAME_2's target (bp=20), NOT FRAME_1's");
-        CHECK(gs_mem_read_psmct32(20, 640, 5, 5) != red, "context2's target buffer does not contain context1's color (genuinely separate)");
+        CHECK(gs_mem_read_psmct32(20u * 2048u, 640, 5, 5) == blue, "context2 sprite (CTXT=1) landed in FRAME_2's target (bp=20), NOT FRAME_1's");
+        CHECK(gs_mem_read_psmct32(20u * 2048u, 640, 5, 5) != red, "context2's target buffer does not contain context1's color (genuinely separate)");
     }
 
     { /* Context 1's own state is completely unaffected by ANY amount
@@ -104,7 +110,7 @@ int main(void)
         gif_process_quadwords(DMA_CHANNEL_GIF, buf, (uint32_t)(off / 16));
 
         CHECK(gs_mem_read_psmct32(0, 640, 5, 5) == green, "context1 draw unaffected by an unused, configured-but-never-selected FRAME_2");
-        CHECK(gs_mem_read_psmct32(99, 640, 5, 5) == 0, "FRAME_2's never-selected target buffer was never actually written to");
+        CHECK(gs_mem_read_psmct32(99u * 2048u, 640, 5, 5) == 0, "FRAME_2's never-selected target buffer was never actually written to");
     }
 
     { /* Alpha test/blend state is genuinely per-context: configure
@@ -195,7 +201,7 @@ int main(void)
         gif_process_quadwords(DMA_CHANNEL_GIF, buf, (uint32_t)(off / 16));
 
         CHECK(gs_mem_read_psmct32(0, 640, 2, 2) == c1, "interleaved: first ctx1 draw's pixel still correct after a ctx2 draw ran in between");
-        CHECK(gs_mem_read_psmct32(50, 640, 2, 2) == c2, "interleaved: ctx2 draw landed in FRAME_2's target");
+        CHECK(gs_mem_read_psmct32(50u * 2048u, 640, 2, 2) == c2, "interleaved: ctx2 draw landed in FRAME_2's target");
         CHECK(gs_mem_read_psmct32(0, 640, 22, 22) == c3, "interleaved: second ctx1 draw (after the ctx2 draw) still uses FRAME_1's target correctly - ctx1 state was not clobbered by the ctx2 draw in between");
     }
 

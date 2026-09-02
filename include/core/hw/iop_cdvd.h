@@ -230,6 +230,17 @@ int iop_cdvd_mmio_write8(uint32_t addr, uint8_t value);
  * directly without decoding register semantics themselves. */
 uint8_t iop_cdvd_get_last_ncommand(void);
 
+/* Round 732 (task #447, fresh GT3-in-game-code context): live call
+ * counters + last-issued-command latches for both dispatch functions -
+ * see iop_cdvd.c's own field comment for the exact rationale. Lets a
+ * checkpoint-resumed survey answer, empirically, whether real game
+ * code is still issuing CDVD commands during an observed stall, or
+ * has stopped calling into this subsystem entirely. */
+uint64_t iop_cdvd_get_ncmd_call_count(void);
+uint64_t iop_cdvd_get_scmd_call_count(void);
+uint8_t  iop_cdvd_get_last_ncmd_issued(void);
+uint8_t  iop_cdvd_get_last_scmd_issued(void);
+
 /* Round 347 (IOP RPC re-entry architecture): non-consuming peek at
  * the real OFF_ERROR register - see iop_cdvd.c's own definition
  * comment for the full rationale (project-internal only, never
@@ -314,5 +325,57 @@ int iop_cdvd_rebind_iso(const char *path); /* Round 449 - checkpoint-resume-safe
  * isn't found/valid. */
 int iop_cdvd_disc_find_file(const char *name, uint32_t *out_lba, uint32_t *out_size);
 int iop_cdvd_disc_read_sector(uint32_t lba, uint8_t *buf);
+
+/* Round 750 (task #730) fix: this module's real dispatch/register state
+ * (g_regs - includes the disc-TYPE register iop_cdvd_get_disc_type()
+ * reads, the exact field this round's KUSEG-TLB-storm root-cause chases
+ * - plus the N-/S-command parameter/result buffers and the Round 732
+ * diagnostic call counters) was NEVER captured by any checkpoint.c
+ * block, unlike every other hw/ module (see checkpoint.c's own DMA0/
+ * GIF0/GS00/etc. blocks). Every single checkpoint save/load boundary
+ * therefore silently reset g_regs back to its C zero-init default
+ * (IOP_CDVD_TYPE_NODISC, matching iop_cdvd_init()'s own explicit
+ * reset value) regardless of what iop_cdvd_set_disc_present() had set
+ * it to beforehand - so a real, disc-mounted GT3 checkpoint-chained
+ * boot silently reverted to reading back "no disc" on the FIRST
+ * checkpoint-resume invocation after the very first one, fooling the
+ * "diskless-only" guards in source/core/ee/ee_core.c's
+ * ee_check_browser_idle_carousel()/ee_check_browser_menu_escalation_
+ * heuristic() into firing on a genuinely disc-mounted boot and raw-
+ * dereferencing KUSEG addresses those functions' own header comments
+ * already document as needing established TLB coverage that a real
+ * disc-boot trace never provides (Round 607). This is the same
+ * documented bug CLASS as Round 649's GSM0 gap and Round 659's ITHR
+ * gap - a hw/ module's state silently excluded from the checkpoint
+ * format. iop_cdvd_checkpoint_save()/_load() follow the same save-
+ * into-caller-buffer / apply-from-caller-buffer convention checkpoint.c
+ * already uses for every other typed block (see e.g. dma_get_state()'s
+ * sizeof(*ptr) block), just via explicit field-copy helpers instead of
+ * a single already-contiguous struct pointer, since this module's state
+ * was never one struct to begin with (deliberately NOT restructured
+ * this round - that would touch every one of this file's many existing
+ * g_regs/g_param_buf/etc. call sites for no functional benefit, whereas
+ * these two new functions touch zero existing code). g_disc/g_disc_
+ * mounted are deliberately NOT included here - those are already
+ * correctly handled by the existing iop_cdvd_rebind_iso() call
+ * checkpoint.c makes on load (Round 449's own citation on why a raw
+ * FILE*-pointer copy would be unsafe across a process boundary). */
+typedef struct {
+    uint8_t  regs[IOP_CDVD_SIZE];
+    uint8_t  param_buf[16];
+    int32_t  param_count;
+    uint8_t  sparam_buf[16];
+    int32_t  sparam_count;
+    uint8_t  sresult_buf[16];
+    int32_t  sresult_count;
+    int32_t  sresult_pos;
+    uint64_t ncmd_call_count;
+    uint64_t scmd_call_count;
+    uint8_t  last_ncmd_issued;
+    uint8_t  last_scmd_issued;
+} iop_cdvd_checkpoint_t;
+
+void iop_cdvd_checkpoint_save(iop_cdvd_checkpoint_t *out);
+void iop_cdvd_checkpoint_load(const iop_cdvd_checkpoint_t *in);
 
 #endif

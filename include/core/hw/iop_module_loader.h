@@ -148,6 +148,57 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc);
  * state from a previous run. */
 void iop_module_loader_reset(void);
 
+/* Round 770 (task #764, GT3 checkpoint-chain investigation): checkpoint.c
+ * has a dedicated block for every OTHER stateful IOP subsystem (DMA0/
+ * EINT/.../ITHR/ICDV - see checkpoint.c's own save/load block list) but
+ * NONE for this file's own internal `g` state - the one-shot `attempted`
+ * flag, the bump allocator cursor, the per-module entry-point table, the
+ * synthetic trampoline/boot_info addresses, and the ELF/export/import
+ * bookkeeping load_all_modules() computes once during real boot. This is
+ * the exact same bug CLASS already fixed for gs_mem.c (Round 649, "GSM0"),
+ * iop_hle_thread.c (Round 659, "ITHR"), and iop_cdvd.c (Round 750, "ICDV")
+ * - see iop_hle_thread_get_checkpoint_blob()'s own header comment for the
+ * precedent this follows.
+ *
+ * Confirmed empirically this round via direct instrumentation: resuming
+ * a GT3 checkpoint-chain run via chain_driver's "continue" mode starts
+ * this file's `g` struct at its C-static zero-initialized state (attempted
+ * =0, bump_next=0, modlist_count=0) - NOT the real, already-booted state
+ * the checkpoint was saved from. The first time IOP PC organically
+ * reaches an address past all real, already-loaded module code (the
+ * normal, honest "PC escaped to unfetchable addr" terminal condition -
+ * see iop_core.c's Round-14 guard), iop_module_loader_boot()'s one-shot
+ * `if (g.attempted) return 0;` guard is spuriously false again, so the
+ * ENTIRE one-time boot sequence silently re-runs: it re-parses the real
+ * BIOS ROMDIR, reloads all 29 real IOP modules via bump_alloc() (which,
+ * being fully deterministic given the same real BIOS, lands at the exact
+ * same addresses as the original cold boot), and then unconditionally
+ * redispatches the IOP to modlist_index=0's entry point (SYSMEM, real
+ * entry 0x00000890) with a freshly-computed $ra=g.trampoline_addr - all
+ * while the REST of the checkpoint (CPU registers, RAM contents, every
+ * other subsystem's real accumulated state) is the genuine, continuous,
+ * already-billions-of-instructions-deep boot state. This exactly and
+ * completely explains this round's own "interrupt-storm crawl through
+ * 0x00202c44-0x00203ffc, then a PC jump straight to 0x00000890 with
+ * $ra=0x00055b40" finding (docs/STATUS.md, Round 770): it is a checkpoint-
+ * chaining TOOLING artifact, not a real bug in the module-dispatch
+ * mechanism, the interrupt controller, or anything about real GT3/BIOS
+ * boot behavior on a continuous (non-checkpointed) run. Directly verified
+ * via a scratch-tree diagnostic print (`[R770-BOOT] ... attempted=0
+ * bump_next=0x00000000 modlist_count=0`) captured at the exact instant
+ * iop_module_loader_boot() spuriously re-entered mid-chain.
+ *
+ * `g` is entirely flat/pointer-free (fixed-size arrays only - romdir[],
+ * modlist[][], entry_points[], elf_results[] of iop_elf_load_result_t
+ * which is itself pointer-free, registration_list_slot_addr[], exports[]
+ * - see this file's own `static struct { ... } g;` definition), so a raw
+ * byte-for-byte blob is a safe, correct checkpoint representation, same
+ * approach as every other _get_state()-based checkpoint block. Returns
+ * the blob pointer; *size_out receives its size in bytes (do not
+ * hardcode the size in callers - it will change if MODLIST_MAX/
+ * ROM_MAX_ENTRIES/EXPORT_REGISTRY_MAX are ever tuned). */
+void *iop_module_loader_get_checkpoint_blob(uint32_t *size_out);
+
 typedef struct {
     uint32_t modules_attempted;
     uint32_t modules_loaded;

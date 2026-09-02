@@ -80,20 +80,56 @@ typedef struct {
     ee_timer_t t[EE_TIMERS_COUNT];
 } ee_timers_state_t;
 
-/* Real EE T*_MODE bit layout (pcsx2/Counters.h's tCOUNTER/rcntMode
- * union), see the file-level comment above for which of these this
- * project's simplified tick model actually honors. */
+/* Real EE T*_MODE bit layout - CORRECTED Round 751 (task #733
+ * continuation). The bit positions below Round 87/127 originally used
+ * (CMPE=bit6, OVFE=bit7, CUE=bit10, EQUF=bit11, OVFF=bit12, plus
+ * invented REPEAT_IRQ=bit8/TOGGLE_IRQ=bit9 bits that don't exist on
+ * real hardware at all) were WRONG - never cross-checked against the
+ * real bitfield layout, just guessed from the register names alone.
+ * Found this round while root-causing a permanent stall: the real
+ * PAL BIOS (30004R V6) writes T0_MODE=0x83 during a GT3 disc-boot
+ * checkpoint-chain run, then busy-waits (pc=0x9FC41048, disassembled
+ * this round with tools/round655-ee-disasm) for T0_COUNT to change -
+ * but under the OLD (wrong) bit mapping, 0x83's bit7 landed on
+ * EE_CNT_MODE_OVF_ENABLE, not CUE (bit10, unset by this write), so
+ * ee_timers_tick()'s `if (!(t->mode & EE_CNT_MODE_CUE)) continue;`
+ * guard kept the counter permanently stopped and the busy-wait spun
+ * forever (confirmed directly: a checkpoint dump showed T0
+ * count=0/mode=0x83/CUE=0 after 3.12B instructions of chaining).
+ *
+ * Real layout confirmed directly from real PCSX2 source
+ * (pcsx2-master.zip, pcsx2/Counters.h's EECNT_MODE bitfield struct,
+ * cross-checked against Counters.cpp's rcntWmode() - its write mask
+ * `value & 0x3ff` for the configurable low bits and
+ * `value & 0xc00` for the write-1-to-clear TargetReached/
+ * OverflowReached flags is exactly the bit split below):
+ *   bit0-1  (0x003): ClockSource (CLKS)
+ *   bit2    (0x004): EnableGate (GATE_ENABLE)
+ *   bit3    (0x008): GateSource (0=hblank type,1=vblank type) - not modeled
+ *   bit4-5  (0x030): GateMode - not modeled
+ *   bit6    (0x040): ZeroReturn (ZRET)
+ *   bit7    (0x080): IsCounting (CUE) - THE bit this round's stall needed
+ *   bit8    (0x100): TargetInterrupt (CMPE)
+ *   bit9    (0x200): OverflowInterrupt (OVFE)
+ *   bit10   (0x400): TargetReached (EQUF) - write-1-to-clear
+ *   bit11   (0x800): OverflowReached (OVFF) - write-1-to-clear
+ * There is no separate real "repeat vs one-shot IRQ" bit anywhere in
+ * this register - real _cpuTestTarget()/_cpuTestOverflow() (Counters.cpp)
+ * gate re-firing purely on the TargetReached/OverflowReached flag
+ * (only cleared by software rewriting MODE with that bit set to 1),
+ * never by disabling TargetInterrupt/OverflowInterrupt themselves.
+ * ee_timers_tick() (ee_timers.c) is fixed to match this exactly this
+ * round - see that function's own updated comment. */
 #define EE_CNT_MODE_CLKS        0x0003u /* bits 0-1, clock source: 0=BUSCLK, 1=BUSCLK/16, 2=BUSCLK/256, 3=HBLNK - modeled since Round 127 */
-#define EE_CNT_MODE_GATE_ENABLE 0x0004u /* not modeled */
-#define EE_CNT_MODE_GATE_MODE   0x0018u /* bits 3-4, not modeled */
-#define EE_CNT_MODE_ZERO_RETURN 0x0020u
-#define EE_CNT_MODE_CMP_ENABLE  0x0040u /* CMPE: compare-match IRQ enable */
-#define EE_CNT_MODE_OVF_ENABLE  0x0080u /* OVFE: overflow IRQ enable */
-#define EE_CNT_MODE_REPEAT_IRQ  0x0100u /* real bit8: repeat vs one-shot IRQ */
-#define EE_CNT_MODE_TOGGLE_IRQ  0x0200u /* not modeled */
-#define EE_CNT_MODE_CUE         0x0400u /* count-enable */
-#define EE_CNT_MODE_EQUF        0x0800u /* compare-match flag */
-#define EE_CNT_MODE_OVFF        0x1000u /* overflow flag */
+#define EE_CNT_MODE_GATE_ENABLE 0x0004u /* bit2, not modeled */
+#define EE_CNT_MODE_GATE_SOURCE 0x0008u /* bit3, not modeled */
+#define EE_CNT_MODE_GATE_MODE   0x0030u /* bits 4-5, not modeled */
+#define EE_CNT_MODE_ZERO_RETURN 0x0040u /* bit6 (ZRET) - corrected Round 751, was bit5 */
+#define EE_CNT_MODE_CUE         0x0080u /* bit7 (IsCounting/count-enable) - corrected Round 751, was bit10 */
+#define EE_CNT_MODE_CMP_ENABLE  0x0100u /* bit8 (CMPE: compare-match IRQ enable) - corrected Round 751, was bit6 */
+#define EE_CNT_MODE_OVF_ENABLE  0x0200u /* bit9 (OVFE: overflow IRQ enable) - corrected Round 751, was bit7 */
+#define EE_CNT_MODE_EQUF        0x0400u /* bit10 (TargetReached, compare-match flag) - corrected Round 751, was bit11 */
+#define EE_CNT_MODE_OVFF        0x0800u /* bit11 (OverflowReached, overflow flag) - corrected Round 751, was bit12 */
 
 void ee_timers_init(void);
 
@@ -111,5 +147,19 @@ int ee_timers_mmio_write32(uint32_t addr, uint32_t value);
 void ee_timers_tick(void);
 
 ee_timers_state_t *ee_timers_get_state(void);
+
+/* Round 715 (task #693/#694, per the user's explicit "focus only on
+ * this timer issue" instruction): per-timer real IRQ-raise hit
+ * counter (compare-match OR overflow, whichever actually calls
+ * ee_intc_raise() - see ee_timers_tick()'s own doc comment), mirroring
+ * this project's established hit-counter diagnostic convention
+ * (iop_dma_get_sif2_transfer_count(), dispatch_ncmd() count, etc.).
+ * Lets a boot survey empirically confirm real IRQ cadence (does a
+ * given timer fire once, or does it keep firing forever as a real
+ * periodic heartbeat would) - independent of guessing from register
+ * snapshots alone, which can't distinguish "never armed" from "armed,
+ * fired once, then silently suppressed" from "armed and firing
+ * correctly but too slowly to have fired again yet". */
+uint32_t ee_timers_get_irq_count(int idx);
 
 #endif

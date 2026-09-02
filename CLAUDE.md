@@ -851,6 +851,26 @@ always ask for/verify the no-disc case explicitly).
 This project has a strict, consistently-applied ritual for every increment
 of work. Do not skip steps, even for small changes:
 
+0. **Back up first, locally, before touching tracked source** (standing
+   rule added Round 778 per the user's explicit instruction: "you always
+   can write your own code or fixes if you think its right but also make
+   always a backup first local on my harddrive if something goes wrong").
+   Before editing any tracked `include/`/`source/` file for a speculative
+   or experimental fix (as opposed to a fully evidenced one), copy the
+   current, clean, committed state of the file(s) about to be touched into
+   `backups/<round>_<short-description>/` inside this repo (i.e. on the
+   user's actual hard drive via the synced outputs folder, not just in
+   `/tmp/` scratch or git history) before making the change. This is in
+   addition to, not instead of, normal git history - it's a fast, no-
+   git-knowledge-required way for the user to recover the prior state.
+   If the experiment doesn't pan out, restore from the backup (or `git
+   checkout`), delete the now-unneeded backup copy, and document the
+   attempt-and-revert honestly in `STATUS.md` exactly like every prior
+   reverted experiment in this file (e.g. Round 265, Round 280, Round 549).
+   Routine/mechanical changes with strong existing evidence (a disassembly-
+   confirmed opcode gap, a cited real-source struct offset, etc.) don't
+   need a separate backup step beyond normal git commits - this is for
+   genuinely speculative "let's try this and see" attempts.
 1. Implement the change.
 2. Write (or extend) a **host-native** unit test in `tests/` that exercises
    the real code path - not a reimplementation/formula re-derivation of the

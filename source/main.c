@@ -408,13 +408,35 @@ static void run_real_boot_flow(void)
     printf("[+] BIOS loaded: %s  size=%u  rom_ver=%s\n",
            g_bios.name, (unsigned)g_bios.size, g_bios.version_string);
 
+    if (!g_system_started) {
+        system_init(&g_bios, &g_bios);
+        g_system_started = 1;
+        gs_init();
+        gs_mem_init();
+    }
+
     /* Round 209: real disc mount, once, best-effort. Mounted on BOTH
      * real register interfaces since it is not yet established which
      * one (if either) real BIOS/kernel code actually uses to read
      * SYSTEM.CNF (Round 205-207) - giving the real boot every real
      * chance to succeed regardless of which path it tries. Missing
      * disc is logged, not fatal - matches real PS2 boot-with-no-disc
-     * behavior. */
+     * behavior.
+     *
+     * Round 610 (task #536 continuation): moved to AFTER system_init()
+     * above - it used to run BEFORE, but system_init() -> iop_core_
+     * init() -> iop_cdvd_init() unconditionally resets the CDVD
+     * disc-type register back to IOP_CDVD_TYPE_NODISC (see iop_cdvd.c's
+     * init()), which silently undid this exact mount/set_disc_present
+     * call on every single real disc-mounted boot. This was a
+     * pre-existing bug (not introduced this round) discovered while
+     * host-native-verifying ee_check_browser_menu_escalation_
+     * heuristic()'s new diskless-only gate: a disc-mounted boot trace
+     * and a genuinely diskless boot trace were found to be byte-
+     * identical because iop_cdvd_get_disc_type() read back NODISC in
+     * both cases. Moving the mount to run after system_init() fixes
+     * this for every caller of iop_cdvd_get_disc_type(), not just the
+     * new Round 610 gate. */
     if (!g_disc_checked) {
         g_disc_checked = 1;
         int cdvd_rc   = iop_cdvd_mount_iso("sd:/pcsx2/games/game.bin");
@@ -434,13 +456,6 @@ static void run_real_boot_flow(void)
             printf("    for a real disc-boot attempt; real hardware also boots\n");
             printf("    fine with no disc, just without a game to run).\n");
         }
-    }
-
-    if (!g_system_started) {
-        system_init(&g_bios, &g_bios);
-        g_system_started = 1;
-        gs_init();
-        gs_mem_init();
     }
 
     ee_state_t  *ee  = ee_core_get_state();

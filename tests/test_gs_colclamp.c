@@ -21,6 +21,13 @@
 #include "core/hw/gif.h"
 #include "core/hw/gs_mem.h"
 
+/* Round 640: seed texture/CLUT data via the _blk (real 256-bytes/unit
+ * BITBLTBUF/TEX0-style) addressing helper, matching gif.c's gs_sample_
+ * texel()/gs_sample_clut() which now read TBP0/CBP through the same
+ * _blk scale. Framebuffer output reads below stay on the plain,
+ * unchanged gs_mem_read_psmct32() - FBP/output addressing is untouched
+ * by this round's fix. See docs/STATUS.md Round 639/640. */
+
 static int failures = 0;
 #define CHECK(cond, msg) do { \
     if (!(cond)) { printf("FAIL: %s\n", msg); failures++; } \
@@ -55,7 +62,7 @@ static void append_ad(uint8_t *buf, int *off, uint32_t data_lo, uint32_t data_hi
 
 static void setup_white_texel(void)
 {
-    gs_mem_write_psmct32(TEX_BP, TEX_BW, 0, 0, 0xFFFFFFFFu);
+    gs_mem_write_psmct32_blk(TEX_BP, TEX_BW, 0, 0, 0xFFFFFFFFu);
 }
 
 /* Draws a 1x1 MODULATE-textured SPRITE with white texel * white vertex

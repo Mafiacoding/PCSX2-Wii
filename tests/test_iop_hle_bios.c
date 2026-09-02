@@ -23,6 +23,47 @@ static int failures = 0;
     else { printf("ok:   %s\n", msg); } \
 } while (0)
 
+/* Task #735 test-harness compatibility helper - see test_iop_core.c
+ * for the full rationale. Drop-in replacement for iop_core_run() that
+ * preserves the pre-existing syscall-recovery special case inside
+ * the BREAK handler (task #156) and freezes execution in exactly the
+ * state that existed the instant a genuine BREAK was reached,
+ * undoing the (now real) Breakpoint-exception delivery it would
+ * otherwise leave behind. */
+static void iop_run_until_break(void) {
+    iop_state_t *st = iop_core_get_state();
+    long guard;
+    for (guard = 0; guard < 2000000L; guard++) {
+        if (st->halted) return;
+        uint32_t pre_pc = st->pc;
+        uint32_t pre_next_pc = st->next_pc;
+        uint32_t pre_status = st->cop0[12];
+        uint32_t pre_cause = st->cop0[13];
+        uint32_t pre_epc = st->cop0[14];
+        uint8_t  pre_pending = st->exception_pending;
+        uint64_t pre_count = st->instructions_executed;
+
+        if (iop_step()) return; /* genuine halt - not a BREAK, leave as-is */
+
+        if (st->exception_pending && (st->cop0[13] & 0x7Cu) == 0x24u && st->cop0[14] == pre_pc) {
+            st->cop0[12] = pre_status;
+            st->cop0[13] = pre_cause;
+            st->cop0[14] = pre_epc;
+            st->exception_pending = pre_pending;
+            st->pc = pre_pc;
+            st->next_pc = pre_next_pc;
+            st->instructions_executed = pre_count;
+            st->halted = 1;
+            snprintf(st->halt_reason, sizeof(st->halt_reason),
+                     "BREAK (task #735: real Breakpoint exception raised and unwound by the test harness, ExcCode 9)");
+            return;
+        }
+    }
+    st->halted = 1;
+    snprintf(st->halt_reason, sizeof(st->halt_reason),
+             "iop_run_until_break() safety cap reached without a Breakpoint exception");
+}
+
 static uint32_t enc_addiu(int rt, int rs, int16_t imm) { return (0x09 << 26) | (rs << 21) | (rt << 16) | (uint16_t)imm; }
 static uint32_t enc_jal(uint32_t target)                { return (0x03 << 26) | ((target >> 2) & 0x03FFFFFFu); }
 static uint32_t enc_nop(void)                            { return 0x00000000u; }
@@ -70,14 +111,15 @@ int main(void)
     st_setup->pc = 0;
     st_setup->next_pc = 4;
 
-    /* Run exactly 6 steps: ADDIU, JAL, NOP (branch delay slot), the
-     * trapped call at 0xA0 (consumes one step but executes no real
-     * MIPS instruction), ORI, BREAK. Using iop_core_step() directly
-     * (rather than iop_core_run()) so we can inspect state
-     * deterministically after a known number of instructions, same
-     * style other tests use when step-level precision matters. */
-    for (int i = 0; i < 6 && !g_iop.halted; i++)
-        iop_core_step();
+    /* Runs exactly 6 real steps: ADDIU, JAL, NOP (branch delay slot),
+     * the trapped call at 0xA0 (consumes one step but executes no
+     * real MIPS instruction), ORI, BREAK. Task #735: now uses
+     * iop_run_until_break() rather than a raw iop_core_step() loop,
+     * since a genuine BREAK no longer halts on its own - the shim
+     * steps exactly as far as the old loop did and freezes state at
+     * the same point (right as BREAK is reached), so this program's
+     * deterministic step count is unaffected. */
+    iop_run_until_break();
 
     iop_state_t *st = iop_core_get_state();
     iop_hle_bios_state_t *hle = iop_hle_bios_get_state();

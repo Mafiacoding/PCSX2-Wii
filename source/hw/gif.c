@@ -9,6 +9,15 @@
 
 static gif_state_t g_gif;
 
+/* Round 635 (task #536/#614): upper bound on how many qwords an
+ * IMAGE-mode carry-over is allowed to track (see gif.h's
+ * image_carry_remaining_qwords comment). 4096 qwords = 64KB - several
+ * times larger than any single BIOS menu label/glyph texture observed
+ * so far (Round 633's captured transfer needed well under 1KB), so
+ * legitimate transfers are never affected, while a bogus/mis-decoded
+ * NLOOP can never turn into a large, slow-to-drain carry. */
+#define GIF_IMAGE_CARRY_MAX_QWORDS 4096u
+
 /* Round 542: which real GIF_PATH_1/2/3 value is driving the packet
  * currently being parsed by process_one_packet() - set by
  * gif_process_quadwords() before its parse loop runs (a single call
@@ -157,13 +166,17 @@ static uint32_t gs_sample_clut(uint32_t index)
     uint32_t flat = g_gif.tex_csa * CLUT_CSA_UNIT + index;
     uint32_t cx = flat % CLUT_ROW_WIDTH;
     uint32_t cy = flat / CLUT_ROW_WIDTH;
-    return gs_mem_read_psmct32(g_gif.tex_cbp, CLUT_ROW_WIDTH, cx, cy);
+    /* Round 640: CBP is TEX0.CBP - real unit is 256 bytes (Address/64
+     * words), not the plain functions' 4-byte-word assumption. */
+    return gs_mem_read_psmct32_blk(g_gif.tex_cbp, CLUT_ROW_WIDTH, cx, cy);
 }
 
 static uint32_t gs_sample_texel(int32_t tex_x, int32_t tex_y)
 {
-    uint32_t raw = gs_mem_read_psmct32(g_gif.tex_tbp0, g_gif.tex_tbw,
-                                        (uint32_t)tex_x, (uint32_t)tex_y);
+    /* Round 640: TBP0 is TEX0.TBP0 - real unit is 256 bytes (Address/64
+     * words), not the plain functions' 4-byte-word assumption. */
+    uint32_t raw = gs_mem_read_psmct32_blk(g_gif.tex_tbp0, g_gif.tex_tbw,
+                                            (uint32_t)tex_x, (uint32_t)tex_y);
     if (g_gif.tex_psm == TEX_PSM_PSMT8) {
         uint32_t idx = raw & 0xFFu;
         uint32_t swizzled = (idx & 0xE7u) | ((idx & 0x08u) << 1) | ((idx & 0x10u) >> 1);
@@ -1579,12 +1592,31 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
     case GS_REG_FRAME_1: {
         /* FBP: bits 0-8, FBW: bits 9-14 (units of 64px - real hardware
          * convention), PSM: bits 15-20 (ignored, PSMCT32 assumed).
-         * FBP here is used directly as our gs_mem "bp" word-offset
-         * convention - not a claim it matches real hardware block
-         * addressing (see gs_mem.h). Round 27: also mirrors into
-         * ctx1_fbp/ctx1_fbw (context 1's permanent storage - see
-         * gif.h's dual-context field comment). */
-        uint32_t fbp = data_lo & 0x1FFu;
+         *
+         * Round 748 fix: FBP is a real "Address/2048 words" page index
+         * on actual hardware (8192 bytes/unit - see gs_mem.h's Round
+         * 640 comment), the SAME unit gs_decode_dispfb() already
+         * scales by (*2048) for DISPFB1/DISPFB2. Previously FBP was
+         * stored raw/unscaled here and fed directly into gs_mem_read/
+         * write_psmct32()'s "word offset" bp parameter - Round 640
+         * explicitly considered this exact question for FRAME/ZBUF and
+         * concluded "no aliasing was observed for that register pair",
+         * but that was wrong: GT3's real disc-boot fbp=70/zbp=140
+         * landed only 280/560 bytes apart under the old raw-field
+         * convention (should be 573,440/1,146,880 bytes apart),
+         * causing the color framebuffer and Z-buffer to alias almost
+         * completely - see docs/STATUS.md Round 747/748 for the full
+         * evidence trail (pixel-identical draw-target/Z-buffer PPM
+         * dumps). Scaling here (matching gs_decode_dispfb's existing,
+         * already-correct, already-tested convention) makes FRAME's
+         * bp consistent with DISPFB's bp for the first time - every
+         * downstream consumer (gs_finish_pixel, rasterize_triangle's
+         * Z-test, gs_activate_context's ctx1/ctx2 copy) already treats
+         * g_gif.fbp/zbp as an opaque pre-scaled word offset and needs
+         * no further change. Round 27: also mirrors into ctx1_fbp/
+         * ctx1_fbw (context 1's permanent storage - see gif.h's
+         * dual-context field comment). */
+        uint32_t fbp = (data_lo & 0x1FFu) * 2048u;
         uint32_t fbw_field = (data_lo >> 9) & 0x3Fu;
         uint32_t fbw = fbw_field * 64u;
         if (fbw == 0) fbw = 640; /* guard against a zero FBW making every pixel alias */
@@ -1597,8 +1629,9 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
         /* Context 2's FRAME - identical bitfield to FRAME_1 above,
          * written ONLY into ctx2_fbp/ctx2_fbw (context 2 only becomes
          * "live" in the flat/active fields once a primitive is
-         * actually drawn with PRIM.CTXT=1 - see gs_activate_context()). */
-        uint32_t fbp = data_lo & 0x1FFu;
+         * actually drawn with PRIM.CTXT=1 - see gs_activate_context()).
+         * Round 748: same *2048 page-scale fix as FRAME_1 above. */
+        uint32_t fbp = (data_lo & 0x1FFu) * 2048u;
         uint32_t fbw_field = (data_lo >> 9) & 0x3Fu;
         uint32_t fbw = fbw_field * 64u;
         if (fbw == 0) fbw = 640;
@@ -1852,7 +1885,12 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
          * rasterize_sprite(). zbuf_configured is this project's own
          * safety gate - see gif.h's field comment. Round 27: also
          * mirrors into ctx1_zbp/ctx1_zmsk/ctx1_zbuf_configured. */
-        g_gif.zbp = data_lo & 0x1FFu;
+        /* Round 748: same *2048 page-scale fix as FRAME_1/2 above -
+         * ZBUF's bp field is the same real "Address/2048 words" unit,
+         * previously left raw/unscaled (the specific gap Round 640
+         * checked for and incorrectly cleared - see FRAME_1's comment
+         * above for the full citation). */
+        g_gif.zbp = (data_lo & 0x1FFu) * 2048u;
         g_gif.zmsk = (int)(data_hi & 0x1u);
         g_gif.zbuf_configured = 1;
         g_gif.ctx1_zbp = g_gif.zbp;
@@ -1861,8 +1899,9 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
     } break;
     case GS_REG_ZBUF_2: {
         /* Context 2's ZBUF - identical bitfield to ZBUF_1 above,
-         * written ONLY into the ctx2_zxxx permanent fields. */
-        g_gif.ctx2_zbp = data_lo & 0x1FFu;
+         * written ONLY into the ctx2_zxxx permanent fields. Round 748:
+         * same *2048 page-scale fix. */
+        g_gif.ctx2_zbp = (data_lo & 0x1FFu) * 2048u;
         g_gif.ctx2_zmsk = (int)(data_hi & 0x1u);
         g_gif.ctx2_zbuf_configured = 1;
     } break;
@@ -2133,10 +2172,34 @@ static void apply_ad_write(uint32_t addr, uint32_t data_lo, uint32_t data_hi)
         g_gif.trx_dsay = (data_hi >> 16) & 0x7FFu;
     } break;
     case GS_REG_TRXREG:
-        /* GIFRegTRXREG: word0 = RRW:12(0-11), RRH:12(16-27) - the
-         * transfer rectangle's width/height in pixels. word1 unused. */
+        /* GIFRegTRXREG (Round 636 fix, task #536/#614): real GS
+         * register layout (confirmed against pcsx2 reference source's
+         * GSRegs.h REG64_ macro, which packs every GS A+D register as
+         * two 32-bit words - word0 = bits[0:31], word1 = bits[32:63]
+         * of the 64-bit register) is:
+         *   word0 (data_lo): RRW:12(0-11), pad:20
+         *   word1 (data_hi): RRH:12(0-11), pad:20
+         * The PREVIOUS code read RRH from data_lo's bits[16:27] -
+         * that's word0's padding region, which real hardware always
+         * leaves 0. This made trx_rrh always 0, so every IMAGE-mode
+         * host-to-local transfer's rectangle height collapsed to 0:
+         * gif.c's image_write_pixel_qwords()/trx_cur_y wrap logic
+         * checks "trx_cur_y >= trx_rrh" after each row, and with
+         * rrh=0 that's true after the very FIRST row (rrw pixels),
+         * silently ending the transfer there - regardless of how
+         * many rows of real texture data NLOOP actually described.
+         * This is the root cause of Round 635's "solid bar instead
+         * of glyphs" finding: every multi-row glyph/label texture
+         * upload was being truncated to exactly 1 pixel row before
+         * ever reaching row 2, so distinct glyph shapes never had a
+         * chance to form - confirmed via direct instrumentation
+         * showing trx_rrh=0 on every real TRXREG write captured
+         * during a 100M-slice diskless boot survey. Fix: read RRH
+         * from data_hi's bits[0:11], matching real hardware and the
+         * TRXPOS handler's own already-correct high/low word split
+         * just above. */
         g_gif.trx_rrw = data_lo & 0xFFFu;
-        g_gif.trx_rrh = (data_lo >> 16) & 0xFFFu;
+        g_gif.trx_rrh = data_hi & 0xFFFu;
         break;
     case GS_REG_TRXDIR: {
         /* GIFRegTRXDIR: word0 = XDIR:2(0-1). Writing this register is
@@ -2174,6 +2237,44 @@ static inline uint32_t regs_nibble(uint32_t w2, uint32_t w3, uint32_t idx)
  * qwords) starting at 'p', which must have at least 16 bytes (the
  * tag) available. Returns the number of bytes consumed, or 0 if 'len'
  * isn't enough for even the tag. */
+/* Round 634 (task #536/#614): shared IMAGE-mode raw-pixel writer,
+ * extracted so both the "whole transfer fits in this call" path and
+ * the "only part of it fits" path (see process_one_packet()'s IMAGE
+ * branch below) drive the exact same trx_active/trx_cur_x/trx_cur_y
+ * state machine - no behavioral change for the common case where a
+ * transfer fits in one call, just no duplicated logic. */
+static void image_write_pixel_qwords(const uint8_t *q, uint32_t n_qwords)
+{
+    for (uint32_t i = 0; i < n_qwords && g_gif.trx_active; i++) {
+        const uint8_t *qq = q + i * 16u;
+        uint32_t px[4];
+        px[0] = rd_le32(qq + 0);
+        px[1] = rd_le32(qq + 4);
+        px[2] = rd_le32(qq + 8);
+        px[3] = rd_le32(qq + 12);
+        for (int k = 0; k < 4 && g_gif.trx_active; k++) {
+            /* Round 640: DBP is BITBLTBUF.DBP - real unit is 256 bytes
+             * (Address/64 words), not the plain functions' 4-byte-word
+             * assumption. This is the fix for the VRAM-aliasing collision
+             * documented in docs/STATUS.md Round 639/640 (legitimate
+             * texture-upload dbp values like 13440 were landing inside the
+             * framebuffer's own byte range under the old, under-scaled
+             * addressing). */
+            gs_mem_write_psmct32_blk(g_gif.trx_dbp, g_gif.trx_dbw,
+                                      g_gif.trx_dsax + g_gif.trx_cur_x,
+                                      g_gif.trx_dsay + g_gif.trx_cur_y,
+                                      px[k]);
+            g_gif.trx_cur_x++;
+            if (g_gif.trx_cur_x >= g_gif.trx_rrw) {
+                g_gif.trx_cur_x = 0;
+                g_gif.trx_cur_y++;
+                if (g_gif.trx_cur_y >= g_gif.trx_rrh)
+                    g_gif.trx_active = 0; /* transfer complete - a new TRXDIR write is required to start another */
+            }
+        }
+    }
+}
+
 static uint32_t process_one_packet(const uint8_t *p, uint32_t len)
 {
     if (len < 16) return 0;
@@ -2186,6 +2287,40 @@ static uint32_t process_one_packet(const uint8_t *p, uint32_t len)
     uint32_t nloop = tag_w0 & 0x7FFFu;
     uint32_t flg   = (tag_w1 >> 26) & 0x3u;
     uint32_t nreg  = (tag_w1 >> 28) & 0xFu;
+    /* Round 641 (task #536): real GS hardware's NREG field uses the
+     * same "0 means max" convention as NLOOP's siblings elsewhere in
+     * this file - NREG=0 in the tag means 16 registers per loop, not
+     * zero. Confirmed against PCSX2's own real GIFTagBits::EnableAlgo
+     * parsing (docs/reference/pcsx2/pcsx2/GS/GSRegs.h:1140,
+     * "nreg = (b & 0xf0000000) ? (b >> 28) : 16") - this project's
+     * gif_tag0/gif_cnt raw-register snapshots above still report the
+     * raw 4-bit field unchanged (real GIF_CNT.REGCNT also reads the
+     * raw, un-substituted field per the manual), only the *parsing*
+     * below needs the 16-substitution. Before this fix, a REGLIST- or
+     * PACKED-mode tag with a real NREG=0 (16) fell through into the
+     * IMAGE-mode/degenerate-skip branch below instead (guarded by
+     * "|| nreg == 0"), silently misinterpreting real register-list
+     * draw data (PRIM/RGBAQ/XYZ2/TEX0 writes) as raw pixel bytes to
+     * skip. This is a genuine, real-hardware-cited correctness fix,
+     * kept on that basis - but Round 641's own live instrumentation
+     * (see docs/STATUS.md) found it empirically INERT against this
+     * project's captured boot trace: nreg==0 was observed occurring
+     * only when flg==2 (already IMAGE mode, where NREG is unused/
+     * irrelevant), never in the flg==0/1 misrouting scenario this
+     * fix targets. The garbled PRIM values described below (reserved
+     * TYPE=7, high-entropy attribute bits, repeated 0x7ff) are still
+     * observed live with this fix applied - see gif.h's gif_last_eop
+     * comment and gif_process_quadwords() below for the transfer-
+     * boundary fix that was ALSO tried and ALSO found insufficient
+     * alone; the real source of the corruption is still open as of
+     * Round 641 and is narrowed to a within-packet NLOOP/NREG or
+     * upstream VU1-content desync, not a transfer-boundary or
+     * NREG-substitution issue. Do not re-claim this fix (or the EOP
+     * fix) as "the" root cause without fresh empirical confirmation -
+     * both were disproven by direct instrumentation after initially
+     * being written up with this over-confident claim. */
+    uint32_t nreg_raw = nreg;
+    if (nreg_raw == 0) nreg = 16;
     uint32_t pre   = (tag_w1 >> 14) & 0x1u;
     uint32_t prim  = (tag_w1 >> 15) & 0x7FFu;
     uint32_t eop   = (tag_w0 >> 15) & 0x1u; /* real tGIF_TAG0::EOP, bit 15 - see Gif.h */
@@ -2215,6 +2350,11 @@ static uint32_t process_one_packet(const uint8_t *p, uint32_t len)
         g_gif.gif_p3cnt = nloop & 0x7FFFu;
         g_gif.gif_p3tag = (nloop & 0x7FFFu) | (eop << 15);
     }
+    /* Round 641: unconditionally mirror EOP (not gated on PATH_3 like
+     * gif_p3cnt/gif_p3tag above) for gif_process_quadwords()'s real
+     * transfer-boundary stop check below - see gif.h's gif_last_eop
+     * comment for the full citation/rationale. */
+    g_gif.gif_last_eop = eop;
 
     if (pre) {
         g_gif.prim = prim;
@@ -2243,7 +2383,7 @@ static uint32_t process_one_packet(const uint8_t *p, uint32_t len)
      * already-documented A+D XYZ2 simplification (no real Z - see
      * apply_ad_write's own GS_REG_XYZ2 case) for REGLIST-mode XYZ2
      * writes too - a consistent, not a new, limitation. */
-    if (flg == 1 /* REGLIST */ && nreg != 0) {
+    if (flg == 1 /* REGLIST */) {
         uint32_t total_regs = nloop * nreg;
         for (uint32_t i = 0; i < total_regs; i++) {
             uint32_t qword_idx = i / 2;
@@ -2265,7 +2405,7 @@ static uint32_t process_one_packet(const uint8_t *p, uint32_t len)
         return consumed + total_qwords * 16u;
     }
 
-    if (flg == 2 || flg == 3 /* IMAGE (3 is the reserved/disabled variant, treated the same) */ || nreg == 0) {
+    if (flg == 2 || flg == 3 /* IMAGE (3 is the reserved/disabled variant, treated the same) */) {
         /* IMAGE mode: NLOOP qwords of completely raw pixel data - no
          * register interpretation, no REGS descriptor involved at
          * all (byte accounting was already correct before this
@@ -2285,31 +2425,66 @@ static uint32_t process_one_packet(const uint8_t *p, uint32_t len)
          * byte-skip - not interpreted, but the stream stays in sync. */
         uint32_t skip_qwords = nloop;
         uint32_t skip_bytes = skip_qwords * 16u;
-        if (consumed + skip_bytes > len) return consumed; /* not enough data yet */
 
-        if ((flg == 2 || flg == 3) && g_gif.trx_active) {
-            for (uint32_t i = 0; i < nloop && g_gif.trx_active; i++) {
-                const uint8_t *q = p + consumed + i * 16u;
-                uint32_t px[4];
-                px[0] = rd_le32(q + 0);
-                px[1] = rd_le32(q + 4);
-                px[2] = rd_le32(q + 8);
-                px[3] = rd_le32(q + 12);
-                for (int k = 0; k < 4 && g_gif.trx_active; k++) {
-                    gs_mem_write_psmct32(g_gif.trx_dbp, g_gif.trx_dbw,
-                                          g_gif.trx_dsax + g_gif.trx_cur_x,
-                                          g_gif.trx_dsay + g_gif.trx_cur_y,
-                                          px[k]);
-                    g_gif.trx_cur_x++;
-                    if (g_gif.trx_cur_x >= g_gif.trx_rrw) {
-                        g_gif.trx_cur_x = 0;
-                        g_gif.trx_cur_y++;
-                        if (g_gif.trx_cur_y >= g_gif.trx_rrh)
-                            g_gif.trx_active = 0; /* transfer complete - a new TRXDIR write is required to start another */
-                    }
-                }
+        /* Round 634 (task #536/#614): a real IMAGE-mode transfer's
+         * NLOOP qwords do not always all fit in this call's buffer -
+         * e.g. a large texture/font-glyph upload that the emulated
+         * DMA feed splits across multiple gif_process_quadwords()
+         * calls. The old code here returned early with NO progress
+         * when that happened, leaving this packet's un-fit pixel
+         * bytes sitting in the buffer for the CALLER's loop to
+         * immediately re-enter process_one_packet() on - which
+         * mis-parses genuine continuation pixel bytes as a fresh
+         * GIFtag. Round 633's raw-packet capture caught this exactly:
+         * prim_raw=0x3FF/type-7 ("reserved" - not a real primitive
+         * type), x=y=4095 (both pinned at the 12-bit max) - textbook
+         * "raw pixel bytes reinterpreted as tag/vertex fields"
+         * symptoms, not a real BIOS bug. Round 634 fixed the
+         * corruption statelessly (write what fits, discard the rest,
+         * return len) after an unbounded carry-over prototype was
+         * measured to occasionally desync unrelated later traffic
+         * forever once trx_active went false with owed_qwords still
+         * outstanding (every subsequent call's ENTIRE buffer got
+         * swallowed as phantom carry-over, freezing all further GS
+         * output - caught in testing before shipping).
+         *
+         * Round 635 (task #536/#614) re-enables reconstruction, but
+         * bounded and self-healing this time: only start a carry-over
+         * when the shortfall is small (<=GIF_IMAGE_CARRY_MAX_QWORDS -
+         * generous for a single BIOS menu label/glyph texture, nowhere
+         * near enough to matter if a runaway/bogus NLOOP ever occurs);
+         * gif_process_quadwords() (see below) unconditionally zeroes
+         * the carry counter the instant trx_active reads false, rather
+         * than continuing to consume future calls' bytes - this is
+         * the exact bug the Round 634 writeup identified in the
+         * discarded prototype, now fixed at its root instead of
+         * avoided by dropping reconstruction entirely. */
+        if (consumed + skip_bytes > len) {
+            uint32_t avail_bytes = (len > consumed) ? (len - consumed) : 0u;
+            uint32_t avail_qwords = avail_bytes / 16u;
+            uint32_t shortfall_qwords = skip_qwords - avail_qwords;
+
+            if ((flg == 2 || flg == 3) && g_gif.trx_active && avail_qwords > 0)
+                image_write_pixel_qwords(p + consumed, avail_qwords);
+
+            if ((flg == 2 || flg == 3) && g_gif.trx_active &&
+                shortfall_qwords <= GIF_IMAGE_CARRY_MAX_QWORDS) {
+                g_gif.image_carry_remaining_qwords = shortfall_qwords;
+            } else {
+                /* either not a real host-to-local pixel write, the
+                 * transfer already completed mid-write, or the
+                 * shortfall is implausibly large (likely a bogus/
+                 * mis-decoded NLOOP) - fall back to the safe Round 634
+                 * behavior for this packet: drop the tail, don't carry
+                 * anything forward. */
+                g_gif.image_carry_remaining_qwords = 0;
             }
+
+            return len; /* fully consumed - nothing left in this buffer to misparse as a fresh tag */
         }
+
+        if ((flg == 2 || flg == 3) && g_gif.trx_active)
+            image_write_pixel_qwords(p + consumed, nloop);
 
         return consumed + skip_bytes;
     }
@@ -2398,6 +2573,40 @@ void gif_process_quadwords(int channel, const uint8_t *data, uint32_t qwc)
     uint32_t len = qwc * 16u;
     uint32_t off = 0;
 
+    /* Round 635 (task #536/#614): drain any bounded IMAGE-mode
+     * carry-over owed from a prior call BEFORE parsing this buffer as
+     * tags - this buffer's leading bytes may be genuine continuation
+     * pixel data from a transfer that didn't fit in the previous call
+     * (see process_one_packet()'s IMAGE-mode branch and gif.h's
+     * image_carry_remaining_qwords comment).
+     *
+     * Safety property (this is what Round 634's discarded unbounded
+     * prototype got wrong): the moment trx_active reads false - the
+     * transfer legitimately completed mid-drain, OR was reset/
+     * cancelled by something else since the shortfall was recorded -
+     * the carry counter is unconditionally zeroed right here, THIS
+     * call, before it can consume any more bytes. There is no path
+     * left where a stale non-zero counter can keep swallowing future
+     * calls' data. Combined with the bounded shortfall cap at the
+     * point the carry is created, this makes the carry-over
+     * self-limiting in both size and duration. */
+    if (g_gif.image_carry_remaining_qwords > 0) {
+        if (!g_gif.trx_active) {
+            g_gif.image_carry_remaining_qwords = 0;
+        } else {
+            uint32_t owed_qwords = g_gif.image_carry_remaining_qwords;
+            uint32_t avail_qwords = len / 16u;
+            uint32_t take_qwords = (owed_qwords < avail_qwords) ? owed_qwords : avail_qwords;
+
+            image_write_pixel_qwords(data, take_qwords);
+            g_gif.image_carry_remaining_qwords = owed_qwords - take_qwords;
+            off = take_qwords * 16u;
+
+            if (!g_gif.trx_active)
+                g_gif.image_carry_remaining_qwords = 0; /* rectangle filled mid-drain (real NLOOP overstated it) - nothing left to reconstruct */
+        }
+    }
+
     while (off < len) {
         uint32_t used = process_one_packet(data + off, len - off);
         if (used == 0)
@@ -2405,6 +2614,34 @@ void gif_process_quadwords(int channel, const uint8_t *data, uint32_t qwc)
         off += used;
         if (used < 16)
             break; /* incomplete packet - safety, shouldn't normally happen */
+        /* Round 641 (task #536): real hardware terminates a GIF
+         * transfer at the first tag with EOP=1, on every path - see
+         * gif.h's gif_last_eop comment for the full citation. This
+         * matters most for PATH1 (VU1 XGKICK, vu.c): that caller
+         * intentionally passes a generous upper-bound qwc (everything
+         * from the kick address to the end of VU1's 16KB local
+         * memory, matching real hardware's own "doesn't know the
+         * real length in advance either" XGKICK model) and relies on
+         * this loop to stop at the real transfer's actual end. This
+         * is a genuine, real-hardware-cited correctness fix (kept on
+         * that basis alone), but Round 641's own live verification
+         * driver found it did NOT restore textured sprite/triangle
+         * rendering: sprite_textured/tri_textured stayed at 0 across
+         * a full 150M-slice survey, byte-for-byte identical dumped
+         * framebuffers before/after, and garbled PRIM values
+         * (reserved TYPE=7, high-entropy attribute bits, repeated
+         * 0x7ff) are STILL observed live with this fix applied - see
+         * docs/STATUS.md Round 641 for the full writeup. The
+         * remaining corruption is narrowed to something that
+         * produces bad NLOOP/NREG/FLG fields WITHIN a single, already
+         * EOP-bounded transfer (or from bad VU1 source content
+         * upstream of GIF parsing entirely) - not an unbounded
+         * transfer running past its real end, which is what this fix
+         * addresses. Left in place because it is independently
+         * correct per the manual and causes no regression, not
+         * because it was confirmed to fix the visible bug. */
+        if (g_gif.gif_last_eop)
+            break;
     }
 }
 

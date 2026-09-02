@@ -77,11 +77,42 @@ static void vu_write_dest(uint32_t vf[32][4], uint32_t fd_idx, uint32_t dest_mas
  * general-purpose integer-register writes (indices 1-15). */
 static inline void vu_write_vi(uint32_t *vi, uint32_t idx, uint32_t value)
 {
-    if (idx == 0 || idx > 15) return;
+    /* Round 653 fix (task #640): real VU hardware only has 16
+     * addressable integer registers (I0-I15) wired to a 5-bit
+     * Is/It/Id field (see vu_opcodes.h's manual-sourced field-width
+     * note). The unused 5th bit is not a "reserved slot" selector -
+     * it is simply not decoded by the register-file hardware, so a
+     * real encoded index of 16-31 aliases directly onto 0-15
+     * (idx & 0xF), the same way an oversized register-select field
+     * aliases on real silicon. This project's own special registers
+     * (Status/MAC/Clip flag, R, I, Q - stored at vi[16..31] in this
+     * project's vi[32] convention) are never reached through this
+     * general Is-field path on real hardware or in this codebase -
+     * they are written directly (e.g. "vi[22] = ..." in the
+     * DIV/SQRT/RSQRT handlers below), bypassing this helper entirely,
+     * so masking here cannot collide with those slots.
+     *
+     * Before this fix, idx>15 was silently dropped (a no-op write),
+     * which permanently froze any loop-counter register that a real
+     * microprogram encoded with the 5th bit set (e.g. SQI using Is=27
+     * instead of the aliased 11) - the address computed from that
+     * counter would never advance past its initial value, so the
+     * same VU1 memory address got overwritten every iteration.
+     * Live-captured via r653/r654 instrumentation (task #640): SQI at
+     * micro-pc 0x0188/0x01a8/0x01b8 (Is=27/26/27) was stuck writing
+     * to address 0 for 391+ consecutive iterations pre-fix; after
+     * aliasing idx to 0xF, the same instructions correctly resolve to
+     * real registers 11/10/11 and the address computation changes
+     * accordingly. This directly implicates the old idx>15 no-op as a
+     * likely contributor to the "period-16 repeating GIFtag content"
+     * anomaly documented in Round 652. */
+    idx &= 0xFu;
+    if (idx == 0) return;
     vi[idx] = value & 0xFFFFu;
 }
 static inline uint32_t vu_read_vi16(const uint32_t *vi, uint32_t idx)
 {
+    idx &= 0xFu;
     if (idx == 0) return 0;
     return vi[idx] & 0xFFFFu;
 }

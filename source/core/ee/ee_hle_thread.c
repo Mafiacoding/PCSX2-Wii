@@ -69,9 +69,55 @@ static struct {
     ee_sema_internal_t semas[EE_HLE_THREAD_MAX_SEMAS];
 } g;
 
+/* Round 733 (task #447, GT3-in-game-code stall investigation, user:
+ * "use all sources available to track down this issue and fix them
+ * once and for all"): live per-target call counters for WakeupThread/
+ * _iWakeupThread and SignalSema/iSignalSema - diagnostic-only, same
+ * "project-internal accessor" convention as Round 732's CDVD dispatch
+ * counters (iop_cdvd.c). Deliberately NOT part of the checkpointed `g`
+ * blob (mirrors Round 732's choice not to checkpoint its counters
+ * either) - these answer a live, per-process-run empirical question
+ * ("does ANY thread ever call WakeupThread(3) or WakeupThread(5) - GT3's
+ * own two real, currently-sleeping worker threads found parked with
+ * wait_type=TSW_SLEEP/wakeup_count=0 - or SignalSema on whatever they
+ * might really be gated behind"), not something that needs to survive
+ * a save/resume cycle. */
+static uint64_t g_wakeup_call_count[EE_HLE_THREAD_MAX_THREADS + 1];
+static uint64_t g_signal_call_count[EE_HLE_THREAD_MAX_SEMAS + 1];
+
+/* Round 733 continuation (task #447): the force-wake diagnostic proved
+ * threads 3/5 stay READY-but-never-scheduled forever even once woken,
+ * because pick_next_ready()'s FIFO tiebreak always favors whichever
+ * same-priority thread has the OLDEST ready_seq - and the currently-
+ * RUNNING thread never loses that advantage unless something calls
+ * RotateThreadReadyQueue() (sysnum 43/-44) on its own priority level
+ * (the real PS2 kernel's documented fairness mechanism - real games
+ * that run multiple same-priority worker threads are expected to call
+ * this periodically, typically from their main-loop/VSync handler).
+ * This counter answers the empirical question "does GT3's thread 4
+ * ever actually call it" - decisive for classifying whether this is a
+ * real emulator dispatch gap or genuinely-not-yet-reached game code. */
+static uint64_t g_rotate_call_count;
+uint64_t ee_hle_thread_get_rotate_calls(void) { return g_rotate_call_count; }
+
 void ee_hle_thread_init(void)
 {
     memset(&g, 0, sizeof(g));
+    memset(g_wakeup_call_count, 0, sizeof(g_wakeup_call_count));
+    memset(g_signal_call_count, 0, sizeof(g_signal_call_count));
+    g_rotate_call_count = 0;
+}
+
+uint64_t ee_hle_thread_get_wakeup_calls(int thid)
+{
+    if (thid < 0 || thid > EE_HLE_THREAD_MAX_THREADS) return 0;
+    return g_wakeup_call_count[thid];
+}
+
+uint64_t ee_hle_thread_get_signal_calls(int semid)
+{
+    if (semid < 0 || semid > EE_HLE_THREAD_MAX_SEMAS) return 0;
+    return g_signal_call_count[semid];
 }
 
 void ee_hle_thread_get_checkpoint_blob(void **ptr, uint32_t *size)
@@ -84,6 +130,30 @@ static ee_tcb_t *tcb(int thid) /* thid is 1-based */
 {
     if (thid < 1 || thid > EE_HLE_THREAD_MAX_THREADS) return NULL;
     return &g.threads[thid - 1];
+}
+
+/* Round 733 diagnostic-only (task #447, GT3 stall investigation): forces
+ * a WAIT/SLEEP thread to READY, using the EXACT same real-hardware
+ * transition as the sysnum==51 WakeupThread handler below (mirrors it
+ * rather than calling it, since that handler is inlined in
+ * ee_hle_thread_try_handle() and not separately callable). This is NOT
+ * wired into any EE syscall path and never fires during organic
+ * emulation - it exists purely so a scratch driver can test the
+ * hypothesis "would GT3's threads 3/5 go on to do real work (e.g. issue
+ * a CDVD read) if something had woken them", without first having to
+ * locate why the real wake call never happens. Same diagnostic-injection
+ * precedent as Round 568's synthetic WaitSema(0) signal test. */
+void ee_hle_thread_debug_force_wakeup(int thid)
+{
+    ee_tcb_t *t = tcb(thid);
+    if (!t || !t->in_use) return;
+    if (t->status == EE_THS_WAIT && t->wait_type == EE_TSW_SLEEP) {
+        t->status = EE_THS_READY;
+        t->wait_type = EE_TSW_NONE;
+        t->ready_seq = g.ready_seq_counter++;
+    } else {
+        t->wakeup_count++;
+    }
 }
 
 static int alloc_tcb_slot(void)
@@ -218,6 +288,42 @@ static void reschedule(ee_state_t *st)
         ee_tcb_t *cur = tcb(g.current_thread_id);
         if (cur) cur->status = EE_THS_RUN;
     }
+}
+
+/* Round 734 diagnostic-only (task #447, GT3 stall investigation
+ * continuation, user: "maybe its time we write our self some code
+ * RotateThreadReadyQueue" - see this round's clarification: NOT a
+ * proposal to make our scheduler auto-rotate on its own, since Round
+ * 712's own cited research already established real EE kernel hardware
+ * has no automatic timeslicing among equal-priority threads - that
+ * would be fabricating non-real behavior (the exact Round 549 mistake).
+ * Instead, this is a scratch-driver-callable injection point, applying
+ * the EXACT same real transition as the sysnum==43/-44
+ * RotateThreadReadyQueue handler below (mirrored, not called - that
+ * handler is inlined in ee_hle_thread_try_handle()), immediately
+ * followed by a real reschedule() so a context switch can actually
+ * happen. This exists purely to test what threads 3/5 DO once they
+ * finally get real CPU time - the Round 733 force_wakeup experiment
+ * flipped their status to READY but never called reschedule()
+ * afterward, so pick_next_ready()'s FIFO tiebreak (thread 4's
+ * long-standing, older ready_seq always wins) meant nothing ever
+ * visibly changed. This function is NOT wired into any EE syscall path
+ * and never fires during organic emulation. */
+void ee_hle_thread_debug_force_rotate(ee_state_t *st, int priority)
+{
+    int earliest = 0;
+    uint32_t earliest_seq = 0xFFFFFFFFu;
+    for (int i = 0; i < EE_HLE_THREAD_MAX_THREADS; i++) {
+        ee_tcb_t *t = &g.threads[i];
+        if (t->in_use && (int32_t)t->priority == priority &&
+            (t->status == EE_THS_READY || t->status == EE_THS_RUN) &&
+            t->ready_seq < earliest_seq) {
+            earliest = i + 1;
+            earliest_seq = t->ready_seq;
+        }
+    }
+    if (earliest) tcb(earliest)->ready_seq = g.ready_seq_counter++;
+    reschedule(st);
 }
 
 /* Wakes the earliest (FIFO, real default SA_THFIFO-equivalent - this
@@ -411,6 +517,7 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
         return 1;
     }
     if (sysnum == 43 || sysnum == -44) {
+        g_rotate_call_count++; /* Round 733 - see field comment */
         /* RotateThreadReadyQueue(int priority) - 0 = caller's own
          * current priority. Same real-equivalent implementation as
          * the IOP side: give the earliest-ready_seq thread at that
@@ -488,6 +595,7 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
     if (sysnum == 51 || sysnum == -52) {
         /* WakeupThread(int thid) / _iWakeupThread(int thid) */
         int thid = (int)(int32_t)st->gpr[4].ud0;
+        if (thid >= 0 && thid <= EE_HLE_THREAD_MAX_THREADS) g_wakeup_call_count[thid]++; /* Round 733 - see field comment */
         ee_tcb_t *t = tcb(thid);
         if (t && t->in_use) {
             if (t->status == EE_THS_WAIT && t->wait_type == EE_TSW_SLEEP) {
@@ -588,6 +696,7 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
          * optimization for reschedule()), but it no longer gates
          * whether count is incremented. */
         int semid = (int)(int32_t)st->gpr[4].ud0;
+        if (semid >= 0 && semid <= EE_HLE_THREAD_MAX_SEMAS) g_signal_call_count[semid]++; /* Round 733 - see field comment */
         ee_sema_internal_t *s = sema(semid);
         if (s && s->in_use) {
             if (s->count < s->max_count) {
@@ -643,6 +752,27 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
             }
             s->wait_threads++;
             reschedule(st);
+            /* Round 781 (task #803, GT3 0x0101bc24 permanent-park
+             * fix): this park re-executes the SAME WaitSema syscall
+             * every step for as long as the semaphore stays at 0 -
+             * exactly like the original (now-dead) ee_core.c handler
+             * this scheduler superseded (Round 569). That old handler
+             * called an equivalent tick sequence inline every parked
+             * step specifically so real elapsed hardware time (COP0
+             * Count, VBLANK, timers, DMAC/INTC interrupt delivery)
+             * keeps flowing even though this thread's own PC/context
+             * isn't moving - real hardware's clock does not stop just
+             * because one thread is blocked. This scheduler never
+             * ported that call, so entering this branch permanently
+             * starved every interrupt source ee_step()'s normal
+             * epilogue would otherwise drive (verified live: GT3's
+             * checkpoint chain, parked here on `WaitSema(5)`, made
+             * literally zero forward progress across 240M+ slices -
+             * see docs/STATUS.md Round 780/781). Fix: call the same
+             * real-time tick ee_core.c now exposes for exactly this
+             * purpose (ee_core_park_tick(), Round 781/task #803) once
+             * per parked step. */
+            ee_core_park_tick(st);
         }
         return 1;
     }
@@ -693,4 +823,174 @@ uint32_t ee_hle_thread_get_priority(int thid)
 {
     ee_tcb_t *t = tcb(thid);
     return t ? t->priority : 0u;
+}
+/* Round 612 (task #536): see header comment - read-only accessors for
+ * the TCB's own already-tracked wait_type/wait_id fields. */
+uint32_t ee_hle_thread_get_wait_type(int thid)
+{
+    ee_tcb_t *t = tcb(thid);
+    return t ? (uint32_t)t->wait_type : 0u;
+}
+uint32_t ee_hle_thread_get_wait_id(int thid)
+{
+    ee_tcb_t *t = tcb(thid);
+    return t ? (uint32_t)t->wait_id : 0u;
+}
+
+/* Round 613 (task #536): see header comment - expose entry/pc/wakeup_count
+ * for host-native diagnostic drivers, to identify which real BIOS
+ * function each parked thread belongs to. */
+uint32_t ee_hle_thread_get_entry(int thid)
+{
+    ee_tcb_t *t = tcb(thid);
+    return t ? t->entry : 0u;
+}
+uint32_t ee_hle_thread_get_saved_pc(int thid)
+{
+    ee_tcb_t *t = tcb(thid);
+    return t ? t->pc : 0u;
+}
+uint32_t ee_hle_thread_get_wakeup_count(int thid)
+{
+    ee_tcb_t *t = tcb(thid);
+    return t ? t->wakeup_count : 0u;
+}
+
+/* Round 597 (task #447/#536, following Round 596's finding): forced
+ * preemption. This project's reschedule() is otherwise only invoked
+ * from specific HLE syscall handlers above (StartThread/WakeupThread/
+ * SleepThread/ChangeThreadPriority/RotateThreadReadyQueue/thread-exit/
+ * SignalSema/WaitSema) - so a thread that never itself calls one of
+ * those specific syscalls can starve a higher-priority READY thread
+ * indefinitely, even after that thread has been made READY and even
+ * signaled via a real WakeupThread() call. Round 596 found exactly
+ * this: OSDSYS's real disc-browser dispatcher thread (entry=
+ * 0x00204308, identified by disassembly) sits READY with a real,
+ * better kernel priority than the currently-RUNNING animation-loop
+ * thread, already woken (wakeup_count=1 at the point of discovery),
+ * but never actually scheduled because nothing re-checks the ready
+ * queue between syscalls. Real EE hardware avoids this via kernel-
+ * level forced preemption on interrupt return (the real kernel's
+ * exception/interrupt-return path always re-checks the ready queue
+ * before restoring context) - this project's own C-level HLE
+ * scheduler (Round 569) never had an equivalent, since it only ever
+ * reacts to the specific syscalls above.
+ *
+ * Called once per genuine instruction boundary from ee_core.c's
+ * ee_step(), in the exact same `if (!st->branch_pending)` block and
+ * calling convention already used for ee_check_timer_interrupt()/
+ * ee_check_intc_interrupt()/ee_check_dmac_interrupt() - a cheap
+ * O(thread_count) scan (thread_count capped at
+ * EE_HLE_THREAD_MAX_THREADS==32) that is a no-op until this project's
+ * own scheduler has been engaged at all (thread_count==0, matching
+ * every other check function's existing no-op-until-armed
+ * convention).
+ *
+ * Deliberately conservative: only switches when the best real ready
+ * priority is STRICTLY better (numerically lower) than the currently-
+ * RUNNING thread's own priority - never merely because a same-or-
+ * lower-priority thread is ready, so FIFO ordering among equal-
+ * priority threads (pick_next_ready()'s own tiebreak) is never
+ * disturbed by this function. This mirrors a real priority-preemptive
+ * kernel's exact behavior (strictly-higher-priority-preempts, ties
+ * don't), just checked far more frequently than real hardware's own
+ * timer-tick granularity - an intentional, honest simplification
+ * given this project has no cycle-accurate timing model (same
+ * established precedent as e.g. ee_step()'s own COP0 Count-advances-
+ * by-1-per-instruction comment immediately above in ee_core.c). */
+void ee_hle_thread_check_preempt(ee_state_t *st)
+{
+    /* Round 598 (task #447/#536 follow-up, real regression fix): a real,
+     * confirmed-via-user-supplied-disc regression was found in Round 597's
+     * original version of this function - it had no guard against
+     * preempting while the CPU is genuinely mid-hardware-exception
+     * (COP0 Status.EXL or Status.ERL set). ee_check_timer_interrupt()/
+     * ee_check_intc_interrupt()/ee_check_dmac_interrupt() immediately
+     * above this function's own call site in ee_core.c's ee_step() all
+     * correctly refuse to raise a NEW interrupt while EXL/ERL is set
+     * (real MIPS semantics - exceptions do not nest by default), but
+     * this function had no equivalent check, so it could - and, per
+     * Round 598's host-native evidence against the real Tekken Tag
+     * Tournament (Europe) (Demo) disc image, DID - swap out the "current
+     * thread"'s live register file (including pc) while that thread's
+     * CPU state actually belonged to a real EE interrupt handler
+     * (Status.EXL=1, COP0 EPC holding the real interrupted return
+     * address). A real interrupt-return sequence (ERET) assumes it will
+     * resume exactly the context that was live when the exception was
+     * taken; this function silently substituting a DIFFERENT thread's
+     * saved context in between corrupts that assumption - the newly-
+     * loaded thread's code then runs with EXL still set (interrupts
+     * effectively masked) and no correct path back to the original
+     * caller, which is exactly the symptom Round 598 measured: the real
+     * Tekken disc-boot animation thread (tid 3) permanently trapped
+     * cycling through EE kernel interrupt-dispatch code
+     * (0x8000CC00-0x8000FA00) with zero further VU1/GS activity for
+     * over a billion further instructions, instead of baseline's
+     * (pre-Round-597) behavior of continuing to render real frames.
+     * The fix mirrors the exact same EXL/ERL gating convention already
+     * used by this file's three sibling interrupt-check functions -
+     * simply refuse to switch threads while genuinely inside a hardware
+     * exception; the CPU will still be re-checked on every subsequent
+     * instruction boundary once ERET clears EXL, so the disc-browser-
+     * dispatcher-starvation fix Round 597 was written for is preserved
+     * (see this file's own header/definition comments for that
+     * original rationale), just no longer firing during the one window
+     * where doing so is unsafe. */
+    if (st->cop0[12] & 0x6u) return; /* Status.EXL (bit 1) or Status.ERL (bit 2) set - genuinely mid-exception, never preempt here */
+    /* Round 625 (task #536/#607, following Round 624's live-hardware-
+     * verified findings): never freeze a thread's context while its PC
+     * sits inside the real, fixed generic ERET-glue thread-start
+     * trampoline - the exact 5-instruction body this project has fully
+     * disassembled and byte-verified twice, independently, against the
+     * real BIOS ROM (Round 467's "0x00081FE0 is a fixed generic kernel
+     * thread-start trampoline; real entry point travels through $v1,
+     * not $a0" finding; Round 619's byte-exact confirmation:
+     *   0x00081FE0: lui   $sp, 8
+     *   0x00081FE4: jalr  $v1        ; delay slot below
+     *   0x00081FE8: addiu $sp, $sp, 0x1fc0
+     *   0x00081FEC: addiu $v1, $zero, -5
+     *   0x00081FF0: syscall
+     * ). $v1 here is a real MIPS calling-convention register: the
+     * trampoline's ONLY caller-supplied argument, which must already
+     * hold a valid target address by the time control reaches
+     * 0x00081FE0 - the trampoline body itself performs no load, no
+     * null-check, and no guard of any kind before `jalr $v1` (Round
+     * 619's own conclusion, quoted in STATUS.md: "There is no branch,
+     * no zero-check, no guard of any kind between the trampoline's
+     * entry and the jalr $v1"). Real EE hardware never has a problem
+     * with this: an interrupt landing here is always followed by a
+     * full, faithful, immediate context restore on return, so $v1
+     * (already set by the real caller a few instructions earlier)
+     * survives untouched. This project's OWN software scheduler is
+     * different in one specific, consequential way - once
+     * save_context() freezes a thread here, nothing guarantees WHEN
+     * (or whether, for a very long time) load_context() will resume
+     * it, unlike real hardware's effectively-instantaneous interrupt
+     * round-trip. Round 622's own live-instrumented conclusion
+     * ("$ra=0x800027AC... a leftover register value from BEFORE the
+     * 2,000,000-slice observation window... set by a real call more
+     * than ~154,500,000 slices earlier and never overwritten since")
+     * and Round 624's direct RAM comparison (TIMER3's real per-cause
+     * handler-table slot is genuinely unregistered/count=0, and the
+     * real 0x80001630 dispatcher's own intact blez-guard would never
+     * reach this trampoline for it at all) together rule out "the real
+     * BIOS dispatch code is buggy" as the explanation - the evidence
+     * instead points at exactly this window: this project's own forced
+     * preemption (introduced Round 597, moved to fire only on real
+     * ERET in Round 598) can still freeze whichever thread happens to
+     * be mid-handoff here, for however long its priority keeps it off
+     * the ready queue, and later resume it with $v1 stale/zero. The
+     * fix is narrow and conservative - defer preemption by the few
+     * instructions it takes the CPU to clear this window on its own,
+     * exactly the same "genuinely unsafe software-yield point, unlike
+     * real hardware which needs no such carve-out" reasoning as the
+     * Status.EXL/ERL check immediately above. */
+    if (st->pc >= 0x00081FE0u && st->pc < 0x00081FF0u) return;
+    if (g.thread_count == 0 || g.current_thread_id == 0) return;
+    ee_tcb_t *cur = tcb(g.current_thread_id);
+    if (!cur || cur->status != EE_THS_RUN) return;
+    int best = pick_next_ready();
+    if (best == 0 || best == g.current_thread_id) return;
+    ee_tcb_t *bt = tcb(best);
+    if (bt && bt->priority < cur->priority) reschedule(st);
 }

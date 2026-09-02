@@ -30,6 +30,14 @@ static const ee_timer_range_t s_ranges[EE_TIMERS_COUNT] = {
 static const int s_irq_bit[EE_TIMERS_COUNT] = { 9, 10, 11, 12 };
 
 static ee_timers_state_t g_timers;
+static uint32_t g_irq_count[EE_TIMERS_COUNT];
+
+uint32_t ee_timers_get_irq_count(int idx)
+{
+    if (idx < 0 || idx >= EE_TIMERS_COUNT)
+        return 0;
+    return g_irq_count[idx];
+}
 
 /* Round 127 (task #172/#247, 167th finding): real EE clock is
  * 294,912,000 Hz; real NTSC horizontal-sync (HSYNC) line rate is
@@ -49,6 +57,7 @@ static uint64_t g_bus_tick_counter = 0;
 void ee_timers_init(void)
 {
     memset(&g_timers, 0, sizeof(g_timers));
+    memset(&g_irq_count, 0, sizeof(g_irq_count));
     g_bus_tick_counter = 0;
 }
 
@@ -172,13 +181,30 @@ void ee_timers_tick(void)
 
         t->count++;
 
-        /* Compare match - real rcntUpdate()'s target-check. */
+        /* Compare match - CORRECTED Round 751 (task #733/#734
+         * continuation) to match real _cpuTestTarget()/_cpuTestOverflow()
+         * (pcsx2-master/pcsx2/Counters.cpp) exactly, found alongside the
+         * bit-position fix in ee_timers.h's own citation. Real hardware
+         * does NOT auto-disable TargetInterrupt/OverflowInterrupt after
+         * one firing (this project's old code invented a REPEAT_IRQ mode
+         * bit to gate that, which does not exist in the real MODE
+         * register at all - see ee_timers.h). Real re-arming is purely
+         * flag-gated: the EQUF/OVFF flag itself blocks re-firing until
+         * software clears it by writing MODE with that bit set to 1
+         * (already handled correctly by ee_timers_mmio_write32() below -
+         * that logic was already right, only this tick-side gating was
+         * wrong). Both flag/IRQ sets are also now correctly scoped
+         * inside their own enable-bit check (EQUF/OVFF are only ever
+         * touched when CMPE/OVFE is actually enabled, matching real
+         * _cpuTestTarget()'s `if (mode.TargetInterrupt) { if
+         * (!mode.TargetReached) {...} }` nesting exactly - previously
+         * EQUF/OVFF were set unconditionally on every match/overflow
+         * regardless of whether the enable bit was even set). */
         if (t->count == t->comp) {
-            t->mode |= EE_CNT_MODE_EQUF;
-            if (t->mode & EE_CNT_MODE_CMP_ENABLE) {
+            if ((t->mode & EE_CNT_MODE_CMP_ENABLE) && !(t->mode & EE_CNT_MODE_EQUF)) {
+                t->mode |= EE_CNT_MODE_EQUF;
                 ee_intc_raise(s_irq_bit[i]);
-                if (!(t->mode & EE_CNT_MODE_REPEAT_IRQ))
-                    t->mode &= ~EE_CNT_MODE_CMP_ENABLE; /* real: one-shot disables further compare IRQs until MODE is rewritten */
+                g_irq_count[i]++;
             }
             if (t->mode & EE_CNT_MODE_ZERO_RETURN)
                 t->count = 0; /* real: zero-return wraps immediately on match, ready for the next period */
@@ -188,13 +214,13 @@ void ee_timers_tick(void)
          * function-level comment above for the live evidence this is
          * 16-bit, not 32-bit). Skipped for zero-return timers whose
          * count never reaches past COMP in the first place (they
-         * wrap via the match branch above instead). */
+         * wrap via the match branch above instead). Same Round 751
+         * flag-gating correction as the compare-match branch above. */
         if (t->count > EE_TIMER_MAX_COUNT) {
-            t->mode |= EE_CNT_MODE_OVFF;
-            if (t->mode & EE_CNT_MODE_OVF_ENABLE) {
+            if ((t->mode & EE_CNT_MODE_OVF_ENABLE) && !(t->mode & EE_CNT_MODE_OVFF)) {
+                t->mode |= EE_CNT_MODE_OVFF;
                 ee_intc_raise(s_irq_bit[i]);
-                if (!(t->mode & EE_CNT_MODE_REPEAT_IRQ))
-                    t->mode &= ~EE_CNT_MODE_OVF_ENABLE;
+                g_irq_count[i]++;
             }
             t->count -= (EE_TIMER_MAX_COUNT + 1u);
         }

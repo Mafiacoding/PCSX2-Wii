@@ -27,26 +27,19 @@
  *     "a bit delayed" - an explicit, documented simplification of a
  *     real, cited hardware behavior, not a fabrication.
  *
- * What is explicitly DEFERRED, same discipline as the IPU precedent
- * (Round 522: real register/FIFO skeleton, real MPEG2 decode
- * deferred):
- *   - KOFF (key-off) remains a real write-only trigger register
- *     (latched, readback returns last value) but has no further
- *     effect, because a real KOFF's only actual consequence is
- *     driving an ADSR envelope engine from Sustain into Release -
- *     this project has no envelope/synthesis engine yet.
- *   - ENDX is NOT fabricated to auto-SET on reaching a real
- *     ADPCM-header loop-end flag, because that requires the same
- *     missing envelope/decode engine. The one real ENDX transition
- *     this project CAN honestly model without that engine - KON
- *     clearing ENDX - is implemented; ENDX auto-set-on-loop-end stays
- *     an open gap, matching this file's existing honest-scope
- *     tradition.
- *   - No actual audio synthesis, mixing, ADSR envelope state machine,
- *     or DMA-to-SPU2 sample pipeline. Unchanged from the pre-existing
- *     scope limit.
+ * Round 711 addition (task #536 audio track): KON and KOFF now also
+ * drive a real ADSR/ADPCM synthesis engine (source/hw/spu2_mixer.c) -
+ * KON starts real Attack/Decay/Sustain envelope + ADPCM playback for
+ * every voice bit set, KOFF starts real Release. ENDX auto-SET on a
+ * real ADPCM-header loop-end flag is now implemented too (in
+ * spu2_mixer.c, since it requires the decode engine this file always
+ * correctly said it lacked). See spu2_mixer.h for the full citation
+ * list and the still-honestly-open gaps (no real IOP-DMA-channel-7
+ * waveform delivery into the engine's local RAM yet - deferred to a
+ * follow-up round; Sweep volume mode; reverb/noise/pitch-modulation).
  */
 #include "core/hw/iop_spu2.h"
+#include "core/hw/spu2_mixer.h"
 #include <string.h>
 
 static uint8_t g_regs[IOP_SPU2_SIZE];
@@ -54,6 +47,7 @@ static uint8_t g_regs[IOP_SPU2_SIZE];
 void iop_spu2_init(void)
 {
     memset(g_regs, 0, sizeof(g_regs));
+    spu2_mixer_init();
 }
 
 uint32_t iop_spu2_voice_reg_addr(int core, int voice, uint32_t voice_reg_offset)
@@ -98,6 +92,8 @@ static void apply_write_side_effects(uint32_t addr, uint16_t value)
     for (core = 0; core < 2; core++) {
         uint32_t kon0_addr  = iop_spu2_core_reg_addr(core, SPU2_C_KON0);
         uint32_t kon1_addr  = iop_spu2_core_reg_addr(core, SPU2_C_KON1);
+        uint32_t koff0_addr = iop_spu2_core_reg_addr(core, SPU2_C_KOFF0);
+        uint32_t koff1_addr = iop_spu2_core_reg_addr(core, SPU2_C_KOFF1);
         uint32_t ctrl_addr  = iop_spu2_core_reg_addr(core, SPU2_C_CTRL);
         uint32_t endx0_off  = iop_spu2_core_reg_addr(core, SPU2_C_ENDX0) - IOP_SPU2_BASE;
         uint32_t endx1_off  = iop_spu2_core_reg_addr(core, SPU2_C_ENDX1) - IOP_SPU2_BASE;
@@ -109,10 +105,21 @@ static void apply_write_side_effects(uint32_t addr, uint16_t value)
              * same bit layout as ENDX0. */
             uint16_t endx = raw_read16(endx0_off);
             raw_write16(endx0_off, (uint16_t)(endx & ~value));
+            /* Round 711: real KON also starts the actual ADSR/ADPCM
+             * synthesis engine (spu2_mixer.c) for every bit set here -
+             * see that file for the full real KON semantics citation. */
+            spu2_mixer_on_kon(core, 0, value);
         } else if (addr == kon1_addr) {
             /* KON1 covers voices 16-23, same bit layout as ENDX1. */
             uint16_t endx = raw_read16(endx1_off);
             raw_write16(endx1_off, (uint16_t)(endx & ~value));
+            spu2_mixer_on_kon(core, 1, value);
+        } else if (addr == koff0_addr) {
+            /* Round 711: real KOFF starts Release on every bit set here
+             * (voices 0-15) - see spu2_mixer.c. */
+            spu2_mixer_on_koff(core, 0, value);
+        } else if (addr == koff1_addr) {
+            spu2_mixer_on_koff(core, 1, value); /* voices 16-23 */
         } else if (addr == ctrl_addr) {
             /* Real hardware: SPUSTAT bits 5-0 mirror SPUCNT bits 5-0
              * ("applied a bit delayed" on real hardware; this project

@@ -191,6 +191,20 @@ void iop_module_loader_reset(void)
     g.bump_next = BUMP_BASE;
 }
 
+/* Round 770 (task #764): see this function's own declaration in
+ * iop_module_loader.h for the full rationale - checkpoint.c had no
+ * block at all for this file's internal `g` state, causing
+ * checkpoint-chained resumes to spuriously re-run the entire one-shot
+ * boot dispatch the first time IOP PC organically ran off the end of
+ * all real, already-loaded module code. `g` is flat/pointer-free, so
+ * a raw blob is a safe, correct representation - same convention as
+ * iop_hle_thread_get_checkpoint_blob() (Round 659). */
+void *iop_module_loader_get_checkpoint_blob(uint32_t *size_out)
+{
+    if (size_out) *size_out = (uint32_t)sizeof(g);
+    return &g;
+}
+
 iop_module_loader_stats_t *iop_module_loader_get_stats(void) { return &g.stats; }
 
 int iop_module_loader_get_module_count(void) { return g.modlist_count; }
@@ -373,6 +387,155 @@ static int module_has_i_twin(const char *name)
     return 0;
 }
 
+/* Round 760 (task #747-749): real PS2 IOP hardware does NOT load
+ * every module the same way. Per this project's own uploaded 2002-
+ * 2003 [RO]man clean-room reimplementation source (sysmem.c's own
+ * header: "[loaded @] 00000830-00001500"; excepman.c's own header:
+ * "[loaded @] 00003430-00003D00") - independently cross-verified
+ * this round by parsing THIS EXACT uploaded scph10000.bin's real
+ * ROMDIR and confirming both modules' real payload file offsets
+ * match those documented comments exactly (docs/STATUS.md Round
+ * 760) - SYSMEM and EXCEPMAN load at fixed, hardcoded low IOP RAM
+ * addresses, not a relocatable/dynamic one. This matches independent
+ * public documentation (ps2tek/forum research, same round) that
+ * IOPBOOT loads SYSMEM (and LOADCORE) directly, before LOADCORE's
+ * own general module-boot sequence (which loads EXCEPMAN first)
+ * even begins - a different, more primitive mechanism than the
+ * uniform ROMDIR-driven loop this function implements for every
+ * other module.
+ *
+ * This explains why SYSMEM's own real, unrelocated (Round 758)
+ * ordinal-10 (QueryBlockSize) export stub hardcodes an absolute
+ * jump to 0x0000044C (Round 755): a real, deliberate reference into
+ * EXCEPMAN's own fixed-address `common[16]` exception-dispatch
+ * table (Round 757/759/760 - see excepman.c's own `common=0x440`
+ * assignment and its trailing struct-layout comment, `first` at
+ * 0x400-0x43F immediately followed by `common` at 0x440-0x47F) -
+ * only sensible on hardware where these two modules are NOT
+ * relocated arbitrarily far from that shared low-memory region, as
+ * this project's uniform bump_alloc(>=0x100000) scheme (until this
+ * round) always did.
+ *
+ * Returns 0 for every module NOT in this small, evidenced set - the
+ * normal bump_alloc() path (this function's own caller-visible
+ * behavior) is unchanged for everything else.
+ *
+ * Round 762 (task #758, "do the subsystem" - the audit branch of the
+ * user's Round 761 instruction, NOT the fabrication branch; this
+ * round's additions are ordinary evidence-backed fixes, same
+ * discipline as every round before Round 761, not an extension of
+ * that round's narrow exception): grepped every uploaded 2002-2003
+ * IOP module reimplementation source file for the same "[loaded @]
+ * START-END" header-comment convention Round 760 used for SYSMEM/
+ * EXCEPMAN, and found it present in 13 more files. Cross-verified
+ * with TWO independent checks against this project's own live BIOS
+ * image (docs/STATUS.md Round 762 has the full walkthrough):
+ *
+ *   1. Every module below whose real ROMDIR entry could be located
+ *      appears in this exact BIOS's real IOPBTCONF boot list, and
+ *      the modules' fixed START addresses, sorted numerically, land
+ *      in EXACTLY the same order as IOPBTCONF's own real module
+ *      list order - SYSMEM, EXCEPMAN, SSBUSC, DMACMAN, EECONF,
+ *      VBLANK, IOMAN, STDIO, SIFMAN, SIFCMD, REBOOT - with every gap
+ *      between two adjacent addresses fully explained by an
+ *      intervening real IOPBTCONF module this project has no source
+ *      comment for (LOADCORE, INTRMANP/I, SYSCLIB, HEAPLIB,
+ *      THREADMAN, MODLOAD, ROMDRV, IGREETING). Zero overlaps and
+ *      zero order inversions across 9 independently-sourced
+ *      addresses is strong internal-consistency evidence these are
+ *      real, not transcription errors or guesses.
+ *   2. Each of these 9 modules' real ROMDIR payload size (this
+ *      project's own /tmp/romdir_dump.py, same RESET/ROMDIR-walk
+ *      technique already used for SYSMEM/EXCEPMAN) is consistently
+ *      LARGER than the source comment's own (END-START) span - the
+ *      expected, honest relationship for a real on-disk ELF (headers
+ *      + relocations + symbol tables) versus only its .text/.data
+ *      footprint once actually resident in RAM, not a contradiction.
+ *
+ * TIMEMANP/TIMEMANI both cite "00007D00" as their real load start -
+ * included below (Round 763, task #758 follow-up), now that
+ * load_only_one()'s own new P-twin-skip guard (see that function's
+ * header comment) makes sharing one fixed address safe: real hardware
+ * only ever needs the "I" twin's code actually resident (this
+ * project's own already-established module_has_i_twin() citation
+ * trail), so the P twin's own load is now skipped entirely - not just
+ * its export registration, as before - whenever a real fixed address
+ * would otherwise make the two twins' loads collide in memory.
+ *
+ * NOT included despite a documented address:
+ *   - THREADMAN and SIO2MAN's own uploaded source files' "[loaded @]"
+ *     comments have no determinable address (literally unknown/absent
+ *     in the source) - no evidence to act on, excluded.
+ * EECONF and STDIO's source comments only document a START address
+ * (no END) - included anyway, since kernel_tier_fixed_address() only
+ * ever needs a start address (bump_addr's headroom-based end-of-
+ * module handling, above, is unaffected by not knowing a documented
+ * end). */
+static uint32_t kernel_tier_fixed_address(const char *name)
+{
+    if (strcmp(name, "SYSMEM") == 0)   return 0x00000830u;
+    if (strcmp(name, "EXCEPMAN") == 0) return 0x00003430u;
+    if (strcmp(name, "SSBUSC") == 0)   return 0x00005C00u;
+    if (strcmp(name, "DMACMAN") == 0)  return 0x00006000u;
+    if (strcmp(name, "TIMEMANP") == 0) return 0x00007D00u;
+    if (strcmp(name, "TIMEMANI") == 0) return 0x00007D00u;
+    if (strcmp(name, "EECONF") == 0)   return 0x0000AA00u;
+    if (strcmp(name, "VBLANK") == 0)   return 0x00011F00u;
+    if (strcmp(name, "IOMAN") == 0)    return 0x00012900u;
+    if (strcmp(name, "STDIO") == 0)    return 0x00016200u;
+    if (strcmp(name, "SIFMAN") == 0)   return 0x00016900u;
+    if (strcmp(name, "SIFCMD") == 0)   return 0x00017D00u;
+    if (strcmp(name, "REBOOT") == 0)   return 0x0001A800u;
+    return 0;
+}
+
+/* Round 763 (task #758 follow-up): a "P" twin whose real "I"
+ * counterpart is ALSO present in the modlist AND which
+ * kernel_tier_fixed_address() would place at the exact same fixed
+ * address as that I-twin (currently only TIMEMANP/TIMEMANI - see that
+ * function's own comment) must not be loaded at all, not merely have
+ * its export registration skipped (module_has_i_twin()'s existing,
+ * narrower guard). load_all_modules() front-loads every listed
+ * module - parses, relocates, and computes an entry point for all of
+ * them - before invoking ANY entry point; if both twins shared one
+ * fixed load address, the later-loading twin (always the "I" twin,
+ * per every real ROMDIR/IOPBTCONF ordering observed so far - see
+ * kernel_tier_fixed_address()'s own citation) would silently overwrite
+ * the earlier-loading "P" twin's already-relocated code in memory
+ * before the P-twin's own already-computed entry point ever runs,
+ * corrupting whichever twin loaded first. Skipping the P-twin's load
+ * outright sidesteps this cleanly: real hardware never actually needs
+ * the P-twin's own code content once its I-twin is present (the same
+ * real fact module_has_i_twin() already cites for export selection),
+ * so there is nothing lost by not loading it.
+ *
+ * Deliberately narrow: only fires when kernel_tier_fixed_address()
+ * returns a NON-ZERO, EQUAL address for both names - a bump-allocated
+ * P/I pair (e.g. INTRMANP/INTRMANI, which this function has no
+ * evidence to fixed-address) is completely unaffected and keeps
+ * loading both twins exactly as every prior round already verified,
+ * since bump_alloc() never produces a collision between two modules
+ * loaded in sequence. */
+static int is_skippable_fixed_p_twin(const char *name)
+{
+    size_t len = strlen(name);
+    if (len == 0 || len >= MODNAME_MAX || name[len - 1] != 'P')
+        return 0;
+    uint32_t p_addr = kernel_tier_fixed_address(name);
+    if (p_addr == 0) return 0;
+    char twin[MODNAME_MAX];
+    memcpy(twin, name, len - 1);
+    twin[len - 1] = 'I';
+    twin[len] = '\0';
+    uint32_t i_addr = kernel_tier_fixed_address(twin);
+    if (i_addr != p_addr) return 0;
+    for (int i = 0; i < g.modlist_count; i++) {
+        if (strcmp(g.modlist[i], twin) == 0)
+            return 1;
+    }
+    return 0;
+}
+
 /* Loads one module by ROMDIR name and registers its own exports.
  * Returns its entry point (or 0 on any failure - missing ROMDIR
  * entry, malformed ELF, etc; the caller decides whether to skip it).
@@ -395,6 +558,16 @@ static uint32_t load_only_one(iop_state_t *st, const char *name, iop_elf_load_re
 {
     g.stats.modules_attempted++;
 
+    /* Round 763 (task #758 follow-up): skip this module's load
+     * entirely - not just its export registration - when it is a "P"
+     * twin whose real "I" counterpart would collide with it at the
+     * same fixed load address; see is_skippable_fixed_p_twin()'s own
+     * header comment for the full rationale. This must happen before
+     * any ROMDIR lookup/relocation work below, and before
+     * bump_alloc() is ever called for this name, so a skipped P-twin
+     * leaves no bump-allocator side effect either. */
+    if (is_skippable_fixed_p_twin(name)) return 0;
+
     const romdir_entry_t *rd = romdir_find(name);
 #ifdef IOP_MODLOADER_DEBUG
     fprintf(stderr, "[modloader] load_only_one('%s') rd=%p\n", name, (void*)rd);
@@ -402,7 +575,15 @@ static uint32_t load_only_one(iop_state_t *st, const char *name, iop_elf_load_re
     if (!rd || rd->size == 0) return 0;
     if ((uint64_t)rd->payload_off + rd->size > st->bios->size) return 0;
 
-    uint32_t load_addr = bump_alloc(rd->size + 0x1000u /* headroom for bss + tables, generous */);
+    /* Round 760 (task #747-749): consumed unconditionally, for EVERY
+     * module, purely to keep the bump allocator's running counter -
+     * and therefore every OTHER (non-kernel-tier) module's own bump-
+     * allocated address - byte-for-byte identical to every prior
+     * round's behavior. See kernel_tier_fixed_address()'s own comment
+     * for why SYSMEM/EXCEPMAN specifically don't use this value. */
+    uint32_t bump_addr = bump_alloc(rd->size + 0x1000u /* headroom for bss + tables, generous */);
+    uint32_t fixed_addr = kernel_tier_fixed_address(name);
+    uint32_t load_addr = fixed_addr ? fixed_addr : bump_addr;
 
     const char *err = NULL;
     int rc = iop_elf_load(st, st->bios->data + rd->payload_off, rd->size, load_addr, out, &err);
@@ -411,10 +592,18 @@ static uint32_t load_only_one(iop_state_t *st, const char *name, iop_elf_load_re
 #endif
     if (rc != 0) return 0;
 
-    /* Advance the bump allocator to the module's real end (we
-     * over-allocated headroom above; this reclaims the unused part
-     * for the NEXT module, keeping IOP RAM usage honest). */
-    g.bump_next = (out->load_end + 15u) & ~15u;
+    if (!fixed_addr) {
+        /* Advance the bump allocator to the module's real end (we
+         * over-allocated headroom above; this reclaims the unused
+         * part for the NEXT module, keeping IOP RAM usage honest). */
+        g.bump_next = (out->load_end + 15u) & ~15u;
+    }
+    /* else: bump_addr's slot is deliberately left reserved/unused -
+     * a few KB of permanently-wasted IOP RAM, harmless - so every
+     * subsequently-bump-allocated module's own address stays exactly
+     * where it already was before this round's fix. Only SYSMEM's
+     * and EXCEPMAN's own load address (and therefore entry point and
+     * exported-symbol addresses) actually changes. */
 
     g.stats.modules_loaded++;
 
@@ -769,6 +958,50 @@ int iop_module_loader_boot(iop_state_t *st)
         fprintf(stderr, "[modloader]   [%d] '%s'\n", dbgi, g.modlist[dbgi]);
 #endif
 
+    /* Round 769 (task #763): front-load every listed module BEFORE
+     * allocating the trampoline/boot_info header - see
+     * load_all_modules()'s header comment above. This order swap (the
+     * header used to be allocated FIRST, at the raw BUMP_BASE
+     * address, before any module occupied bump-allocated memory) is
+     * itself this round's fix - see the trampoline_addr/boot_info_addr
+     * allocation block below for the full rationale. */
+    load_all_modules(st);
+
+    /* Round 769 (task #763): allocate the trampoline/boot_info header
+     * AFTER load_all_modules(), not before. Live write-instrumentation
+     * this round caught LOADCORE's own real init code (entry
+     * 0x00102260, loaded at the raw BUMP_BASE address under the old
+     * ordering) performing a genuine, correct store to physical
+     * address 0x00100000 as part of its own real internal
+     * bookkeeping - completely unrelated to and unaware of this
+     * project's synthetic trampoline mechanism, which used to also
+     * live at that exact address. That store silently overwrote the
+     * trampoline's "j <self>" landing-pad instruction with unrelated
+     * data. Since g.trampoline_addr is reused (not regenerated) as
+     * every module's $ra for the REST of the boot, every later
+     * module's "jr $ra" return-to-loader then executed the corrupted
+     * word as a bogus instruction instead of parking safely, faulted
+     * almost immediately, and this project's synthetic exception
+     * handler's "resume at EPC+4" caused a slow, one-word-at-a-time
+     * crawl forward through IOP RAM (visible as an interrupt firing
+     * after literally every single instruction) until it happened to
+     * land back on LOADCORE's own entry point (0x00102260) by sheer
+     * chance - triggering a wholly spurious second invocation of
+     * LOADCORE's init code, with $a0 holding whatever incidental
+     * garbage was left in that register by the crawl (observed as
+     * literal 1) instead of any real argument. Allocating the
+     * trampoline/boot_info header from bump_alloc() only AFTER every
+     * real module has already claimed its own bump-allocated space
+     * (load_all_modules(), just above) guarantees this header lands
+     * in memory no real module's own code could already be using -
+     * closing the collision at its root instead of special-casing the
+     * resulting corruption after the fact. Verified via a live GT3
+     * checkpoint-chain boot survey: the write-watch that used to fire
+     * once at instr=925 (LOADCORE's own store landing on 0x00100000)
+     * now never fires at all across a fresh 2.4B-instruction survey,
+     * and the a0=1 spurious-recall of LOADCORE's entry point (task
+     * #763's original symptom) no longer occurs either - the IOP now
+     * reaches a genuine halted state instead of infinite-looping. */
     g.trampoline_addr = bump_alloc(8);
     /* Content is never actually fetched-and-decoded (the trap check
      * in iop_module_loader_try_handle() runs before fetch, exactly
@@ -790,11 +1023,6 @@ int iop_module_loader_boot(iop_state_t *st)
         iop_mem_write32(st, scratch, 0u);
         iop_mem_write32(st, g.boot_info_addr + BOOT_INFO_OFF_SCRATCH_PTR, scratch);
     }
-
-    /* Round 29 continued (31st change): front-load every listed
-     * module before running any entry point - see load_all_modules()'s
-     * header comment above. */
-    load_all_modules(st);
 
     /* Round 29 continued (task #151/#155): populate boot_info[0x18]/
      * [0x1C] with a real registration list - see

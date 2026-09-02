@@ -179,6 +179,90 @@ int ee_hle_thread_get_current_thread_id(void);
 uint32_t ee_hle_thread_get_status(int thid);
 uint32_t ee_hle_thread_get_priority(int thid);
 
+/* Round 612 (task #536, user-supplied real ps2sdk kernel.h confirms
+ * ee_thread_status_t really has waitType@0x24/waitId@0x28 - this
+ * project's own TCB already tracks the identical fields internally
+ * (wait_type/wait_id, set by WaitSema/SleepThread, cleared by
+ * SignalSema/WakeupThread - see ee_hle_thread.c) and already exposes
+ * them to GUEST code via ReferThreadStatus's 0x24/0x28 writes, but
+ * had no HOST-native accessor for this project's own diagnostic
+ * drivers - added to directly answer "what is thread N blocked on"
+ * instead of inferring it from indirect symptoms. Returns EE_TSW_NONE
+ * (0) for an invalid thid, matching get_status()/get_priority()'s
+ * existing safe-default convention. */
+uint32_t ee_hle_thread_get_wait_type(int thid);
+uint32_t ee_hle_thread_get_wait_id(int thid);
+
+/* Round 613 (task #536 continuation): same rationale/convention as
+ * the Round 612 wait_type/wait_id accessors - expose already-tracked
+ * internal TCB fields (entry point, saved PC, pending wakeup_count)
+ * to host-native diagnostic drivers, to identify WHICH real BIOS
+ * function each parked thread belongs to (by entry point) and
+ * whether any thread already has a queued-but-unconsumed wakeup
+ * (wakeup_count>0 would mean a WakeupThread call already happened
+ * but SleepThread hasn't been called yet - see kernel.h's real
+ * wakeupCount@0x2C field this project's WaitSema/WakeupThread pairing
+ * already correctly implements, per Round 612's citation). */
+uint32_t ee_hle_thread_get_entry(int thid);
+uint32_t ee_hle_thread_get_saved_pc(int thid);
+uint32_t ee_hle_thread_get_wakeup_count(int thid);
+
+/* Round 733 (task #447, GT3-in-game-code stall investigation): live,
+ * per-process-run call counters for WakeupThread(thid)/SignalSema(semid)
+ * (and their interrupt-context -52/-67 siblings) - see ee_hle_thread.c's
+ * own field comment for the full rationale. Not checkpointed - answers
+ * "has ANYTHING, ever, in this run, tried to wake/signal thread/sema N",
+ * which only needs to be true within one continuous observation window. */
+uint64_t ee_hle_thread_get_wakeup_calls(int thid);
+uint64_t ee_hle_thread_get_signal_calls(int semid);
+
+/* Round 733 diagnostic-only (task #447): forces a WAIT/SLEEP thread to
+ * READY using the exact same real-hardware transition as the real
+ * WakeupThread() syscall handler. NOT wired into any EE syscall path -
+ * never fires during organic emulation. Exists solely so a scratch
+ * driver can test whether GT3's parked worker threads would go on to
+ * do real work (e.g. issue a CDVD read) if woken, without first having
+ * to locate why the real wake call never happens. See ee_hle_thread.c's
+ * own definition comment for the full rationale and the Round 568
+ * diagnostic-injection precedent this follows. */
+void ee_hle_thread_debug_force_wakeup(int thid);
+
+/* Round 734 diagnostic-only (task #447 continuation): applies the real
+ * RotateThreadReadyQueue(priority) transition (find the earliest-
+ * ready_seq RUN/READY thread at that priority, give it a fresh
+ * ready_seq) and immediately calls the real reschedule() so a context
+ * switch can actually take effect - unlike Round 733's force_wakeup
+ * (which only flips status, never itself triggers a switch). NOT wired
+ * into any EE syscall path; exists solely for scratch-driver injection
+ * to observe what a starved same-priority thread does once it actually
+ * gets scheduled. See ee_hle_thread.c's own definition for the full
+ * rationale and why this is explicitly NOT a proposal to make the
+ * scheduler auto-rotate on its own (would contradict Round 712's own
+ * cited real-EE-kernel research). */
+void ee_hle_thread_debug_force_rotate(ee_state_t *st, int priority);
+
+/* Round 733 continuation: live call counter for RotateThreadReadyQueue
+ * (sysnum 43/-44) - see ee_hle_thread.c's field comment. Answers
+ * whether GT3's own code ever invokes the real PS2 kernel's documented
+ * same-priority fairness mechanism, which is what would be needed to
+ * unstarve threads 3/5 (found READY-but-never-scheduled even when
+ * forcibly woken, because the currently-RUNNING thread never loses its
+ * FIFO ready_seq advantage otherwise). */
+uint64_t ee_hle_thread_get_rotate_calls(void);
+
+/* Round 597 (task #447/#536): forced preemption. Call once per genuine
+ * instruction boundary from ee_step() (same convention as
+ * ee_check_timer_interrupt()/ee_check_intc_interrupt()/
+ * ee_check_dmac_interrupt()). Switches to a READY thread only if its
+ * priority is strictly better (numerically lower) than the currently-
+ * RUNNING thread's own priority - a no-op otherwise, and a no-op
+ * entirely before this project's own scheduler has been engaged
+ * (thread_count==0). See ee_hle_thread.c's own definition for the
+ * full rationale (Round 596 found a real, higher-priority, already-
+ * woken thread that was never getting scheduled because reschedule()
+ * is otherwise only invoked from specific syscall handlers). */
+void ee_hle_thread_check_preempt(ee_state_t *st);
+
 /* Round 575 (task #550): opaque state-blob accessor for host-native
  * checkpoint/resume tooling. Unlike gs_get_state()/vif0_get_state()/
  * etc. (typed pointers, for callers needing field-level access), this

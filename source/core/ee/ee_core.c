@@ -62,9 +62,9 @@
  *     VU0 data staging.
  *
  * Still NOT implemented (halts cleanly, does not crash):
- *   - The other ~23 MMI opcodes (QFSRV - needs the SA hardware
- *     register and MTSA/MTSAB/MTSAH to set it, none of which exist
- *     yet; PMADDW/H, PMSUBW/H, PMULTW/H, PDIVW/PDIVBW, PMULTUW/
+ *   - The other ~21 MMI opcodes (QFSRV/MFSA/MTSA/MTSAB/MTSAH are now
+ *     ALL implemented as of Round 774 - see the REGIMM switch and the
+ *     SPECIAL funct 0x28/0x29 cases; PMADDW/H, PMSUBW/H, PMULTW/H, PDIVW/PDIVBW, PMULTUW/
  *     PDIVUW/PMADDUW - the remaining MMI2/MMI3 HI/LO-touching
  *     arithmetic, some with documented real-hardware rounding quirks
  *     in PCSX2's own source worth extra care when ported; PMFHL/PMTHL
@@ -123,6 +123,7 @@
 #include "core/hw/iop_cdvd.h" /* Round 347 (IOP RPC re-entry architecture): real CDVD MMIO dispatch */
 #include "core/hw/iop_hle_intr.h" /* Round 347: real registered-handler completion detection */
 #include "core/hw/iop_heap.h" /* Round 401: real SYSMEM free-list heap allocator port - see comment at the SIF_SID_IOPHEAP branch below */
+#include "core/hw/iop_sio2.h" /* Round 663: real low-level pad-connected state for PAD_BIND reply */
 
 /* Task #172 continued (regression fix): the SIF DMA-copy syscall
  * handler below needs to write into IOP memory, but ee_core.c must
@@ -636,12 +637,173 @@ static void ee_check_dmac_interrupt(ee_state_t *st, uint32_t this_pc)
  * intentionally only names the sources it has historically raised. */
 #define EE_INTC_IRQ_SBUS 1
 
+/* Round 669 (task #447/#623, fixing Round 638's "pad-mailbox
+ * starvation" finding): persistent storage for pad_area buffers
+ * bound via the real PAD_BIND RPC (SIF_SID_PAD_BIND_ID1_OLD/ID2_OLD,
+ * handled far below in this file), indexed by real port number (0 or
+ * 1, per libpad's own padOpenArgs.port field at request-buffer offset
+ * +4 - see the PAD_BIND handler's own citation trail). Populated once
+ * per port when PAD_BIND completes, then read back every real
+ * VBLANK_START (ee_check_vblank() below) to keep live button state
+ * flowing into OSDSYS's own consumers - mirroring real IOP-side
+ * PADMAN's continuous per-field DMA refresh of this exact buffer.
+ *
+ * Round 638 traced OSDSYS's two pad-mailbox consumer threads
+ * (RAM[0x1C0444]->thread 7, RAM[0x0028AA10]->thread 9) and found both
+ * correctly implemented but permanently starved because this
+ * project's own pad_area write only ever happened ONCE, at bind time
+ * - real IOP-side PADMAN would have kept refreshing it every field.
+ * This project's own main.c (Wii target) already reads the real Wii
+ * GameCube pad every VSync and feeds it into iop_sio2_pad_set_buttons()
+ * - that live button state was simply never being re-published into
+ * the bound EE-side pad_area buffer. This is the fix. */
+static uint32_t g_ee_pad_area_bound[2] = { 0u, 0u };
+
+/* Round 736 (task #447 continuation): purely observational log of every
+ * real AddIntcHandler(cause, handler_func, next) call (sysnum 16 only -
+ * NOT RemoveIntcHandler/17). This does not change how the syscall is
+ * handled at all - it's still let through to raise a real MIPS Syscall
+ * exception exactly as before (see the sysnum==16||17 block's own long-
+ * standing comment for why: the real, already-resident BIOS kernel code
+ * must perform the actual per-cause handler-table write itself, this
+ * project has no business fabricating that table). This log exists
+ * solely to answer, without further guesswork, Round 735's open
+ * question: does GT3's thread 4 or thread 5 module (or anything else)
+ * ever register an interrupt handler whose target address lands back
+ * inside the 0x0079xxxx-0x007bxxxx job-queue region Round 735 found -
+ * which would be the real completion mechanism for thread 5's stuck
+ * WaitJob() poll. Capped ring buffer, never wired into any behavior. */
+#define EE_ADDINTC_LOG_CAP 64
+typedef struct {
+    uint32_t cause;
+    uint32_t handler_addr;
+    uint32_t next;
+    uint32_t call_pc;
+} ee_addintc_log_entry_t;
+static ee_addintc_log_entry_t g_addintc_log[EE_ADDINTC_LOG_CAP];
+static uint32_t g_addintc_log_count = 0; /* total calls seen, may exceed CAP */
+
+uint32_t ee_core_get_addintc_log_count(void) { return g_addintc_log_count; }
+
+int ee_core_get_addintc_log_entry(uint32_t idx, uint32_t *cause, uint32_t *handler_addr,
+                                   uint32_t *next, uint32_t *call_pc)
+{
+    if (idx >= EE_ADDINTC_LOG_CAP || idx >= g_addintc_log_count) return -1;
+    if (cause) *cause = g_addintc_log[idx].cause;
+    if (handler_addr) *handler_addr = g_addintc_log[idx].handler_addr;
+    if (next) *next = g_addintc_log[idx].next;
+    if (call_pc) *call_pc = g_addintc_log[idx].call_pc;
+    return 0;
+}
+
+/* Writes the real, already-cited SIO2 wire-protocol pad state (state/
+ * reqState/ok/payload_len bytes plus the pad_process_command()-shaped
+ * reply bytes: dummy/ID/buttons[/analog axes]) into both 64-byte
+ * double-buffered slots at `pad_area`, sourced from the live
+ * iop_sio2.c pad model. Factored out so the PAD_BIND RPC handler
+ * (initial bind, far below) and ee_pad_area_refresh_all() (Round
+ * 669's periodic per-VBLANK refresh, right below) write byte-for-byte
+ * identical content - see the PAD_BIND handler's own extensive
+ * citation trail (Rounds 63/663/664/666) for the real protocol layout
+ * this mirrors; nothing here changes that layout, only when it runs. */
+static void ee_pad_area_write_slots(ee_state_t *st, uint32_t pad_area)
+{
+    int slot_i;
+    int connected = iop_sio2_pad_is_connected();
+    uint8_t state = connected ? 6u /* PAD_STATE_STABLE, real libpad.h enum */
+                                : 0u /* PAD_STATE_DISCONN */;
+    uint8_t ok = connected ? 1u : 0u;
+    uint16_t wire = connected ? (uint16_t)~iop_sio2_pad_get_buttons() : 0xFFFFu;
+    int analog = connected && iop_sio2_pad_is_analog_mode();
+    uint8_t rx = 0x80u, ry = 0x80u, lx = 0x80u, ly = 0x80u;
+    uint32_t payload_len = connected ? (analog ? 9u : 5u) : 0u;
+    if (analog) {
+        iop_sio2_pad_get_analog_axes(&rx, &ry, &lx, &ly);
+    }
+    for (slot_i = 0; slot_i < 2; slot_i++) {
+        uint32_t base = pad_area + (uint32_t)(slot_i * 64);
+        ee_mem_write32(st, base + 0u, payload_len); /* real memcpy length */
+        ee_mem_write32(st, base + 40u, payload_len); /* 2nd consumer's real length field (Round 666) */
+        ee_mem_write8(st, base + 4u, state);
+        ee_mem_write8(st, base + 5u, 0u);   /* reqState = PAD_RSTAT_COMPLETE */
+        ee_mem_write8(st, base + 6u, ok);
+        if (connected) {
+            ee_mem_write8(st, base + 8u, 0x00u); /* dummy, real cited SIO2 byte 0 */
+            ee_mem_write8(st, base + 9u, analog ? IOP_PAD_ID_ANALOG_LO : IOP_PAD_ID_LO);
+            ee_mem_write8(st, base + 10u, analog ? IOP_PAD_ID_ANALOG_HI : IOP_PAD_ID_HI);
+            ee_mem_write8(st, base + 11u, (uint8_t)(wire & 0xFFu));
+            ee_mem_write8(st, base + 12u, (uint8_t)((wire >> 8) & 0xFFu));
+            if (analog) {
+                ee_mem_write8(st, base + 13u, rx);
+                ee_mem_write8(st, base + 14u, ry);
+                ee_mem_write8(st, base + 15u, lx);
+                ee_mem_write8(st, base + 16u, ly);
+            }
+        }
+    }
+}
+
+/* Round 669: called once per real VBLANK_START (ee_check_vblank()
+ * immediately below) - re-issues the live pad state into every
+ * pad_area buffer bound so far via PAD_BIND, matching real IOP-side
+ * PADMAN's continuous per-field refresh. A no-op for any port that
+ * hasn't completed PAD_BIND yet (g_ee_pad_area_bound[port] == 0). */
+static void ee_pad_area_refresh_all(ee_state_t *st)
+{
+    int port;
+    for (port = 0; port < 2; port++) {
+        if (g_ee_pad_area_bound[port] != 0u)
+            ee_pad_area_write_slots(st, g_ee_pad_area_bound[port]);
+    }
+}
+
+/* Round 781 (task #803, GT3 0x0101bc24 WaitSema(5) permanent-park
+ * investigation): CORRECTION - this used to key off
+ * `st->instructions_executed`, which is deliberately NOT advanced
+ * while a thread is parked in WaitSema (sysnum==68 above: "blocking"
+ * is modeled by re-executing the same syscall instruction every step,
+ * so pc/instructions_executed never move - see that handler's own
+ * long citation trail). WaitSema's park branch calls this exact
+ * function every single parked step (to let a real interrupt still
+ * wake the thread), but since instructions_executed was frozen, the
+ * modulo-based frame-boundary check below could only ever re-test the
+ * SAME phase value forever - VBLANK could never fire again for any
+ * thread parked anywhere except exactly on a frame boundary. Verified
+ * live: GT3's checkpoint chain (docs/STATUS.md Round 780/781) stalls
+ * for 240M+ slices at total_instr=38,865,331 with `$v1=68 (WaitSema)
+ * $a0=5`, EE_INTC mask=0x1027 (VBLANK_START/bit 2 among the enabled
+ * sources) and Status.IE=1 - i.e. this thread IS listening for VBLANK
+ * to eventually SignalSema(5), a real, standard PS2 vsync-wait idiom
+ * (confirmed against real ps2sdk ee/graph/src/graph.c's
+ * graph_add_vsync_handler(): AddIntcHandler(INTC_VBLANK_S,...) + a
+ * real interrupt-context signal, and real PCSX2's Counters.cpp
+ * UpdateVSyncRate() comment: "The PS2's vsync timer is an independent
+ * crystal ... it has nothing to do with" anything CPU-thread-state-
+ * dependent - VBLANK timing is real-hardware-independent of any
+ * specific thread's blocked state) - but it can never actually
+ * resolve here due to the frozen-counter bug above.
+ *
+ * Fix: use `st->cop0[9]` (COP0 Count) instead of instructions_executed.
+ * Count is the real, free-running R5900 hardware register (ee_step()'s
+ * own shared epilogue increments both instructions_executed++ and
+ * cop0[9]++ together, 1:1, on every normal non-parked step - see the
+ * citation at that increment site), and - critically - WaitSema's park
+ * branch ALSO increments cop0[9] every parked step (just not
+ * instructions_executed), so Count keeps ticking forward exactly like
+ * real hardware's free-running clock would while a thread is blocked,
+ * fixing this without changing any already-verified normal-path
+ * timing (the two counters are numerically identical whenever nothing
+ * is parked, so this is a no-op for every previously-tested boot path
+ * that never hits this exact WaitSema-park condition). */
 static void ee_check_vblank(ee_state_t *st)
 {
-    uint64_t phase = st->instructions_executed % EE_CYCLES_PER_FRAME_NTSC;
-    if (phase == 0)
+    uint64_t phase = st->cop0[9] % EE_CYCLES_PER_FRAME_NTSC;
+    if (phase == 0) {
+        /* Round 669: refresh live pad state at the same real cadence
+         * VBLANK_START itself fires at - see the citation above. */
+        ee_pad_area_refresh_all(st);
         ee_intc_raise(EE_INTC_IRQ_VBLANK_START);
-    else if (phase == EE_CYCLES_VBLANK_DURATION)
+    } else if (phase == EE_CYCLES_VBLANK_DURATION)
         ee_intc_raise(EE_INTC_IRQ_VBLANK_END);
 }
 
@@ -704,6 +866,349 @@ static void ee_check_boot_unblock_selfloop(ee_state_t *st)
         return; /* already unmasked by real BIOS/game code - don't interfere */
     intc->mask |= (1u << EE_INTC_IRQ_VBLANK_START) | (1u << EE_INTC_IRQ_VBLANK_END);
     fired = 1;
+}
+
+/*
+ * Round 610 (task #536, direct continuation of the user's "both" request
+ * after Round 609's live ground truth): PRAGMATIC, NOT PROVEN-AUTHENTIC
+ * COMPROMISE FIX - same explicit-labeling convention as Round 161's
+ * ee_check_boot_unblock_selfloop() above ("just applied to a hardware
+ * register instead of a syscall"), extended to a real OSDSYS BIOS-RAM
+ * struct field instead of an INTC register.
+ *
+ * Context. Task #447's 55+-round investigation (Rounds 335-609)
+ * exhaustively confirmed: (1) real OSDSYS's Browser main menu is the
+ * correct diskless-boot target content (Round 609 - a genuinely
+ * diskless `Start BIOS` boot on real hardware reaches this exact
+ * screen); (2) real hardware's own `0x001C0454` struct field holds
+ * `5` at that screen (Rounds 590-592/606/609, confirmed 5+ independent
+ * times live); (3) this project's own emulation always leaves that
+ * field at its honest, correctly-modeled init value of `0` (Round 593
+ * disassembled BOTH real write sites for this field down to the
+ * instruction level - both are legitimate, unconditional `sw $zero`
+ * BIOS init/ack code, not a bug); (4) a full, now file-complete static
+ * scan of every byte of OSDSYS's real loaded ELF segment (Round 593's
+ * original 0x200000-0x280000 scan, extended this round to the exact
+ * real p_filesz boundary 0x200000-0x28D1EC - see this round's docs
+ * entry for the extraction/validation methodology) finds NO further
+ * instruction anywhere in the real, currently-loaded code that could
+ * write anything but `0` to this field - the real producer code is
+ * either never loaded into this trace's window at all, or reachable
+ * only through a currently-unidentified indirect/IOP-side path.
+ *
+ * Given this exhaustive, evidence-based dead end, and per the user's
+ * standing tolerance ("even if it crashes i dont care atleast it
+ * boots") plus this round's explicit instruction to try both continued
+ * root-cause investigation AND a pragmatic workaround: this function
+ * force-writes the real, live-confirmed value (`5`) into the real
+ * struct field (`0x001C0454`) once boot has run long enough to
+ * plausibly correspond to real hardware's own observed ~1-3-second
+ * Start-BIOS-to-menu transition (Rounds 590/606/609) - approximated
+ * here as 120 real EE_CYCLES_PER_FRAME_NTSC-sized frames (~2 seconds
+ * of real PS2 time, the middle of that observed window, using this
+ * project's own already-real, already-frame-accurate VBLANK cycle
+ * model rather than a fabricated instruction count), and ONLY when no
+ * disc is mounted (iop_cdvd_get_disc_type() == IOP_CDVD_TYPE_NODISC) -
+ * this must never fire on a disc-mounted boot, since Round 607 already
+ * proved real disc-mounted boots use a completely separate EELOAD/
+ * _LoadExecPS2 dispatch chain that never touches this struct at all,
+ * and firing here would be pure interference with that already-working
+ * path. Same defensive "don't fight a real write" guard as Round 161's
+ * precedent: only overwrites the field if it is still exactly the
+ * known, disassembly-confirmed init value 0 - if real (or future,
+ * evidenced) code has already written something else, this backs off
+ * rather than clobbering it.
+ *
+ * Explicitly unverified/honest scope note: this does NOT claim to be
+ * the real trigger mechanism, and does NOT by itself guarantee OSDSYS's
+ * own per-tick dispatcher (0x00204308, Round 482-484's citation) will
+ * successfully render the interactive menu once this field changes -
+ * that depends on whatever else the real dispatcher's escalation
+ * handler (0x00210E70 chain, Round 594-595) needs that this project's
+ * emulation may also be missing. This is a deliberate, clearly-labeled
+ * compromise to give the real, already-loaded BIOS dispatcher code a
+ * chance to pick up the transition and run itself, in place of
+ * continuing to block on an unresolved 55+-round root-cause search -
+ * a future round that finds the actual real trigger should replace
+ * this, exactly per Round 161's own precedent and rationale. Only
+ * fires once per boot (static latch), matching every other one-shot
+ * shortcut in this file. */
+#define EE_BROWSER_ESCALATION_FIELD_ADDR   0x001C0454u
+#define EE_BROWSER_ESCALATION_REAL_VALUE   0x00000005u
+#define EE_BROWSER_ESCALATION_FRAME_DELAY  120u /* ~2s real PS2 time */
+
+static void ee_check_browser_menu_escalation_heuristic(ee_state_t *st)
+{
+    static int fired = 0;
+    if (fired)
+        return;
+    if (st->instructions_executed < (uint64_t)EE_BROWSER_ESCALATION_FRAME_DELAY * EE_CYCLES_PER_FRAME_NTSC)
+        return; /* not yet at the real ~2s-equivalent point */
+    if (iop_cdvd_get_disc_type() != IOP_CDVD_TYPE_NODISC)
+        return; /* diskless-only heuristic - never touch the real, already-working disc-mounted EELOAD path (Round 607) */
+    uint32_t current = ee_mem_read32(st, EE_BROWSER_ESCALATION_FIELD_ADDR);
+    if (current != 0)
+        return; /* real (or future evidenced) code already wrote something else - don't interfere */
+    ee_mem_write32(st, EE_BROWSER_ESCALATION_FIELD_ADDR, EE_BROWSER_ESCALATION_REAL_VALUE);
+    fired = 1;
+}
+
+/*
+ * Round 772 (task #447, real fix): permanent, tracked-source version of
+ * Round 552's proven-but-never-shipped "EELOAD fast-boot string patch".
+ *
+ * Full evidence chain (Rounds 543-555, 771, this round - see
+ * docs/STATUS.md for the complete writeup): this project's own EELOAD
+ * module (a fixed, BIOS-version-independent resident address, per
+ * PCSX2's own vendored R5900.h EELOAD_START=0x00082000 citation) is
+ * hit exactly ONCE per organic boot, always with a0=0/a1=0 - which
+ * real, documented PCSX2 behavior (R5900.cpp's own eeloadHook()
+ * comment, cited in Round 551/552) says means "no arguments -> launch
+ * rom0:OSDSYS by default". Real hardware/BIOS is then supposed to have
+ * OSDSYS itself call EELOAD a SECOND time with "EELOAD rom0:PS2LOGO
+ * <game ELF>" to auto-boot a mounted disc - Round 552's own docs entry
+ * states plainly this second invocation "has never been observed in
+ * this project's boot trace at all, in any historical or current
+ * checkpoint tested so far", and Round 771's fresh, much-deeper
+ * (SIFX-checkpoint-fix-unblocked) re-trace this session reconfirmed it
+ * again: a fresh cold boot's FIRST (and only) call to the real EELOAD
+ * entry function is directly "rom0:OSDSYS", with no PS2LOGO/EELOAD
+ * call ever preceding it.
+ *
+ * Real PCSX2 itself does not wait for that second invocation either -
+ * its own eeloadHook(), on EELOAD's first (and only) call, when
+ * elfname is empty, finds the literal "rom0:OSDSYS" string already
+ * resident in EELOAD's own just-loaded memory and overwrites it in
+ * place with the real target game's boot path, then lets EELOAD's own
+ * completely unmodified code do 100% of the rest of the kernel
+ * handoff - this is real, cited PCSX2 behavior (Round 552's citation),
+ * not a fabrication. Round 552 built this technique as a disposable
+ * scratch driver (never committed) and confirmed it works: patched
+ * with the real Tekken Tag Tournament Demo's own SYSTEM.CNF BOOT2
+ * path ("cdrom0:\SCED_500.41;1"), EELOAD ran ~14,000 further real
+ * instructions before parking in a genuine WaitSema(0) - which Round
+ * 554 (already shipped, tracked) then root-caused to a real bug in
+ * this project's own LF_F_ELF_LOAD RPC handler (rom0:-only routing)
+ * and fixed by adding sif_loadfile_elf_load_disc() for cdrom0:/
+ * cdrom1: - verified, after that fix, to let EELOAD's patched fast-
+ * boot path run 33+ million further clean instructions (Round 554),
+ * and up to 1.12 BILLION instructions with zero crashes in an extended
+ * survey (Round 555). What Round 552 never did was promote the
+ * string-patch technique itself out of scratch/disposable code and
+ * into this permanent tracked source - this function does exactly
+ * that, generalized (a runtime scan for the string, not a hardcoded
+ * offset for one specific BIOS test) and gated so it can never affect
+ * an already-correct diskless boot.
+ *
+ * Mechanism:
+ *   1. Only ever attempted once per boot (one-shot latch, same
+ *      convention as every sibling heuristic in this file).
+ *   2. Diskless boots are left completely untouched (iop_cdvd_get_
+ *      disc_type()==NODISC bails immediately) - Round 607 already
+ *      proved diskless boots must never be interfered with here.
+ *   3. Reads the real, mounted disc's own SYSTEM.CNF (via the same
+ *      already-tested iop_cdvd_disc_find_file()/iop_cdvd_disc_read_
+ *      sector() ISO9660 accessors this project's cdrom0:/cdrom1:
+ *      FIO_F_OPEN handler already uses, Round 367) and extracts the
+ *      real "BOOT2 = <path>" line's target path - if no real SYSTEM.CNF
+ *      or BOOT2 line is found, this is an honest gap: bail, do not
+ *      guess a path.
+ *   4. Scans EELOAD's own just-loaded resident memory (the real BIOS
+ *      boot code has, by the moment execution reaches EE_EELOAD_START_PC,
+ *      already organically copied EELOAD's ROM image into RAM there -
+ *      Round 544) for the literal, NUL-terminated "rom0:OSDSYS" string.
+ *      If not found at this BIOS version's layout, honest gap: bail.
+ *   5. Only overwrites it if the real BOOT2 path (plus its own NUL)
+ *      fits inside the contiguous real zero-padding already following
+ *      the matched string in EELOAD's memory - never writes past that
+ *      real, measured boundary into adjacent genuine EELOAD data.
+ */
+#define EE_EELOAD_START_PC   0x00082000u
+#define EE_EELOAD_SCAN_BYTES 0x00010000u /* 64KB - generous vs. Round 552's observed real offset (~0x7580) */
+
+static int ee_read_boot2_path_from_system_cnf(char *out, size_t out_size)
+{
+    uint32_t lba = 0, size = 0;
+    int found = iop_cdvd_disc_find_file("SYSTEM.CNF", &lba, &size);
+    if (!found) found = iop_cdvd_disc_find_file("SYSTEM.CNF;1", &lba, &size);
+    if (!found) return 0; /* honest gap - no real SYSTEM.CNF on the mounted disc */
+
+    uint8_t buf[2048]; /* real SYSTEM.CNF is always a few dozen bytes - one sector is always enough */
+    if (iop_cdvd_disc_read_sector(lba, buf) != 0) return 0;
+
+    uint32_t scan_len = size < sizeof(buf) ? size : (uint32_t)sizeof(buf);
+    const char *p = (const char *)buf;
+    const char *end = p + scan_len;
+    const char *tag = NULL;
+    for (const char *s = p; s + 5 <= end; s++) {
+        if (strncmp(s, "BOOT2", 5) == 0) { tag = s + 5; break; }
+    }
+    if (!tag) return 0; /* real SYSTEM.CNF present but no BOOT2 line - honest gap */
+    while (tag < end && (*tag == ' ' || *tag == '\t')) tag++;
+    if (tag >= end || *tag != '=') return 0;
+    tag++;
+    while (tag < end && (*tag == ' ' || *tag == '\t')) tag++;
+    size_t n = 0;
+    while (tag < end && *tag != '\r' && *tag != '\n' && *tag != 0 && n + 1 < out_size) {
+        out[n++] = *tag++;
+    }
+    out[n] = 0;
+    return n > 0;
+}
+
+static void ee_check_eeload_fastboot_patch(ee_state_t *st)
+{
+    static int attempted = 0; /* one-shot, whether or not it actually finds/patches anything */
+    if (attempted)
+        return;
+    if (st->pc != EE_EELOAD_START_PC)
+        return;
+    attempted = 1;
+
+    if (iop_cdvd_get_disc_type() == IOP_CDVD_TYPE_NODISC)
+        return; /* diskless boot - real BIOS's own "default to rom0:OSDSYS" behavior is already correct; never touch it (Round 607) */
+
+    char boot2[64];
+    if (!ee_read_boot2_path_from_system_cnf(boot2, sizeof(boot2)))
+        return; /* honest gap - no real, parseable BOOT2 target found; leave EELOAD's real default alone */
+
+    const char *needle = "rom0:OSDSYS";
+    size_t needle_len = strlen(needle);
+    uint32_t found_addr = 0;
+    for (uint32_t off = 0; off < EE_EELOAD_SCAN_BYTES; off++) {
+        uint32_t addr = EE_EELOAD_START_PC + off;
+        size_t k;
+        for (k = 0; k < needle_len; k++) {
+            if (ee_mem_read8(st, addr + (uint32_t)k) != (uint8_t)needle[k]) break;
+        }
+        if (k == needle_len && ee_mem_read8(st, addr + (uint32_t)needle_len) == 0) {
+            found_addr = addr;
+            break;
+        }
+    }
+    if (found_addr == 0)
+        return; /* honest gap - literal string not found at this BIOS version's real EELOAD layout; don't guess an offset (Round 552's own hardcoded-offset limitation, fixed here via scan instead of removed) */
+
+    /* Real available slot = the matched string's own bytes plus
+     * however many further real zero-padding bytes immediately follow
+     * it in EELOAD's resident memory - only patch if the new path (+
+     * its own NUL) fits entirely inside that already-zero space. */
+    size_t avail = needle_len;
+    uint32_t probe = found_addr + (uint32_t)needle_len;
+    while (avail < 255 && ee_mem_read8(st, probe) == 0) { avail++; probe++; }
+
+    size_t boot2_len = strlen(boot2);
+    if (boot2_len == 0 || boot2_len + 1 > avail)
+        return; /* real BOOT2 path doesn't fit in the real available slot - don't corrupt adjacent EELOAD data */
+
+    for (size_t k = 0; k < boot2_len; k++)
+        ee_mem_write8(st, found_addr + (uint32_t)k, (uint8_t)boot2[k]);
+    ee_mem_write8(st, found_addr + (uint32_t)boot2_len, 0);
+}
+
+/* Round 696 (task #447/#536): idle-carousel driver for RAM[0x1C0444]
+ * ("+0x444", the real OSDSYS per-panel dispatch index this project
+ * has traced exhaustively since Round 594; the full real dispatch
+ * chain it feeds - 0x00203D78's ~17-entry handler table - was
+ * decoded in Round 682/683 and confirmed, via a scratch host-native
+ * survey in Round 683, to already be correctly reached in our own
+ * diskless boot exactly once, early, but ALWAYS with +0x444==0, so
+ * the whole handler chain silently no-ops every time.
+ *
+ * Round 684 captured direct, repeated live-hardware evidence that
+ * real OSDSYS cycles +0x444 through multiple real nonzero values
+ * (14, then 10, observed ~44M cycles apart) with ZERO pad input from
+ * the operator - i.e. this is a real, evidenced idle/auto-scan
+ * carousel behavior, not something that only happens on a button
+ * press. Round 695 further confirmed, via scratch instrumentation,
+ * that this project's own thread-6-equivalent dispatch body is
+ * alive, reachable, and behaviorally correct given its inputs - the
+ * ONLY missing piece, precisely located across Rounds 683-695, is
+ * that nothing in our own trace ever performs the write this
+ * function now performs.
+ *
+ * Honest scope note (same standard as the sibling escalation
+ * heuristic above and Round 630's pragmatic-fix precedent): this is
+ * NOT a claim to have found the exact real writer function or its
+ * exact real timing/period - that remains genuinely unknown (Round
+ * 684 only bounds the real interval from above, at ~44M cycles,
+ * from two essentially-randomly-timed live samples). What IS
+ * directly evidenced is (a) the real field, (b) that it must cycle
+ * through real nonzero values from Round 682's already-decoded
+ * table, and (c) that it happens without any pad input. This
+ * function reproduces exactly that observed behavior - a slow,
+ * pad-independent cycle through the known-valid panel indices - so
+ * the already-correct, already-reachable real dispatch chain
+ * (0x00203D78 and everything it calls) gets real, non-zero input to
+ * work with, matching the general shape of real hardware's own
+ * idle-carousel UX rather than leaving it permanently inert.
+ *
+ * Guards, matching the sibling function's established conventions:
+ * diskless-only (never touches the real, already-working disc-
+ * mounted EELOAD path, Round 607); gated on the Browser having
+ * already reached its real idle state (+0x450==5, the value the
+ * sibling heuristic above sets and this project has repeatedly
+ * live-confirmed, Rounds 606/687, as real hardware's actual resting
+ * Browser-idle value); and a "don't fight a real write" check
+ * identical in spirit to the sibling heuristic - only advances the
+ * carousel when +0x444 is still exactly 0 (i.e. the previous cycle's
+ * handler call, per Round 682's disassembly, already reset it back
+ * to 0 the way every real handler does, or no real code has written
+ * anything there yet), so this never clobbers a genuine in-progress
+ * dispatch. Ticks once per real ~1-second-equivalent window (60
+ * EE_CYCLES_PER_FRAME_NTSC-sized frames) - a deliberately
+ * conservative, mid-range guess consistent with (but not proven to
+ * exactly match) Round 684's "at least every ~44M cycles" bound. */
+#define EE_BROWSER_CAROUSEL_FIELD_ADDR    0x001C0444u
+#define EE_BROWSER_STATE_FIELD_ADDR       0x001C0450u
+#define EE_BROWSER_STATE_IDLE_VALUE       0x00000005u
+#define EE_BROWSER_CAROUSEL_TICK_FRAMES   60u /* ~1s real PS2 time per step */
+
+static void ee_check_browser_idle_carousel(ee_state_t *st)
+{
+    /* Round 682's decoded 0x00203D78 handler table: valid indices are
+     * 1-15 and 17 (16 is skipped - no case in the real dispatcher). */
+    static const uint32_t panel_sequence[] = {
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17
+    };
+    static uint64_t next_tick_instr = 0;
+    static unsigned int seq_index = 0;
+
+    if (iop_cdvd_get_disc_type() != IOP_CDVD_TYPE_NODISC)
+        return; /* diskless-only - never interfere with the real disc-mounted EELOAD path (Round 607) */
+    /* Round 697 fix (found via regression-suite investigation): must not
+     * touch RAM[0x1C0450] before the sibling escalation heuristic's own
+     * delay gate has passed. 0x001C0450 is a raw KUSEG-style address
+     * (<0x80000000), so ee_mem_read32() routes it through
+     * ee_tlb_translate() rather than a direct physical access; on a
+     * freshly-reset core (instructions_executed==0, no TLB entries
+     * programmed yet - exactly the state every host-native unit test
+     * exercises, and also the very first few real EE instructions of
+     * any boot) that translation fails, and the resulting TLB Refill
+     * exception silently hijacks $pc every single instruction step -
+     * observed directly as 45 host-native regression tests failing
+     * with corrupted register results (CPU never reaching its own
+     * test program, endlessly re-vectoring instead). The sibling
+     * ee_check_browser_menu_escalation_heuristic() never hit this
+     * because its own EE_BROWSER_ESCALATION_FRAME_DELAY gate (120
+     * frames) means its one-shot read of the neighboring +0x454 field
+     * never actually executes until well after a real boot has
+     * established TLB coverage for this region. Reusing that exact
+     * same gate here guarantees this function is provably inert no
+     * earlier than the already-verified sibling. */
+    if (st->instructions_executed < (uint64_t)EE_BROWSER_ESCALATION_FRAME_DELAY * EE_CYCLES_PER_FRAME_NTSC)
+        return;
+    if (ee_mem_read32(st, EE_BROWSER_STATE_FIELD_ADDR) != EE_BROWSER_STATE_IDLE_VALUE)
+        return; /* only once the Browser has genuinely reached its real idle state */
+    if (st->instructions_executed < next_tick_instr)
+        return; /* not yet time for the next carousel step */
+    if (ee_mem_read32(st, EE_BROWSER_CAROUSEL_FIELD_ADDR) != 0)
+        return; /* real dispatch chain hasn't consumed/reset the last value yet - don't clobber it */
+
+    ee_mem_write32(st, EE_BROWSER_CAROUSEL_FIELD_ADDR, panel_sequence[seq_index]);
+    seq_index = (seq_index + 1u) % (sizeof(panel_sequence) / sizeof(panel_sequence[0]));
+    next_tick_instr = st->instructions_executed +
+        (uint64_t)EE_BROWSER_CAROUSEL_TICK_FRAMES * EE_CYCLES_PER_FRAME_NTSC;
 }
 
 /* Round 279 (task #423 continuation, 320th finding) shipped a shortcut
@@ -2383,6 +2888,7 @@ int ee_core_init(const bios_image_t *bios)
     memset(g_ee_sema, 0, sizeof(g_ee_sema)); /* task #188: reset semaphore table on (re-)init */
     ee_hle_thread_init(); /* Round 569: real EE thread/sema scheduler init - see include/core/ee/ee_hle_thread.h */
     mch_init(); /* EE-side MCH_RICM/MCH_DRD RDRAM auto-init registers - see core/hw/mch.h */
+    g_addintc_log_count = 0; /* Round 736: reset AddIntcHandler observation log on (re-)init */
 
     g_state.ram = memalign(32, EE_RAM_SIZE);
     if (!g_state.ram) {
@@ -2713,10 +3219,61 @@ static inline void set_lane_b(ee_reg128_t *r, int n, uint8_t val) {
     *p = (*p & mask) | ((uint64_t)val << sh);
 }
 
+/* Round 630 (task #536/#611) experimental safety-net counter - see the
+ * guard's own comment below for full rationale. Exposed non-static so
+ * host-native tests/tools can observe it if useful; intentionally NOT
+ * declared in a header since this is a narrow, self-contained probe. */
+long g_ee_null_jalr_guard_hits = 0;
+
 static int ee_step(void)
 {
     ee_state_t *st = &g_state;
     uint32_t pc = st->pc;
+
+    /* Round 630 (task #536/#611): narrow, clearly-labeled pragmatic
+     * safety net, NOT a proven-authentic real-hardware fix (see
+     * docs/STATUS.md Round 630 for the full evidence trail).
+     *
+     * Real EE kernel code dispatches through the fixed 0x00081FE0
+     * generic thread-start trampoline via `jalr $ra,$v1` (Round 467).
+     * On the diskless-boot path, TIMER3's real Alarm dispatcher
+     * (0x80002650, decoded Round 629) eventually reads an empty
+     * table slot ($v1==0) and this unconditionally faults at
+     * instruction address 0, which - given this project's existing
+     * TLB-refill/exception-recovery path - leaves Status.EXL stuck
+     * at 1 forever (Round 610-626: a permanent CPU lockup).
+     *
+     * Round 629 proved the empty table itself is NOT a bug (live
+     * PCSX2 read of real hardware shows the identical empty
+     * table/pending_count=0 state, even mid-gameplay) - so the real
+     * divergence is elsewhere (TIMER3 arming/disarming timing,
+     * per Round 629's live-hardware comparison), not yet fully
+     * root-caused. Round 630 built and tested this exact guard as a
+     * diagnostic: treat the null-$v1 dispatch as a no-op return
+     * (as if a trivial "jr $ra" stub existed at the target) instead
+     * of letting it corrupt Status/EXL permanently.
+     *
+     * Empirical result (Round 630, 400M-slice diskless survey): the
+     * guard fires exactly once (~slice 156M, matching the previously
+     * -documented fault point), Status.EXL is correctly NOT left
+     * stuck afterward, and execution continues looping in the same
+     * animation-loop PC range it was already in since slice ~20M -
+     * i.e. this does NOT unlock further progress into OSDSYS's real
+     * menu-dispatcher code (that remains task #536's open problem),
+     * but it DOES turn a permanent hard lockup into an indefinite,
+     * still-responsive animation loop - consistent with the user's
+     * standing tolerance ("even if it crashes i dont care atleast it
+     * boots"). Kept intentionally narrow (exact pc==0 && EXL==0
+     * signature only) so it cannot mask any other, unrelated fault
+     * class. */
+    if (pc == 0 && !(st->cop0[12] & 0x2u)) {
+        g_ee_null_jalr_guard_hits++;
+        uint32_t ra = (uint32_t)st->gpr[31].ud0;
+        st->pc = ra;
+        st->next_pc = ra + 4;
+        st->branch_pending = 0;
+        return 0;
+    }
 
     /* Capture + clear the delay-slot flag the PREVIOUS instruction may
      * have left for us (see branch_pending's comment in ee_core.h),
@@ -3330,6 +3887,9 @@ static int ee_step(void)
                         ee_latch_timer_interrupt(st);
                         ee_check_vblank(st);
                         ee_check_boot_unblock_selfloop(st); /* Round 161 */
+                        ee_check_eeload_fastboot_patch(st); /* Round 772 (task #447, real fix) */
+                        ee_check_browser_menu_escalation_heuristic(st); /* Round 610 (task #536) */
+                        ee_check_browser_idle_carousel(st); /* Round 696 (task #447/#536) */
                         ee_check_boot_unblock_sbus_wait(st); /* Round 178 (task #344) - EXPERIMENTAL BRANCH ONLY */
                         ee_check_gs_vsync(st); /* Round 87 (127th finding) */
                         ee_timers_tick(); /* Round 87 (127th finding): EE peripheral timers T0-T3 */
@@ -3722,6 +4282,15 @@ static int ee_step(void)
                  * whole emulated machine outright) or fabricating a
                  * software table this project cannot verify the real
                  * layout of. */
+                if (sysnum == 16 && g_addintc_log_count < EE_ADDINTC_LOG_CAP) {
+                    /* Round 736: observational only, see field comment
+                     * above - does not alter control flow at all. */
+                    g_addintc_log[g_addintc_log_count].cause        = (uint32_t)GPR(4); /* $a0 */
+                    g_addintc_log[g_addintc_log_count].handler_addr = (uint32_t)GPR(5); /* $a1 */
+                    g_addintc_log[g_addintc_log_count].next         = (uint32_t)GPR(6); /* $a2 */
+                    g_addintc_log[g_addintc_log_count].call_pc      = this_pc;
+                }
+                if (sysnum == 16) g_addintc_log_count++;
                 ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
                 break;
             }
@@ -4754,14 +5323,25 @@ static int ee_step(void)
                                 {
                                     uint32_t pad_area = ee_mem_read32(st, call_recvbuf + 16u);
                                     if (pad_area != 0u) {
-                                        int slot_i;
-                                        for (slot_i = 0; slot_i < 2; slot_i++) {
-                                            uint32_t base = pad_area + (uint32_t)(slot_i * 64);
-                                            ee_mem_write32(st, base + 0u, 1u);  /* frame (both slots equal - real tie-break picks slot 0) */
-                                            ee_mem_write8(st, base + 4u, 0u);   /* state = PAD_STATE_DISCONN (real libpad.h enum) */
-                                            ee_mem_write8(st, base + 5u, 0u);   /* reqState = PAD_RSTAT_COMPLETE */
-                                            ee_mem_write8(st, base + 6u, 0u);   /* ok = 0 (no real report yet, honest placeholder) */
-                                        }
+                                        /* Round 663-666 (task #447/#623): see
+                                         * ee_pad_area_write_slots()'s own citation trail
+                                         * (defined near ee_check_vblank(), far above) for
+                                         * the full real-protocol rationale behind every
+                                         * byte this writes - unchanged behavior, just
+                                         * factored into a shared helper.
+                                         *
+                                         * Round 669 addition: remember this port's real
+                                         * pad_area address (libpad's own padOpenArgs.port
+                                         * field, request-buffer offset +4) so
+                                         * ee_pad_area_refresh_all() can keep re-publishing
+                                         * live button state into it every VBLANK_START,
+                                         * fixing Round 638's "pad-mailbox starvation" -
+                                         * this initial write was the ONLY write that ever
+                                         * happened before this round. */
+                                        uint32_t port = ee_mem_read32(st, call_recvbuf + 4u);
+                                        if (port < 2u)
+                                            g_ee_pad_area_bound[port] = pad_area;
+                                        ee_pad_area_write_slots(st, pad_area);
                                     }
                                 }
                                 ee_arm_rpc_call_pending(call_cd);
@@ -6687,7 +7267,26 @@ static int ee_step(void)
                     break;
         case 0x2A: /* SLT */    if (rd) GPR(rd) = ((int64_t)GPR(rs) < (int64_t)GPR(rt)) ? 1 : 0; break;
         case 0x2B: /* SLTU */   if (rd) GPR(rd) = (GPR(rs) < GPR(rt)) ? 1 : 0; break;
+        /* Round 776 (task #447/#764, GT3 fresh-boot survey): real
+         * standard MIPS III DADD/DSUB (funct 0x2C/0x2E) were missing -
+         * only their unsigned siblings DADDU/DSUBU (0x2D/0x2F) were
+         * implemented. First observed live: GT3's real IOP/EE boot
+         * code hit funct=0x2E (raw=0x0008482e, rs=0,rt=8,rd=9) at
+         * pc=0x0100f5ac, halting with "unimplemented SPECIAL funct"
+         * at instr=30,047,008 on a fresh cold-boot chain. Per the real
+         * MIPS III ISA (and matching this exact switch's own
+         * established precedent just above for ADD/ADDU (funct
+         * 0x20/0x21) and SUB/SUBU (funct 0x22/0x23), both already
+         * merged into their unsigned sibling's case since this project
+         * doesn't model integer-overflow trap exceptions), DADD only
+         * differs from DADDU by trapping on signed 64-bit overflow,
+         * and DSUB only differs from DSUBU the same way - so falling
+         * through to the existing unsigned bodies is the correct,
+         * real-ISA-accurate fix given this project's existing
+         * no-overflow-trap convention, not a guess. */
+        case 0x2C: /* DADD */
         case 0x2D: /* DADDU */  if (rd) GPR(rd) = GPR(rs) + GPR(rt); break;
+        case 0x2E: /* DSUB */
         case 0x2F: /* DSUBU */  if (rd) GPR(rd) = GPR(rs) - GPR(rt); break;
         /* Round 478: real, standard MIPS II/III/EE trap-on-condition
          * family (funct 0x30-0x36, skipping reserved 0x35/0x37) - see
@@ -6741,6 +7340,46 @@ static int ee_step(void)
         case 0x13: /* BGEZALL - same unconditional-link caveat as BLTZALL. */
             LINK(31);
             if ((int64_t)GPR(rs) >= 0) BRANCH_TO(this_pc + 4 + (imm << 2)); else { st->pc = fallthrough_pc + 4; st->next_pc = fallthrough_pc + 8; }
+            break;
+        /* Round 774 (task #447 follow-up, King of Fighters 2000-2001
+         * disc-boot real halt): MTSAB/MTSAH - real R5900-specific
+         * REGIMM-space instructions (rt=0x18/0x19 per real PCSX2's own
+         * R5900OpcodeTables.cpp REGIMM row - cross-checked directly
+         * against docs/reference/pcsx2/pcsx2/R5900OpcodeTables.cpp,
+         * already vendored into this repo). Real, non-branching -
+         * unlike every other REGIMM opcode implemented above, these
+         * don't touch pc/next_pc at all, matching TGEI/TGEIU/etc's
+         * "just do the real op and fall through" convention. This
+         * project already has the real SA (shift-amount) hardware
+         * register (st->sa_reg, task #177's MFSA/MTSA, already wired
+         * into QFSRV) - MTSAB/MTSAH were the two real ways real EE
+         * code sets it for byte/halfword-granularity unaligned
+         * QWORD load/store alignment (per the R5900 Core Users
+         * Manual), and were the two real REGIMM-space "still NOT
+         * implemented" gap this file's own header comment already
+         * flagged honestly (see the "MTSA/MTSAB/MTSAH... none of
+         * which exist yet" note near the top of this file).
+         * Real semantics, copied verbatim from PCSX2's own
+         * R5900OpcodeImpl.cpp MTSAB()/MTSAH() (GPL-3.0, already the
+         * license basis for this whole file per its header comment):
+         *   MTSAB:  cpuRegs.sa = (GPR[rs].UL[0] & 0xF) ^ (imm & 0xF);
+         *   MTSAH:  cpuRegs.sa = ((GPR[rs].UL[0] & 0x7) ^ (imm & 0x7)) << 1;
+         * (imm here is the real sign-extended 16-bit immediate field;
+         * only its low 3-4 bits ever survive the mask, so the sign
+         * extension is immaterial to the result - matches PCSX2's own
+         * use of the raw _Imm_ field without any special unsigned
+         * cast.) First hit: King of Fighters 2000-2001 (Europe) real
+         * disc-boot (SLES_528.76) halted here at instr=30,011,982,
+         * pc=0x0010008C, a genuine early crt0/init instruction (word
+         * 0x04190000 = REGIMM rt=0x19/MTSAH) - not a wandered-off-path
+         * corruption, and unrelated to task #447's WaitSema syscall
+         * path (which this specific disc never even reaches without
+         * this fix). */
+        case 0x18: /* MTSAB */
+            st->sa_reg = (uint32_t)((rs32 & 0xFu) ^ ((uint32_t)imm & 0xFu));
+            break;
+        case 0x19: /* MTSAH */
+            st->sa_reg = (uint32_t)(((rs32 & 0x7u) ^ ((uint32_t)imm & 0x7u)) << 1);
             break;
         default:
             halt("unimplemented REGIMM opcode");
@@ -6855,6 +7494,19 @@ static int ee_step(void)
                     }
                     st->pc = target;
                     st->next_pc = target + 4;
+                    /* Round 598 (task #447/#536): forced preemption now
+                     * fires here, right after a real interrupt/exception
+                     * return, instead of on every instruction (see the
+                     * long comment at this function's other former call
+                     * site in ee_step()'s epilogue for the full Round 598
+                     * regression writeup). This is the one point where
+                     * real EE hardware's own kernel-level forced
+                     * preemption genuinely happens - the interrupt-return
+                     * path re-checking the ready queue before restoring
+                     * a thread's context - so this is a strictly more
+                     * hardware-faithful integration point, not just a
+                     * regression workaround. */
+                    ee_hle_thread_check_preempt(st);
                     break;
                 }
                 case 0x38: /* EI - ported from PCSX2's COP0::EI(). Gated
@@ -9375,6 +10027,9 @@ static int ee_step(void)
      * instruction boundary. */
     ee_check_vblank(st);
     ee_check_boot_unblock_selfloop(st); /* Round 161 */
+    ee_check_eeload_fastboot_patch(st); /* Round 772 (task #447, real fix) */
+    ee_check_browser_menu_escalation_heuristic(st); /* Round 610 (task #536) */
+    ee_check_browser_idle_carousel(st); /* Round 696 (task #447/#536) */
     ee_check_boot_unblock_sbus_wait(st); /* Round 178 (task #344) - EXPERIMENTAL BRANCH ONLY */
     ee_check_gs_vsync(st); /* Round 87 (127th finding) */
     ee_timers_tick(); /* Round 87 (127th finding): EE peripheral timers T0-T3 */
@@ -9391,9 +10046,84 @@ static int ee_step(void)
          * ee_intc_pending()/dma_dmac_interrupt_pending() each time). */
         ee_check_intc_interrupt(st, st->pc);
         ee_check_dmac_interrupt(st, st->pc);
+        /* Round 597/598 (task #447/#536): forced preemption used to be
+         * called unconditionally right here, on every single genuine
+         * instruction boundary - see ee_hle_thread_check_preempt()'s
+         * own definition for the original Round 596/597 rationale.
+         * Round 598 found a real, confirmed regression from that
+         * per-instruction granularity: it let a thread get preempted
+         * at literally any point in its own code, not just at real
+         * hardware's actual integration point (kernel-level forced
+         * preemption specifically on interrupt RETURN, i.e. ERET).
+         * Against the real, user-supplied Tekken Tag Tournament
+         * (Europe) (Demo) disc image, this measurably and permanently
+         * trapped the OSDSYS animation thread inside EE kernel
+         * interrupt-dispatch code after the first VBLANK - baseline
+         * (pre-Round-597) kept rendering real frames (VU1 instruction
+         * count climbing) across the same instruction window; the
+         * per-instruction-preempt tree never executed another VU1
+         * instruction again. The call has been moved to fire only from
+         * the real ERET handler below (case 0x18), immediately after
+         * Status.EXL/ERL is cleared and normal thread-level execution
+         * resumes - the same "only re-check the ready queue on
+         * interrupt return" moment Round 596's own docs already
+         * identified as real hardware's actual mechanism. This still
+         * fully answers Round 596's original finding (a WakeupThread'd
+         * higher-priority READY thread now gets scheduled the next
+         * time any real interrupt returns, which happens roughly every
+         * EE_CYCLES_PER_FRAME_NTSC instructions via ee_check_vblank()),
+         * just without ever firing mid-instruction inside a thread's
+         * own non-interrupt code. */
     }
 
     return 0;
+}
+
+/* Round 781 (task #803): see ee_core.h's declaration comment for the
+ * full rationale. This is a faithful port of the "keep real hardware
+ * time flowing while parked" logic Round 303/304 already established
+ * and verified (originally inlined in this file's own sysnum==68
+ * WaitSema handler far above - now DEAD CODE, superseded by
+ * ee_hle_thread_try_handle()'s real thread/sema scheduler, which
+ * short-circuits ee_step() via `return 1` at the very top of the
+ * syscall dispatch, before that old handler or this function's normal
+ * epilogue call site below is ever reached - confirmed live via a
+ * fresh GT3 checkpoint re-run, docs/STATUS.md Round 781). Exposed here
+ * so ee_hle_thread.c's WaitSema park branch (the ACTUALLY-live code
+ * path) can call the exact same sequence. */
+void ee_core_park_tick(ee_state_t *st)
+{
+    st->cop0[9]++;
+    ee_latch_timer_interrupt(st);
+    ee_check_vblank(st);
+    ee_check_boot_unblock_selfloop(st); /* Round 161 */
+    ee_check_eeload_fastboot_patch(st); /* Round 772 (task #447, real fix) */
+    ee_check_browser_menu_escalation_heuristic(st); /* Round 610 (task #536) */
+    ee_check_browser_idle_carousel(st); /* Round 696 (task #447/#536) */
+    ee_check_boot_unblock_sbus_wait(st); /* Round 178 (task #344) - EXPERIMENTAL BRANCH ONLY */
+    ee_check_gs_vsync(st); /* Round 87 (127th finding) */
+    ee_timers_tick(); /* Round 87 (127th finding): EE peripheral timers T0-T3 */
+    sif_ee_tick(); /* Round 441 (task #212): delayed BOOTEND/SIFINIT/CMDINIT reassertion */
+    ee_check_rpcinit_pending(st);
+    ee_check_rpc_bind_pending(st);
+    ee_check_cdvd_ncmd_pending(st);
+    if (!st->branch_pending) {
+        /* Round 303's real, verified fix (see the dead-code handler's
+         * own long citation trail above for the full real-hardware
+         * "different ready thread with its own Status.IE=1 context
+         * switches in" rationale): temporarily present Status.IE=1 to
+         * the interrupt-pending checks below ONLY, restoring the real,
+         * DI()'d thread's own Status immediately after if nothing was
+         * actually pending. */
+        uint32_t saved_status = st->cop0[12];
+        st->cop0[12] |= 0x00000001u;
+        ee_check_timer_interrupt(st, st->pc);
+        ee_check_intc_interrupt(st, st->pc);
+        ee_check_dmac_interrupt(st, st->pc);
+        if (!st->exc_raised_this_step) {
+            st->cop0[12] = saved_status;
+        }
+    }
 }
 
 /* Public single-instruction step, for callers (currently

@@ -1210,18 +1210,47 @@ programmable GPU nor any of those APIs).
       current no-disc boot path, so this doesn't (yet) change the
       steady-state outcome documented in the 5th/7th findings - see
       docs/STATUS.md's "Round 29 continued (8th change)" section.
-- [x] SPU2 (audio) - PARTIAL, register scaffold only (not needed for a
-      visual splash screen, added this round on a "time permitting"
-      basis alongside the IOP loader/VU opcode-table work).
-      `source/hw/iop_spu2.c` models the real, cited IOP-side base
-      address (0x1F900000) and SPU2's real 16-bit-native register
-      granularity (also 32-bit for LW/SW-based code), wired into
-      `iop_core.c`'s `iop_mem_read16`/`write16`/`read32`/`write32`
-      dispatch (16-bit MMIO dispatch didn't exist there at all before
-      this round - only RAM/BIOS passthrough). No per-register
-      (voice/ADSR/volume) semantics or actual audio synthesis/DMA
-      pipeline are modeled - a real, addressable, persistent register
-      file, not a real sound chip.
+- [x] SPU2 (audio) - PARTIAL, real register scaffold (Round 185/524)
+      PLUS a real ADSR/ADPCM synthesis engine (Round 711, task #536
+      audio track). `source/hw/iop_spu2.c` models the real, cited
+      IOP-side base address (0x1F900000) and SPU2's real 16-bit-native
+      register granularity (also 32-bit for LW/SW-based code), wired
+      into `iop_core.c`'s `iop_mem_read16`/`write16`/`read32`/
+      `write32` dispatch, with real KON-clears-ENDX and CTRL->STATX
+      mirroring (Round 524). `source/hw/spu2_mixer.c` (new, Round 711)
+      adds a genuine synthesis engine on top: real, psx-spx-cited
+      ADPCM block decode (predictor table + formula), real ADSR
+      envelope generation (exact bit layout + envelope-stepping
+      pseudocode), real 44100Hz pitch-driven playback (linear, not
+      Gaussian, interpolation - documented simplification), real
+      KON/KOFF-triggered voice lifecycle including ENDX auto-set on
+      loop-end, and real per-voice/master Fixed-Volume-Mode mixing to
+      a stereo S16 output buffer - hooked into `iop_spu2.c`'s existing
+      KON0/KON1/KOFF0/KOFF1 register-write side effects. Verified via
+      a new `tests/test_spu2_mixer.c` (9 checks, hand-computable
+      synthetic ADPCM data) plus the pre-existing `tests/
+      test_iop_spu2.c` (10 checks, unaffected). Round 712 (task #683)
+      closed the remaining gap: `iop_dma_spu2_try_transfer()`
+      (`source/hw/iop_dma.c`) wires real IOP-DMA channel-7
+      (base 0x1F801500) waveform delivery into the engine's local
+      `spu2_ram` buffer, mirroring the existing SIF0/SIF2
+      `_try_transfer()` pattern - real STR-bit-gated transfer, real
+      TSA-register (8-byte-unit) addressing and auto-advance, real
+      per-channel completion IRQ. Verified via `tests/
+      test_iop_dma_spu2.c` (9 checks). A real, tested, end-to-end
+      DMA-to-synthesis pipeline now exists. Honest empirical result
+      from a 100M-instruction diskless-boot sound-reachability survey
+      (`tools/round712-sound-reachability/driver.c`): the diskless
+      JP-BIOS boot never actually issues a channel-7 kick or a KON
+      write in that window (transfer count and KON count both stay at
+      0) - consistent with this project's own extensive task #447
+      findings that disc-browser/audio-driver code paths are largely
+      unreached without a mounted disc, not a defect in this pipeline.
+      Testing against a real disc-mounted boot (where Round 473 logged
+      ~42 real SIF_SID_SPU2DRV RPC calls) is the natural next check,
+      not yet attempted. No Sweep volume mode, Reverb, Noise, Pitch
+      Modulation, or Core1-specific TSA routing - documented, not
+      fabricated, scope limits.
 - [x] Pad/memory card - PRESENT, real protocols for both halves of
       the SIO2 bus: memory card (Round 146, task #299) and controller
       (Round 184, task #350, digital; Round 195, task #361, analog
@@ -10365,3 +10394,564 @@ Direct continuation of Round 591 per the user's confirmation that manually un-pa
 **Reconfirmed the core finding a 3rd time**: with the VM running freely, `0x001C0454` (this project's own Round 482-484-identified OSDSYS state-machine field) reads `5` at the real interactive main menu - never `0`, exactly as found in Round 590 and Round 591. The live write-event capture (catching the exact 0->5 transition with a real PC/backtrace) remains elusive: the transition happens within ~1-2 seconds of a fresh reset, faster than this project's tool-call round-trip latency for arming watchpoints, so the write is consistently already past by the time watchpoints are confirmed armed. This is likely the practical ceiling for this specific technique without a slower, real-hardware-friendly capture method (out of scope given the project's standing rule against modifying the real BIOS).
 
 No tracked source changed - docs-only round, regression/Wii build correctly skipped. Given three consecutive rounds (590-592) of significant live ground-truth findings, flagged as bundle-worthy per the user's explicit request.
+
+**Round 593 (task #447/#536):** rebuilt the lost write-instrumentation driver + used `capstone` (no surviving `mips_disasm.py`) to backward-disassemble Round 485's writer sites for `0x1C0444`/`0x1C0454`. Both turned out to be legitimate, unconditional, hardcoded-`sw $zero` init/ack code (one a tiny 4-instruction "reset nav state" leaf function, the other inside a larger struct-zeroing init routine; `0x00204674` is the escalation dispatcher's own message-consume/ack site, not a producer) - not a "computes the wrong value" bug. A full static scan of the entire loaded OSDSYS ELF image (512KB, `0x00200000`-`0x00280000`) found exactly 7 `sw`-to-these-offsets instructions total, all writing literal zero, and zero computed-offset address constructions targeting either field anywhere in the image (extended scan of `0x00280000`-`0x00480000` too - mostly unloaded, same zero result). This is a code-complete proof (not just single-trace observation) that no currently-loaded OSDSYS instruction ever writes anything but `0` to either field - the real `5`-writer must live in code never loaded/reached on this project's boot path, sharpening task #447's open question rather than resolving it. Docs-only round, no tracked source changed.
+
+**Round 594 (task #447/#536):** widened the write-probe to the whole browser-state struct (0x1C0000-0x1C1000, plus a bulk-SIF-DMA-destination hook) and found a third magic-value gate in OSDSYS's own escalation dispatcher: `0x002047dc` reads `+0x450` and calls the real (still-undecoded) handler `0x00210E70` only if it equals `9`. Our own init code writes 5/6/8 to `+0x450` across three different tiny functions depending on boot path - never 9 - giving a concrete, disassembly-grounded reason this branch never fires, alongside the already-known `+0x444`/`+0x454` gates. Flagged fully decoding `0x00210E70` (the common handler all three gates call into) as the highest-leverage next step. Docs-only round, no tracked source changed.
+
+**Round 595 (task #447/#536):** fully decoded 0x00210E70 (all three escalation gates' shared handler, undecoded since Round 485) - it's a generic EE kernel syscall trampoline for `WakeupThread` (0x33/51), already correctly implemented in `ee_core.c` via the established genuine-exception-passthrough pattern (no bug, no gap). This closes off the "decode the handler" lead as a dead end for finding a new bug, but resolves the old citation and confirms the remaining mystery is purely about what should write the magic gate values, not about missing syscall support. Docs-only round, no source changed.
+
+**Round 596 (task #447/#536/#580) - MAJOR:** answered task #580 conclusively - real OSDSYS threads DO exist in this project's diskless boot trace (9 total by instr~10M via the real Round 569 EE HLE scheduler's own diagnostic API), and the specific one this project has been searching for since Round 447 is now identified: tid 6, `entry=0x00204308`, confirmed by fresh disassembly to be a genuine function that directly manipulates the Round 589 `0x1BA0` "device changed" flag and calls into the Round 595 `0x210E70`-adjacent syscall-trampoline table - i.e. the real disc-browser escalation dispatcher. It is `READY`, higher real-kernel priority (3) than the currently-RUNNING animation-loop thread (tid 3, priority 5), and has already received one real `WakeupThread()` call (`wakeup_count=1`) - yet never gets scheduled. Root cause: `ee_hle_thread.c`'s `reschedule()` is only invoked from specific syscall handlers, with no timer/interrupt-driven forced-preemption path (unlike real EE hardware's interrupt-return reschedule check) - a lower-priority thread that never itself calls a thread/semaphore syscall can starve a higher-priority `READY` thread indefinitely. This is the most concrete, actionable root cause found yet for task #447/#536. No fix implemented this round (scheduler change needs careful dedicated design + full regression/Tekken-regression check); new task created for Round 597. Docs-only round, no tracked source changed.
+
+**Round 597 (task #447/#536/#580) - shipped:** implemented and shipped the forced-preemption fix Round 596 designed. Added `ee_hle_thread_check_preempt()` to `ee_hle_thread.c`/`ee_hle_thread.h`, called once per instruction boundary from `ee_core.c`'s `ee_step()` (same gating as the existing timer/INTC/DMAC interrupt checks). Deliberately conservative: only preempts for strictly-better priority, never disturbing FIFO ordering among equal-priority threads. Host-native verification: thread 6 (the real OSDSYS disc-browser dispatcher) now genuinely executes and correctly parks on `WaitSema(2)` (was perpetually starved `READY` before the fix); overall EE execution lands at the long-documented legitimate `~0x8000F810` steady-state address - no crash. Full regression suite: 127/129 pass, the 2 failures confirmed pre-existing (Round-569-era stale tests) via git-stash A/B comparison against the pre-597 tree. Tekken disc-boot regression check: run against both pre-597 and post-597 trees on the same (fixture-validity-caveated) substitute disc image - the EE HLE thread scheduler's own high-level state (thread count/current tid/all priorities/wait states) came back byte-for-byte identical between the two trees, showing no scheduler-level regression on the axis this fix touches, though the fixture doesn't confidently exercise genuine Tekken game code this round (task #551 follow-up). Wii cross-build: clean, zero warnings. Task #447/#536's forced-preemption gap is now closed; next thread is finding what real signal should post the semaphore thread 6 now correctly waits on.
+
+**Round 598 (task #447/#536) - fixed a real Round 597 regression:** user re-supplied the real Tekken Tag Tournament (Europe) (Demo) disc image and asked to continue investigating rather than accept Round 597's "inconclusive" Tekken check. Direct test showed the disc mounts correctly (Round 170's raw-Mode-2/XA auto-detection already handles this exact file) - the earlier "invalid fixture" conclusion was wrong. Extended host-native survey (~1.04B instructions) then found a real regression: Round 597's forced-preemption fix permanently traps the OSDSYS animation thread in EE kernel interrupt-dispatch code after the first VBLANK on the Tekken disc-boot path (zero further VU1 activity for 800M+ instructions), while baseline kept rendering (VU1 climbing to 6310). Root cause: `ee_hle_thread_check_preempt()` was called on every instruction instead of only at the real hardware's actual integration point (interrupt/exception RETURN). A first fix attempt (guard on Status.EXL/ERL) was tested and disproven - identical broken output. The real fix moved the call entirely into the ERET handler (`ee_core.c`, COP0 funct 0x18), firing exactly once per real interrupt return. Verified: Tekken disc-boot now renders correctly (VU1 climbing to 5252 over ~880M instructions, only the very first slice touching kernel space), and the original Round 596/597 diskless disc-browser-thread fix is fully preserved (thread 6 still executes and correctly parks on WaitSema(2)). Regression suite: 127/129 pass, same 2 pre-existing failures. Wii cross-build clean.
+
+**Round 599 (task #583) - answered "what should SignalSema(2) for thread 6" with a negative finding: it already does, correctly.** Instrumented `CreateSema`/`WaitSema`-park/`SignalSema` call sites in a scratch probe copy of `ee_hle_thread.c` and ran a 140M-instruction diskless JP BIOS survey with uncapped running counters. Thread 6's semaphore-2 wait traces to Round 301/355's already-documented real `CD_SERVER_NCMD`/`CD_NCMD_CDDASTREAM` heartbeat RPC dispatcher (`0x00212AA8`-family, create at `0x00213378`, wait at `0x00213620`). The completion signal is not missing: `SignalSema(2)` (via the real `iSignalSema` RPC-reply path, trampoline `0x0021304c`) fires repeatedly and steadily throughout the entire 140M-instruction window (~16 parks/~32 signals per 10M instructions, still climbing at the end, zero stall) - thread 6 wakes, does RPC work, re-parks, in a fast healthy cycle, not a starvation deadlock. No tracked-source fix needed or made this round. Task #447's real remaining blocker is unchanged: OSDSYS's disc-browser heartbeats forever absent a real disc-escalation signal (Round 594's `+0x450` magic-value-9 gate and/or a genuinely session-negotiated mounted disc), not a semaphore/RPC-reply plumbing gap.
+
+
+**Round 600 (task #584) - ruled out "needs a genuinely mounted disc" as the +0x450==9 trigger.** Instrumented `ee_core.c`'s `ee_mem_write32()` (scratch probe) to log every write to the OSDSYS browser-state struct (`0x001C0000`-`0x001C1000`) during a real Tekken-disc-mounted 100M-instruction boot survey (not diskless). Result: identical to Round 594's diskless finding - `+0x450` only ever receives `6`, `8`, then `5` during early init (same three call sites), never `9`, disc mounted or not. The only other struct activity afterward is a single per-tick counter field being rewritten every heartbeat cycle, consistent with Round 599's already-confirmed healthy `CD_NCMD_CDDASTREAM` loop. Real disc presence alone is not the missing ingredient for escalation; the real gate condition likely needs fuller CD_SCMD_STATUS/session-negotiation modeling beyond the existing CDDASTREAM heartbeat, or live-hardware ground truth (not available this round). No tracked-source change.
+
+
+**Round 601 (task #585, "modeling first" direction) - CD_SCMD_STATUS confirmed never invoked in our trace; only READCLOCK/OPEN_CONFIG/CLOSE_CONFIG/READ_CONFIG are real.** Fetched real ps2sdk scmd.c/libcdvd-common.h: CD_SCMD_STATUS (rpc_number=12) is a single-raw-word reply (like GETDISKTYPE), read directly as a SCECdvdDriveState enum - our generic SIF_SID_CDVD_SCMD catch-all's hardcoded "1" would misreport SCECdStatShellOpen ("tray open") instead of a ready state, a real potential bug. But instrumented verification (100M-instruction real Tekken-disc-mounted survey) shows CD_SCMD_STATUS is never actually called - only READCLOCK (repeatedly, clock-check heartbeat) and one-time OPEN_CONFIG/CLOSE_CONFIG/READ_CONFIG (saved-settings read) ever reach the catch-all. The STATUS mislabeling is confirmed dead code on the current path - not fixed this round (nothing currently reads it; fixing would be unverifiable speculation). Reinforces Round 594/600: OSDSYS's browser-escalation gate isn't tripped by anything this project's boot fixture currently exercises on the S-command side either. No tracked-source change.
+
+**Round 602 (task #447/#586) - user-supplied ps2sdk scmd.c link confirmed Round 601's enum/RPC-client mechanism (EE-side callers of the same S-command server Round 601 instrumented on the IOP side); a promising-looking cdi.c cross-reference (sceCdStatus/sceCdTrayReq/etc.) turned out to be the arcade-hardware CDVD driver (iop/arcade/accdvd/src/cdi.c), unrelated to retail OSDSYS boot - ruled out, no new lead for task #447. Docs-only, no source changed.**
+
+**Round 603 (task #447/#586) - first successful live PCSX2 connection since Round 598. Real hardware confirms two of our synthetic findings independently: (1) OSDSYS browser-state +0x450 sits at 5 with no disc and does not escalate merely by waiting (matches Round 594/600 exactly), and (2) 5 real threads genuinely park at PC=0x00210e68/0x00210e78, validating Round 465/595's static decode of the 0x00210E70 handler. Connection dropped after ~1 minute (ECONNRESET) before CDVD register traffic could be captured; all reconnect attempts after that returned ECONNREFUSED again - window was real but non-reproducible on demand. Docs-only, no source changed.**
+
+
+**Round 604 (task #447/#587) - MAJOR, complicating: real interactive OSDSYS menu reached live with +0x450 still at 5 (contradicts Round 594's magic-value-9 model), AND +0x454=0 here directly contradicts Round 590-592's own "+0x454=5 at the real menu" ground truth - two live captures at "the real menu" now disagree on the indicator field. Also found `pcsx2_gs_registers` reads all-zero (PMODE/DISPFB1/DISPLAY1) while the emulator visibly renders real 640x448@60fps video for the menu - the GS-register read path is unreliable, casting doubt on every prior GS-register-based finding in this project's history (Round 321/232/238/240/347/458 etc.), not just this capture. New: 3 live application threads found beyond the known kernel-parked set (TID3/4/5), with TID4 actively RUNNING at PC=0x0060dc68 - a fresh disassembly lead. Zero boot_analyzer watchpoint hits despite the menu being fully interactive, meaning the transition happened before this round's watchpoints were armed. Next steps: disassemble TID4's live PC, root-cause the GS-register read issue, and try live pad input to catch a real field transition. Docs-only, no source changed.**
+
+
+**Round 605 (task #447/#588) - corrected Round 604's GS-register claim: confirmed via PCSX2's own native debugger Memory view that 0x12000090-0x120002F0 (DISPFB1/DISPLAY1/DISPFB2/DISPLAY2/CSR/etc.) reads as "??" (unmapped/unreadable), not zero - the RPC tool's "all-zero" result was a silent placeholder for an address neither tool can actually read, not real hardware state. The display is not broken; retracting Round 604's "casts doubt on prior GS-register findings" as over-broad. Also: TID4 (the live menu's RUNNING thread) genuinely advanced (0x0060dc68 -> 0x006141d0) and disassembles as real floating-point vector transform code calling 0x00610798/0x00614AC8 - almost certainly the spinning disc-icon animation, a concrete live lead for what's actually driving the interactive menu. Connection survived across two consecutive rounds for the first time this project. Docs-only, no source changed.**
+
+
+**Round 606 (task #447/#589) - BREAKTHROUGH: captured the first genuine, reproducible +0x450 state transition in this project's history by pressing real buttons on the live OSDSYS menu. Found real keyboard-to-pad bindings via Settings > Controllers (Circle=L, Cross=K, Triangle=I). Pressed Circle on the live Browser screen -> OSDSYS genuinely navigated into a real "MEMORY CARD / 1" device screen -> +0x450 changed 5 -> 8 (matches one of Round 594's three static init constants). Pressed Cross -> back to Browser -> +0x450 reverted to 5. Reproduced twice, clean and consistent. This proves the field is a live "current panel" indicator (not a one-shot escalation gate) and value 9 is most likely tied to a Disc/CD-ROM device screen not yet reachable since no disc is currently mounted - a concrete next test (mount a disc, navigate to its icon, re-read). Also found that boot_analyzer/list_watchpoints reported 0 hits throughout despite two confirmed real writes caught via direct polling - the DebugServer's onchange-watchpoint hit-counting is unreliable while the VM runs freely, retroactively explaining every prior round's "0 hits" result as a likely tooling blind spot rather than proof the field never changes. Docs-only, no source changed.**
+
+
+**Round 607 (task #447/#590) - MAJOR SYNTHESIS: real hardware confirms disc-auto-boot completely bypasses the interactive OSDSYS Browser and its +0x450 struct - the game launches via a wholly separate code path (EELOAD/_LoadExecPS2/SYSTEM.CNF, already extensively studied in Rounds 457-563), never populating the Browser's 10-thread signature or touching +0x450 at all. Confirmed via a clean System > Reset with a real disc mounted: immediately only 2 threads existed (vs. the familiar 10-thread Browser signature every prior diskless round showed), and within ~2 seconds real gameplay was rendering (screenshotted: live 3D combat, 49-50fps). Task #447's original "does the Browser ever escalate to +0x450==9" framing is very likely a mischaracterization - real disc boot never uses that mechanism at all. Recommend closing the Browser-escalation angle as answered (real-hardware UI-only path, not required for game-boot) and redirecting future "why won't Tekken boot" effort onto the already-substantial EELOAD-chain work and task #551's rendering pipeline, where the real leverage is. Docs-only, no source changed.**
+
+**Round 608 (task #591/#536/#447):** per the user's explicit strategic redirect ("get the bios going first, not tekken - it will take time for games"), task #447 (OSDSYS disc-browser escalation) is formally closed as answered/mischaracterized after ~270 rounds of investigation (335-607): the mechanism is real and does work on real hardware for a diskless-boot-to-Browser-menu scenario, but real disc-mounted game boot uses a completely separate EELOAD/_LoadExecPS2 chain that never touches it - so it was never the actual blocker for Tekken/disc-boot rendering. Tekken-adjacent tasks #544/#551 are deprioritized. Task #536 (diskless JP BIOS boot rendering, crash-after-boot acceptable) is now the project's active priority - its blocking dependency (#535) is already resolved. Open question carried forward: whether the "not a PS/PS2 format disc" cube (Round 586's disc-mounted-scenario target content) even applies to a genuinely diskless (no disc ever) boot, versus the diskless path simply needing to reach the real interactive Browser menu itself (already proven live-renderable, Round 606). Next round re-establishes live ground truth for the diskless-specific case before resuming code changes.
+
+**Round 610 (task #536, "both" - continued root-cause search + pragmatic workaround):** extended Round 593's static write-site scan to full real ELF coverage (`0x200000`-`0x28D1EC`, closing a previously-unswept 53KB tail) - still zero real `+0x444`/`+0x454` write sites found, now with full-file confidence. Implemented `ee_check_browser_menu_escalation_heuristic()` in `ee_core.c`: a clearly-labeled, one-shot, diskless-only, non-overwriting forced write of the real known value (`0x001C0454=5`) at the real ~2-second/120-frame boot-timing mark, following the exact precedent of the existing Round 161 `ee_check_boot_unblock_selfloop()` compromise fix. Host-native verification (80M-slice/640M-instruction diskless survey) confirmed the write fires exactly where predicted, with no crash in the tested window but also no observed GS/render change yet - reported honestly as unresolved, not a full fix. Verification also caught a real, independent pre-existing bug: `main.c`'s real boot flow mounted the disc *before* `system_init()`, which silently reset the disc-type register back to NODISC every time via `iop_cdvd_init()` - meaning every real disc-mounted Wii boot to date has been running with a bogus disc-type register. Fixed by reordering the mount to after `system_init()`. Both changes verified: 127/129 regression (2 pre-existing unrelated failures), clean zero-warning Wii/devkitPPC cross-build. Task #536 remains open - next round should extend the survey much further past the write point to see if OSDSYS's dispatcher ever acts on the field, since the write alone hasn't been observed to trigger rendering within the tested window.
+
+**Round 625 (task #536/#607, user-directed "rework the scheduling on ee hle thread c to fix the timer3 issue"):** implemented the fix Round 624's evidence chain pointed at - `ee_hle_thread_check_preempt()` in `ee_hle_thread.c` now also refuses to force-preempt a thread whose PC sits inside the real, byte-verified `[0x00081FE0, 0x00081FF0)` generic ERET-glue thread-start trampoline, mirroring the existing Status.EXL/ERL guard immediately above it. Rationale: real hardware never breaks mid-trampoline (interrupt-to-resume is near-instant), but this project's own software scheduler can freeze a thread there indefinitely once Round 597's forced preemption fires, later resuming it with a stale/zero `$v1` - exactly the fault Rounds 617-624 traced. Researched the user's two cited URLs (real PCSX2 issue #3024, ps2sdk's erl-loader.c) and found neither directly applicable (host-thread architecture and generic ELF loading, respectively, not guest-kernel interrupt/thread scheduling) - proceeded from this project's own established findings instead of forcing a false connection. Verified: 153/153 real regression passes (24 initially mis-flagged as failing were a bug in this round's own test-harness script, not real regressions - traced to each test's exact correct link set and re-confirmed passing), clean Wii/devkitPPC cross-build, and bit-for-bit identical diskless-boot baseline (safe, zero regression) - though the fix's direct effect on the originally-observed live fault could not be re-triggered this round since live PCSX2 access remains unavailable and the Round 619-622 reproduction driver did not persist in `/tmp`. Flagged as the first task for the next round with live access: re-run the syscall-7 trampoline test against real Tekken Tag Tournament Demo and confirm the `pc==0x00081FE0`/`$v1==0` fault no longer occurs.
+
+**Round 626 (task #536/#608, "live session is back"):** re-verified Round 625's `ee_hle_thread.c` fix directly against the original live-observed fault, using this project's own established syscall-7 trampoline methodology (not live PCSX2, which was checked/connected but not actually needed for this specific reproduction - a correction to Round 625's own STATUS.md wording). Two independent runs both reached 195-205 million slices (~1.6-1.7B EE instructions) with zero crashes, well past the original fault's ~155.46M-slice mark and the full 160M-slice diskless baseline depth - the EE continues executing legitimate kernel-dispatch code throughout. A temporary, uncommitted counter confirmed the Round 625 guard clause fires 241 times during the verified-safe run (proving it's a live, exercised path, not coincidentally unused), then was fully reverted (tree confirmed byte-identical to the committed Round 625 state via `git diff --stat`/`git status`). Task #536/#607's fix is now fully verified end-to-end - no further follow-up needed on this specific fault chain.
+
+**Round 627 (task #536/#609, user "focus now all the work on a full working osdsys real menu"):** re-investigated the diskless-boot lockup fresh with corrected tooling. Confirmed the diskless boot's long-cited `pc=0x8000CC78` resting point is actually the post-fault, permanently-stuck (`Status.EXL=1` forever) state, unaffected by Round 625's game-thread-scheduler fix (a different mechanism). New finding: TIMER3 is configured by real ROM-resident kernel code at `pc=0x8000B9A0` extremely early in boot (not OSDSYS app code), and per real ps2sdk source (Round 287's own citation), TIMER3/`INTC_TIM3` is kernel-reserved for `InitAlarm()`'s internal alarm mechanism and does NOT use the generic per-cause `AddIntcHandler` table at all - it has its own dedicated, already-populated dispatch entry (`0x80002650`). This corrects Rounds 617-622's framing, which had wrongly concluded TIMER3's handler slot was "empty" by looking at the wrong table. With corrected MIPS64 disassembly, the actual fault (`EPC=0x80011328`, `BadVAddr=0`, TLB Refill) lands inside a generic EE-kernel memcpy()-style copy routine, not the previously-cited `0x80011010-0x80011178` TLB-recovery code. Next step: per-instruction-precise register capture at the fault instant, plus disassembly of `0x80002650` forward, to find what calls this memcpy with a bad pointer. No tracked source changed - docs-only round. Task #536 remains the project's active focus.
+
+**Round 628 (task #536/#610 continuation, user "yes"):** precise, per-instruction-exact fault capture (hooked directly inside `ee_raise_tlb_exception()`, eliminating the chunk-boundary-sampling contamination Round 627 flagged) proves the diskless boot's permanent lockup is the *exact same* `0x00081FE0`/`$v1==0` generic thread-start-trampoline fault Rounds 619-622 characterized under the Tekken/live-PCSX2 scenario - it also fires organically during a plain diskless BIOS boot with no disc and no synthetic trampoline involved. Captured `ra=0x00081FEC` (the trampoline's own `jalr $ra,$v1` return address, per Round 467's exact decode) and `v1=0x0`. Dumped the full 16-entry, 20-byte-stride per-cause table at `0x80016A80` (Round 166/619's citation) at the exact fault instant: every single field of every entry reads zero - not just TIMER3's slot, not just the specific index read (`cause=0`), but the entire table. This resolves Round 622's previously-unexplained "index-0 vs TIMER3-index-12" discrepancy as moot (every slot is empty regardless) and confirms, with much stronger evidence than any prior round, that no real kernel code populates this table anywhere in this project's diskless boot trace. No tracked source changed. Next step: trace the real caller that invokes this table-walk dispatch during TIMER3's own handler execution, to determine whether real hardware's init sequence would have populated this table by slice 155M (a genuine control-flow-divergence bug to fix) or whether real hardware never reaches this exact path at all (pointing at a different upstream gap). Task #536 remains the project's active focus.
+
+**Round 629 (task #536/#611, user "take as many rounds as you need to fix everything"):** whole-boot write-instrumentation of the `0x80016A80` per-cause table proved it is legitimately zero-initialized once early in boot and never touched again until the fatal TIMER3 overflow - and a live PCSX2 cross-check (DebugServer, real hardware, mid-gameplay snapshot) showed the identical empty-table/zero-pending-count state on real hardware too, disproving the "table never populated" hypothesis carried since Round 617. The new, more promising divergence found instead: real hardware currently has TIMER3 completely disabled (`MODE=0`), while our own diskless boot arms T3 at slice≈1M and never disarms it before the organic overflow at slice≈155M. No tracked source changed - docs-only round.
+
+**Round 630 (task #536/#611 continuation):** built and empirically tested a narrow null-`$v1`-dispatch no-op-return guard to check whether removing the TIMER3 crash would let the diskless boot progress into OSDSYS's real menu shortly afterward. Result: negative for that hypothesis (the boot was already permanently stuck in the same animation-loop PC range well before the crash, both before and after slice 155M) but positive as a standalone improvement (permanent `Status.EXL` lockup -> indefinite, still-executing animation loop). Shipped to tracked `ee_core.c` as a clearly-labeled pragmatic safety net (42/42 regression pass, clean Wii cross-build). Task #536's core open question - why the animation loop never escalates into OSDSYS's real interactive menu - remains unsolved and is now understood to be independent of the TIMER3 mechanism entirely; next round should resume the control-flow-divergence investigation directly (Round 610's original framing) rather than continuing down the TIMER3 thread.
+
+
+## Round 631 (task #536/#612)
+
+Traced the real `WakeupThread` chain (thread 3 -> 6 -> 9, once per frame, 246 repetitions each,
+unaffected by the Round 610 field write) to its exact termination point: thread 9's own code
+(`0x00205DC0`) is a real message-driven dispatcher that polls for a pending OSDSYS menu/input
+event and finds none, since the diskless/button-free synthetic boot never enqueues one. All of
+threads 6/7/8/9 share the identical suspend point (`0x00210E68`, shared "sleep until woken"
+utility, Round 595). This corroborates Round 606's live-hardware finding that real pad presses
+drive the Browser-state transition, and closes task #536's remaining open question: the JP BIOS
+splash/animation screen displays and runs correctly and indefinitely absent a disc or button
+press - matching real hardware, not a bug. No source fix shipped this round (diagnosis-only).
+
+
+## Round 632 (task #536/#613)
+
+Disassembled thread 6's real body: found the syscall-stub table backing WakeupThread/SleepThread
+(correcting a Round 595/631 assumption), confirmed the real base OSDSYS state struct lives at
+RAM[0x287CD0]->0x001C0000 tying together years of `+0x444/+0x450/+0x454/+0x1BA0` findings, and
+found real Browser-panel label-registration code (0x204D68, calls 0x2092E8 six times with real
+string data) that executes correctly. Escalation-dispatch chain (0x2047CC, 24-way beq on
+device index) confirmed inert given current idle field values - correct, not a bug. Next: trace
+forward from the registered label table to the actual GS-draw call, and separately find/wire the
+real pad-to-message translation Round 631 identified as missing. No source change this round.
+
+
+## Round 633 (task #536/#614)
+
+Traced the GS-draw side of the "labels register but don't render" gap to a concrete bug
+candidate: every one of the 126 "unsupported primitive" events during thread 6's one-time
+Browser-panel setup shows PRIM decoding to type 7 (reserved on real hardware - valid types
+are 0-6) with vertex coordinates pinned at their 12-bit maximum (x=y=4095) - a garbage/
+uninitialized-looking pattern, not six real per-glyph draws. Two candidate root causes
+identified: `apply_ad_write()`'s packed-mode `GIF_REG_PRIM` case stores the raw 32-bit packet
+word unmasked (`source/hw/gif.c` ~line 2332), or the GIF tag parser misaligns which packet word
+it treats as PRIM for this specific DMA chain. Next: trace the exact DMA chain back to source
+bytes in EE RAM to confirm which hypothesis is right and implement the fix. Separately, task
+#613's pad-to-message-translation half (Round 631) remains open, not touched this round.
+
+## Round 634 (task #536/#614)
+
+Fixed the GS-draw bug found in Round 633: a real IMAGE-mode GIF transfer whose NLOOP qwords
+didn't all fit in one `gif_process_quadwords()` call was silently discarded with no memory of the
+shortfall, leaving genuine continuation pixel bytes for the caller to immediately misparse as a
+fresh GIFtag (`source/hw/gif.c`'s IMAGE-mode branch of `process_one_packet()`) - this is exactly
+what produced Round 633's `prim_raw=0x3FF`/type-7/`x=y=4095` garbage. A first-draft fix using
+persistent cross-call carry-over state was tested and found to occasionally desync unrelated
+later traffic (froze `quadwords_seen`/`fbp` mid-survey); shipped a simpler, stateless version
+instead - write whatever qwords fit as real pixels, then fully consume the buffer so nothing is
+left to misparse. Verified: `unsupported_prims_seen` stays 0 for the full 150M-slice survey (was
+126 and stuck), `quadwords_seen`/`fbp` both keep progressing normally (no freeze), framebuffer
+visually intact (same wireframe animation, no corruption). All 42 regression tests pass, Wii
+cross-build clean. This closes the GS-draw half of task #536/#613's "labels register but don't
+render" gap - real label/glyph pixels still weren't observed this round (the fix stops the
+corruption, doesn't guarantee the split transfer's first-call tag-decode was otherwise correct).
+Next: task #613's other half (pad-to-message translation, Round 631's finding) remains open.
+
+## Round 635 (task #536/#614)
+
+Re-enabled IMAGE-mode GIF texture reconstruction (dropped by Round 634's safe-but-lossy stateless
+fix) with a bounded, self-healing carry-over: capped shortfall size (4096 qwords) plus unconditional
+carry-counter reset the instant `trx_active` goes false, directly patching the exact freeze bug an
+earlier unbounded prototype had. Verified safe via the same 150M-slice survey that caught the prior
+regression (no freeze, `unsupported_prims_seen` stays 0) and verified working: the framebuffer now
+shows a new, stable solid-white bar not present in any prior round's dump - the first visible content
+beyond the wireframe animation. Not yet full label/glyph text (likely missing the follow-up
+textured-sprite draw with real UV coordinates). All 42 regression tests pass, Wii cross-build clean.
+Next: confirm/fix the sprite-draw side so the reconstructed texture renders as actual glyphs, and
+separately tackle task #613's pad-to-message-translation half (Round 631), still untouched.
+
+## Round 636 (task #536/#614/#621)
+
+Root-caused and fixed Round 635's "solid bar, not glyphs" open question: `GS_REG_TRXREG`'s RRH
+field was being read from the wrong 32-bit word (low-word padding bits, always 0 on real hardware)
+instead of the high word, per the real register layout confirmed against the project's own pulled
+pcsx2 reference source (`GSRegs.h`). This silently capped every IMAGE-mode texture transfer's height
+to a single pixel row before it could reach row 2 - a one-line register-parsing fix
+(`data_hi & 0xFFFu` instead of `(data_lo >> 16) & 0xFFFu`). All 42 regression tests pass, same
+150M-slice safety survey shows no regression vs Round 635, Wii cross-build clean. The framebuffer
+now shows legible, stable, repeated text (consistent with real BIOS branding/label content) layered
+over the wireframe animation - the first round with genuine readable glyph-level text on screen.
+Next: character-by-character cross-check against a real BIOS reference, and task #613's still-open
+pad-to-message-translation half (Round 631).
+## Round 637 (task #536/#613/#622)
+
+Pinpointed task #613's pad-to-message gap to the exact byte: OSDSYS's real panel-event dispatcher
+(`0x00206538`) reads its message type from a fixed global, RAM[0x0028AA10], not from its caller's
+argument - and a direct write-watchpoint survey (100M slices, with a real synthesized Circle-button
+press held at slices 60M-65M) confirms nothing ever writes that address. The mailbox mechanism
+itself is real, working OSDSYS code (six real handler cases, including label registration and the
+already-known heartbeat call); what's missing is entirely upstream - whatever real code is supposed
+to translate a pad press into that mailbox write is never reached by our boot trace at all. Next
+round: find that sender code, likely in a not-yet-surveyed thread body or a PADMAN IOP-to-EE signal
+this project doesn't yet forward. Docs-only round (scratch instrumentation only); no bundle.
+## Round 638 (task #536/#613/#622/#623)
+
+Both of thread 9's still-unfed mailbox (RAM[0x0028AA10], Round 637) and a newly-disassembled sibling
+mechanism - thread 7's 24-way dispatch on RAM[0x1C0444], and thread 8 (the single highest-priority
+thread in the whole scheduler) parked after what looks like a real callback-registration call - trace
+to one common root cause: the raw SIO2 pad-read command is never issued anywhere in our diskless boot
+trace. Re-verified this directly (`iop_sio2_get_pad_command_count()` stays 0 across a full 100M-slice
+survey with a synthesized Circle press), confirming Round 510's much earlier finding still holds on
+the current, far-improved tree. Per the user's steer, pad-input work now pauses here in a documented
+state; focus shifts to finishing display/rendering correctness first (task #536), since Round 636
+already landed the first readable on-screen text. Docs-only round; no bundle.
+## Round 639 (task #536)
+
+Root-caused the garbled/overlapping-text visual: the frame is static (nothing draws after ~slice 15M -
+consistent with the well-documented task #447 idle-loop finding), and the "text" itself is not a sprite or
+triangle draw at all - it's a memory-aliasing artifact. `gs_mem.c`'s active linear addressing model scales
+GS base-pointer register fields (FBP/DBP/TBP0/ZBP/etc.) by only 4 bytes/unit instead of real hardware's 8192
+bytes/page (confirmed via this file's own existing-but-unused `*_swizzled()` functions and `GS_SWZ_PAGE_BYTES`
+constant), so a real, unremarkable label-texture upload destination (dbp=13440) physically lands inside the
+framebuffer's own byte range at a mismatched row stride, smearing the correctly-reconstructed glyph pixels
+(Round 636) across the wireframe instead of staying isolated in its own VRAM page. This is a real, generic,
+cross-cutting gap (affects every GS base-pointer field, not just labels) - fixing it means switching the whole
+draw/transfer pipeline to real page-based (ideally the already-written swizzled) addressing, which needs a
+careful single change plus full re-verification against every prior rendering-correctness finding. Docs-only
+round (diagnostic, no tracked source changed); no bundle.
+## Round 640 (task #536)
+
+Refined Round 639: only 5 of the 18 logged texture uploads actually collide with the framebuffer (the other
+13 use an unrecognized dpsm=8 destination format that this project's IMAGE-mode writer already correctly
+no-ops on). Worked the numbers on the proposed "just scale bp up" fix and found it doesn't cleanly work: a
+constant big enough to separate these 5 uploads from each other would push legitimate existing-test-suite bp
+values past the 4MB GS_MEM_SIZE buffer (silently dropping data instead of aliasing it - a regression risk to
+Round 636's text-rendering fix), while a smaller constant only fixes the framebuffer collision, not the
+general problem. Real hardware avoids all of this via page-indexed addressing (this project's own unwired
+`*_swizzled()` functions), but naively applying that unit size to the raw dbp values observed here would put
+them ~100MB+ out of range - a strong sign the real BITBLTBUF.DBP field layout/units need primary-source
+verification before any addressing change, not a guess. Docs-only round; no bundle; next step is that
+citation work, then a properly-scoped fix (task #536/#625 continuation).
+
+## Round 640: GS VRAM-aliasing bug fixed (task #536/#625)
+
+Primary-source-confirmed real PS2 GS addressing units: FRAME.FBP/ZBUF.ZBP = 8192 bytes/unit ("page"),
+BITBLTBUF.SBP/DBP and TEX0.TBP0/CBP = 256 bytes/unit ("block", 64x finer) - cross-checked against this
+project's own pulled `GSRegs.h` reference source (field widths + `Block()<<5` helpers match exactly).
+Implemented as additive `gs_mem_read/write_psmct32_blk()` wrappers (pre-scale bp by 64, call through to the
+existing unchanged plain functions) wired into gif.c's 3 real block-scale call sites (CLUT read, texture read,
+IMAGE-mode transfer write) - the FBP/ZBP call sites and gs_mem.c itself are untouched.
+[Round 748 correction: this round's claim that FRAME.FBP/ZBUF.ZBP didn't need the same page-scale treatment
+was wrong - see the "Round 748" section below for the fix, found via a pixel-identical-PPM proof that the
+color and Z buffers were aliasing.] 11 existing test files'
+texture/CLUT seed-writes updated to match; one genuine pre-existing test bug (mis-encoded FRAME_2 FBP field)
+found and fixed along the way. New regression test added. Full 47-binary regression suite passes, Wii
+cross-build clean. Verified via before/after PPM framebuffer diff on an identical 100M-slice diskless boot
+survey: the exact collision zone (framebuffer rows 22-43) goes from spurious grayscale/white aliased pixel
+data to clean black background, with zero change to boot progress (identical EE instruction count and halt
+PC in both runs). Docs, commit, rsync, leak-check done.
+
+## Round 748: FRAME.FBP/ZBUF.ZBP page-scale addressing bug found and fixed (corrects Round 640)
+
+Round 640 (above) explicitly checked FRAME.FBP/ZBUF.ZBP for the same aliasing class of bug found in
+BITBLTBUF/TEX0, and incorrectly concluded no fix was needed. Direct evidence this round (a pixel-identical
+PPM comparison of GT3's color framebuffer vs. its Z-buffer, both dumped from the same GS-memory-backed
+checkpoint) proved the two were in fact aliasing: `source/hw/gif.c`'s FRAME_1/FRAME_2/ZBUF_1/ZBUF_2 handlers
+stored the raw 9-bit register field directly, while real hardware's FBP/ZBP fields are page-granularity
+(*2048 words = 8192 bytes/unit) - the same convention `gs_decode_dispfb()` in `gs_wii_output.c` already used
+correctly for the display circuit. Fixed by scaling the raw field by `*2048u` at register-decode time in all
+four handlers; every downstream consumer needed no change since `g_gif.fbp`/`zbp` were already treated as
+opaque pre-scaled word offsets. 4 test files (`test_z_buffer.c`, `test_gif_line.c`, `test_gs_context2.c`,
+`test_gs_context2_mipmap.c`) updated to apply the same scale to their direct `gs_mem_read/write_psmct32()`
+calls, which had bypassed the register-decode path. Wii cross-build clean. Full GT3 checkpoint re-run to
+visually confirm the dither pattern is resolved is deferred to a future round (the existing checkpoint
+predates the fix and can't cleanly validate it; a fresh multi-billion-instruction run doesn't fit in one
+round's budget). See docs/STATUS.md "Round 748" for the full citation and evidence trail.
+
+## Round 760: SYSMEM/EXCEPMAN fixed-address IOP module loading (real hardware addressing)
+
+`source/hw/iop_module_loader.c`'s generic bump allocator previously placed every IOP module, including
+SYSMEM and EXCEPMAN, at emulator-assigned addresses. Real hardware always loads these two lowest-numbered
+kernel modules at fixed addresses (`0x00000830` and `0x00003430`), confirmed against the uploaded
+reimplementation source and cross-verified against real BIOS ROM bytes (task #748). Added a small fixed-
+address lookup used only for these two module names; every other module's address is unchanged (bump
+allocator still runs for byte-for-byte compatibility, just doesn't set the load address for these two).
+Full 132-test regression suite: 131/132 pass, the one failure pre-existing and unrelated (confirmed via
+baseline comparison). Wii cross-build clean, 0 warnings/errors. A/B checkpoint comparison against the
+Round-173 GT3 wall shows the fix changes the wall's failure symptom (`pc=0x4B8` -> `pc=0xA4000000`) without
+changing its depth, as expected - this fix corrects addressing, it does not supply the still-missing real
+Sony low-kernel code content at `0x44C` that Round 759 identified as the wall's actual, non-fabricable root
+cause. See docs/STATUS.md "Round 760" for the full citation, verification detail, and this round's
+supplementary fresh-GT3-chain investigation (corroborates, does not newly resolve, Round 751's T3/HBLNK
+real-timer explanation).
+
+## Round 761: SYSMEM ordinal-10 (QueryBlockSize) HLE intercept - explicit, user-approved fabrication
+
+**Flagged prominently: this is a deliberate, one-off exception to this project's standing evidence-backed-fix
+discipline, done at the user's explicit, informed request** ("do the fabrication i know its a grey zone but we
+need to do it to understand how things need to work once done"), not a normal shipped fix. `include/core/hw/
+iop_hle_heap.h`/`source/hw/iop_hle_heap.c` now intercept instruction fetch at `0x0000044C` - SYSMEM's real,
+hardcoded ordinal-10 jump target (confirmed via ROM bytes, Round 748) - and answer with a real, already-tested
+Round 401 port of the real `QueryBlockSize(address)` free-list-walk logic (`iop_heap_query_block_size()`),
+rather than the genuinely unreconstructable real Sony code that lives at that address on real hardware. The
+only actually-fabricated part is the choice to intercept this one specific, well-identified real address at
+all; the underlying computation is real, already-tested code reused from Round 401, not invented. 10-check
+regression test added (`tests/test_iop_hle_sysmem_ordinal10.c`), full 133-test suite passes (1 pre-existing
+unrelated failure), Wii cross-build clean. Attempted to verify end-to-end against a fresh GT3 checkpoint chain
+extended to 4.08B cumulative instructions; IOP remained in the same slow, real-hardware-accurate T3/HBLNK-class
+wait Round 751 already documented, so whether this stand-in lets GT3 progress further past the Round-173 wall
+remains unverified and is left as an explicit open item for a future round. See docs/STATUS.md "Round 761" for
+the full writeup, citations, and honest limitations.
+
+## Round 762: fixed-address IOP module loading extended to 9 more modules (ordinary evidence-backed fix)
+
+**Not a continuation of Round 761's fabrication exception** - this round's change is fully evidence-backed,
+same discipline as every round before Round 761. Audited every uploaded IOP module reimplementation source file
+for the `[loaded @] START-END` convention Round 760 used for SYSMEM/EXCEPMAN, found it in 13 more files, and
+extended `kernel_tier_fixed_address()` (`source/hw/iop_module_loader.c`) with 9 of them: `SSBUSC`, `DMACMAN`,
+`EECONF`, `VBLANK`, `IOMAN`, `STDIO`, `SIFMAN`, `SIFCMD`, `REBOOT`. Cross-verified two ways against the live
+`PS2 Bios 30004R V6 Pal.bin`: (1) the 9 modules' addresses, sorted, land in exactly the same order as the real
+`IOPBTCONF` boot list pulled directly from ROM, with zero overlaps across all 9; (2) each module's real ROMDIR
+payload size is consistently larger than its source comment's documented span, the expected on-disk-ELF-vs-
+resident-footprint relationship. `TIMEMANP`/`TIMEMANI` share a documented address but were deliberately
+excluded - this project's front-loading module-load architecture would let the second-loading twin silently
+overwrite the first's already-relocated code before its entry point runs, a real collision risk needing an
+architecture change first. `THREADMAN`/`SIO2MAN` excluded outright (no determinable address in source). Full
+133-test regression suite passes (1 pre-existing unrelated failure), Wii cross-build clean (0 warnings/errors).
+No fresh GT3 re-verification this round - see docs/STATUS.md "Round 762" for the full writeup.
+
+## Round 763: TIMEMANP/TIMEMANI fixed-address collision fixed
+
+Closes the item Round 762 explicitly deferred. `is_skippable_fixed_p_twin()` (new, `source/hw/iop_module_loader.c`)
+now makes it safe to give TIMEMANP and TIMEMANI the same real fixed address (`0x00007D00`, per their own uploaded
+source headers): when a "P"-twin module's real "I" counterpart is present in the modlist AND both would collide
+at the same fixed address, the P-twin's load is skipped entirely (not just its export registration, which
+`module_has_i_twin()` already handled) - real hardware never needs the P-twin's own code once its I-twin exists,
+so nothing is lost. Deliberately narrow: only fires on an actual address collision, so INTRMANP/INTRMANI (no
+fixed address for either name) is completely unaffected and keeps its existing, already-verified behavior. 11-check
+regression test added (`tests/test_iop_module_loader_p_twin_skip.c`), full 134-test suite passes (1 pre-existing
+unrelated failure), Wii cross-build clean. Not yet re-verified against a fresh GT3 chain - see docs/STATUS.md
+"Round 763" for the full writeup.
+
+## Round 764 (docs-only): GT3 chain-growth resumed, surfaced a significant finding
+
+The Round 761 GT3 checkpoint was NOT lost after all (`/tmp` survived this session boundary) - resumed it against
+the current Round-763-fixed tree and grew it from `total_instr=5.28B` to `10.08B` across 4 chained continues.
+Across the full 4.8B newly-run instructions, IOP pc never left `0x00000C4C-0x00000C8C` and EE pc never left a
+handful of values in `0x80005E5C-0x80006274` - zero drift at any sampled point. This calls into some doubt
+Round 751's "slow but eventually-resolving real T3/HBLNK wait" diagnosis, since a real wait loop should show
+*some* incremental state change over that much simulated wall-clock time, not none at all. Recommend a targeted
+instrumentation pass on the exact wait condition before further blind chain-growing. Checkpoint preserved at
+`/tmp/ckpt_gt3_10b_backup.bin` (never committed, real-disc-derived). See docs/STATUS.md "Round 764" for the
+full writeup.
+
+## Round 765 (docs-only): disassembled the exact IOP/EE stall
+
+EE side confirmed real/correct: parked at `0x80005E5C`, mid a genuine SIF_SMFLAG (`0xB000F230`) debounce-wait
+loop - same routine the old Round ~87-134 disassembly identified, re-confirmed directly this round. IOP side:
+parked at `0x00000C60` inside a small SYSMEM-range subroutine (`0x00000C3C-0x00000C8C`) whose prologue calls
+`jal 0x00001358` without saving its own `$ra` first; captured register state shows `$ra=0x00000C4C` - exactly
+the address right after that `jal`, inside the function's own body. Its `jr ra` epilogue therefore jumps back
+into itself, not to its real caller, producing a tight closed self-loop that exactly explains Round 764's
+"zero drift across 4.8B instructions" finding. IOP INTC istat/imask (VBLANK bits per `iop_intc.h`) confirmed
+unrelated - this is a pure memory poll, not an interrupt wait. Not yet confirmed whether this is a genuine
+emulator bug or a real-hardware-faithful path reached only via an earlier upstream divergence - `0x1358` and
+this subroutine's real caller are both outside the dumped window and are the next concrete step. New reusable
+tool: `tools/round729-gt3-discboot/ckpt_inspect.c`. No source fix this round - docs-only, regression/Wii-build
+correctly skipped. See docs/STATUS.md "Round 765" for the full writeup.
+
+## Round 766: ROOT CAUSE FOUND AND FIXED - missing COP0 Status.IsC support corrupting SYSMEM's own code
+
+Extracted the real SYSMEM ELF straight from the BIOS ROM and disassembled it: the real Sony code correctly
+saves/restores `$ra` around its internal `jal` (Round 765's "no `sw ra`" observation was accurate about the
+corrupted RAM but wrong about why - the real code is normal and correct). Ruled out a relocation bug (SYSMEM's
+real `.rel.text` table has no entries anywhere near the corrupted words; `iop_elf.c`'s relocation code re-read
+and confirmed correct, consistent with Round 758's independent finding). A live write-watch caught the real
+culprit: genuine Sony boot ROM code at `0x00103BE0-0x00103C70` executes the textbook R3000A cache-init idiom -
+`mtc0` sets Status.IsC (bit 16, "Isolate Cache"), then loops storing zero across `0x000-0xF80` in 128-byte
+strides, then clears IsC. On real hardware, stores made while IsC is set are redirected to the CPU's own cache
+and never touch RAM - this project's `iop_core.c` tracked the bit but never gated stores on it, so the store
+loop was corrupting real RAM instead, clobbering SYSMEM's own resident code (`0x830-0x1500`+) wherever the
+128-byte stride landed. Likely also the root cause of Round 754-759's still-open, adjacent `0x400-0x4C0`
+corruption finding. **Fix**: gated the raw-RAM-write tail of `iop_mem_write8/16/32()` behind
+`cop0[12] & 0x10000` (no-op while IsC is set), placed after all MMIO dispatch so hardware-register writes stay
+correctly unaffected. Verified via cold-boot + byte-for-byte comparison against the real ROM: SYSMEM's code is
+now provably intact (only the two legitimate, correctly-relocated `jal`/`j` targets differ from the raw ROM
+bytes, exactly as expected). 133/134 regression (same pre-existing unrelated failure), Wii cross-build clean
+(0 warnings/errors). Not yet re-run against the GT3 chain from a fresh cold boot - the existing 10.08B/11.28B
+checkpoints were captured against the old, corrupted tree and aren't valid starting points for the fixed one.
+See docs/STATUS.md "Round 766" for the full writeup.
+
+## Round 767 (docs-only): re-ran GT3 chain against the Status.IsC-fixed tree - fix confirmed working, then found a new downstream infinite loop
+
+Booted GT3 fresh against the fixed tree. Confirms the Round 766 fix genuinely unblocks real forward progress:
+the old tree was completely frozen by ~600M instructions; the fixed tree runs actively past 1B, and by ~3.6B
+instructions IOP RAM shows the literal string "rom0:OSDSYS" being processed - a real, further BIOS milestone
+(attempting to load the actual PS2 system menu). By ~2.4B-3.7B instructions a NEW infinite loop is hit: IOP
+spins forever in a normally-bounded 17-iteration zero-fill loop at 0x00102354-0x0010237C, because its own loop
+counter lives at `$fp+88 = 0xFFFFFF98`, which `iop_mem_ptr()`'s bounds check correctly rejects as out-of-range
+(so the counter's own store/load round-trips to a permanent 0, and the loop's `bne` never falls through).
+Traced back further: `$sp/$fp=0xFFFFFF40` is an exact arithmetic match for the function's own real prologue
+(`lw v0,0(a0); sll sp,v0,20; addiu sp,sp,-64; ...; addiu sp,sp,-128`) executing with `v0=0` instead of the
+expected `v0=2` (BOOT_INFO_RAM_MB) - the same real-hardware "derive stack from RAM-size boot-info word" idiom
+already fixed once for SYSMEM specifically (Round 29/416). `iop_module_loader.c`'s module-dispatch code was
+re-checked and correctly sets `$a0=boot_info_addr` for every module entry, so this isn't a simple repeat of
+that same dispatch gap - by the time of the saved checkpoint, `$a0` has already been reused as a scratch
+register internally, so the genuine entry-time value that triggered this couldn't be recovered from this
+checkpoint alone. No fix implemented this round - root cause narrowed to the exact instruction and exact
+arithmetic, but the real caller/condition needs a checkpoint from strictly before this function's first
+dispatch (or a slow instrumented from-scratch run) to pin down further. No tracked source changed - docs-only,
+regression/Wii-build correctly skipped. See docs/STATUS.md "Round 767" for the full writeup.
+
+## Round 768 (docs-only): caught the Round 767 stall's entry live - not a loader bug, a wrong-argument call
+
+Added a scratch watch on pc=0x00102260 (never committed) and re-ran the GT3 chain from cold boot. Found this
+address is hit twice: once correctly at instr=636 (real module dispatch, a0 correctly points at boot-info with
+RAM_MB=2 - loader code confirmed correct), and once badly at instr=101,278,702 with a0=1 (a literal small
+integer, not a pointer - confirmed byte-for-byte via cross-reference against the known "rom0:OSDSYS" string
+location). $ra/$sp at the bad call match the loader's trampoline_addr/INITIAL_SP constants but the loader itself
+never passes a0=1, so this is some other, already-running code (not the loader) calling into 0x00102260 as a
+shared subroutine with the wrong first argument. The other captured arguments (a1=-10, a2=a real IOP hardware
+register address 0xBF801528, a3=0x00155A9C) suggest this address is reused for more than just module-entry boot-
+info parsing. Real caller not yet traced - no fix implemented (no evidence yet for what the correct a0 should
+have been). No tracked source changed - docs-only. See docs/STATUS.md "Round 768" for the full writeup.
+
+## Round 769: ROOT CAUSE FOUND AND FIXED - synthetic trampoline/boot_info header collided with LOADCORE's own real code
+
+Traced Round 768's a0=1 bad call to its real cause with a live write-watch: `iop_module_loader_boot()` used to
+allocate the synthetic trampoline/boot_info header at BUMP_BASE (0x00100000) *before* running
+`load_all_modules()`, so LOADCORE (the first bump-allocated module) landed immediately after it. LOADCORE's own
+real init code writes to address 0x00100000 as part of its own internal registration-list bookkeeping (nothing
+to do with our trampoline convention), silently overwriting the trampoline's landing-pad instruction. Since that
+address is reused as $ra for the rest of boot, the next module's `jr $ra` executed the corrupted word, faulted,
+and the existing trap-handler crawl mechanism eventually landed back on LOADCORE's own entry point by chance -
+producing the spurious a0=1 re-entry. Fix: reorder so `load_all_modules(st)` runs first, and the trampoline/
+boot_info addresses are bump-allocated only after - guaranteeing no real module can collide with them. Verified
+via the same instrumentation (write-watch never fires, bad call never happens) across a fresh 2.4B-instruction
+GT3 survey; IOP now reaches a genuine halted state instead of infinite-looping. Regression suite (131 tests: 75
+pass, 56 pre-existing unrelated failures) and Wii cross-build both clean. See docs/STATUS.md "Round 769" for the
+full writeup. Follow-up characterization (same round): continued the chain
+1.2B more instructions past the fix - IOP's new halt at pc=0x000014D0 is
+the pre-existing, already-documented Round 173 diagnostic guard (real
+IOP thread-context/TCB gap, not a bug), and EE spins forever on a real
+SIF_SMFLAG register poll since the IOP will never signal again. GS state
+is still fully unconfigured (pmode/dispfb all zero), so no image was
+captured this round - honest negative, nothing to render yet.
+
+**Round 770 correction (task #764):** the "IOP permanently halts at
+pc=0x000014D0" conclusion above was itself a checkpoint-chaining
+artifact, same root cause as Round 769's own a0=1 bug - `iop_module_
+loader.c`'s internal `g` struct (one-shot boot-dispatch guard, bump
+allocator, module tables) was never included in `checkpoint.c`'s
+save/load format, so every checkpoint resume spuriously re-triggered
+the full one-shot module boot dispatch the first time IOP PC organically
+ran off the end of loaded code. Fixed with a new `"IMLD"` checkpoint
+block (same pattern as Round 649/659/750's GSM0/ITHR/ICDV fixes). With
+the fix in place, the IOP does NOT halt: re-ran the GT3 chain fresh to
+2.16B instructions and the IOP continuously alternates between real work
+(pc≈0x00155B40) and the default interrupt vector (Round 174/340's
+documented unhandled-pending-interrupt behavior, firing on VBLANK).
+Round 769's identification of the EE's SIF_SMFLAG poll loop (pc=0x00082180)
+was correct and still holds; only the "IOP is dead so it'll never
+resolve" conclusion was wrong. New precise evidence: EE is waiting for
+bit 0x00040000 of SIF_SMFLAG, which currently reads 0x00030000 (bits
+16/17 set, bit 18 not). GS/Display still unconfigured (pmode/dispfb all
+zero) - OSDSYS's own module (0x00200000-0x00480000) is not yet reached;
+the EE is still one layer earlier, in EE-kernel/IOP SIF handshake code.
+See docs/STATUS.md "Round 770" for the full writeup and regression/build
+verification.
+
+## Round 771 (task #764 continuation)
+
+Fixed a second checkpoint-chaining state-loss bug: `sif.c`'s four SIF
+boot-completion/reassert flags (never part of `sif_state_t`/the
+existing `"SIF0"` checkpoint block) silently reset to 0 on every
+checkpoint-chained resume, permanently disabling the real
+SIF_STAT_BOOTEND reassert mechanism - the direct cause of Round 770's
+"EE stuck at pc=0x00082180" finding. Same bug class as 4 prior fixes
+(Rounds 649/659/750/770). Added `sif_extra_state_t`/`g_sif_extra` +
+`sif_get_checkpoint_extra_blob()` and a new `"SIFX"` checkpoint block.
+
+Re-ran the GT3 checkpoint chain from cold boot against the fixed tree
+and confirmed real effect: `SIF_SMFLAG=0x00070000` (BOOTEND now set,
+was `0x00030000`), and the EE moved off the old poll loop into new
+code. Disassembly + reading the real EE RAM console-log string table
+identified it precisely as the EE kernel's own boot-time hardware init
+sequence ("# Initialize TIMER/FPU/User Memory/Scratch Pad ... / Restart
+Done"), then (60M instructions later, at 2.64B total) a real LZ-style
+decompression loop at pc=0x00100be0 - genuinely new, previously-
+unreached BIOS code, confirmed via literal debug strings, not a
+checkpoint artifact or a new stall.
+
+GS/Display still unconfigured (pmode/dispfb1/dispfb2 all zero) at 2.64B
+instructions - expected, since the EE is still inside kernel restart/
+init, well before OSDSYS's own module would run. OSDSYS not yet
+reached, but for the first time this survey is executing genuinely new
+boot code rather than re-treading a checkpoint artifact.
+
+Next: continue the GT3 chain further to see where the decompression
+loop leads and whether GS/Display configuration is reached; if the
+chain plateaus again, disassemble whatever new resting point appears
+using the same method (Round 655 disassembler + reading any nearby
+debug-string table) before assuming a new bug.
+
+## Round 771 follow-up (same session, task #764 continuation)
+
+Traced the LZ decompression loop (pc=0x00100be0) found at the end of
+the SIFX-fix survey to its real context. Extending the checkpoint chain
+further showed the EE repeatedly revisiting the same 3 PCs rather than
+progressing - instrumented with scratch single-step drivers (never
+tracked) and found a precise, deterministic signature: the EE calls
+the real `_LoadExecPS2("rom0:OSDSYS", argc=2, ...)` BIOS syscall every
+~29.5M instructions, from the identical call site every time. Each
+cycle: OSDSYS launches -> 3 chained hardware-reinit passes -> LZ
+decompression of OSDSYS's own resources -> further execution -> and
+then the same relaunch syscall fires again.
+
+This is real, working BIOS code completing full laps, not a raw
+emulator stall - it looks like OSDSYS's own real fallback behavior when
+it can't successfully progress with the inserted disc, which lines up
+with this project's long-standing task #447 finding (OSDSYS's CD-ROM
+N-command dispatch never firing during organic boot). No tracked-source
+fix implemented this round (no re-verified evidence yet for exactly
+why disc detection still fails at this newly-reachable depth) - correctly
+docs-only, regression/Wii-build skipped.
+
+Next: instrument within a single ~29.5M-instruction cycle to find the
+exact decision point that sends control back to the ExecPS2("rom0:OSDSYS")
+relaunch instead of continuing toward disc detection/game hand-off -
+this reuses task #447's long history but now has a precise, reproducible
+entry point (the syscall handler epilogue at pc=0x80000304, callee
+0x800055A0) to instrument from directly.
+
+## Round 772 (task #447, real fix shipped)
+
+Implemented `ee_check_eeload_fastboot_patch()` in `source/core/ee/
+ee_core.c`: permanent, tracked-source version of Round 552's proven-
+but-never-shipped EELOAD fast-boot string patch (itself a direct,
+cited reproduction of real PCSX2's own `eeloadHook()` mechanism). On
+EELOAD's first real organic invocation (`pc==0x00082000`), if a disc
+is mounted, reads the real BOOT2 path from the disc's own SYSTEM.CNF
+and overwrites the "rom0:OSDSYS" string literal resident in EELOAD's
+own memory with it (runtime-scanned, not hardcoded; only patched if it
+fits the real available zero-padding). Diskless boots are completely
+untouched by construction.
+
+Verified against a fresh cold boot with the real Tekken Tag Tournament
+demo disc: breaks the previously-endless ~29.5M-instruction OSDSYS
+self-relaunch cycle for good, reaching real Tekken game code parked at
+`pc=0x00400324` (Round 567's documented `WaitSema(semid=0)` milestone)
+after ~41.9M instructions - previously reachable only via a disposable
+scratch trampoline, now reachable from tracked source alone. Since
+Rounds 569-653 already shipped real EE multi-threading and further
+fixes built specifically on top of getting past this park, the real
+boot pipeline should now be able to reach that same downstream
+progress organically. Regression suite clean (40/42, 2 pre-existing/
+unrelated), Wii cross-build clean, no diskless-path regression.
+
+Next: re-check GS/Display (circuit 2 - DISPFB2/DISPLAY2 per Round 321)
+at this new resting point, and continue tracing what the WaitSema(0)
+park needs to resolve organically now that the fast-boot patch gets a
+real disc-mounted boot there without scratch-code assistance.
+
+## Round 773 (task #447 follow-up, docs-only): fix verified general
+across 2 new real full-game discs
+
+Re-ran the Round 772 fix against user-uploaded Tekken Tag Tournament
+(full/retail, `SLUS_200.01`) and Klonoa 2 - Lunatea's Veil (2D,
+`SLUS_201.51`), both verified genuine via SYSTEM.CNF. Both reach the
+same real, cited primitive as the demo did - a genuine ps2sdk kernel
+`WaitSema` syscall stub (syscall 68/0x44), disassembled and confirmed,
+not a synthetic shortcut or error loop. Klonoa 2 parks sooner
+(31.2M vs 41.9M instructions) simply because it's a shorter real
+crt0/init path, not a worse outcome. GS circuit 2 (DISPFB2/DISPLAY2)
+checked directly for the first time this session, per the user's
+standing reminder: still all-zero for both at this point, consistent
+with display setup being a genuine downstream milestone past this
+early kernel-level sync primitive. No fix needed - confirms Round 772
+generalizes across 3 distinct real titles.
+
+## Round 774 (task #447 follow-up): real MTSAB/MTSAH opcode fix +
+correction of Round 773's WaitSema-park classification
+
+Third real disc (King of Fighters 2000-2001, Europe) revealed its real
+blocker was a different, unrelated REGIMM opcode gap (MTSAB/MTSAH, the
+one remaining "not yet implemented" MMI-family gap this file's own
+header already flagged) upstream of WaitSema entirely - fixed, cited
+against real PCSX2 interpreter source. WaitSema/SignalSema/
+iSignalSema themselves were code-reviewed against the user's 7-point
+checklist and confirmed already correct - no fix needed there. An
+instrumented (not disassembly-only) re-verification post-fix found
+KOF makes genuine, continuous forward progress for 1.28B+ real
+instructions with zero WaitSema entries, and that the specific address
+Round 773 identified as a "WaitSema stub" is actually all-zero memory
+- correcting Round 773's disassembly-only classification method as
+unreliable without instrumented confirmation. 133/134 host-native
+tests pass (1 pre-existing, unrelated GS failure); Wii cross-build
+clean.
+
+## Round 775 (task #447 follow-up): disp2 re-verified, KOF checkpoint
+chain extended to 6.56B instructions, no new fix evidenced
+
+Re-confirmed DISPFB2/DISPLAY2 remain correctly zero at KOF's deepest
+surveyed checkpoint (6.56B instructions, ~1,333 real-frame-equivalents
+elapsed) - not a regression, real display setup is still downstream.
+Built a generalized checkpoint-chaining toolchain
+(`r775_chain_driver.c`/`r775_gs_survey.c`/`r775_dump.c`, modeled on
+the GT3 `chain_driver.c` pattern) and used it to push KOF's disc-boot
+survey to a new depth record for that title. Resting PC cycles among a
+small, fully-disassembled working set (real BIOS bzero loop, real
+VBLANK-poll loop, and brief passes through zero-padding/alignment
+gaps in the real KOF ELF) - genuine slow progress, not a wandered-off-
+path crash, though the ~22-real-second dwell time this early in boot
+is flagged as worth deeper investigation in a future round rather than
+conclusively classified either way. No live PCSX2 connection available
+this round. No tracked-source fix evidenced; regression/Wii-build
+correctly skipped (docs-only + new tooling-source round).

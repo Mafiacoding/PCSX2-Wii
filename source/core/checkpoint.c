@@ -12,10 +12,13 @@
 #include "core/hw/ee_timers.h"
 #include "core/hw/gif.h"
 #include "core/hw/gs.h"
+#include "core/hw/gs_mem.h"
 #include "core/hw/iop_dma.h"
 #include "core/hw/iop_excb.h"
 #include "core/hw/iop_hle_bios.h"
 #include "core/hw/iop_hle_modules.h"
+#include "core/hw/iop_hle_thread.h"
+#include "core/hw/iop_module_loader.h"
 #include "core/hw/iop_intc.h"
 #include "core/hw/iop_timers.h"
 #include "core/hw/iop_heap.h"
@@ -73,14 +76,76 @@ int checkpoint_save(const char *path)
     if (write_block(f, "ETMR", ee_timers_get_state(), sizeof(*ee_timers_get_state())) < 0) goto fail;
     if (write_block(f, "GIF0", gif_get_state(), sizeof(*gif_get_state())) < 0) goto fail;
     if (write_block(f, "GS00", gs_get_state(), sizeof(*gs_get_state())) < 0) goto fail;
+    /* Round 649: GS local memory (the actual pixel/texture backing
+     * store, separate from GS00's small register struct) was never
+     * captured by any prior round - a real, evidenced gap found
+     * while investigating why a resumed checkpoint showed non-zero
+     * gif_state_t draw counters (sprites_drawn/etc, correctly
+     * restored via GIF0) but a completely zeroed framebuffer: every
+     * checkpoint_load() silently reset the entire 4MB gs_mem.c
+     * buffer to zero because nothing ever wrote/read it. Saving it
+     * here fixes that - draw counters and actual pixel content now
+     * stay consistent across a save/resume boundary. */
+    if (write_block(f, "GSM0", gs_mem_get(), GS_MEM_SIZE) < 0) goto fail;
     if (write_block(f, "IDMA", iop_dma_get_state(), sizeof(*iop_dma_get_state())) < 0) goto fail;
     if (write_block(f, "IEXC", iop_excb_get_state(), sizeof(*iop_excb_get_state())) < 0) goto fail;
     if (write_block(f, "IBIO", iop_hle_bios_get_state(), sizeof(*iop_hle_bios_get_state())) < 0) goto fail;
     if (write_block(f, "IMOD", iop_hle_modules_get_state(), sizeof(*iop_hle_modules_get_state())) < 0) goto fail;
     if (write_block(f, "IINT", iop_intc_get_state(), sizeof(*iop_intc_get_state())) < 0) goto fail;
     if (write_block(f, "ITMR", iop_timers_get_state(), sizeof(*iop_timers_get_state())) < 0) goto fail;
+    /* Round 659: IOP HLE thread-scheduler state (source/hw/iop_hle_thread.c)
+     * - see iop_hle_thread.h's iop_hle_thread_get_checkpoint_blob() header
+     * comment for why this block was missing entirely before this round
+     * (every IOP thread was silently reset to "0 threads" on every
+     * checkpoint resume). */
+    {
+        uint32_t ithr_size = 0;
+        void *ithr_blob = iop_hle_thread_get_checkpoint_blob(&ithr_size);
+        if (write_block(f, "ITHR", ithr_blob, ithr_size) < 0) goto fail;
+    }
+    /* Round 750 (task #730) fix: see iop_cdvd.h's iop_cdvd_checkpoint_t
+     * citation - this module's register/dispatch state (including the
+     * disc-TYPE register) was never captured by any block here before,
+     * silently resetting to fresh-init "no disc" defaults on every
+     * single checkpoint resume regardless of what iop_cdvd_set_disc_
+     * present() had set earlier. Same bug class as Round 649's GSM0 gap
+     * and Round 659's ITHR gap directly above. */
+    {
+        iop_cdvd_checkpoint_t cdvd_ckpt;
+        iop_cdvd_checkpoint_save(&cdvd_ckpt);
+        if (write_block(f, "ICDV", &cdvd_ckpt, sizeof(cdvd_ckpt)) < 0) goto fail;
+    }
+    /* Round 770 (task #764) fix: see iop_module_loader.h's own
+     * iop_module_loader_get_checkpoint_blob() citation - this file's
+     * static `g` state (one-shot `attempted` flag, bump allocator
+     * cursor, per-module entry points, trampoline/boot_info addresses)
+     * was never captured by any block here before, silently resetting
+     * to fresh-init "boot not yet attempted" defaults on every single
+     * checkpoint resume - the exact same bug class as Round 649's GSM0
+     * gap, Round 659's ITHR gap, and Round 750's ICDV gap. Confirmed
+     * empirically this round: this gap caused chain_driver's "continue"
+     * mode to spuriously re-run the entire one-time module-boot
+     * dispatch (redispatching the IOP straight back to SYSMEM's entry
+     * point) the first time IOP PC organically ran off the end of all
+     * real, already-loaded module code - a checkpoint-chaining tooling
+     * artifact previously misread as a real interrupt-storm/wander bug. */
+    {
+        uint32_t imld_size = 0;
+        void *imld_blob = iop_module_loader_get_checkpoint_blob(&imld_size);
+        if (write_block(f, "IMLD", imld_blob, imld_size) < 0) goto fail;
+    }
     if (write_block(f, "MCH0", mch_get_state(), sizeof(*mch_get_state())) < 0) goto fail;
     if (write_block(f, "SIF0", sif_get_state(), sizeof(*sif_get_state())) < 0) goto fail;
+    /* Round 771 (task #764 continuation): see sif.h's own
+     * sif_get_checkpoint_extra_blob() citation - the SIF_STAT_BOOTEND
+     * reassert flags were never part of sif_state_t/"SIF0" above and so
+     * silently reset on every checkpoint-chained resume, permanently
+     * disabling the real BOOTEND reassert mechanism mid-chain. */
+    {
+        uint32_t sifx_size = 0;
+        void *sifx_blob = sif_get_checkpoint_extra_blob(&sifx_size);
+        if (write_block(f, "SIFX", sifx_blob, sifx_size) < 0) goto fail;
+    }
     if (write_block(f, "VIF0", vif0_get_state(), sizeof(*vif0_get_state())) < 0) goto fail;
     if (write_block(f, "VIF1", vif1_get_state(), sizeof(*vif1_get_state())) < 0) goto fail;
     if (write_block(f, "VU10", vu1_get_state(), sizeof(*vu1_get_state())) < 0) goto fail;
@@ -156,6 +221,7 @@ int checkpoint_load(const char *path, const bios_image_t *ee_bios,
     iop_state_t *iop_scratch = malloc(sizeof(iop_state_t));
     uint8_t *era_scratch = malloc(EE_RAM_SIZE_CKPT);
     uint8_t *ira_scratch = malloc(IOP_RAM_SIZE_CKPT);
+    uint8_t *gsm_scratch = malloc(GS_MEM_SIZE); /* Round 649: gs_mem.c's 4MB pixel/texture buffer - see checkpoint_save()'s citation */
     /* Peripheral scratch buffers - sized generously; read_block()
      * rejects any on-disk block that doesn't fit, so a mismatched
      * struct layout across builds fails safely instead of
@@ -163,9 +229,9 @@ int checkpoint_load(const char *path, const bios_image_t *ee_bios,
     uint8_t generic[65536];
     uint8_t eeth_blob[65536];
     uint8_t heap_blob[1 << 20];
-    uint32_t era_size = 0, ira_size = 0, eeth_size = 0, heap_size = 0;
+    uint32_t era_size = 0, ira_size = 0, eeth_size = 0, heap_size = 0, gsm_size = 0;
 
-    if (!ee_scratch || !iop_scratch || !era_scratch || !ira_scratch) goto fail_alloc;
+    if (!ee_scratch || !iop_scratch || !era_scratch || !ira_scratch || !gsm_scratch) goto fail_alloc;
 
     char tag[4]; uint32_t size; int rc;
 
@@ -186,14 +252,43 @@ int checkpoint_load(const char *path, const bios_image_t *ee_bios,
     EXPECT("ETMR", generic, sizeof(generic), &size); memcpy(ee_timers_get_state(), generic, size);
     EXPECT("GIF0", generic, sizeof(generic), &size); memcpy(gif_get_state(), generic, size);
     EXPECT("GS00", generic, sizeof(generic), &size); memcpy(gs_get_state(), generic, size);
+    EXPECT("GSM0", gsm_scratch, GS_MEM_SIZE, &gsm_size);
     EXPECT("IDMA", generic, sizeof(generic), &size); memcpy(iop_dma_get_state(), generic, size);
     EXPECT("IEXC", generic, sizeof(generic), &size); memcpy(iop_excb_get_state(), generic, size);
     EXPECT("IBIO", generic, sizeof(generic), &size); memcpy(iop_hle_bios_get_state(), generic, size);
     EXPECT("IMOD", generic, sizeof(generic), &size); memcpy(iop_hle_modules_get_state(), generic, size);
     EXPECT("IINT", generic, sizeof(generic), &size); memcpy(iop_intc_get_state(), generic, size);
     EXPECT("ITMR", generic, sizeof(generic), &size); memcpy(iop_timers_get_state(), generic, size);
+    {
+        uint32_t ithr_cap = 0;
+        void *ithr_dest = iop_hle_thread_get_checkpoint_blob(&ithr_cap);
+        EXPECT("ITHR", generic, sizeof(generic), &size);
+        if (size != ithr_cap) goto fail_close; /* struct-layout mismatch - fail safely, per this file's own documented contract */
+        memcpy(ithr_dest, generic, size);
+    }
+    EXPECT("ICDV", generic, sizeof(generic), &size);
+    {
+        iop_cdvd_checkpoint_t cdvd_ckpt;
+        if (size != sizeof(cdvd_ckpt)) goto fail_close; /* struct-layout mismatch - fail safely, per this file's own documented contract */
+        memcpy(&cdvd_ckpt, generic, size);
+        iop_cdvd_checkpoint_load(&cdvd_ckpt);
+    }
+    {
+        uint32_t imld_cap = 0;
+        void *imld_dest = iop_module_loader_get_checkpoint_blob(&imld_cap);
+        EXPECT("IMLD", generic, sizeof(generic), &size);
+        if (size != imld_cap) goto fail_close; /* struct-layout mismatch - fail safely, per this file's own documented contract */
+        memcpy(imld_dest, generic, size);
+    }
     EXPECT("MCH0", generic, sizeof(generic), &size); memcpy(mch_get_state(), generic, size);
     EXPECT("SIF0", generic, sizeof(generic), &size); memcpy(sif_get_state(), generic, size);
+    {
+        uint32_t sifx_cap = 0;
+        void *sifx_dest = sif_get_checkpoint_extra_blob(&sifx_cap);
+        EXPECT("SIFX", generic, sizeof(generic), &size);
+        if (size != sifx_cap) goto fail_close; /* struct-layout mismatch - fail safely, per this file's own documented contract */
+        memcpy(sifx_dest, generic, size);
+    }
     EXPECT("VIF0", generic, sizeof(generic), &size); memcpy(vif0_get_state(), generic, size);
     EXPECT("VIF1", generic, sizeof(generic), &size); memcpy(vif1_get_state(), generic, size);
     EXPECT("VU10", generic, sizeof(generic), &size); memcpy(vu1_get_state(), generic, size);
@@ -243,6 +338,8 @@ int checkpoint_load(const char *path, const bios_image_t *ee_bios,
         if (blob_cap == eeth_size) memcpy(blob, eeth_blob, eeth_size);
     }
     iop_heap_snapshot_load(heap_blob, heap_size);
+    if (gsm_size == GS_MEM_SIZE) memcpy(gs_mem_get(), gsm_scratch, GS_MEM_SIZE); /* Round 649 */
+    free(gsm_scratch);
 
     #undef EXPECT
     return 0;
@@ -254,5 +351,6 @@ fail_alloc:
     free(iop_scratch);
     free(era_scratch);
     free(ira_scratch);
+    free(gsm_scratch);
     return -1;
 }

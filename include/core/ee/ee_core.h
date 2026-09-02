@@ -217,10 +217,39 @@ int  ee_core_init(const bios_image_t *bios);
 void ee_core_run(const bios_image_t *bios);
 void ee_core_rebind_dma_sinks(void); /* Round 449 - checkpoint-resume-safe DMA sink re-registration, see .c citation */
 
+/* Round 736 (task #447 continuation): purely observational log of every
+ * real AddIntcHandler(cause, handler_func, next) call (sysnum 16). Does
+ * NOT change how the syscall is handled - see ee_core.c's own comment on
+ * the sysnum==16||17 block for why this project lets AddIntcHandler
+ * vector as a real exception rather than emulating it in software.
+ * Exists to answer, for a given boot trace, whether any code ever
+ * registers a handler pointing at a specific address range (e.g.
+ * Round 735's GT3 job-queue module) without needing further guesswork. */
+uint32_t ee_core_get_addintc_log_count(void);
+int ee_core_get_addintc_log_entry(uint32_t idx, uint32_t *cause, uint32_t *handler_addr,
+                                   uint32_t *next, uint32_t *call_pc);
+
 /* Single-step entry point, for the interleaved EE/IOP scheduler
  * in core/system.h. See its definition in ee_core.c for details. */
 int ee_core_step(void);
 void ee_core_shutdown(void);
+
+/* Round 781 (task #803): real elapsed-hardware-time tick, for use by
+ * ee_hle_thread.c's WaitSema park branch (and any future genuine
+ * blocking-wait branch with the same shape). See ee_core.c's
+ * definition site for the full citation trail - in short, real
+ * VBLANK/timer/DMAC/INTC interrupt sources keep firing on real
+ * elapsed hardware time regardless of whether any specific EE thread
+ * is CPU-blocked in a syscall, but this project's normal per-
+ * instruction epilogue (which drives all of that) is skipped whenever
+ * ee_hle_thread_try_handle() returns 1 - fine for one-shot syscalls
+ * (a single skipped tick is cosmetic), fatal for WaitSema's
+ * re-executes-forever park (permanently starves every interrupt
+ * source for as long as the park lasts). Call this once per parked
+ * step to keep real hardware time - and therefore interrupt delivery
+ * - flowing during a park, without touching the main per-instruction
+ * path at all. */
+void ee_core_park_tick(ee_state_t *st);
 
 /* Task #172 continued: optional bridge so the SIF DMA-copy syscall
  * handler (sceSifSetDma) can write into IOP memory without ee_core.c

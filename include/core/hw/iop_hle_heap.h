@@ -57,6 +57,58 @@
 #define IOP_HLE_HEAP_QUERY_MAX_FREE_MEM_SIZE 0x0000022Cu
 #define IOP_HLE_HEAP_QUERY_TOTAL_FREE_MEM_SIZE 0x00000230u
 
+/* Round 761 (task #762, user-approved deliberate exception to this
+ * project's standing "no fabrication" discipline - see docs/STATUS.md
+ * "Round 761" for the full writeup and the user's explicit sign-off,
+ * 2026-09-01): SYSMEM's real ordinal-10 export, QueryBlockSize(void
+ * *address) (I_QueryBlockSize = DECLARE_IMPORT(10, QueryBlockSize),
+ * ps2sdk sysmem.h, fetched live from
+ * https://ps2dev.github.io/ps2sdk/sysmem_8h.html), is NOT resolved via
+ * the normal dynamic import-table mechanism the five sentinel gates
+ * above intercept. Round 748 confirmed via direct BIOS ROM-byte
+ * disassembly that its own stub body is a hardcoded, unconditional
+ * `j 0x0000044C` baked directly into SYSMEM's own loaded module code -
+ * a real, fixed low-IOP-RAM address that genuinely holds Sony's own
+ * QueryBlockSize function body on real hardware, content this project
+ * has no legitimate way to obtain or transcribe (its standing clean-
+ * room convention). In this project's own model, that same address
+ * currently holds EXCEPMAN's unrelated handler-table data instead
+ * (Round 757), which the pre-existing Round-173 tripwire eventually
+ * and correctly halts on once GT3's own real code walks off the end
+ * of it (Round 759's full root-cause writeup, and Round 760's
+ * companion fixed-address-loading fix that also touches this call
+ * chain).
+ *
+ * This constant is deliberately NOT placed in the invented-sentinel
+ * range above (0x220-0x230) - unlike those five, 0x0000044C is not a
+ * synthetic address this project chose; it is Sony's own real,
+ * hardcoded jump target, confirmed by ROM bytes, and the intercept
+ * below fires only for genuine arrivals at that exact real address
+ * (Round 758 already confirmed nothing else in this project's model
+ * ever fetches from 0x400-0x4C0 during any other boot path).
+ *
+ * Per the user's explicit instruction, this gate provides a synthetic
+ * stand-in for the missing real function body so GT3's checkpoint
+ * chain can proceed past this exact wall and reveal what (if
+ * anything) blocks progress further downstream - understanding this
+ * does NOT reconstruct real Sony ROM bytes and is NOT claimed to be
+ * evidence-backed the way this project's other shipped fixes are.
+ * It turned out to need far less fabrication than expected, though:
+ * the real QueryBlockSize(address) computation itself already has a
+ * complete, real, byte-exact ported implementation sitting unused in
+ * this codebase since Round 401 -
+ * iop_heap_query_block_size() (core/hw/iop_heap.h), built from the
+ * same uploaded real September-2002 SYSMEM source this project already
+ * used for AllocSysMemory/FreeSysMemory/QueryMemSize/etc (the five
+ * gates above) - it was simply never wired to any real IOP-side call
+ * site, because nothing reached it until Round 759's GT3 checkpoint
+ * chain confirmed this exact call fires. So the only fabricated
+ * choice here is intercepting fetch at Sony's real address at all and
+ * treating every arrival there as this one identified call; the
+ * arithmetic behind the returned answer is a real, already-tested,
+ * real-source port, not invented. */
+#define IOP_HLE_HEAP_SYSMEM_ORDINAL10_QUERYBLOCKSIZE 0x0000044Cu
+
 /* Same contract as iop_hle_intr_sentinel_for_import()/
  * iop_hle_thread_sentinel_for_import(): returns the sentinel address
  * to redirect an import stub to for a (library name, ordinal) pair

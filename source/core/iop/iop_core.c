@@ -272,6 +272,13 @@ void iop_mem_write8(iop_state_t *st, uint32_t addr, uint8_t val)
     if (iop_sio2_mmio_write8(addr, val))
         return;
 
+    /* Round 766 (task #761): Status.IsC (bit 16, real R3000A "Isolate
+     * Cache" bit) - see iop_mem_write32()'s matching comment below for
+     * the full citation/evidence trail. Gated here too since real
+     * hardware isolates ALL store widths, not just word stores. */
+    if (st->cop0[12] & 0x00010000u)
+        return;
+
     uint8_t *p = iop_mem_ptr(st, addr, 1);
     if (p) *p = val;
 }
@@ -307,6 +314,11 @@ void iop_mem_write16(iop_state_t *st, uint32_t addr, uint16_t val)
             return;
     }
 
+    /* Round 766 (task #761): Status.IsC - see iop_mem_write32()'s
+     * matching comment below for the full citation/evidence trail. */
+    if (st->cop0[12] & 0x00010000u)
+        return;
+
     uint8_t *p = iop_mem_ptr(st, addr, 2);
     if (!p) return;
     p[0] = (uint8_t)(val & 0xFF);
@@ -331,6 +343,51 @@ void iop_mem_write32(iop_state_t *st, uint32_t addr, uint32_t val)
         return;
     /* Round 135 (175th finding): SIO2 - see iop_sio2.h. */
     if (iop_sio2_mmio_write32(addr, val))
+        return;
+
+    /* Round 766 (task #761): real R3000A COP0 Status bit 16 - "Isolate
+     * Cache" (IsC). Evidence trail: a GT3 checkpoint-chain investigation
+     * (task #760, docs/STATUS.md Round 765) found SYSMEM's own already-
+     * correctly-loaded code at IOP RAM 0x00000C40-0x00000C98 silently
+     * differed from the real BIOS ROM's SYSMEM ELF at exactly 8 words -
+     * not a load-time relocation bug (iop_elf.c's relocation math was
+     * independently re-verified correct against this project's own
+     * SHT_REL-entry list, which has no entries anywhere near this
+     * range). A live write-watch on that address range (task #761)
+     * caught the real culprit directly: real BIOS boot code at IOP RAM
+     * ~0x00103BE0-0x00103C28 executes the textbook R3000A cache-
+     * initialization idiom - `lui t4,1; mtc0 t4,$12` (sets Status.IsC),
+     * then a tight loop storing zero across address range 0x000-0xF80
+     * in 128-byte strides (8 words per iteration, 16 bytes apart) -
+     * `mtc0 zero,$12` (clears Status.IsC) - `lui at,0xFFFE; sw
+     * t1,0x130(at)` / cache-drain reads at 0xBF801578/0xBF801450. This
+     * is real, correct, harmless PS1/PS2-kernel-heritage boot code:
+     * with IsC set, real R3000A hardware routes these stores into the
+     * CPU's own I-cache/D-cache line storage instead of real RAM, so on
+     * real hardware none of these "clear 0x000-0xF80" stores ever touch
+     * actual memory - they exist purely to reset cache-line state
+     * before the cache is used, a well-documented PS1/PS2-family boot
+     * technique. This project's IOP core previously had no concept of
+     * IsC at all - `case 0x04: MTC0` (above) already just does a plain,
+     * unconditional `st->cop0[rd] = rt32`, so Status.IsC being set was
+     * tracked in cop0[12] but never actually gated memory stores -
+     * meaning this same harmless real-hardware idiom was instead
+     * writing zero directly over real RAM 0x000-0xF80, corrupting
+     * SYSMEM's own resident code (loaded at the real fixed address
+     * 0x830 per Round 760, squarely inside that clobbered range) after
+     * SYSMEM had already been correctly loaded. This is almost
+     * certainly the same root cause behind Round 754-759's earlier,
+     * still-unresolved corruption of SYSMEM's ordinal-10 QueryBlockSize
+     * body at 0x400-0x4C0 (also inside 0x000-0xF80), independently
+     * investigated from a different angle in that Round-753-759 arc.
+     * The minimal, evidence-backed fix matching real hardware's
+     * observable effect (since this project doesn't model a real
+     * I/D-cache as separate storage) is to make ordinary RAM stores a
+     * no-op while Status.IsC is set - MMIO/hardware-register writes are
+     * dispatched above this check and are correctly NOT affected, since
+     * IsC only isolates the CACHED KUSEG/KSEG0 RAM path on real
+     * hardware, not uncached hardware-register accesses. */
+    if (st->cop0[12] & 0x00010000u)
         return;
 
     uint8_t *p = iop_mem_ptr(st, addr, 4);
@@ -1390,8 +1447,48 @@ static int iop_step(void)
                 st->next_pc = epc + 8u;
                 break;
             }
-            halt("BREAK");
-            return 1;
+            /* Round 752 (task #735): real R3000A/MIPS I hardware never
+             * stops executing just because it decoded a BREAK - it
+             * raises a genuine Breakpoint exception (ExcCode 9) and
+             * vectors through the normal exception path, exactly like
+             * every other trap-like class already implemented in this
+             * file (SYSCALL above, TGE/Trap and Reserved Instruction
+             * below). This project's own EE core already made this
+             * exact fix (see ee_core.c's SPECIAL funct 0x0D case,
+             * task #178) after finding a real, intentional BREAK
+             * physically present in the BIOS image - the unconditional
+             * halt() here was the same kind of pragmatic placeholder,
+             * predating real IOP exception delivery, that task #178
+             * already identified and fixed on the EE side.
+             *
+             * Round 751's major finding motivates fixing this now: a
+             * real, ordinary divide-by-zero guard idiom in genuine IOP
+             * kernel/module code (0x00119650-0x0011977C, reached deep
+             * in the GT3 checkpoint chain past 6B instructions) hits
+             * this BREAK when the divisor is zero. Real hardware would
+             * vector to the kernel's installed Breakpoint handler
+             * (which may resume past it, matching common real debug-
+             * trap semantics) rather than permanently killing the IOP
+             * core - which is exactly what was silently happening
+             * here, deadlocking every EE-side SBUS mailbox-flag poll
+             * loop that depends on the IOP staying alive.
+             *
+             * Mirrors this file's own established general-exception-
+             * vector mechanism exactly (EPC=this instruction's own
+             * address, PC vectors to 0xBFC00180/0x80000080 depending
+             * on Status.BEV, same Status KU/IE stack left-shift-by-2
+             * push) - identical in form to the SYSCALL/TGE/Reserved-
+             * Instruction cases above/below, just ExcCode=9 instead. */
+            st->cop0[13] = (st->cop0[13] & ~0x7Fu) | 0x24u; /* Cause.ExcCode = 9 (Breakpoint) */
+            st->cop0[14] = this_pc; /* EPC */
+            {
+                uint32_t vector = (st->cop0[12] & 0x400000u) ? 0xBFC00180u : 0x80000080u; /* Status.BEV */
+                st->pc = vector;
+                st->next_pc = vector + 4;
+            }
+            st->cop0[12] = (st->cop0[12] & ~0x3Fu) | ((st->cop0[12] & 0x0Fu) << 2); /* Status stack push */
+            st->exception_pending = 1; /* task #156 - see iop_core.h's field comment */
+            break;
         case 0x10: /* MFHI */ if (rd) GPR(rd) = st->hi; break;
         case 0x11: /* MTHI */ st->hi = GPR(rs); break;
         case 0x12: /* MFLO */ if (rd) GPR(rd) = st->lo; break;

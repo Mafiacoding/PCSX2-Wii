@@ -21,6 +21,13 @@
 #include "hw/gs_mem.c"
 #include "hw/gif.c"
 
+/* Round 640: seed texture/CLUT data via the _blk (real 256-bytes/unit
+ * BITBLTBUF/TEX0-style) addressing helper, matching gif.c's gs_sample_
+ * texel()/gs_sample_clut() which now read TBP0/CBP through the same
+ * _blk scale. Framebuffer output reads below stay on the plain,
+ * unchanged gs_mem_read_psmct32() - FBP/output addressing is untouched
+ * by this round's fix. See docs/STATUS.md Round 639/640. */
+
 static int failures = 0;
 #define CHECK(cond, msg) do { \
     if (!(cond)) { printf("FAIL: %s\n", msg); failures++; } \
@@ -42,7 +49,7 @@ static void fill_texture_solid(uint32_t bp, uint32_t bw, uint32_t w, uint32_t h,
 {
     for (uint32_t y = 0; y < h; y++)
         for (uint32_t x = 0; x < w; x++)
-            gs_mem_write_psmct32(bp, bw, x, y, rgba);
+            gs_mem_write_psmct32_blk(bp, bw, x, y, rgba);
 }
 
 int main(void)
@@ -80,7 +87,16 @@ int main(void)
 
     /* --- context 2: same base texture, but NO TEX1_2 write at all -
      * mipmapping stays disabled (MXL defaults to 0). --- */
-    append_ad(buf, &off, (20u << 9), 0, GS_REG_FRAME_2); /* different target: FBP=20 */
+    /* Round 640: FBP occupies bits 0-8 of FRAME's data_lo (FBW is bits
+     * 9-14) per gif.c's GS_REG_FRAME_2 case - this was previously
+     * mis-encoded as (20u << 9), which actually wrote FBP=0/FBW=1280
+     * (a latent bug that happened to stay invisible under the old
+     * addressing scheme via an incidental FBW-stride separation; the
+     * Round 640 TBP0/CBP real-scale fix changed downstream memory
+     * layout enough to expose it as a real check failure). Corrected
+     * to plain 20u so FBP really is 20, matching the ctx2_px readback
+     * below and the "different target: FBP=20" intent. */
+    append_ad(buf, &off, 20u, 0, GS_REG_FRAME_2);
     append_ad(buf, &off, 0, 0, GS_REG_XYOFFSET_2);
     append_ad(buf, &off, tex0_lo, tex0_hi, GS_REG_TEX0_2); /* same base texture as ctx1 */
 
@@ -105,9 +121,13 @@ int main(void)
     gif_process_quadwords(DMA_CHANNEL_GIF, buf, (uint32_t)(off / 16));
 
     uint32_t ctx1_px = gs_mem_read_psmct32(0, 640, 3, 3);
-    /* FBP=20 -> block-based address; read back through the same
-     * gs_mem addressing this project already uses elsewhere (bp=20). */
-    uint32_t ctx2_px = gs_mem_read_psmct32(20, 640, 3, 3);
+    /* Round 748: FRAME.FBP is real-hardware page-granularity
+     * (Address/2048 words) - gif.c's FRAME_2 handler now scales the
+     * raw field 20 by *2048 at decode time (matching
+     * gs_decode_dispfb()'s existing DISPFB convention - see
+     * docs/STATUS.md Round 748), so the actual stored word offset is
+     * 20*2048, not 20 itself. */
+    uint32_t ctx2_px = gs_mem_read_psmct32(20u * 2048u, 640, 3, 3);
 
     CHECK(ctx1_px == mip3_color,
           "context 1 (mipmapping configured via TEX1_1/MIPTBP1_1) samples its own mip level 3, unaffected by context 2's config");

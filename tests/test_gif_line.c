@@ -184,13 +184,17 @@ int main(void)
         append_ad(buf, &off, (10u << 9), 0, GS_REG_FRAME_1);
         append_ad(buf, &off, 0, 0, GS_REG_XYOFFSET_1);
         /* ZBP is a real 9-bit hardware field (0-511, masked in
-         * gif.c's GS_REG_ZBUF_1 handler) - must be far enough from 0
-         * that gs_mem's simplified flat addressing (bp*4 +
-         * (y*bw+x)*4 - see gs_mem.h, where zbp directly becomes an
-         * X-pixel offset in that formula) doesn't alias the Z
-         * buffer's test pixel with any COLOR pixel this line actually
-         * draws (x=30..40) - 200 is comfortably outside that span and
-         * within the real 0-511 field range. */
+         * gif.c's GS_REG_ZBUF_1 handler). Round 748: gif.c's ZBUF_1
+         * handler now scales this raw field by *2048 (real-hardware
+         * page granularity, matching gs_decode_dispfb()'s existing
+         * DISPFB convention - see docs/STATUS.md Round 748), so the
+         * actual stored word offset is 200*2048, not 200 itself. Any
+         * direct gs_mem_read/write_psmct32() call below that needs to
+         * land on the SAME storage the rasterizer uses must apply the
+         * same *2048 scale explicitly, since those low-level calls
+         * bypass gif.c's register decode. 200 (pre-scale) is still
+         * comfortably far from the color buffer's own storage (fbp=0,
+         * x=30..40) either way. */
         append_ad(buf, &off, 200u, 0, GS_REG_ZBUF_1);
         append_ad(buf, &off, (1u << 16) | (GS_ZTST_GEQUAL << 17), 0, GS_REG_TEST_1);
         append_ad(buf, &off, PRIM_TYPE_LINE, 0, GS_REG_PRIM);
@@ -200,7 +204,7 @@ int main(void)
         append_xyz2_packed(buf, &off, (uint32_t)(30 << 4), (uint32_t)(30 << 4), 100u);
         append_xyz2_packed(buf, &off, (uint32_t)(40 << 4), (uint32_t)(30 << 4), 100u);
 
-        gs_mem_write_psmct32(200, 640, 35, 30, 200u);
+        gs_mem_write_psmct32(200u * 2048u, 640, 35, 30, 200u);
         uint32_t before = gs_mem_read_psmct32(0, 640, 35, 30);
 
         gif_process_quadwords(DMA_CHANNEL_GIF, buf, (uint32_t)(off / 16));
@@ -208,7 +212,7 @@ int main(void)
         gif_state_t *st = gif_get_state();
         CHECK(st->pixels_ztest_failed >= 1, "LINE + Z-test: at least one fragment counted as Z-test-failed");
         CHECK(gs_mem_read_psmct32(0, 640, 35, 30) == before, "LINE + Z-test: color buffer at the failing pixel is untouched");
-        CHECK(gs_mem_read_psmct32(200, 640, 35, 30) == 200u, "LINE + Z-test: Z-buffer at the failing pixel keeps its old value");
+        CHECK(gs_mem_read_psmct32(200u * 2048u, 640, 35, 30) == 200u, "LINE + Z-test: Z-buffer at the failing pixel keeps its old value");
     }
 
     printf("\n%d check(s) failed\n", failures);

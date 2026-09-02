@@ -15,6 +15,13 @@
 #include "hw/gs_mem.c"
 #include "hw/gif.c"
 
+/* Round 640: seed texture/CLUT data via the _blk (real 256-bytes/unit
+ * BITBLTBUF/TEX0-style) addressing helper, matching gif.c's gs_sample_
+ * texel()/gs_sample_clut() which now read TBP0/CBP through the same
+ * _blk scale. Framebuffer output reads below stay on the plain,
+ * unchanged gs_mem_read_psmct32() - FBP/output addressing is untouched
+ * by this round's fix. See docs/STATUS.md Round 639/640. */
+
 static int failures = 0;
 #define CHECK(cond, msg) do { \
     if (!(cond)) { printf("FAIL: %s\n", msg); failures++; } \
@@ -36,7 +43,7 @@ static void fill_texture_solid(uint32_t bp, uint32_t bw, uint32_t w, uint32_t h,
 {
     for (uint32_t y = 0; y < h; y++)
         for (uint32_t x = 0; x < w; x++)
-            gs_mem_write_psmct32(bp, bw, x, y, rgba);
+            gs_mem_write_psmct32_blk(bp, bw, x, y, rgba);
 }
 
 /* Builds and processes a solid-UV (constant texel everywhere),

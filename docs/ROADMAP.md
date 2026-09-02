@@ -10936,3 +10936,22 @@ Round 773 identified as a "WaitSema stub" is actually all-zero memory
 unreliable without instrumented confirmation. 133/134 host-native
 tests pass (1 pre-existing, unrelated GS failure); Wii cross-build
 clean.
+
+## Round 775 (task #447 follow-up): disp2 re-verified, KOF checkpoint
+chain extended to 6.56B instructions, no new fix evidenced
+
+Re-confirmed DISPFB2/DISPLAY2 remain correctly zero at KOF's deepest
+surveyed checkpoint (6.56B instructions, ~1,333 real-frame-equivalents
+elapsed) - not a regression, real display setup is still downstream.
+Built a generalized checkpoint-chaining toolchain
+(`r775_chain_driver.c`/`r775_gs_survey.c`/`r775_dump.c`, modeled on
+the GT3 `chain_driver.c` pattern) and used it to push KOF's disc-boot
+survey to a new depth record for that title. Resting PC cycles among a
+small, fully-disassembled working set (real BIOS bzero loop, real
+VBLANK-poll loop, and brief passes through zero-padding/alignment
+gaps in the real KOF ELF) - genuine slow progress, not a wandered-off-
+path crash, though the ~22-real-second dwell time this early in boot
+is flagged as worth deeper investigation in a future round rather than
+conclusively classified either way. No live PCSX2 connection available
+this round. No tracked-source fix evidenced; regression/Wii-build
+correctly skipped (docs-only + new tooling-source round).

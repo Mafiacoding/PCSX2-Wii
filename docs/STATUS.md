@@ -32079,3 +32079,102 @@ derived tool output stayed in `/tmp/`, never rsynced/committed).
 `tools/round729-gt3-discboot/r774_kof_waitsema_verify.c` (the initial
 instrumentation driver referenced above) is committed as tooling
 source only.
+
+## Round 775 (task #447 follow-up, user request: "touch the disp2 issues...
+start the next tasks... reach some major steps and booting screens etc
+past osdsys"): re-verified GS circuit 2 + extended King of Fighters
+2000-2001 checkpoint-chained disc-boot survey to 6.56B instructions
+
+**DISPFB2/DISPLAY2 ("disp2 issue"):** re-checked directly this round
+via a new instrumented survey driver (`r775_gs_survey.c`) and a
+generalized checkpoint-chaining driver (`r775_chain_driver.c`,
+modeled on the existing Round 729/750 GT3 `chain_driver.c` pattern).
+Across 5 chained checkpoint-resume invocations spanning KOF's boot
+from cold start out to 6,559,993,100 real EE instructions (~1,333
+real-frame-equivalents, ~22.3 real seconds of PS2 wall-clock time at
+the real 4,921,488-cycle-per-NTSC-frame rate), `PMODE`/`DISPFB1`/
+`DISPLAY1`/`DISPFB2`/`DISPLAY2` all remain exactly
+`0x0000000000000000`. This is unchanged from Rounds 464/772/773/774's
+finding for the other two titles and is NOT a regression - per the
+user's own explicit instruction this round, DISPFB2/DISPLAY2 were not
+artificially initialized. No fix applied to GS/display code this
+round.
+
+**Extended boot-depth findings:** built a new checkpoint-chaining
+toolchain (`r775_chain_driver.c`, generalized from GT3's
+`chain_driver.c`; `r775_gs_survey.c`, a non-chained periodic-GS-poll
+survey; `r775_dump.c`, a scratch checkpoint-RAM-word dumper) and used
+it to push KOF's disc-boot execution to a new depth record for this
+title (6.56B instructions, vs. Round 774's much shallower
+verification). The resting PC cycles among a small working set: the
+real BIOS kernel bzero loop (0x8000db10-3c) and a real INTC_STAT
+bit-2 (VBLANK_START) acknowledge-then-poll loop (0x8000e508-58, fully
+disassembled - a legitimate `27bdffe0`/stack-setup +
+`jal`-to-ack-helper + `1440fffa`-poll pattern, not an error loop), plus
+brief excursions into the 0x00100bxx game-code region. A raw-word
+dump of 0x00100bf4 at one such excursion point showed all-zero
+32-bit words - MIPS `0x00000000` decodes as a valid NOP (`sll
+$0,$0,0`), consistent with genuine zero-padding/alignment gaps between
+real compiled functions in the KOF ELF (a mundane, well-known linker
+artifact), not a wild-jump/wandered-off-path crash - execution
+reliably returns to the real kernel VBLANK-poll loop afterward every
+time, across all 5 chained invocations.
+
+**Sanity-check against real per-frame cycle count:** using the
+project's own real `EE_CYCLES_PER_FRAME_NTSC = 4,921,488` constant
+(`ee_core.c`), 6.56B instructions corresponds to roughly 1,333 real
+NTSC-frame-equivalents having elapsed since cold boot - i.e., the
+`ee_check_vblank()`/`ee_intc_raise(EE_INTC_IRQ_VBLANK_START)`
+mechanism (confirmed called unconditionally from the bottom-of-
+`ee_step()` epilogue on every instruction dispatch) has had over a
+thousand real opportunities to satisfy this exact poll loop, and
+demonstrably has been doing so (the loop keeps exiting and
+re-entering, rather than being stuck at one fixed PC forever). This is
+consistent with genuine, slow, real crt0/kernel-init progress via
+legitimate BIOS synchronization primitives - not an obvious emulator
+bug - though ~22 real seconds parked at this early a boot stage (no
+new working-set addresses observed beyond the same handful) is
+unusually long for what real SNK-logo/attract-mode PS2 titles
+typically take, and is flagged here as a soft signal worth deeper
+instrumented investigation (e.g., what real condition should cause
+KOF's crt0 to escalate past this specific loop) in a future round,
+rather than something this round can respectively call either "a
+confirmed bug" or "definitely fine" without more evidence.
+
+**No live PCSX2 connection available this round** (checked via
+`pcsx2_connect` - both DebugServer port 21512 and Pine port 28011
+refused), so this round's findings rely entirely on the host-native
+checkpoint-chained survey, not live-hardware cross-checking.
+
+**Conclusion / classification (tasks #771-773):** no tracked-source
+fix is evidenced this round. GS circuit 2 remains correctly
+unconfigured at this checkpoint (expected, not a bug). KOF's extended
+boot survey shows continued genuine forward progress through real
+kernel/BIOS code, not a hard freeze - the checkpoint
+(`/tmp/r775_kof.ckpt`, never committed/rsynced) is preserved for
+further chaining in a future round if the user wants to keep pushing
+this specific survey deeper. Reaching an actual visible "booting
+screen" for real commercial disc titles (Tekken Tag Tournament full,
+Klonoa 2, KOF, GT3) remains a large, multi-round undertaking - the
+project's own GT3 arc (Rounds 729-767, ~40 rounds) is the closest
+precedent for the depth of investigation this class of problem
+typically requires per title. The diskless JP BIOS boot path (task
+#536) remains the project's only real-hardware-equivalent boot target
+that already produces visible on-screen output (text/menu rendering),
+and is offered as the nearer-term alternative if the user wants a
+faster visual milestone than continued disc-boot-title checkpoint
+chaining.
+
+**Mandatory workflow:** no `include/`/`source/` tracked files were
+modified this round (only new `tools/round729-gt3-discboot/` scratch
+driver source added), so the host-native regression suite and Wii
+cross-build are correctly skipped per this project's docs-only-round
+convention. Leak-check clean (`git diff --cached --name-only | grep
+-iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'` - no matches;
+`/tmp/r775_kof.ckpt` and all BIOS/disc images stayed in `/tmp/`/
+`uploads/`, never staged).
+
+Files added (tracked as tooling source, not scratch):
+`tools/round729-gt3-discboot/r775_gs_survey.c`,
+`tools/round729-gt3-discboot/r775_chain_driver.c`,
+`tools/round729-gt3-discboot/r775_dump.c`.

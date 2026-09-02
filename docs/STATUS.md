@@ -34170,3 +34170,120 @@ final diff.
 **Leak-check:** clean - no BIOS/ISO/checkpoint files staged;
 `git diff --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'`
 confirmed empty immediately before commit.
+
+## Round 815: BIOS-to-GT3 handoff trace (task #811/#820)
+
+Direct continuation of Round 814's own next-step instruction: rather
+than continue at the generic `SCMD_CLOSECONFIG` completion boundary
+(shown last round to be shared BIOS/CDVDMAN init plumbing, not GT3
+logic), trace the exact point control leaves the BIOS and enters GT3,
+then observe the first game-side execution window for evidence of a
+real CDVD request.
+
+**Instrumentation.** New `R815_HANDOFF_TRACE` macro (zero-cost when
+unset) added to `source/core/ee/ee_core.c`. It arms on the first
+successful real disc-ELF load via the organic `LF_F_ELF_LOAD` SIF RPC
+path (Round 554/558's real EELOAD mechanism - not a synthetic
+trampoline), logging the RPC reply's `epc`/`gp` and the loaded disc
+filename. It then watches for EE PC to first reach that real entry
+point, logging the full handoff-boundary register/thread-state
+snapshot the user's spec asked for. A bounded post-handoff window (up
+to 100,000 newly-seen basic-block PCs, up to 2,000 syscalls) is then
+logged, along with a one-shot detector for the first post-handoff SIF
+RPC bind to a CDVD service ID (`SIF_SID_CDVD_NCMD`/`SCMD`/
+`DISKREADY`). A companion one-line addition to `ee_hle_thread.c`/
+`.h` (`ee_hle_thread_eventlog_set_enabled()`) lets the handoff-arm
+code scope Round 812's existing `R812_EVENTLOG` thread/sema logger to
+start exactly at the handoff, keeping it out of the noisy pre-handoff
+BIOS/EELOAD boot log.
+
+**Result - real handoff captured cleanly.** A continuous (non-
+checkpointed) cold boot of GT3 (europe/australia SCES-502.94 disc,
+`scph10000` BIOS) reached the real handoff at instruction count
+~24M-30M range:
+```
+ELF-LOAD-REPLY discname="SCES_502.94;1" epc=0x01000008 gp=0x00091df0
+HANDOFF handoff_pc=0x80002fbc target_pc=0x01000008
+  ra=0x00082478 sp=0x0008bd80 gp=0x00091df0 v0=0x01000008
+  a0=0x01000008 a1=0x00000000 a2=0x00000001 a3=0x00089500
+  tid=1 status=0x1
+```
+`target_pc=0x01000008` is GT3's real EE ELF entry point (well inside
+the game's own load range, far from any BIOS/OSDSYS address) and
+`discname="SCES_502.94;1"` is the real boot ELF named in this disc's
+own `SYSTEM.CNF`, confirming this is the genuine organic disc-boot
+handoff, not a synthetic shortcut.
+
+Within the captured ~19.5M-instruction/2,000-syscall post-handoff
+window, GT3's own crt0 code is confirmed to execute for real:
+straight-line code at `0x01000008-0x01000030` (the ELF entry
+preamble), a real subroutine call shortly after, and heavy syscall
+traffic - `SetSyscall` (116) fired many times and `WaitSema` (68)
+fired 1,779 times - consistent with genuine C-runtime/threading
+init, not a stall or crash loop. No `FIRST-CDVD-BIND` event fired in
+this window - GT3 never attempted a CDVD-service SIF RPC bind within
+the first ~19.5M post-handoff instructions.
+
+**Classification (per the user's four-way framework).** This directly
+rules out bucket 1 ("GT3 code never executes") - the handoff is real,
+the target PC is GT3's genuine entry point, and GT3's own crt0 runs
+substantial real code afterward. The evidence instead points to
+bucket 2 ("GT3 executes but never calls CDVD") within the observed
+window: no CDVD wrapper call or SIF bind was seen in the first ~19.5M
+post-handoff instructions/2,000 syscalls. Whether GT3 eventually
+attempts a CDVD bind further into execution (buckets 3/4) is not yet
+confirmed - the no-checkpoint control run used to capture this trace
+was deliberately time-boxed and did not run long enough to settle
+that question; extending the window is natural follow-up work for
+task #811.
+
+**Separate finding - checkpoint save/load fidelity artifact (not a
+confirmed bug, flagged honestly).** While setting up this round's
+checkpoint-chained driver (matching every prior r81N tool's pattern),
+a direct A/B comparison surfaced a discrepancy: resuming from a
+checkpoint saved at ~24M instructions into this same GT3 cold boot
+deterministically produces an IOP halt (`"PC escaped to unfetchable
+addr 0x3C04BF80 (unloaded IOP module - see STATUS.md round 14)"`)
+within the next ~800K instructions, while a genuinely continuous
+(non-checkpointed) run through the identical instruction range does
+NOT halt and instead proceeds cleanly into real GT3 code (the capture
+above). Disassembly of the crash site (via `capstone`) confirmed it
+is real, well-formed IOP kernel exception-restore trampoline code
+(`0x00108600-0x001087d0`), not corrupted/garbage data - so this looks
+like a save/restore artifact specific to the exact instant a
+checkpoint is taken (possibly mid-exception-frame push/pop), not a
+general emulation bug. Per this project's anti-fabrication discipline,
+**no speculative fix was applied** - this is flagged as an important
+methodological caveat for future checkpoint-based investigation (avoid
+trusting a checkpoint saved at an arbitrary mid-exception instant) and
+is real, evidence-backed follow-up work, not yet root-caused to the
+exact corrupted field.
+
+**Host-native regression suite.** Full 135-test suite run (batched
+one-at-a-time due to this sandbox's parallel-execution instability
+this round - `xargs -P*` produced false-positive fails under
+contention and silent kills even sequentially; individual invocation
+via `tests/run_test.sh` was reliable). 134/135 pass; the sole failure
+is the same pre-existing, already-tracked `test_gs_reglist_image`
+IMAGE-mode row-wrap bug (task #808), unchanged. No new regressions
+from this round's instrumentation.
+
+**Wii cross-build.** `make clean && make -j4` against devkitPPC/libogc
+completes with zero warnings/errors; `pcsx2-wii.dol` (511,360 bytes)
+produced.
+
+**Files changed:** `include/core/ee/ee_hle_thread.h` (new
+`ee_hle_thread_eventlog_set_enabled()` extern), `source/core/ee/
+ee_hle_thread.c` (its implementation), `source/core/ee/ee_core.c`
+(the `R815_HANDOFF_TRACE` instrumentation), `tools/round729-gt3-
+discboot/r815_handoff_trace.c` (new, checkpoint-chained survey
+driver matching the established r81N pattern), `docs/STATUS.md` (this
+entry). The round's additional ad-hoc diagnostic tools used only to
+characterize the checkpoint-fidelity artifact (`r815_iop_halt_probe.c`,
+`r815_iop_halt_finegrain.c`, `r815_iop_ramdump.c`, `r815_nocp_probe.c`)
+remain uncommitted scratch, consistent with this project's convention
+of not tracking one-off diagnostic side-tools.
+
+**Leak-check:** clean - no BIOS/ISO/checkpoint files staged;
+`git diff --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'`
+confirmed empty immediately before commit.

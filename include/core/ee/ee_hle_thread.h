@@ -229,6 +229,18 @@ uint64_t ee_hle_thread_get_gpr(int thid, int reg);
  * to conditionally compile against it. */
 void ee_hle_thread_eventlog_set_filter(int tid);
 
+/* Round 815 (task #811/#820): optional runtime on/off switch for the
+ * R812_EVENTLOG diagnostic build, separate from the tid filter above.
+ * Default is ENABLED (1) - matches every prior R812_EVENTLOG-built
+ * tool's existing always-on behavior (Rounds 812-814), so this is
+ * purely additive and does not change any existing tool's output.
+ * Added so a driver can scope logging to start only once a specific
+ * moment of interest is reached (e.g. Round 815's own BIOS->game
+ * handoff detection in ee_core.c) instead of capturing the entire,
+ * much noisier pre-handoff BIOS/EELOAD boot sequence. Always declared/
+ * defined (no-op when R812_EVENTLOG is not compiled in). */
+void ee_hle_thread_eventlog_set_enabled(int enabled);
+
 /* Round 733 (task #447, GT3-in-game-code stall investigation): live,
  * per-process-run call counters for WakeupThread(thid)/SignalSema(semid)
  * (and their interrupt-context -52/-67 siblings) - see ee_hle_thread.c's

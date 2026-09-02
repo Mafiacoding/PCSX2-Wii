@@ -123,7 +123,12 @@ uint64_t ee_hle_thread_get_rotate_calls(void) { return g_rotate_call_count; }
 static uint64_t g_evt_seq = 0;
 static int g_evt_filter_tid = -1; /* -1 = log every thread */
 void ee_hle_thread_eventlog_set_filter(int tid) { g_evt_filter_tid = tid; }
-static int evt_pass(int tid) { return g_evt_filter_tid < 0 || g_evt_filter_tid == tid; }
+/* Round 815 (task #811/#820): default ENABLED so every prior
+ * R812_EVENTLOG tool's behavior is unchanged unless it opts in to
+ * calling the new setter below. */
+static int g_evt_enabled = 1;
+void ee_hle_thread_eventlog_set_enabled(int enabled) { g_evt_enabled = enabled; }
+static int evt_pass(int tid) { return g_evt_enabled && (g_evt_filter_tid < 0 || g_evt_filter_tid == tid); }
 #define EVT(tid, ...) do { \
         if (evt_pass((int)(tid))) { \
             fprintf(stderr, "[R812EVT] seq=%llu tid=%d ", \
@@ -135,6 +140,7 @@ static int evt_pass(int tid) { return g_evt_filter_tid < 0 || g_evt_filter_tid =
 #else
 #define EVT(tid, ...) do {} while (0)
 void ee_hle_thread_eventlog_set_filter(int tid) { (void)tid; }
+void ee_hle_thread_eventlog_set_enabled(int enabled) { (void)enabled; }
 #endif
 
 void ee_hle_thread_init(void)

@@ -3225,10 +3225,98 @@ static inline void set_lane_b(ee_reg128_t *r, int n, uint8_t val) {
  * declared in a header since this is a narrow, self-contained probe. */
 long g_ee_null_jalr_guard_hits = 0;
 
+#ifdef R815_HANDOFF_TRACE
+/* Round 815 (task #811/#820, direct continuation of Round 814 per the
+ * user's own next-step instruction): the BIOS-to-GT3 handoff trace.
+ * Round 814 conclusively showed SCMD_CLOSECONFIG's completion is
+ * universal BIOS/CDVDMAN init boilerplate, unrelated to GT3's own
+ * code. The user's own next request: find the exact point where
+ * control leaves the BIOS/EELOAD chain and enters GT3's own loaded
+ * ELF, then trace GT3's own first execution window.
+ *
+ * Mechanism: this project's own real LF_F_ELF_LOAD RPC handler
+ * (sif_loadfile_elf_load_disc(), see its own citation above) is the
+ * exact place a real disc-boot's game entry point/gp become known -
+ * delivered into the caller's own recvbuf exactly as real hardware
+ * would (see the call site below, unchanged this round). Arming a
+ * watch for the EE PC to reach that exact entry-point address is a
+ * direct, evidence-based way to catch the real jump/handoff instant:
+ * this project's own already-correct EELOAD/kernel code performs the
+ * jump itself once its own RPC-reply-reading code runs - nothing is
+ * injected or fabricated here, unlike the abandoned Round 368-371
+ * raw-$pc-injection experiments (which this round deliberately does
+ * NOT repeat, since the current organic disc-boot chain, per Round
+ * 554/569/729+, already reaches and sustains real GT3 code on its
+ * own).
+ *
+ * Zero cost / entirely absent unless R815_HANDOFF_TRACE is defined -
+ * never set in a normal or Wii build. */
+#include <stdio.h>
+static uint32_t g_r815_target_epc = 0;
+static int      g_r815_armed = 0;
+static int      g_r815_handoff_seen = 0;
+static uint32_t g_r815_prev_pc = 0;
+static uint64_t g_r815_post_count = 0;
+#define R815_POST_INSTR_BUDGET 100000ull
+/* Bounded, hash-based "have we printed this exact PC before" set, so
+ * a hot loop body doesn't reprint thousands of identical lines - this
+ * "symbolizes only the blocks that execute" per the user's own
+ * request without needing full basic-block boundary analysis. Open-
+ * addressed, power-of-two sized; MIPS instructions are always 4-byte
+ * aligned so pc>>2 is used as the hash to avoid needless clustering.
+ * pc==0 is remapped to a sentinel since 0 doubles as "empty slot" -
+ * address 0 is never real code in any window this driver observes. */
+#define R815_VISITED_BITS 15
+#define R815_VISITED_SIZE (1u << R815_VISITED_BITS)
+#define R815_VISITED_MASK (R815_VISITED_SIZE - 1u)
+static uint32_t g_r815_visited[R815_VISITED_SIZE];
+static uint32_t g_r815_visited_n = 0;
+static int r815_mark_new_pc(uint32_t pc)
+{
+    uint32_t key = pc ? pc : 0xFFFFFFFFu;
+    uint32_t h = (key >> 2) & R815_VISITED_MASK;
+    uint32_t start = h;
+    if (g_r815_visited_n >= (R815_VISITED_SIZE * 3u / 4u)) return 0; /* keep load factor sane; stop marking new blocks once near-full, instruction counting is unaffected */
+    for (;;) {
+        uint32_t slot = g_r815_visited[h];
+        if (slot == key) return 0;
+        if (slot == 0u) { g_r815_visited[h] = key; g_r815_visited_n++; return 1; }
+        h = (h + 1u) & R815_VISITED_MASK;
+        if (h == start) return 0;
+    }
+}
+static int g_r815_syscall_budget = 2000; /* cap post-handoff per-syscall-number log lines, independent of the 100,000-instruction block-trace budget above */
+#endif
+
 static int ee_step(void)
 {
     ee_state_t *st = &g_state;
     uint32_t pc = st->pc;
+
+#ifdef R815_HANDOFF_TRACE
+    if (g_r815_armed) {
+        if (!g_r815_handoff_seen && pc == g_r815_target_epc) {
+            int tid = ee_hle_thread_get_current_thread_id();
+            fprintf(stderr, "[R815EVT] HANDOFF handoff_pc=0x%08x target_pc=0x%08x ra=0x%08x sp=0x%08x gp=0x%08x v0=0x%08x a0=0x%08x a1=0x%08x a2=0x%08x a3=0x%08x tid=%d status=0x%x\n",
+                    g_r815_prev_pc, pc,
+                    (uint32_t)st->gpr[31].ud0, (uint32_t)st->gpr[29].ud0, (uint32_t)st->gpr[28].ud0,
+                    (uint32_t)st->gpr[2].ud0, (uint32_t)st->gpr[4].ud0, (uint32_t)st->gpr[5].ud0,
+                    (uint32_t)st->gpr[6].ud0, (uint32_t)st->gpr[7].ud0,
+                    tid, ee_hle_thread_get_status(tid));
+            g_r815_handoff_seen = 1;
+            g_r815_post_count = 0;
+            ee_hle_thread_eventlog_set_enabled(1); /* scope R812_EVENTLOG (if also compiled in) to start exactly here */
+        }
+        g_r815_prev_pc = pc;
+        if (g_r815_handoff_seen && g_r815_post_count < R815_POST_INSTR_BUDGET) {
+            if (r815_mark_new_pc(pc)) {
+                fprintf(stderr, "[R815EVT] BLOCK n=%llu pc=0x%08x tid=%d\n",
+                        (unsigned long long)g_r815_post_count, pc, ee_hle_thread_get_current_thread_id());
+            }
+            g_r815_post_count++;
+        }
+    }
+#endif
 
     /* Round 630 (task #536/#611): narrow, clearly-labeled pragmatic
      * safety net, NOT a proven-authentic real-hardware fix (see
@@ -3514,6 +3602,19 @@ static int ee_step(void)
              * chain-mode register engine, so a no-op/generic-default
              * return is correct emulated behavior, not a stand-in. */
             int32_t sysnum = (int32_t)GPR(3); /* $v1, real EE convention */
+#ifdef R815_HANDOFF_TRACE
+            /* Round 815: "syscall numbers after handoff" per the
+             * user's own request - a generic, all-syscalls log,
+             * distinct from (and complementary to) R812_EVENTLOG's
+             * own much more detailed thread/sema-specific event log
+             * (enabled starting exactly at the handoff, see above). */
+            if (g_r815_handoff_seen && g_r815_syscall_budget > 0) {
+                fprintf(stderr, "[R815EVT] SYSCALL sysnum=%d pc=0x%08x tid=%d post_instr=%llu\n",
+                        sysnum, this_pc, ee_hle_thread_get_current_thread_id(),
+                        (unsigned long long)g_r815_post_count);
+                g_r815_syscall_budget--;
+            }
+#endif
             if (ee_hle_thread_try_handle(st, sysnum, this_pc, in_delay_slot)) return 1; /* Round 569: real EE thread/sema scheduler - see include/core/ee/ee_hle_thread.h */
             if (sysnum == 100 || sysnum == 61 ||
                 sysnum == 120 || sysnum == -120) {
@@ -5052,6 +5153,30 @@ static int ee_step(void)
                             uint32_t bind_sid = ee_mem_read32(st, src + 0x20u); /* real SifRpcBindPkt_t.sid offset, already cited (task #195/#196) */
                             sif_cmd_iop_handle_rpc_bind(cd_ptr);
                             sif_cmd_iop_track_bind_sid(cd_ptr, bind_sid); /* task #202 (79th finding) */
+#ifdef R815_HANDOFF_TRACE
+                            /* Round 815: "first game-side references
+                             * to CDVD-related imports or stubs" per
+                             * the user's own request - a real
+                             * sceSifBindRpc() to one of the CDVD
+                             * services is the actual "import/stub
+                             * reference" moment on real hardware (the
+                             * real client stub is a thin RPC-bind-and-
+                             * call wrapper, per the already-fetched
+                             * ee/rpc/cdvd/src/{ncmd,scmd,libcdvd}.c
+                             * sources cited elsewhere in this file) -
+                             * logged once, the first time it happens
+                             * strictly after the BIOS->GT3 handoff. */
+                            if (g_r815_handoff_seen &&
+                                (bind_sid == SIF_SID_CDVD_NCMD || bind_sid == SIF_SID_CDVD_SCMD || bind_sid == SIF_SID_CDVD_DISKREADY)) {
+                                static int r815_cdvd_bind_logged = 0;
+                                if (!r815_cdvd_bind_logged) {
+                                    fprintf(stderr, "[R815EVT] FIRST-CDVD-BIND sid=0x%08x cd=0x%08x pc=0x%08x tid=%d post_instr=%llu\n",
+                                            bind_sid, cd_ptr, st->pc, ee_hle_thread_get_current_thread_id(),
+                                            (unsigned long long)g_r815_post_count);
+                                    r815_cdvd_bind_logged = 1;
+                                }
+                            }
+#endif
                             ee_arm_rpc_bind_pending(cd_ptr);
                         }
                         if (cid == SIF_CMD_RPC_CALL) {
@@ -5161,6 +5286,32 @@ static int ee_step(void)
                                         const char *disc_name = romname;
                                         if (disc_name[0] == '\\') disc_name++;
                                         r554_ok = sif_loadfile_elf_load_disc(st, disc_name, &elf_epc, &elf_gp);
+#ifdef R815_HANDOFF_TRACE
+                                        /* Round 815: this is the exact
+                                         * real moment a disc-boot's
+                                         * game entry point/gp become
+                                         * known (the real LF_F_ELF_LOAD
+                                         * reply this project's own
+                                         * EELOAD/kernel code will read
+                                         * and jump to itself - see the
+                                         * ee_step() handoff-detection
+                                         * block above for the other
+                                         * half of this mechanism).
+                                         * Arm on the FIRST successful
+                                         * cdrom0:/cdrom1: ELF load only
+                                         * - per Round 554's own
+                                         * citation this is always the
+                                         * game's own executable
+                                         * (rom0:OSDSYS uses the
+                                         * separate, unrelated rom0:
+                                         * path above). */
+                                        if (r554_ok && !g_r815_armed) {
+                                            fprintf(stderr, "[R815EVT] ELF-LOAD-REPLY discname=\"%s\" epc=0x%08x gp=0x%08x call_pc=0x%08x tid=%d\n",
+                                                    disc_name, elf_epc, elf_gp, st->pc, ee_hle_thread_get_current_thread_id());
+                                            g_r815_target_epc = elf_epc;
+                                            g_r815_armed = 1;
+                                        }
+#endif
                                     }
                                     if (r554_ok) {
                                         /* Real result data (t_ExecData-style epc/gp,

@@ -33251,3 +33251,119 @@ themselves (no tracked `source/`/`include/` file touched); the full
 134-test sweep this round IS the regression suite, and it's the most
 complete one this project has run in a long time given the compile
 commands' prior staleness.
+
+## Round 808 (task #805 fallback): GT3 thread-3 "crash" root-caused - it's a real, bounded loading-screen thread finishing normally, not a bug
+
+Per the user's explicit fallback instruction ("if VU1/XGKICK fails do
+the same thing you did on the last round - grab all sources including
+sony and see if you can write a fix"), this round re-investigated why
+Round 782's null-jalr `ra==0` guard only produces a tiny trickle of
+progress and never reaches VU1/XGKICK for GT3.
+
+**Thread census tool built** (`tools/round729-gt3-discboot/r808_thread_census.c`,
+committed): loops `ee_hle_thread_get_thread_count()`/`_get_current_thread_id()`/
+`_get_status()`/`_get_priority()`/`_get_wait_type()`/`_get_wait_id()`/
+`_get_entry()`/`_get_saved_pc()` for every thread. First run against the
+most-advanced GT3 checkpoint (`total_instr=1,274,244,891`) hit a
+self-inflicted bug: `current_thread_id` is documented in
+`ee_hle_thread.c` as 1-based ("1-based; 0 = none yet"), but the census
+tool's loop was 0-indexed, silently skipping the highest-numbered (and
+in this case *current*) thread entirely. Fixed to loop `1..thread_count`
+inclusive. Corrected census: `thread_count=3`, `current_thread_id=3`
+(all valid), and critically **thread 3's status is `0x10` = `EE_THS_DORMANT`**
+- not the raw `0` a first glance suggested (that's actually the
+"never-allocated slot" default, unrelated to the real DORMANT constant
+defined at `ee_hle_thread.c:18`). Round 782's fix genuinely IS killing
+thread 3 correctly. Threads 1 and 2 are both `WAIT`/`EE_TSW_SEMA`: thread
+1 on semaphore id 5, thread 2 on semaphore id 0 (id 0 = the same
+`pc=0x0101bc24` WaitSema park Round 781 already documented). Neither has
+ever received a wakeup (`wakeup_calls=0` for both, sustained across the
+entire multi-hundred-million-instruction observation window) - and with
+thread 3 dead and nothing else ever `READY`, `reschedule()`'s own
+documented fallback (`ee_hle_thread.c:267-276`, "nothing at all is ready
+- simply leave the live context exactly as-is") is exactly why `pc`
+stays frozen at `0x00000000` forever after.
+
+**`ee_core_park_tick()` verified correct** (read in full, `ee_core.c`
+line ~10132): even in this fully-parked state, VBLANK/Timer/DMAC/RPC/
+CDVD-ncmd checks all still run every step, with a real (temporary
+Status.IE=1) mechanism to let interrupts through - this explains the
+observed "small trickle" (~5,500-5,800 instr/10M-slice chunk): a real
+VBLANK (or similar) interrupt does fire and its real handler genuinely
+executes for a few thousand instructions each chunk, then ERETs back to
+`EPC=0` (since that's what was saved when the interrupt was taken) and
+the null-jalr guard immediately re-fires. This is all working as
+designed - not the remaining blocker.
+
+**Crash root-cause tool built** (`tools/round729-gt3-discboot/r808_crash_catcher.c`,
+committed): resumes from `r781_gt3_test2.ckpt` (`total_instr=678,449,972`,
+thread 3 confirmed still alive/`WAIT`/`EE_TSW_SLEEP` via the corrected
+census), runs forward in small 200,000-slice increments polling thread
+3's status every iteration, and reconstructs its final ~250 real
+`(pc,ra)` pairs via a temporary ring-buffer instrumentation added to
+`ee_core.c` (backed up first per the Round 779 standing rule at
+`backups/round808/ee_core.c.bak`, fully reverted afterward - confirmed
+via `git status`/`git diff` showing zero tracked-source changes once the
+investigation concluded). First attempt used a fixed-size 256-entry ring
+buffer that kept recording through the crash detection's own coarse
+polling interval, so by the time DORMANT was detected the buffer had
+already been overwritten by thousands of post-crash `pc=0` steps -
+fixed by freezing the buffer the instant the `ra==0` signature first
+fires (a `g_r808_captured` flag set inside the guard itself), giving a
+clean, uncontaminated tail of thread 3's actual final instructions.
+
+**Root cause: thread 3 is GT3's real loading-screen progress-bar thread,
+and it exits normally, per real ps2sdk/kernel convention, exactly the
+way Round 782's own citation predicted.** The captured history shows
+thread 3 executing a completely ordinary, correctly-formed MIPS
+function starting at `0x01000c88` (matching its own `entry` field from
+the census) with a standard prologue (`sd ra,80(sp)` at `0x01000CA4`)
+and epilogue (`ld ra,80(sp)` / `jr ra` at `0x01000E4C-0x01000E64`, fully
+disassembled via `tools/round655-ee-disasm`). The function body (also
+fully disassembled) contains float percentage-math (`div.s`, likely a
+loading-bar fill fraction), calls into drawing primitives with
+screen-dimension constants `640`/`512` (real GS resolution), and a
+bounded loop (`slti v0,s1,12` / `slti v0,s1,112` / outer bound
+`s3`-driven, `bgez v0,0x01000D20`) capped around ~124 total iterations -
+this is exactly the shape of a real PS2 game's boot-time
+loading-percentage animation, not an infinite game-loop thread. Just
+before its own epilogue, it calls `jal 0x0101BA20` - the real syscall-36
+(`ExitDeleteThread`) stub, with `$a0` loaded from a GP-relative global
+(some *other* thread id, not necessarily itself) - and that call returns
+normally (does not itself kill the calling thread), after which the
+function proceeds through its ordinary epilogue and `jr ra`. Per
+`ee_hle_thread.c`'s own Round 569 citation ("real threads never return;
+treated as ExitThread-equivalent dead end if they do" - a real,
+already-cited ps2sdk/kernel convention), the saved `$ra` at `80(sp)` is
+`0` because `StartThread()` seeded it that way when this thread was
+first launched - so this function returning normally, rather than
+calling its own `ExitDeleteThread`, IS the expected, real-hardware-
+faithful way a thread that doesn't loop forever terminates. Round 782's
+guard is confirmed correct and NOT the bug.
+
+**The real remaining gap: semaphores 5 and 0 are never signaled by
+anything, for the thread's entire ~596M-instruction lifetime or after.**
+One subroutine this function calls (`0x0100E430`, disassembled) reads
+scratchpad-region flag bytes (`0x70003000`-based, matching real PS2
+scratchpad `0x70000000`) and a fixed-table byte, returning a small
+enum-like value (`0`/`3`/`9`) - shape-consistent with a pad-connection or
+skip-loading check, not a CD-status poll as initially hypothesized (that
+hypothesis is explicitly disproven by this disassembly, not just
+unconfirmed). None of the other five subroutines this function calls
+(`0x0100D9A8`, `0x0100C7E0`, `0x0100C9B8`/`0x0100C998`/`0x0100C9D0`,
+`0x0100E430` extended body, `0x01000B40`) were fully traced this round -
+that is real further work, not a gap papered over. Given this project's
+own history on directly-comparable investigations (task #447's CDVD
+N/S-command dispatch arc ran from Round 480 through Round 762+), tracing
+which specific call site should have signaled semaphore 5 or 0 - and
+why it didn't - is realistically its own multi-round investigation, not
+something to guess at under time pressure. Filed as task #810 rather
+than shipping a speculative fix.
+
+**No tracked-source fix shipped this round** - the only substantive
+change is the two new, git-committed diagnostic tools; `ee_core.c`'s
+temporary instrumentation was fully reverted (verified via `git diff`
+showing zero change) before this writeup. Regression suite and Wii
+cross-build correctly skipped per the project's docs-only-round
+convention (no `source/`/`include/` file differs from Round 782's
+committed tree).

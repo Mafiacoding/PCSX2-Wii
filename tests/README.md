@@ -1,5 +1,42 @@
 # Tests
 
+## Round 782 (task #807): use `tests/run_test.sh`, not the hand-written commands below
+
+The individual `gcc ...` compile commands documented per-test throughout
+this file have gone stale FOUR separate times as `source/` grew and files
+moved out of the old flat `source/hw/` layout into `source/core/ee/`,
+`source/core/iop/`, `source/hw/`, etc. (Round 605, Round 776b, Round 781,
+Round 782 all independently rediscovered this and had to work around it
+with a live glob). Every previous "fix" just re-typed a fresh snapshot of
+the correct file list, which is exactly why it kept drifting again - a
+hand-copied list is a fork of the truth, not a derivation from it.
+
+`tests/run_test.sh` fixes this at the root: it derives the full link line
+at run time from whatever `source/*.c` files actually exist, and live-
+detects (via `grep`) which `core/*.c`/`hw/*.c` files a given test
+`#include`s directly (so it can exclude those from the link and avoid
+duplicate-symbol errors), instead of hand-maintaining that list either.
+It can never go stale the way the commands below have, because it isn't
+a snapshot - it reads the tree itself, every time.
+
+Usage:
+
+```sh
+tests/run_test.sh test_ee_core            # build + run one test
+tests/run_test.sh test_ee_core --build-only
+tests/run_test.sh --all                    # build + run every test_*.c
+```
+
+Run from the repository root. Verified (Round 782) against all 134 test
+files in this directory with zero compile/link failures.
+
+The individual compile commands still documented below are kept for their
+descriptive value (what each test covers and why it exists) but should be
+treated as historical narrative, not as something to copy-paste and run -
+use `tests/run_test.sh` for that.
+
+---
+
 `test_ee_core.c` is a host-native unit test for `ee_core.c` (compiled
 with your regular host `gcc`, not devkitPPC - it's for fast iteration
 on interpreter correctness, not part of the Wii build/Makefile).

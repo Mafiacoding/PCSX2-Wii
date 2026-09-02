@@ -33206,3 +33206,48 @@ tracked source changed for this investigation.
 source/include file touched by this sub-round's investigation (the earlier
 Round 782a fix in this same STATUS.md entry block already went through the
 full mandatory workflow independently).
+
+## Round 782c: tests/run_test.sh replaces stale hand-written compile commands (task #807), surfaces one real pre-existing GS bug
+
+**The fix.** Added `tests/run_test.sh`, a small shell script that derives
+each test's full compile/link command at run time from the live `source/`
+tree (`find source -name '*.c' ! -path '*recompiler*' ! -name 'main.c'`,
+the same pattern this project's own scratch tooling has used successfully
+for many rounds) instead of from a hand-typed, per-test snapshot. It also
+live-detects (via `grep`) which `core/*.c`/`hw/*.c` files a given test
+`#include`s directly, and excludes exactly those from the link to avoid
+duplicate-symbol errors - so it can never drift the way the 2,444-line
+hand-written command list in `tests/README.md` has now drifted FOUR
+separate times (Round 605, Round 776b, Round 781, Round 782a all
+independently rediscovered the same staleness and had to work around it
+ad hoc). `tests/README.md` now leads with a pointer to the script; the old
+per-test commands are kept only for their descriptive value, explicitly
+marked as historical narrative rather than something to run.
+
+**Verification.** Ran `tests/run_test.sh --all` against all 134 files in
+`tests/` (in parallelized batches of 8-10 to fit the sandbox's per-call
+wall-clock cap) - 133/134 compiled and passed clean, including every
+`ee_core.c`/`iop_core.c`-self-including test (multi-file self-include
+exclusion, e.g. `test_dma_gif_demo.c`'s three direct includes, verified
+correct) and every plain `hw/`-only test.
+
+**Real bug found, not caused by this round.** `test_gs_reglist_image`
+fails 3 of its checks: GS IMAGE-mode host-to-local transfers write the
+first row of pixels correctly but don't wrap to row y=2 at the RRW
+(transfer-rectangle-width) boundary - pixels 4-6 of a 3x2 rectangle land
+in the wrong place. `git log` confirms neither `gif.c`, `gs_mem.c`, nor
+this test file has been touched in any of the last several rounds, so
+this is a genuine, pre-existing regression that simply couldn't be
+detected before now - it's a direct, concrete illustration of why task
+#807 mattered: with the compile commands broken, this test could not be
+run at all, so a real functional bug sat invisible. Filed as a new task
+rather than fixed in this same round (diagnosing+fixing a GS row-wrap bug
+is its own evidence-gathering arc, out of scope for a docs/tooling round;
+per the project's anti-fabrication discipline, not guessing at a fix
+under time pressure).
+
+**Regression/Wii-build correctly skipped** for the script/README changes
+themselves (no tracked `source/`/`include/` file touched); the full
+134-test sweep this round IS the regression suite, and it's the most
+complete one this project has run in a long time given the compile
+commands' prior staleness.

@@ -32390,3 +32390,40 @@ confirmed past the fix, no regression. Leak-check clean (verified
 below, before commit) - checkpoint files (`/tmp/r776b_gt3.ckpt`,
 `/tmp/r776b_gt3_chain`, scratch debug binaries) stayed in `/tmp/`,
 never staged; BIOS/disc images stayed in `/tmp/`/`uploads/`.
+
+## Round 776c (task #536/#447, user's "GT3 and KOF" dual focus,
+continued): KOF checkpoint chain extended 1.2B further instructions
+against the DADD/DSUB-fixed tree
+
+Rebuilt `tools/round729-gt3-discboot/r775_chain_driver.c` against the
+Round 776b-fixed tree (this driver also links `ee_core.c`, so needed
+recompiling to pick up the fix) and continued KOF's existing
+`/tmp/r775_kof.ckpt` chain (PAL BIOS `PS2 Bios 30004R V6 Pal.bin`,
+per this chain's established Round 774/775 convention) for 3 further
+chained invocations, budget 50,000,000 each:
+
+- 7,359,992,230 -> 7,759,991,815 -> 8,159,991,379 -> **8,559,990,964**
+  real EE instructions total (+1,199,998,734 this round), `halted=0`
+  throughout - genuine, sustained forward progress, unlike GT3's
+  `continue`-mode stall documented above (a separate title, separate
+  code path, not the same phenomenon).
+- `pc` oscillates between `0x8000e530`/`0x8000e540` (the real BIOS
+  kernel VBLANK-poll loop, previously disassembled and documented) and
+  `0x00100be4`/`0x00100bf8` (KUSEG `0x00100000+` - the conventional PS2
+  game-ELF load address, i.e. genuine KOF game code, not just BIOS
+  looping) - real cooperative back-and-forth between BIOS and game
+  code, consistent with this project's existing EE HLE
+  scheduler/threading model.
+- `PMODE`/`DISPFB1`/`DISPLAY1`/`DISPFB2`/`DISPLAY2` all remain zero
+  throughout - unchanged from Round 775/776's own documented finding,
+  not re-litigated at length here. No display configuration yet; this
+  is expected, real BIOS-and-game-cooperative execution short of any
+  GS setup, not a new blocker.
+
+**Mandatory workflow.** No tracked `include/`/`source/` file was
+modified for this specific step (the DADD/DSUB fix that made this
+rebuild necessary was already committed in Round 776b above);
+regression suite and Wii cross-build already covered by that same
+commit, correctly not repeated here. Leak-check clean - `/tmp/
+r775_kof.ckpt` and the rebuilt `/tmp/r776b_kof_chain` binary stayed in
+`/tmp/`, never staged; PAL BIOS/KOF ISO stayed in `/tmp/`/`uploads/`.

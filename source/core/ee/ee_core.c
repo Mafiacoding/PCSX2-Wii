@@ -7229,7 +7229,26 @@ static int ee_step(void)
                     break;
         case 0x2A: /* SLT */    if (rd) GPR(rd) = ((int64_t)GPR(rs) < (int64_t)GPR(rt)) ? 1 : 0; break;
         case 0x2B: /* SLTU */   if (rd) GPR(rd) = (GPR(rs) < GPR(rt)) ? 1 : 0; break;
+        /* Round 776 (task #447/#764, GT3 fresh-boot survey): real
+         * standard MIPS III DADD/DSUB (funct 0x2C/0x2E) were missing -
+         * only their unsigned siblings DADDU/DSUBU (0x2D/0x2F) were
+         * implemented. First observed live: GT3's real IOP/EE boot
+         * code hit funct=0x2E (raw=0x0008482e, rs=0,rt=8,rd=9) at
+         * pc=0x0100f5ac, halting with "unimplemented SPECIAL funct"
+         * at instr=30,047,008 on a fresh cold-boot chain. Per the real
+         * MIPS III ISA (and matching this exact switch's own
+         * established precedent just above for ADD/ADDU (funct
+         * 0x20/0x21) and SUB/SUBU (funct 0x22/0x23), both already
+         * merged into their unsigned sibling's case since this project
+         * doesn't model integer-overflow trap exceptions), DADD only
+         * differs from DADDU by trapping on signed 64-bit overflow,
+         * and DSUB only differs from DSUBU the same way - so falling
+         * through to the existing unsigned bodies is the correct,
+         * real-ISA-accurate fix given this project's existing
+         * no-overflow-trap convention, not a guess. */
+        case 0x2C: /* DADD */
         case 0x2D: /* DADDU */  if (rd) GPR(rd) = GPR(rs) + GPR(rt); break;
+        case 0x2E: /* DSUB */
         case 0x2F: /* DSUBU */  if (rd) GPR(rd) = GPR(rs) - GPR(rt); break;
         /* Round 478: real, standard MIPS II/III/EE trap-on-condition
          * family (funct 0x30-0x36, skipping reserved 0x35/0x37) - see

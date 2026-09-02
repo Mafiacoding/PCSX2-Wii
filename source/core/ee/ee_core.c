@@ -5960,6 +5960,25 @@ static int ee_step(void)
                                 }
                                 ee_arm_rpc_call_pending(call_cd);
                             } else if (call_sid == SIF_SID_CDVD_NCMD) {
+#ifdef R813_CDVDTRACE
+                                /* Round 813 (task #811/#814, per user-
+                                 * relayed external-review "make CDVD
+                                 * command ingress observable" plan):
+                                 * diagnostic-only, zero-cost-when-unset
+                                 * log of every real EE->IOP
+                                 * SIF_SID_CDVD_NCMD RPC call, distinct
+                                 * from iop_cdvd.c's own
+                                 * g_ncmd_call_count (which only counts
+                                 * dispatch_ncmd() actually firing,
+                                 * several layers downstream of this
+                                 * SIF RPC entry point). Lets a survey
+                                 * driver answer "did the EE even
+                                 * attempt this RPC at all" independent
+                                 * of whether it's individually
+                                 * recognized/dispatched below. */
+                                fprintf(stderr, "[R813EVT] sid=NCMD rpc_number=%u call_recvbuf=0x%08x call_cd=0x%08x pc=0x%08x\n",
+                                        rpc_number, call_recvbuf, call_cd, st->pc);
+#endif
                                 /* Round 473 (CDVDFSV/audio-stream protocol
                                  * depth, per explicit user request):
                                  * rpc_number==10 (CD_NCMD_CDDASTREAM) real
@@ -6366,6 +6385,15 @@ static int ee_step(void)
                                 }
                                 ee_arm_rpc_call_pending(call_cd);
                             } else if (call_sid == SIF_SID_CDVD_SCMD) {
+#ifdef R813_CDVDTRACE
+                                /* Round 813 - see the SIF_SID_CDVD_NCMD
+                                 * branch's own R813_CDVDTRACE comment
+                                 * above for full rationale. Same
+                                 * observational log for the S-command
+                                 * (synchronous/config) service. */
+                                fprintf(stderr, "[R813EVT] sid=SCMD rpc_number=%u call_recvbuf=0x%08x call_cd=0x%08x pc=0x%08x\n",
+                                        rpc_number, call_recvbuf, call_cd, st->pc);
+#endif
                                 /* Round 302 GENERALIZED catch-all,
                                  * CORRECTED in Round 303: same
                                  * rationale as SIF_SID_SPU2DRV's own

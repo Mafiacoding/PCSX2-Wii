@@ -33942,3 +33942,99 @@ out of the picture.
 **Leak-check:** clean - no BIOS/ISO/checkpoint files staged;
 `git diff --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'`
 confirmed empty immediately before commit.
+
+## Round 813: re-run GT3 checkpoint chain against Round 812 fixed scheduler - conclusively answers "does the scheduler fix unlock CDVD dispatch" (task #811/#814)
+
+Direct follow-up to Round 812, executing the 4-step plan the user
+relayed from an external review of that fix: rebuild from `4996c5a`,
+re-run GT3's checkpoint-chain boot survey against the now-fixed
+scheduler, check whether corrected thread contexts reach the CDVD
+request path, and only patch the first real boundary where execution
+actually stops (never fabricate a `SignalSema(5)` or force a read
+after `SCMD_CLOSECONFIG`).
+
+**Stale-checkpoint false alarm, resolved.** The original plan pointed
+at `r776b_gt3.ckpt`; the closest available equivalent in this sandbox,
+`/tmp/r812_r767.ckpt`, failed to load (`checkpoint_load fail`). A
+scratch copy of `checkpoint.c`'s `EXPECT` macro was patched with a
+diagnostic fprintf to show expected-vs-actual tag on failure: it
+expected `IMLD` and got `MCH0`. Root cause: that checkpoint predates
+the `IMLD` block added in Round 770 (task #764) - it's simply an
+old-format file, not a bug. `sizeof(ee_state_t)=27032` was confirmed
+to match the current build exactly, ruling out an EES1 struct-layout
+mismatch as a contributing factor. Switched to `/tmp/r812_cold.ckpt`,
+a checkpoint generated this session under the current (IMLD-inclusive)
+format, which loads cleanly.
+
+**New permanent instrumentation.** Added `R813_CDVDTRACE`-gated
+`fprintf(stderr, "[R813EVT] ...")` logging to the two `SIF_SID_CDVD_NCMD`
+and `SIF_SID_CDVD_SCMD` branches in `ee_core.c`'s SIF-call dispatch
+(around the existing `rpc_number`/`call_recvbuf`/`call_cd`/`call_sid`
+locals). This logs every real EE-issued CDVD RPC call attempt,
+independent of whether `iop_cdvd.c`'s own `dispatch_ncmd()`/
+`dispatch_scmd()` ever actually fires downstream - i.e. it answers
+"did the EE even attempt this RPC" rather than "did the IOP dispatch
+it," which is the specific distinction the external review's decision-
+boundary chain needed settled:
+```
+GT3 EE code -> EE CDVD syscall/API wrapper -> SIF RPC or CDVD MMIO
+  -> IOP CDVD command handler -> dispatch_ncmd() -> completion
+  interrupt/callback -> SignalSema(5)
+```
+Zero-cost when unset - verified compiling clean under
+`-Wall -Wextra -Werror` in both plain and `-DR813_CDVDTRACE` configs.
+A companion checkpoint-chained survey tool,
+`tools/round729-gt3-discboot/r813_eecdvd_trace.c` (same resumable
+structure as the existing `r811_cdvdtrace.c`), drives it.
+
+**Result: reproducible, definitive negative.** Resuming from
+`/tmp/r812_cold.ckpt` (already at `total_instr=7,359,991,955` under the
+Round-812-fixed scheduler) and running forward under the new tracked-
+source instrumentation reached `total_instr=7,839,991,426` - 480
+million further instructions - with `ncmd=0` throughout and zero
+`[R813EVT]` hits of any kind (neither NCMD nor SCMD). The EE's only
+CDVD RPC activity anywhere in this multi-billion-instruction trace is
+its initial S-command config sequence (13 calls, ending in
+`SCMD_CLOSECONFIG`, `last_scmd=67`) captured earlier in the chain; not
+one further CDVD RPC of any kind is issued afterward. This was
+independently cross-checked twice: once via an ad-hoc `/tmp/dbgtree`
+scratch build (7.77B instructions, 400M further with zero hits), and
+again via the permanent tracked-source `R813_CDVDTRACE` build above
+(7.84B instructions, zero hits across the final 60M-instruction pass).
+
+**Conclusion.** This conclusively answers the external review's own
+question: the Round 812 scheduler fix does **not** unlock CDVD
+dispatch. The blocker sits at decision-boundary bucket 1 in the chain
+above - "no EE CDVD call" - not anywhere in the SIF RPC transport,
+MMIO, IOP dispatch, or completion-signal layers, all of which remain
+unreached because the EE side never issues the call in the first
+place. Per the anti-fabrication rule reiterated in the external
+review's own plan ("implement a request that is observed, not one
+inferred solely from the semaphore state"), no CDVD-dispatch fix was
+attempted this round - none of the 8 beta-fix ideas from that plan
+apply until a concrete missing call site is found. The real next step
+is disassembling/tracing GT3's own EE-side game/BIOS code starting
+from the `SCMD_CLOSECONFIG` completion point forward, to find why it
+never proceeds to issue a further CDVD request - not yet attempted.
+
+**Host-native regression suite.** Full 135-file suite re-run in full
+(parallelized `xargs -P2`, 4 resumable chunked calls): 0 new failures,
+full 135/135 coverage confirmed via an empty `comm -23` diff against
+the complete test list. The only 3 failing assertions in the entire
+suite remain `test_gs_reglist_image`'s pre-existing, already-tracked
+IMAGE-mode row-wrap bug (task #808), untouched by this round.
+
+**Wii cross-build.** `make clean && make -j4` against devkitPPC/libogc
+completes cleanly, `pcsx2-wii.dol` produced (511,360 bytes).
+
+**Files changed:** `source/core/ee/ee_core.c` (the two
+`R813_CDVDTRACE`-gated `[R813EVT]` fprintf blocks, off by default),
+`tools/round729-gt3-discboot/r813_eecdvd_trace.c` (new, permanent
+diagnostic driver, not part of any normal build), `docs/STATUS.md`
+(this entry). Backed up to `backups/round813/` before editing per the
+Round 779 rule; backup deleted now that the change is confirmed
+correct and kept via the clean regression suite above.
+
+**Leak-check:** clean - no BIOS/ISO/checkpoint files staged;
+`git diff --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'`
+confirmed empty immediately before commit.

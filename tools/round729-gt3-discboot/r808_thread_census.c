@@ -58,6 +58,14 @@ int main(int argc, char **argv)
     int cur = ee_hle_thread_get_current_thread_id();
     printf("[R808-CENSUS] thread_count=%d current_thread_id=%d\n", count, cur);
     printf("[R808-CENSUS] rotate_calls=%llu\n", (unsigned long long)ee_hle_thread_get_rotate_calls());
+    /* Round 808 continuation (task #810): direct signal-call counters
+     * instead of reverse-engineering syscall numbers from raw
+     * disassembly - answers "has ANYTHING, ever, in this run, called
+     * SignalSema(semid)" for the two semaphores threads 1/2 are parked
+     * on, far more reliably than manual stub-address pattern matching. */
+    for (int s = 0; s < 8; s++) {
+        printf("[R808-CENSUS] signal_calls(semid=%d)=%llu\n", s, (unsigned long long)ee_hle_thread_get_signal_calls(s));
+    }
 
     /* current_thread_id is 1-based per ee_hle_thread.c line 66 ("1-based;
      * 0 = none yet"), and thread_count tracks the highest slot ever used

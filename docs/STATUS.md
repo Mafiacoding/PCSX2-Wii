@@ -33367,3 +33367,88 @@ showing zero change) before this writeup. Regression suite and Wii
 cross-build correctly skipped per the project's docs-only-round
 convention (no `source/`/`include/` file differs from Round 782's
 committed tree).
+
+## Round 810 (task #810 continuation, per user's "keep tracing"): semaphore-0 producer/consumer confirmed CORRECT - the "thread 2 stuck forever" reading was a polling-granularity illusion, not a scheduler bug; semaphore 5 remains the real open question
+
+Continuing directly from Round 808's open question ("what should
+signal semaphores 5/0"), this round added temporary printf
+instrumentation (guarded by a `R810_SEMDIAG` build define, never
+enabled in the tracked build) directly inside `ee_hle_thread.c`'s
+SignalSema and WaitSema handlers - backed up first to
+`backups/round808b/ee_hle_thread.c.bak` per the Round 779 standing
+rule, and fully reverted (`git checkout --`) once the observation was
+complete; `git diff --stat source/core/ee/ee_hle_thread.c` confirmed
+zero net change before this writeup.
+
+**Resuming from `r781_gt3_test2.ckpt` (thread 3 alive, pre-crash) and
+running forward in 1M-slice chunks with the diagnostic build revealed
+the exact per-call sequence**, repeating in lockstep every time thread
+3's loading-loop signals semaphore 0:
+```
+SIGNAL semid=0 by tid=3 count_after=1 max=255 woke=1 wait_threads=0
+WAIT   semid=0 by tid=2 IMMEDIATE-SUCCESS count_after=0
+WAIT   semid=0 by tid=2 PARKING count=0 wait_threads=1
+```
+Thread 3's `SignalSema(0)` bumps `count` to 1 and `wake_one_sema_waiter()`
+correctly matches and flips thread 2 (the sole `WAIT`/`SEMA`/`id=0`
+waiter) to `READY`; thread 2 is then dispatched, resumes at its parked
+`WaitSema(0)` instruction, sees `count>0`, decrements it back to 0
+("IMMEDIATE-SUCCESS" - a fully correct wake-and-consume), and then
+**immediately calls `WaitSema(0)` a second time** as part of its own
+per-tick work loop, finds `count==0` again, and re-parks - all within
+the same or next few instructions. This confirms `wake_one_sema_waiter()`,
+the SignalSema/WaitSema handlers, and the underlying scheduler are
+**all working exactly as designed** for this semaphore: thread 2 is a
+genuine per-iteration consumer of thread 3's ~122 loading-loop ticks,
+not a permanently-starved thread. The earlier "`tid2 ever left WAIT
+status: NO (never)`" finding (Round 808 continuation, pre-instrumentation)
+was a measurement artifact of `r808_sem_watch.c`'s coarse 1M-instruction
+polling interval - thread 2's non-WAIT window lasts only a handful of
+instructions per tick, far shorter than the polling granularity, so it
+was never once caught in a live/READY state despite genuinely
+transitioning through it 122 times. **This is a real, evidence-backed
+correction of Round 808's carried-over framing** - semaphore 0 is not
+a bug and does not need fixing; once thread 3's loading animation
+finishes and stops signaling, thread 2 correctly parks forever waiting
+for a next tick that (on this boot path) never comes, which is
+expected, not a defect.
+
+**Semaphore 5 (thread 1's target) remains the one genuinely open
+question** - `signal_calls(semid=5)` stayed at 0 for the entire
+observation window, both runs, confirming nothing ever signals it.
+An attempt to identify the call site via static disassembly of thread
+1's saved `pc` (`0x0101bb28`, from the `r781_gt3_test2.ckpt` census)
+against a fresh EE-RAM dump of that region (new scratch tool
+`r810_eeramdump.c`) hit a dead end: the address decodes as `jr ra`
+(the tail of an unrelated `iWakeupThread` syscall stub) in the
+checkpoint's *current* memory snapshot, which contradicts the
+WaitSema busy-park convention's own invariant (a genuinely-parked
+thread's saved `pc` must be the `syscall` instruction it re-executes
+each step, per `ee_core.c:3350`'s `this_pc = pc`). The only honest
+explanation is that `0x0101a000-0x0101d000` is a reused memory region
+whose content differs now from what it held at the actual moment
+thread 1 parked (well before this, the earliest checkpoint available,
+was taken at `instr=678,449,972`) - so static address-matching against
+a checkpoint's live snapshot is **not a reliable technique** for
+finding a long-past call site without an actual execution trace from
+before the park happened. Flagging this methodology dead-end
+explicitly so a future round doesn't repeat it. The real next step for
+semaphore 5 is either a fresh cold-boot instruction-level trace from
+before thread 1's first `WaitSema(5)` call (expensive - GT3 has no
+cheap earlier checkpoint currently on hand), or continuing the
+already-open task #447 CDVD/disc-command angle, since a semaphore that
+sits unsignaled for a thread's entire observed lifetime is exactly the
+shape of "waiting on a disc/RPC event this project's boot path never
+triggers."
+
+**No tracked-source fix shipped this round** - `ee_hle_thread.c`'s
+diagnostic instrumentation was fully reverted; the only lasting change
+is two new scratch diagnostic tools
+(`tools/round729-gt3-discboot/r808_sem_watch.c`,
+`tools/round729-gt3-discboot/r810_eeramdump.c`) plus a small
+`signal_calls` printout addition to the existing `r808_thread_census.c`,
+all committed for reuse by future rounds. Regression suite and Wii
+cross-build correctly skipped per the project's docs-only-round
+convention (no `source/`/`include/` file differs from Round 808's
+committed tree - verified via `git diff --stat` showing only `tools/`
+changes).

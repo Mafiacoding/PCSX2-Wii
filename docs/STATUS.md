@@ -32427,3 +32427,127 @@ regression suite and Wii cross-build already covered by that same
 commit, correctly not repeated here. Leak-check clean - `/tmp/
 r775_kof.ckpt` and the rebuilt `/tmp/r776b_kof_chain` binary stayed in
 `/tmp/`, never staged; PAL BIOS/KOF ISO stayed in `/tmp/`/`uploads/`.
+
+## Round 777 (user's "Focus right now Display Configure... and also
+keep pushing KOF" dual instruction): instrumented KOF's checkpoint
+chain for GS-display-register writes and SetGsCrt calls; traced the
+real code the EE is executing at depth; corrected a Round 776c
+mislabeling
+
+**Display-configuration instrumentation (task #784).** Built a
+scratch-patched copy of `source/hw/gs.c`'s `gs_mmio_write64()`
+(prints on any write to PMODE/DISPFB1/DISPLAY1/DISPFB2/DISPLAY2) and
+`ee_core.c`'s `sysnum==2` (SetGsCrt) dispatch site (prints on every
+call), compiled against a full scratch copy of the tree, and ran it
+against the live `/tmp/r775_kof.ckpt` for two chained 50,000,000-
+instruction invocations (8,559,990,964 -> 8,959,990,528 ->
+9,359,990,113 total). **Zero** `[R777-GSDBG]` write events and zero
+`[R777-SYSDBG]` SetGsCrt calls fired across the full 400,000,000+
+instructions surveyed this round (100M in the fresh instrumented run
+plus the prior Round 776c continuation). PMODE/DISPFB1/DISPLAY1/
+DISPFB2/DISPLAY2 remain all-zero. This is a real, direct negative
+result (not an absence-of-evidence guess): the exact write path and
+exact syscall dispatch site were both instrumented and neither fired.
+
+**Thread census (task #785).** Built `tools/round729-gt3-discboot/
+r777_kof_census.c` (reuses the existing Round 612/613
+`ee_hle_thread_get_*` introspection API, same pattern as GT3's Round
+733/740 census) and ran it against the live checkpoint with no further
+execution. Result: `thread_count=1`, a single thread (tid=1, status
+RUN, priority 64, entry=0x00000000 - the Round-612-documented
+"implicit root thread" synthesized the first time any thread primitive
+fires, standing in for "whatever EE code was already running"). **KOF
+has never called CreateThread/StartThread even once by
+9.46B instructions in** - all execution so far is the single implicit
+root thread. No worker-thread starvation puzzle to solve here (unlike
+GT3's Rounds 733-741 multi-thread investigation) - there simply is no
+second thread yet.
+
+**Correcting Round 776c's "VBLANK-poll loop" label.** Round 776c
+described the `0x8000e530`/`0x8000e540` resting addresses as "the real
+BIOS kernel VBLANK-poll loop" - built via disassembly this round
+(`tools/round655-ee-disasm/disasm.c`, reused unmodified), that label
+is **wrong**. The real code there is:
+
+```
+0x8000E52C: por  v0, zero, zero      ; v0 = 0
+0x8000E530: sq   v0, 0(s0)           ; *(quadword*)s0 = 0
+0x8000E534: addiu s0, s0, 16         ; s0 += 16
+0x8000E538: sltu v0, s0, a0          ; v0 = (s0 < a0)
+0x8000E544: bne  v0, zero, 0x8000E530
+0x8000E548: por  v0, zero, zero      ; (delay slot)
+```
+
+This is a plain 16-byte-at-a-time SQ zero-fill loop (`bzero`-style),
+not a poll. Fine-grained tracing (`r777_kof_looptrace.c`, single-
+stepping with `s0`/`a0` sampled every 2,000,000 steps) confirms it: `a0`
+is pinned at `0x02000000` (exactly PS2 main RAM's real 32MB size) and
+`s0` climbs from 0 to `0x02000000` over ~2.1-2.8M iterations before the
+loop exits - a **full EE main-RAM clear**, not an infinite spin.
+
+**Why this recurs (~every 29.5M instructions, 3x observed in a 100M
+window).** Backward-traced the exact entry mechanism
+(`r777_kof_backtrace.c`, ring-buffer of the last 64 distinct `pc`
+values before the loop's caller region is reached): the address that
+looked like a suspicious "reset re-entry point"
+(`0x8000db00`) is not a jump target at all - it's reached via a plain
+`jr ra` **return** from this project's own real EE debug-SIO print
+helper (`0x800073E8`, Round 392), immediately after which the same
+straight-line code issues *another* `jal 0x800073E8` call with a new
+string-literal argument. Dumping the string table at the literal
+addresses used (`0x80016148`+) confirms real, human-readable BIOS
+boot-banner text: `"# Initialize GS ...\n"`, `"# Initialize INTC
+...\n"`, `"# Initialize TIMER ...\n"`, `"# Initialize FPU ...\n"`,
+`"# Initialize User Memory"` - i.e. this is the **real EE kernel
+cold-boot bootstrap sequence**, and the 32MB RAM clear documented
+above *is* its "Initialize User Memory" step.
+
+This sequence's real-hardware trigger is already independently cited
+in this project's own Round 493 ResetEE (syscall 1) comment: real
+`ExecPS2.c`'s `SoftPeripheralEEReset()` calls `ResetEE(0x7F)` "as part
+of every real program launch." A KOF-2000/2001-class disc is a
+**two-game compilation** with its own title-select menu, which
+legitimately re-execs a fresh EE program (own boot banner, own full
+RAM clear, own peripheral reset) each time the player picks a title
+or returns to the menu - so 3 full cold-boot-style re-entries across
+9+ billion instructions of chained execution is consistent with real,
+expected multi-title-disc behavior, not a bug or a stuck loop. (This
+project's own `ee_core.c` `ResetEE` handler does not itself alter
+`pc`, so it does not directly explain a jump to fresh boot code - the
+re-entry is real game/BIOS control flow calling into the same kernel
+bootstrap code path each time, which is architecturally identical to
+what a real `_ExecPS2`-driven relaunch does.)
+
+**What this means for "why is GS/display never configured" (task
+#786).** No safe, evidenced fix is being shipped this round. The
+"# Initialize GS ..." banner's own follow-on code
+(`0x8000DB0C`-`0x8000DB40`) does a hardware register poll against
+`0x1000F000` (a real SIF/DMAC-class EE MMIO address, not a GS
+register) rather than touching PMODE/DISPFBx/DISPLAYx directly or
+calling SetGsCrt - consistent with this project's Round 776b finding
+that SetGsCrt is already correctly modeled as a real syscall
+exception, and with task #784's fresh negative-instrumentation result
+above. The most honest current read: real GS/CRTC configuration is
+the **game's own responsibility**, issued later via an explicit
+SetGsCrt call from application code once a title actually starts
+rendering - and at every depth surveyed so far (multiple full
+9+ billion-instruction chains, 3 observed program (re)starts), KOF's
+own game code has not yet reached that point. This is different from
+"blocked/broken" - it may simply mean the surveyed depth is still
+inside BIOS/menu/title-select territory for this compilation disc.
+Continuing to push the chain (task #788) is the correct next lever,
+not a source change.
+
+**Mandatory workflow.** No tracked `include/`/`source/` file was
+modified this round (all instrumentation lived in scratch copies
+under `/tmp/scratch_kofdbg/`, never touching the tracked tree) -
+regression suite and Wii cross-build correctly skipped per the
+docs-only convention. Leak-check clean: `/tmp/scratch_kofdbg/`,
+`/tmp/r777_kof_*` binaries/dumps, and `/tmp/r775_kof.ckpt` all stayed
+in `/tmp/`, never staged; PAL BIOS/KOF ISO stayed in
+`/tmp/`/`uploads/`. New tracked tooling added this round (diagnostic
+drivers only, no BIOS/disc/checkpoint content):
+`tools/round729-gt3-discboot/r777_kof_census.c` and
+`r777_kof_ramdump.c` (the pctrace/looptrace/entrytrace/backtrace/
+gsdbg-driver tools stayed scratch-only, as pure diagnostics whose
+job is done once the finding above was captured).

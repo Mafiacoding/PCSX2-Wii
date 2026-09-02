@@ -14,6 +14,24 @@
  * DISPFB1/DISPLAY1/DISPFB2/DISPLAY2) every invocation per the user's
  * standing "GS/Display is Display2" reminder and task #447's
  * "reach booting screens past OSDSYS" goal.
+ *
+ * Round 779 units-clarity fix (task #796): the `budget`/`chunk` values
+ * below are passed straight to system_run_interleaved(), whose
+ * parameter is a *slice* count, not a raw EE instruction count - each
+ * slice executes up to EE_IOP_STEP_RATIO=8 real EE instructions plus 1
+ * IOP instruction (see source/core/system.c's own citation on the real
+ * ~8:1 EE:IOP clock ratio - deliberate and correct, already documented
+ * there; it was never a bug). This driver's own printed "ran %llu more"
+ * previously just echoed the requested slice count (`done`) labeled as
+ * if it were the real EE instruction delta, which is why "budget=
+ * 50000000" was consistently observed (STATUS.md, Rounds 777-778) to
+ * actually advance ee->instructions_executed by ~400,000,000 - an
+ * exact 8x match, not a mystery overshoot. No emulator-core bug exists
+ * here. Fixed *only* in this diagnostic tool: now samples
+ * ee->instructions_executed before/after and prints the real delta
+ * alongside the requested slice count, so future rounds can size chain
+ * calls by real EE-instruction target instead of an unlabeled 8x fudge
+ * factor.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,15 +75,19 @@ int main(int argc, char **argv)
     vu1_state_t *vu1 = vu1_get_state();
 
     uint64_t chunk = 10000000ull, done = 0;
+    uint64_t ee_instr_before = ee->instructions_executed;
     while (done < budget && !ee->halted) {
         system_run_interleaved(chunk);
         done += chunk;
     }
+    uint64_t ee_instr_delta = ee->instructions_executed - ee_instr_before;
 
     int tid = ee_hle_thread_get_current_thread_id();
-    printf("[R775-CHAIN] ran %llu more, total_instr=%llu pc=0x%08x halted=%u tid=%d "
+    printf("[R775-CHAIN] ran %llu slice(s) (real EE delta=%llu, ~%.1fx), total_instr=%llu pc=0x%08x halted=%u tid=%d "
            "vu1_instr=%llu vu1_tpc=0x%04x gif_path1=%llu qw_seen=%llu\n",
-           (unsigned long long)done, (unsigned long long)ee->instructions_executed, ee->pc, ee->halted, tid,
+           (unsigned long long)done, (unsigned long long)ee_instr_delta,
+           done ? (double)ee_instr_delta / (double)done : 0.0,
+           (unsigned long long)ee->instructions_executed, ee->pc, ee->halted, tid,
            (unsigned long long)(vu1 ? vu1->instructions_executed : 0), vu1 ? vu1->tpc : 0,
            (unsigned long long)(gif ? gif->gif_path1_transfers : 0),
            (unsigned long long)(gif ? gif->quadwords_seen : 0));

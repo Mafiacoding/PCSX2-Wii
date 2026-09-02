@@ -32675,3 +32675,77 @@ content): `tools/round729-gt3-discboot/r778_ms3_regdump.c` (new) and
 `r777_kof_pctrace.c` (existed only in Round 777's scratch dir until
 now - added to the tracked tree per this project's existing-tool
 convention, since it proved useful again this round).
+
+## Round 779: new standing rule (backup-before-experimenting) + chain-driver units fix + MS3 chain pushed to 10B
+
+Per the user's explicit instruction this round ("you always can write
+your own code or fixes if you think its right but also make always a
+backup first local on my harddrive if something goes wrong"), added a
+new step 0 to `CLAUDE.md`'s "mandatory per-change workflow": before
+editing tracked source for a speculative/experimental fix, copy the
+current state into `backups/` in this repo (on the user's real hard
+drive via the synced outputs folder) before touching it, in addition
+to normal git history; revert and delete the backup if the experiment
+doesn't hold up, keep and document if it does - consistent with this
+project's existing "try it, verify, revert-if-wrong" culture (Round
+265, Round 280, Round 549, etc.), just with an extra pre-edit safety
+net now made explicit and mandatory.
+
+**A real, small, verified fix found and shipped this round** (task
+#796, invited by the user's "invent a fix and try it" permission):
+using the new register-probe tool (`r778_ms3_regdump.c`), continued
+sampling MS3's checkpoint across several `r775_chain_driver`
+`continue` calls and confirmed task #778's decompressor from a fresh
+angle - by instr=8,399,991,054 the same LZ decoder (now on a *second*
+asset, `ctx+0x14` stream pointer changed from `0x13402c` to
+`0x1464f6`) had written `0x9a136` = 630,838 of `0xa7eb4` = 686,260
+target bytes (91.9% complete) - further confirming genuine, converging
+forward progress, not a stuck loop.
+
+While doing this, re-examined `tools/round729-gt3-discboot/
+r775_chain_driver.c` (the tool used for every checkpoint chain since
+Round 775, including KOF's 10.5B-instruction and MS3's multi-billion-
+instruction chains) to understand the "budget=50000000 produces
+~400,000,000 actual instructions" behavior flagged-but-never-explained
+in Round 777/778's summaries. Root cause, found by reading `source/
+core/system.c`: `system_run_interleaved()`'s parameter is a **slice**
+count, not a raw EE instruction count - each slice runs up to
+`EE_IOP_STEP_RATIO=8` real EE instructions (plus 1 IOP instruction),
+a real, deliberate, already-documented approximation of the true
+~8:1 EE:IOP clock ratio (comment present in `system.c` since the
+ratio was implemented, well before Round 775's driver was written).
+**No emulator-core bug exists** - `system.c` was already correct.
+The actual gap was in the diagnostic driver's own bookkeeping: it
+looped `system_run_interleaved(chunk)` and printed the requested
+slice count (`done`) as if it were the real EE instruction delta,
+silently hiding the 8x multiplier from every round that used it.
+
+Fixed *only* in the diagnostic tool: `r775_chain_driver.c` now samples
+`ee->instructions_executed` before/after the loop and prints the real
+delta plus the observed multiplier alongside the requested slice
+count. Backed up the original file to `backups/
+round779_chain_driver_units_fix/` before editing (per the new rule
+above), rebuilt as `/tmp/r779_ms3_chain`, and verified against the
+live MS3 checkpoint: `budget=50000000` consistently produces `real EE
+delta=~399999580, ~8.0x` - an exact match to the predicted
+`EE_IOP_STEP_RATIO`, confirming the fix's own accuracy. Backup deleted
+after confirming the fix holds (git history is the durable record for
+a kept change; the backup step exists for reverts). No host-native
+`tests/` unit test or Wii cross-build applies - `tools/` is not part
+of the Wii `Makefile`'s `SOURCES` list (confirmed by grep), matching
+the precedent already established in Round 588 for this same category
+of change.
+
+**Continued the MS3 chain (task #795)** with the corrected driver:
+6,399,993,192 -> 6,799,992,756 -> 7,199,992,341 -> 7,599,991,905 ->
+7,999,991,490 -> 8,399,991,054 -> 8,799,990,639 -> 9,199,990,198 ->
+9,599,989,788 -> **9,999,989,347** total instructions this round
+(+3,599,996,155 since Round 778's 6,399,993,192 baseline; MS3's
+overall chain now stands at essentially 10B instructions), each
+segment now printing a real, verified `~8.0x` multiplier. `halted=0`
+throughout; GS display registers (PMODE/DISPFB1/DISPLAY1/DISPFB2/
+DISPLAY2) still all-zero, consistent with Round 778's "still inside
+legitimate pre-gameplay decompression/init work" conclusion - no
+change to that diagnosis this round, just substantially more evidence
+depth and a cleaner instrument for future rounds to size their runs
+with intent instead of an unlabeled 8x guess.

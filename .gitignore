@@ -10,3 +10,4 @@ tools/elf2dol_native
 tests/test_*
 !tests/test_*.c
 !tests/README.md
+*.bundle

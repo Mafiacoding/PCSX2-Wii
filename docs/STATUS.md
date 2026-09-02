@@ -33150,3 +33150,59 @@ Leak-check clean - all checkpoints (`/tmp/r782_*.ckpt`) and BIOS/ISO files
 stayed in `/tmp`/the read-only `uploads/` mount, never staged; `git diff
 --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'`
 confirmed clean immediately before commit.
+
+## Round 782b: Tekken/Klonoa2 "identical park" mystery closed - mischaracterization, not a bug (task #806)
+
+Prior rounds' STATUS.md notes described Tekken Tag Tournament and Klonoa 2's
+disc-boot checkpoint chains as "stuck" at byte-for-byte identical
+`total_instr=879,999,087`/`pc=0x8000e538`, framing it as an unresolved
+mystery in the same family as GT3's genuine WaitSema/null-`$ra` parks (Rounds
+781-782a). This round re-investigated with direct evidence rather than
+carrying the label forward.
+
+**Register-level confirmation.** Rebuilt the existing generic
+`r781_gt3_regdump.c` tool (already parameterized by bios/checkpoint path, no
+changes needed) against the two checkpoints
+(`/tmp/r781_tekken_test.ckpt`, `/tmp/r781_klonoa_test.ckpt`, both from
+Round 781). `diff` of the two full 32-GPR + COP0 + EE_INTC dumps: zero
+differences. `cop0.Cause=0x00008020`, `EE_INTC stat=0x00000008 mask=
+0x00001002 pending=0` - both titles are mid-instruction in ordinary code, not
+sitting on a `syscall`/wait instruction.
+
+**Disassembly at pc=0x8000e538.** Dumped 256 bytes of EE RAM around the
+address (`r777_kof_ramdump.c`, also unmodified/reused) and disassembled with
+`tools/round655-ee-disasm/disasm.c`. `0x8000e538` (`sltu v0, s0, a0`) sits
+inside an ordinary bzero-style loop at `0x8000E508-0x8000E558`
+(`sq v0,0(s0)` / `addiu s0,s0,16` / `sltu` / `bne` back to the sq) - a
+completely generic EE-kernel memory-clear routine, not a wait/park primitive
+at all.
+
+**The actual explanation - real, healthy forward progress, not a freeze.**
+Re-ran both checkpoints 3x10,000,000 slices each against the current
+(Round 782a-fixed) tree. Both titles: (1) advanced `total_instr` by the full
+real-EE delta every chunk (79,999,903 / 79,999,902 / 79,999,926 - no stall,
+`ee->halted=0` throughout), and (2) landed on the exact same
+`pc`/`total_instr`/GS-state at every single one of the 3 checkpoints
+(`0x8000dc50`@959998990, `0x00100c00`@1039998892, `0x8000e540`@1119998818),
+diverging by zero bytes at each step. This is the real signature of two
+different discs' boot processes both still executing 100% shared,
+disc-content-independent EE-kernel/IOP-module-dispatch code this early in
+cold boot (this depth, ~1.1B EE instructions, is still well inside common
+BIOS/kernel init - task #447's whole multi-hundred-round saga documents how
+far downstream real disc-specific CD-ROM command dispatch is from cold
+reset). Since execution is fully deterministic and neither game's own
+disc-specific code path has diverged the CPU state yet, identical
+instruction budgets from identical `start` boots necessarily produce
+byte-identical snapshots - not a park, not a shared-checkpoint-file bug (the
+two `.ckpt` files were confirmed genuinely distinct via `cmp`/`md5sum`,
+differing at byte 10500 in their disc-image-derived section), and not any
+kind of emulator defect.
+
+**Classification: no fix needed, prior "mystery" framing corrected.** This
+closes task #806 as a documentation correction rather than a bug fix - no
+tracked source changed for this investigation.
+
+**Regression/Wii-build correctly skipped** - docs-only, no tracked
+source/include file touched by this sub-round's investigation (the earlier
+Round 782a fix in this same STATUS.md entry block already went through the
+full mandatory workflow independently).

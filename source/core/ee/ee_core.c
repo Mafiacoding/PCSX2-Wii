@@ -757,9 +757,47 @@ static void ee_pad_area_refresh_all(ee_state_t *st)
     }
 }
 
+/* Round 781 (task #803, GT3 0x0101bc24 WaitSema(5) permanent-park
+ * investigation): CORRECTION - this used to key off
+ * `st->instructions_executed`, which is deliberately NOT advanced
+ * while a thread is parked in WaitSema (sysnum==68 above: "blocking"
+ * is modeled by re-executing the same syscall instruction every step,
+ * so pc/instructions_executed never move - see that handler's own
+ * long citation trail). WaitSema's park branch calls this exact
+ * function every single parked step (to let a real interrupt still
+ * wake the thread), but since instructions_executed was frozen, the
+ * modulo-based frame-boundary check below could only ever re-test the
+ * SAME phase value forever - VBLANK could never fire again for any
+ * thread parked anywhere except exactly on a frame boundary. Verified
+ * live: GT3's checkpoint chain (docs/STATUS.md Round 780/781) stalls
+ * for 240M+ slices at total_instr=38,865,331 with `$v1=68 (WaitSema)
+ * $a0=5`, EE_INTC mask=0x1027 (VBLANK_START/bit 2 among the enabled
+ * sources) and Status.IE=1 - i.e. this thread IS listening for VBLANK
+ * to eventually SignalSema(5), a real, standard PS2 vsync-wait idiom
+ * (confirmed against real ps2sdk ee/graph/src/graph.c's
+ * graph_add_vsync_handler(): AddIntcHandler(INTC_VBLANK_S,...) + a
+ * real interrupt-context signal, and real PCSX2's Counters.cpp
+ * UpdateVSyncRate() comment: "The PS2's vsync timer is an independent
+ * crystal ... it has nothing to do with" anything CPU-thread-state-
+ * dependent - VBLANK timing is real-hardware-independent of any
+ * specific thread's blocked state) - but it can never actually
+ * resolve here due to the frozen-counter bug above.
+ *
+ * Fix: use `st->cop0[9]` (COP0 Count) instead of instructions_executed.
+ * Count is the real, free-running R5900 hardware register (ee_step()'s
+ * own shared epilogue increments both instructions_executed++ and
+ * cop0[9]++ together, 1:1, on every normal non-parked step - see the
+ * citation at that increment site), and - critically - WaitSema's park
+ * branch ALSO increments cop0[9] every parked step (just not
+ * instructions_executed), so Count keeps ticking forward exactly like
+ * real hardware's free-running clock would while a thread is blocked,
+ * fixing this without changing any already-verified normal-path
+ * timing (the two counters are numerically identical whenever nothing
+ * is parked, so this is a no-op for every previously-tested boot path
+ * that never hits this exact WaitSema-park condition). */
 static void ee_check_vblank(ee_state_t *st)
 {
-    uint64_t phase = st->instructions_executed % EE_CYCLES_PER_FRAME_NTSC;
+    uint64_t phase = st->cop0[9] % EE_CYCLES_PER_FRAME_NTSC;
     if (phase == 0) {
         /* Round 669: refresh live pad state at the same real cadence
          * VBLANK_START itself fires at - see the citation above. */
@@ -10039,6 +10077,53 @@ static int ee_step(void)
     }
 
     return 0;
+}
+
+/* Round 781 (task #803): see ee_core.h's declaration comment for the
+ * full rationale. This is a faithful port of the "keep real hardware
+ * time flowing while parked" logic Round 303/304 already established
+ * and verified (originally inlined in this file's own sysnum==68
+ * WaitSema handler far above - now DEAD CODE, superseded by
+ * ee_hle_thread_try_handle()'s real thread/sema scheduler, which
+ * short-circuits ee_step() via `return 1` at the very top of the
+ * syscall dispatch, before that old handler or this function's normal
+ * epilogue call site below is ever reached - confirmed live via a
+ * fresh GT3 checkpoint re-run, docs/STATUS.md Round 781). Exposed here
+ * so ee_hle_thread.c's WaitSema park branch (the ACTUALLY-live code
+ * path) can call the exact same sequence. */
+void ee_core_park_tick(ee_state_t *st)
+{
+    st->cop0[9]++;
+    ee_latch_timer_interrupt(st);
+    ee_check_vblank(st);
+    ee_check_boot_unblock_selfloop(st); /* Round 161 */
+    ee_check_eeload_fastboot_patch(st); /* Round 772 (task #447, real fix) */
+    ee_check_browser_menu_escalation_heuristic(st); /* Round 610 (task #536) */
+    ee_check_browser_idle_carousel(st); /* Round 696 (task #447/#536) */
+    ee_check_boot_unblock_sbus_wait(st); /* Round 178 (task #344) - EXPERIMENTAL BRANCH ONLY */
+    ee_check_gs_vsync(st); /* Round 87 (127th finding) */
+    ee_timers_tick(); /* Round 87 (127th finding): EE peripheral timers T0-T3 */
+    sif_ee_tick(); /* Round 441 (task #212): delayed BOOTEND/SIFINIT/CMDINIT reassertion */
+    ee_check_rpcinit_pending(st);
+    ee_check_rpc_bind_pending(st);
+    ee_check_cdvd_ncmd_pending(st);
+    if (!st->branch_pending) {
+        /* Round 303's real, verified fix (see the dead-code handler's
+         * own long citation trail above for the full real-hardware
+         * "different ready thread with its own Status.IE=1 context
+         * switches in" rationale): temporarily present Status.IE=1 to
+         * the interrupt-pending checks below ONLY, restoring the real,
+         * DI()'d thread's own Status immediately after if nothing was
+         * actually pending. */
+        uint32_t saved_status = st->cop0[12];
+        st->cop0[12] |= 0x00000001u;
+        ee_check_timer_interrupt(st, st->pc);
+        ee_check_intc_interrupt(st, st->pc);
+        ee_check_dmac_interrupt(st, st->pc);
+        if (!st->exc_raised_this_step) {
+            st->cop0[12] = saved_status;
+        }
+    }
 }
 
 /* Public single-instruction step, for callers (currently

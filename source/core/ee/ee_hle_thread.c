@@ -752,6 +752,27 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
             }
             s->wait_threads++;
             reschedule(st);
+            /* Round 781 (task #803, GT3 0x0101bc24 permanent-park
+             * fix): this park re-executes the SAME WaitSema syscall
+             * every step for as long as the semaphore stays at 0 -
+             * exactly like the original (now-dead) ee_core.c handler
+             * this scheduler superseded (Round 569). That old handler
+             * called an equivalent tick sequence inline every parked
+             * step specifically so real elapsed hardware time (COP0
+             * Count, VBLANK, timers, DMAC/INTC interrupt delivery)
+             * keeps flowing even though this thread's own PC/context
+             * isn't moving - real hardware's clock does not stop just
+             * because one thread is blocked. This scheduler never
+             * ported that call, so entering this branch permanently
+             * starved every interrupt source ee_step()'s normal
+             * epilogue would otherwise drive (verified live: GT3's
+             * checkpoint chain, parked here on `WaitSema(5)`, made
+             * literally zero forward progress across 240M+ slices -
+             * see docs/STATUS.md Round 780/781). Fix: call the same
+             * real-time tick ee_core.c now exposes for exactly this
+             * purpose (ee_core_park_tick(), Round 781/task #803) once
+             * per parked step. */
+            ee_core_park_tick(st);
         }
         return 1;
     }

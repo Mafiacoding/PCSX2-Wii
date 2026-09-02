@@ -32906,3 +32906,156 @@ so regression suite and Wii cross-build are correctly skipped.
 Leak-check clean - `/tmp/r776b_gt3.ckpt`, `/tmp/r780_gt3_chain`
 stayed in `/tmp/`, never staged; GT3 ISO/PAL BIOS were read directly
 from the read-only `uploads/` mount, never copied into tracked output.
+
+## Round 781: real fix for GT3's permanent stall at 0x0101bc24 - WaitSema park was starving every interrupt source, including VBLANK (tasks #800-804)
+
+Directly resumes task #799's finding: GT3's checkpoint chain, `/tmp/r776b_gt3.ckpt`,
+sits frozen at `total_instr=38,865,331`, `pc=0x0101bc24`, and does not move no
+matter how large a slice budget is thrown at it. This round disassembles that
+address, root-causes the freeze, and ships a real, verified fix - GT3's chain
+now advances by hundreds of millions of instructions per invocation and, for
+the first time in this project's history, configures non-zero real GS display
+registers.
+
+**Disassembly (task #800).** Dumped 800 bytes of GT3's own EE RAM starting at
+`0x0101bb00` (via a recompiled copy of the existing `r777_kof_ramdump.c`
+technique) and ran it through this project's own EE/R5900 disassembler
+(`tools/round655-ee-disasm`, unmodified, built Round 655). The region is a
+repeating 4-instruction syscall trampoline stub table - `addiu v1,zero,N` /
+`syscall` / `jr ra` / `nop`, one stub per syscall number, matching the real
+ps2sdk syscall-stub convention. `pc=0x0101bc24` lands exactly on the `syscall`
+opcode of the stub for syscall number 68 - `WaitSema`.
+
+**GPR/INTC dump (task #801).** Built `tools/round729-gt3-discboot/
+r781_gt3_regdump.c` (new, generic 32-GPR + EE_INTC register dump, modeled on
+the existing `r778_ms3_regdump.c`) and ran it against the frozen checkpoint:
+`$v1=68` (WaitSema), `$a0=5` (semaphore id), `cop0.Status=...IE=1`,
+`EE_INTC stat=0x00000008` (stale VBLANK_END ack), `mask=0x00001027` (VBLANK_START
+enabled, bit 2), `pending=0`. Conclusion: GT3's EE thread is genuinely, correctly
+parked in a real `WaitSema(semid=5)` call with interrupts nominally enabled and
+VBLANK unmasked - so something should eventually wake it, but nothing does.
+
+**Research (task #802, via subagent).** Fetched real `ps2sdk-master/ee/graph/
+src/graph.c`'s `graph_add_vsync_handler()` (`AddIntcHandler(INTC_VBLANK_S,
+vsync_callback, -1); EnableIntc(INTC_VBLANK_S);` - the standard real "vsync via
+interrupt + semaphore" idiom), real `KERNEL.C`'s `iWaitSema()`/`WaitSema()`
+(neither touches any per-thread instruction-count field or COP0 Count), real
+PCSX2 `Counters.cpp`'s `UpdateVSyncRate()` ("The PS2's vsync timer is an
+independent crystal... it has nothing to do with real TV timings" - VBLANK is
+driven off `cpuRegs.cycle`, one free-running CPU cycle counter, not a
+per-thread progress value), and real `ps2sdk-master/ee/kernel/src/timer.c`'s
+`cpu_ticks()` (reads `COP0_REG_Count` directly). All of this points the same
+way: real VBLANK/interrupt delivery is driven by a free-running hardware clock
+independent of any specific thread's blocked/running state.
+
+**Root cause (task #803).** `ee_step()`'s shared per-instruction epilogue -
+which increments `st->instructions_executed`, increments `st->cop0[9]` (COP0
+Count, a real MIPS hardware register), and calls `ee_check_vblank()`,
+`ee_timers_tick()`, `ee_check_timer_interrupt()`, `ee_check_intc_interrupt()`,
+`ee_check_dmac_interrupt()`, etc. - is entirely skipped whenever a syscall is
+handled by `ee_hle_thread_try_handle()` (the real EE thread/semaphore
+scheduler, `source/core/ee/ee_hle_thread.c`, Round 569+), which returns 1
+before `ee_step()`'s own dispatch ever reaches its legacy per-syscall handlers.
+For a one-shot syscall this is cosmetic (a single skipped tick). For
+`WaitSema`'s park branch - which re-executes the *same* syscall instruction
+every step for as long as the semaphore stays at 0, this project's established
+Round 567-569 "park" idiom for modeling a blocked thread - it is fatal: it
+permanently starves every interrupt source, including the VBLANK generator,
+for as long as the park lasts. Verified live: GT3's chain made literally zero
+forward progress across 240,000,000+ slices of testing (three independent
+`continue`-mode invocations against `/tmp/r781_gt3_test.ckpt`).
+
+A first fix attempt - editing `ee_check_vblank()` in `ee_core.c` to key off
+`st->cop0[9]` instead of `st->instructions_executed` - had **zero effect**
+after rebuild+retest (`total_instr` stayed frozen at exactly 38,865,331,
+byte-for-byte identical GPR/INTC state). Root-caused: that function lives
+inside `ee_core.c`'s own legacy `sysnum==68` handler, which is dead code -
+`ee_hle_thread_try_handle()` intercepts syscall 68 first and returns 1 before
+`ee_step()`'s dispatch ever reaches it. Self-caught via direct re-verification
+before presenting anything to the user, per this project's evidence-first
+discipline.
+
+**The real fix.** Exposed a new function, `ee_core_park_tick(ee_state_t *st)`
+(declared in `include/core/ee/ee_core.h`, defined in `source/core/ee/
+ee_core.c`), that faithfully ports the exact real-time-tick sequence the now-
+dead `ee_core.c` handler used to run inline every parked step (itself citing
+the already-verified Round 303/304 "temporarily present Status.IE=1 to the
+interrupt-pending checks" mechanism): increments `cop0[9]`, then calls
+`ee_latch_timer_interrupt()`, the fixed `ee_check_vblank()`, the existing
+boot-unblock/carousel/RPC/CDVD-pending heuristics, `ee_timers_tick()`,
+`sif_ee_tick()`, and finally re-checks timer/INTC/DMAC interrupts with a
+temporary `Status.IE=1` override. Called this once per parked step from the
+**real, live** WaitSema handler in `source/core/ee/ee_hle_thread.c`,
+immediately after its existing `reschedule(st);` call in the park (count==0)
+branch - the actual code path this scheduler's own WaitSema syscall executes,
+unlike the dead `ee_core.c` copy the first attempt touched.
+
+**Backup.** Per the Round 779 standing rule, `source/core/ee/ee_core.c` was
+copied to `backups/round781_vblank_park_fix/ee_core.c.orig` before this
+speculative edit was made; deleted now that the fix is confirmed correct and
+kept (git history is the durable record from here).
+
+**Verification - real, sustained forward progress plus a first-ever GS
+milestone.** Re-ran the GT3 chain driver against fresh copies of `/tmp/
+r776b_gt3.ckpt` across three successive `continue`-mode invocations (30M-slice
+budget each). `total_instr` advanced from the permanently-frozen 38,865,331 to
+**678,449,972** - real, sustained progress across independent test calls, not
+a one-time blip. And for the first time in this project's entire documented
+history, **GT3's GS display registers became non-zero**: `PMODE=0x66`,
+`DISPFB2=0x94a0` (evolving legitimately across segments), `DISPLAY2=
+0x001ff9ff0184828c`. `DISPFB1`/`DISPLAY1` remain zero, consistent with this
+project's established Round 321 finding that real OSDSYS/games configure GS
+circuit 2, not circuit 1. `vu1_instr` is still 0 - VU1/XGKICK is not yet
+reached; flagged as a distinct, later milestone, not addressed this round.
+
+**Host-native regression suite (task #804).** `tests/README.md`'s recorded
+compile commands for `test_ee_core.c`/`test_iop_core.c` are stale again (a
+recurring, previously-documented issue - Round 605/776b): the recorded source
+lists are missing several files this project has added since (`ee_timers.c`,
+`ee_sio.c`, `ipu.c`, `ee_hle_thread.c`, `iop_cdvd.c`, `iop_heap.c`, `iop_dma.c`,
+`iop_hle_intr.c`, others), causing straight-copy-paste compilation to fail on
+undefined references. Worked around, same as prior rounds, by linking against
+this project's own standard `find source -name '*.c' ! -path '*recompiler*'
+! -name 'main.c' ! -name '<test-target>.c'` glob (excluding the target `.c`
+file itself, since both test files `#include` their target source directly
+rather than linking it) instead of the stale hand-maintained list. Both suites
+now build and pass clean against the fixed tree: `test_ee` - 10/10 checks
+pass, 0 failures; `test_iop` - 4/4 checks pass, 0 failures. `tests/README.md`'s
+staleness is noted here as a known, recurring, low-priority follow-up (not
+re-fixed this round, to stay focused on the shipped fix).
+
+**Cross-title regression sanity check.** All three of KOF, Tekken Tag
+Tournament (Demo), and Klonoa 2 also route through `ee_hle_thread_try_handle()`
+and can hit WaitSema, so this is a shared-code-path change. Ran a quick
+sanity `continue` (20,000,000-slice budget) against fresh copies of each
+title's most recent checkpoint (`/tmp/r775_kof.ckpt`, `/tmp/r776_tekken.ckpt`,
+`/tmp/r776_klonoa.ckpt`) plus Metal Slug 3 (`/tmp/r778_ms3.ckpt`): all four
+advanced their `total_instr` by the expected ~80,000,000 real EE instructions
+for the budget given, none crashed or halted unexpectedly, and GS display
+state remained all-zero for all four (correct/unchanged - none of these four
+titles has reached real display configuration yet, matching prior rounds'
+documented state). No regression observed in any of the four.
+
+**Wii cross-build.** This round changed real tracked `source/`/`include/`
+files (`ee_core.c`, `ee_core.h`, `ee_hle_thread.c`), unlike Round 780's
+docs/tools-only changes, so a Wii rebuild was required and run: `make clean &&
+make -j4` against devkitPPC/libogc completes cleanly, `pcsx2-wii.dol` produced,
+zero errors (the sandbox's devkitPPC toolchain needed `LD_LIBRARY_PATH`
+pointed at `devkitPPC/lib` this round to find `libmpfr.so.4`, a sandbox
+environment quirk unrelated to this round's source changes - noted here in
+case a future round hits the same "cc1: error while loading shared libraries"
+symptom).
+
+**Files changed:** `include/core/ee/ee_core.h` (new `ee_core_park_tick()`
+declaration), `source/core/ee/ee_core.c` (fixed `ee_check_vblank()` to key off
+`st->cop0[9]`; new `ee_core_park_tick()` definition - the dead legacy
+`sysnum==68` handler was left in place, unreverted, harmless dead code),
+`source/core/ee/ee_hle_thread.c` (one new call to `ee_core_park_tick(st)` in
+the real, live WaitSema park branch), `tools/round729-gt3-discboot/
+r781_gt3_regdump.c` (new diagnostic tool), `docs/STATUS.md` (this entry).
+Leak-check clean - all checkpoints (`/tmp/r776b_gt3.ckpt`, `/tmp/
+r781_gt3_test*.ckpt`, `/tmp/r781_kof_test.ckpt`, `/tmp/r781_tekken_test.ckpt`,
+`/tmp/r781_klonoa_test.ckpt`, `/tmp/r781_ms3_test.ckpt`) and all BIOS/ISO
+files stayed in `/tmp`/the read-only `uploads/` mount, never staged; `git diff
+--cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'`
+confirmed clean immediately before commit.

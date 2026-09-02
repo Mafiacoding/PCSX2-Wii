@@ -32551,3 +32551,13 @@ drivers only, no BIOS/disc/checkpoint content):
 `r777_kof_ramdump.c` (the pctrace/looptrace/entrytrace/backtrace/
 gsdbg-driver tools stayed scratch-only, as pure diagnostics whose
 job is done once the finding above was captured).
+
+**Continuing the KOF chain (task #788).** After the investigation
+above, rebuilt the (non-instrumented) `r775_chain_driver.c` against
+the tracked tree and continued `/tmp/r775_kof.ckpt` for 3 more
+chained 50,000,000-instruction invocations: 9,459,989,987 ->
+9,759,989,675 -> 10,159,989,262 -> **10,559,988,821** total
+instructions (+1,099,998,834 this segment), `halted=0` throughout,
+GS display registers still all-zero (expected, per the finding
+above). No tracked source changed by this step either - regression/
+Wii-build correctly skipped again.

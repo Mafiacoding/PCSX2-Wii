@@ -100,6 +100,43 @@ static uint64_t g_signal_call_count[EE_HLE_THREAD_MAX_SEMAS + 1];
 static uint64_t g_rotate_call_count;
 uint64_t ee_hle_thread_get_rotate_calls(void) { return g_rotate_call_count; }
 
+/* Round 812 (task #811 continuation, per user-relayed external-review
+ * request): temporary, compile-gated (R812_EVENTLOG) state-transition
+ * event log. Diagnostic-only - completely absent from normal builds
+ * (regression suite, Wii cross-build) since the macro is never
+ * defined there, so this has zero cost/behavioral effect outside a
+ * dedicated diagnostic tool build. Purpose: distinguish, with direct
+ * evidence rather than static disassembly guesswork, between the two
+ * live hypotheses for GT3 thread 1's WAIT/SEMA/5 anomaly (Round 811b):
+ * (a) a genuine WaitSema(5) block occurred once, and thread 1 later
+ * "quietly" passed a re-check without its status/wait_type/wait_id
+ * fields ever being cleared, or (b) TCB slot 1 was freed (Delete/
+ * Terminate/ExitThread) and later reallocated by CreateThread to an
+ * entirely different logical thread, which then independently blocked
+ * on WaitSema(5) itself - a real, if confusing, behavior rather than a
+ * stale-field bug. Every event line is plain text to stderr, matching
+ * this project's established r811_cdvdtrace.c-style diagnostic
+ * convention, so it can be captured via a driver's stderr redirection
+ * across checkpoint-chained runs and grepped/analyzed afterward. */
+#ifdef R812_EVENTLOG
+#include <stdio.h>
+static uint64_t g_evt_seq = 0;
+static int g_evt_filter_tid = -1; /* -1 = log every thread */
+void ee_hle_thread_eventlog_set_filter(int tid) { g_evt_filter_tid = tid; }
+static int evt_pass(int tid) { return g_evt_filter_tid < 0 || g_evt_filter_tid == tid; }
+#define EVT(tid, ...) do { \
+        if (evt_pass((int)(tid))) { \
+            fprintf(stderr, "[R812EVT] seq=%llu tid=%d ", \
+                    (unsigned long long)(++g_evt_seq), (int)(tid)); \
+            fprintf(stderr, __VA_ARGS__); \
+            fprintf(stderr, "\n"); \
+        } \
+    } while (0)
+#else
+#define EVT(tid, ...) do {} while (0)
+void ee_hle_thread_eventlog_set_filter(int tid) { (void)tid; }
+#endif
+
 void ee_hle_thread_init(void)
 {
     memset(&g, 0, sizeof(g));
@@ -208,6 +245,7 @@ static void ensure_root_thread(ee_state_t *st)
     t->lo = st->lo;
     t->sa_reg = st->sa_reg;
     g.thread_count = 1;
+    EVT(1, "event=current_thread_id-write old=0 new=1 reason=ensure_root_thread pc=0x%08x", st->pc);
     g.current_thread_id = 1;
 }
 
@@ -263,7 +301,64 @@ static int pick_next_ready(void)
  * hardware's own physical context-switch mechanism. */
 static void reschedule(ee_state_t *st)
 {
+    int old_current = g.current_thread_id;
+    (void)old_current; /* only referenced by EVT(), a no-op unless R812_EVENTLOG is defined */
     int next = pick_next_ready();
+    EVT(old_current, "event=reschedule old_current=%d next=%d pc=0x%08x",
+        old_current, next, st->pc);
+    /* Round 812 fix (task #811/#813, GT3 semaphore-5 anomaly - user-
+     * relayed external-review plan's event-log instrumentation
+     * request). Live evidence (R812EVT capture, GT3 disc-boot chain):
+     * thread 1 parks cleanly in WaitSema(5)'s busy-park loop (status/
+     * wait_type/wait_id = WAIT/SEMA/5, saved pc pinned at the syscall
+     * instruction 0x0101bc24) for ~850M further instructions with
+     * reschedule() repeatedly finding nothing else ready (next=0) and
+     * g.current_thread_id never once being written away from 1 - then,
+     * with NO intervening WaitSema-success, status-change, load-
+     * context, or current_thread_id-write event for tid=1, an
+     * "event=WakeupThread target=3 ... pc=0x0101bb24" line appears
+     * still tagged tid=1 (i.e. g.current_thread_id was still literally
+     * 1), followed immediately by "event=reschedule old_current=1
+     * next=3 pc=0x0101bb28" and a switch-out save-context at that same
+     * pc. 0x0101bb28 is the jr-ra return address of a DIFFERENT
+     * syscall trampoline (WakeupThread's, per Round 811's decoded
+     * stub table) than WaitSema's - not a value thread 1's own code
+     * ever produces. ee_hle_thread_check_preempt() was ruled out as
+     * the mechanism (it explicitly requires cur->status==EE_THS_RUN
+     * before ever calling reschedule(), so it can never touch a WAIT
+     * thread). The remaining explanation, consistent with every
+     * observed event: a hardware interrupt fired while thread 1 was
+     * the live context, its handler executed an interrupt-safe
+     * syscall (WakeupThread/-52 iWakeupThread is the real PS2 kernel's
+     * own "i"-prefixed convention for exactly this - calls issued from
+     * interrupt-handler code), and THAT syscall's own reschedule()
+     * call found thread 3 newly READY and performed a full context
+     * switch. At that moment the "live" st registers belonged to the
+     * INTERRUPT HANDLER (which must return via ERET/COP0 EPC, not via
+     * this thread-level mechanism) - not to thread 1's own suspended
+     * WaitSema state - so the switch-out's unconditional
+     * save_context(st, g.current_thread_id) silently overwrote thread
+     * 1's real saved pc (0x0101bc24) with the interrupt handler's
+     * mid-flight pc (0x0101bb28), while thread 1's WAIT/SEMA/5 fields
+     * were never touched (matching Round 811b's original static
+     * finding exactly: status/wait_type/wait_id unchanged, saved pc
+     * drifted). This is the same class of hazard Round 598 already
+     * fixed for check_preempt()'s per-instruction path (a forced
+     * context swap while Status.EXL/ERL is set corrupts the pending
+     * ERET's return-address assumption) - reschedule() itself had no
+     * equivalent guard, and unlike check_preempt() it CAN be reached
+     * while genuinely mid-exception, via any interrupt-context syscall
+     * handler that calls it directly (WakeupThread/-52, SignalSema/
+     * -67, and any future one). Defer the actual context switch (and
+     * the none-ready branch's re-save, which has the identical hazard)
+     * until Status.EXL/ERL clears; the target thread is already marked
+     * READY by the syscall handler itself and will be picked up safely
+     * on a later, non-exception reschedule() or by check_preempt()
+     * once ERET returns and clears EXL. */
+    if (st->cop0[12] & 0x6u) {
+        EVT(old_current, "event=reschedule-deferred reason=mid-exception(EXL/ERL) pc=0x%08x", st->pc);
+        return;
+    }
     if (next == 0) {
         /* Nothing at all is ready - nothing meaningful to fall back
          * to on the EE side (unlike the IOP, this project has no
@@ -272,17 +367,26 @@ static void reschedule(ee_state_t *st)
          * st->pc/next_pc to, e.g. WaitSema's own park-by-not-
          * advancing-pc convention still applies as the honest last
          * resort when literally nothing is ready). */
-        if (g.current_thread_id != 0) save_context(st, g.current_thread_id);
+        if (g.current_thread_id != 0) {
+            EVT(g.current_thread_id, "event=save-context pc=0x%08x reason=reschedule-none-ready", st->pc);
+            save_context(st, g.current_thread_id);
+        }
         return;
     }
     if (next != g.current_thread_id) {
         if (g.current_thread_id != 0) {
             ee_tcb_t *cur = tcb(g.current_thread_id);
-            if (cur && cur->status == EE_THS_RUN) cur->status = EE_THS_READY;
+            if (cur && cur->status == EE_THS_RUN) {
+                EVT(g.current_thread_id, "event=status old=0x%x new=0x2 reason=reschedule-switch-out pc=0x%08x", cur->status, st->pc);
+                cur->status = EE_THS_READY;
+            }
+            EVT(g.current_thread_id, "event=save-context pc=0x%08x reason=reschedule-switch-out", st->pc);
             save_context(st, g.current_thread_id);
         }
         load_context(st, next);
+        EVT(next, "event=load-context pc=0x%08x reason=reschedule-switch-in", st->pc);
         tcb(next)->status = EE_THS_RUN;
+        EVT(next, "event=current_thread_id-write old=%d new=%d reason=reschedule", old_current, next);
         g.current_thread_id = next;
     } else {
         ee_tcb_t *cur = tcb(g.current_thread_id);
@@ -347,6 +451,8 @@ static int wake_one_sema_waiter(int semid)
     }
     if (best == 0) return 0;
     ee_tcb_t *t = tcb(best);
+    EVT(best, "event=wake_one_sema_waiter sem=%d old_status=0x%x old_wait_type=%d old_wait_id=%d pc=0x%08x",
+        semid, t->status, t->wait_type, t->wait_id, t->pc);
     t->status = EE_THS_READY;
     t->wait_type = EE_TSW_NONE;
     t->wait_id = 0;
@@ -423,6 +529,7 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
             t->priority = (uint32_t)priority;
             t->init_priority = (uint32_t)priority;
             if (slot > g.thread_count) g.thread_count = slot;
+            EVT(slot, "event=CreateThread slot=%d entry=0x%08x pc=0x%08x", slot, func, this_pc);
             EE_RET(slot);
         }
         EE_ADVANCE();
@@ -433,6 +540,7 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
         int thid = (int)(int32_t)st->gpr[4].ud0;
         ee_tcb_t *t = tcb(thid);
         if (t && t->in_use && t->status == EE_THS_DORMANT) {
+            EVT(thid, "event=DeleteThread target=%d pc=0x%08x", thid, this_pc);
             t->in_use = 0;
             EE_RET(0);
         } else {
@@ -470,6 +578,7 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
     if (sysnum == 35 || sysnum == 36) {
         /* ExitThread() / ExitDeleteThread() - no args, no return. */
         if (cur) {
+            EVT(cur, "event=%s target=%d pc=0x%08x", sysnum == 36 ? "ExitDeleteThread" : "ExitThread", cur, this_pc);
             tcb(cur)->status = EE_THS_DORMANT;
             if (sysnum == 36) tcb(cur)->in_use = 0;
         }
@@ -481,6 +590,7 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
         int thid = (int)(int32_t)st->gpr[4].ud0;
         ee_tcb_t *t = tcb(thid);
         if (t && t->in_use && thid != cur) {
+            EVT(thid, "event=TerminateThread target=%d old_status=0x%x pc=0x%08x", thid, t->status, this_pc);
             t->status = EE_THS_DORMANT;
             t->wait_type = EE_TSW_NONE; t->wait_id = 0;
             EE_RET(0);
@@ -582,6 +692,7 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
             } else {
                 EE_RET(0); /* pre-set: the real return value once woken */
                 EE_ADVANCE();
+                EVT(cur, "event=status old=0x%x new=0x4 wait_type=SLEEP reason=SleepThread pc=0x%08x", t->status, this_pc);
                 t->status = EE_THS_WAIT;
                 t->wait_type = EE_TSW_SLEEP;
                 t->wait_id = 0;
@@ -597,8 +708,11 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
         int thid = (int)(int32_t)st->gpr[4].ud0;
         if (thid >= 0 && thid <= EE_HLE_THREAD_MAX_THREADS) g_wakeup_call_count[thid]++; /* Round 733 - see field comment */
         ee_tcb_t *t = tcb(thid);
+        EVT(cur, "event=WakeupThread target=%d target_status=0x%x target_wait_type=%d pc=0x%08x",
+            thid, t ? t->status : 0, t ? t->wait_type : 0, this_pc);
         if (t && t->in_use) {
             if (t->status == EE_THS_WAIT && t->wait_type == EE_TSW_SLEEP) {
+                EVT(thid, "event=status old=0x%x new=0x2 reason=WakeupThread pc=0x%08x", t->status, this_pc);
                 t->status = EE_THS_READY;
                 t->wait_type = EE_TSW_NONE;
                 t->ready_seq = g.ready_seq_counter++;
@@ -701,6 +815,7 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
         if (s && s->in_use) {
             if (s->count < s->max_count) {
                 s->count++;
+                EVT(cur, "event=SignalSema sem=%d count=%d pc=0x%08x", semid, s->count, this_pc);
                 wake_one_sema_waiter(semid); /* bookkeeping only - does not gate the increment above */
                 EE_RET(0);
             } else {
@@ -719,13 +834,16 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
          * architectural gap. */
         int semid = (int)(int32_t)st->gpr[4].ud0;
         ee_sema_internal_t *s = sema(semid);
+        EVT(cur, "event=WaitSema-entry sem=%d count=%d pc=0x%08x", semid, s ? s->count : -1, this_pc);
         if (!s || !s->in_use) {
+            EVT(cur, "event=WaitSema-invalid sem=%d pc=0x%08x", semid, this_pc);
             EE_RET(-1);
             EE_ADVANCE();
             return 1;
         }
         if (s->count > 0) {
             s->count--;
+            EVT(cur, "event=WaitSema-success sem=%d count=%d pc=0x%08x", semid, s->count, this_pc);
             EE_RET(0);
             EE_ADVANCE();
         } else {
@@ -741,10 +859,13 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
              * BIOS boot baseline (pmode stuck at 0x0) - this is the
              * fix, verified against that same baseline below. */
             ee_tcb_t *t = tcb(cur);
+            EVT(cur, "event=WaitSema-block sem=%d count=%d pc=0x%08x", semid, s->count, this_pc);
             EE_RET(0); /* pre-set: the real return value once actually woken and re-dispatched */
             st->pc = this_pc;
             st->next_pc = this_pc + 4u;
             if (t) {
+                EVT(cur, "event=status old=0x%x new=0x4 wait_type=SEMA wait_id=%d reason=WaitSema-block pc=0x%08x",
+                    t->status, semid, this_pc);
                 t->status = EE_THS_WAIT;
                 t->wait_type = EE_TSW_SEMA;
                 t->wait_id = semid;

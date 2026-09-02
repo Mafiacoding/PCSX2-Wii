@@ -222,6 +222,13 @@ uint32_t ee_hle_thread_get_wakeup_count(int thid);
 /* Round 811: raw saved-GPR accessor (reg 0=$zero..31=$ra), low 64 bits. */
 uint64_t ee_hle_thread_get_gpr(int thid, int reg);
 
+/* Round 812 (task #811 continuation): optional single-thread filter for
+ * the R812_EVENTLOG diagnostic build (see ee_hle_thread.c's own header
+ * comment). tid<0 = log every thread (default); always declared/defined
+ * (no-op when R812_EVENTLOG is not compiled in) so callers don't need
+ * to conditionally compile against it. */
+void ee_hle_thread_eventlog_set_filter(int tid);
+
 /* Round 733 (task #447, GT3-in-game-code stall investigation): live,
  * per-process-run call counters for WakeupThread(thid)/SignalSema(semid)
  * (and their interrupt-context -52/-67 siblings) - see ee_hle_thread.c's

@@ -33838,3 +33838,107 @@ returns) combined with fine-grained per-instruction tracing of thread
 the actual transition live, since static checkpoint inspection has now
 been pushed as far as it can go without observing execution in
 progress.
+
+## Round 812: real reschedule() context-corruption bug found and fixed via live event-log instrumentation (task #813)
+
+Round 811b's open question - why thread 1's saved context looked like
+a `WakeupThread(3)` return point instead of the `WaitSema(68)` trap
+that is the sole writer of `status=WAIT/wait_type=SEMA/wait_id=5` -
+turned out not to require watching semaphore 5's count at all. It is
+a real scheduler bug: `reschedule()` in
+`source/core/ee/ee_hle_thread.c` could clobber a thread's *real* saved
+context with a *different* thread's live register file whenever it
+was reached while the CPU was genuinely mid-exception.
+
+**Instrumentation.** Built `tools/round729-gt3-discboot/r812_eventlog.c`,
+a checkpoint-chained driver identical in structure to `chain_driver.c`
+but linked against an `ee_hle_thread.c` compiled with a new
+`-DR812_EVENTLOG` diagnostic build flag that streams every
+`WaitSema`/`WakeupThread`/`wake_one_sema_waiter`/`reschedule`/
+save-context/load-context/status-transition/`current_thread_id`-write
+event to stderr as `[R812EVT] ...` lines, filterable to a single tid
+via the new `ee_hle_thread_eventlog_set_filter()` accessor (declared
+in `include/core/ee/ee_hle_thread.h`). Diagnostic-only - normal builds
+never define `R812_EVENTLOG` and pay zero cost.
+
+**Root cause.** `reschedule()`'s switch-out path unconditionally
+called `save_context()` on `g.current_thread_id` any time it decided a
+switch was warranted - including when it was invoked from *inside* an
+interrupt-context syscall handler (e.g. `WakeupThread`/`iWakeupThread`,
+sysnum -52, called while the CPU's own Status.EXL or Status.ERL bit is
+still set from a real hardware exception/interrupt that hasn't
+returned yet). In that situation the "current" EE register file
+(`st->gpr[]`, `st->pc`) does not belong to the logically-running
+thread at all - it's still mid-exception scratch state - so
+`save_context()` was stamping that scratch state into the TCB as if it
+were the thread's real saved context, permanently corrupting it. This
+exactly explains Round 811b's observation: thread 1's TCB ended up
+holding a `WakeupThread(3)`-adjacent return point because a `reschedule()`
+call fired while genuinely mid-exception overwrote its real
+`WaitSema(68)` trap-point context with whatever was live in the CPU at
+that unrelated moment.
+
+**Fix.** Added a guard at the top of `reschedule()`:
+`if (st->cop0[12] & 0x6u) { EVT(...); return; }` - if Status.EXL
+(bit 1) or Status.ERL (bit 2) is set, the entire switch decision is
+deferred (not skipped: the next call to `reschedule()` after the
+exception genuinely returns, e.g. the following syscall's own trailing
+`reschedule()`, re-evaluates normally). This mirrors the same
+Status-register-awareness precedent as Round 598's
+`ee_hle_thread_check_preempt()` forced-preemption guard, just applied
+to the unconditional interrupt-context call site instead.
+
+**Targeted regression test.** `tests/test_ee_hle_reschedule_exl_guard.c`
+(new) is a fast, host-native, non-vacuous synthetic test built directly
+against the real `CreateThread`/`StartThread`/`SleepThread`/
+`WakeupThread` HLE syscall handlers (via `ee_core_step()`, no hand-
+rolled scheduler-internals poking): it creates a second thread B
+(priority 80, worse than the caller/root thread's 64), has root
+genuinely block via `SleepThread` (forcing a real switch to B, proving
+B is actually running), then calls `WakeupThread(root)` twice - once
+with Status.EXL forced set (must defer: current thread stays B, root
+stays non-RUN) and once with it clear (must perform the otherwise-due
+switch: current thread becomes root again, RUN). Because root
+objectively has the better priority than B at the moment of the
+deferred call, the "guard defers rather than silently suppresses"
+behavior is provably non-vacuous, not just "nothing happened to
+happen." All 12 checks pass.
+
+**Host-native regression suite.** Full 135-file suite (`tests/run_test.sh`,
+chunked across ~8 sandbox calls due to the per-call wall-clock cap)
+re-run in full against the fixed tree, including the new test above:
+0 new failures. The only 3 failing assertions in the entire suite are
+`test_gs_reglist_image`'s pre-existing, already-tracked IMAGE-mode
+row-wrap bug (task #808), unrelated to and unaffected by this round's
+change.
+
+**Wii cross-build.** `make clean && make -j4` against devkitPPC/libogc
+completes cleanly (all 34 tracked `source/` files compile with no new
+warnings or errors under `-Wall`), `pcsx2-wii.dol` produced
+(511,360 bytes).
+
+**Files changed:** `source/core/ee/ee_hle_thread.c` (the
+Status.EXL/ERL guard in `reschedule()`, plus the `R812_EVENTLOG`
+diagnostic instrumentation gated entirely behind that build flag),
+`include/core/ee/ee_hle_thread.h` (new
+`ee_hle_thread_eventlog_set_filter()` declaration),
+`tests/test_ee_hle_reschedule_exl_guard.c` (new targeted regression
+test), `tools/round729-gt3-discboot/r812_eventlog.c` (new, permanent
+diagnostic driver, not part of any normal build), `docs/STATUS.md`
+(this entry). Backed up to `backups/round812/` before editing per the
+Round 779 rule; backup deleted now that the fix is confirmed correct
+and kept via the clean regression suite above.
+
+**Reconciliation with task #811/#810.** This closes the specific
+context-corruption mechanism Round 811b flagged as an open anomaly,
+but does not by itself resolve task #811's original goal (finding
+GT3's real CDVD N-command dispatch call site) - it was a genuine,
+independently-real scheduler-integrity bug found while investigating
+that thread, not necessarily GT3's final CDVD-dispatch blocker. Task
+#811 remains open for a future round to determine whether GT3's
+checkpoint chain now behaves differently with corrupted-context bugs
+out of the picture.
+
+**Leak-check:** clean - no BIOS/ISO/checkpoint files staged;
+`git diff --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'`
+confirmed empty immediately before commit.

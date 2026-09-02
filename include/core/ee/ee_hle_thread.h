@@ -173,6 +173,19 @@ void ee_hle_thread_init(void);
  * fall through to its own further sysnum checks as normal). */
 int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, int in_delay_slot);
 
+/* Round 782 (task #805): real ExitThread()/ExitDeleteThread()-equivalent
+ * exit of the CURRENTLY RUNNING thread, exposed for ee_core.c's null-
+ * jalr guard (see that file's citation trail) to call when it detects
+ * pc==0 with $ra ALSO 0 - the exact signature of a thread whose own
+ * call chain has unwound all the way back through its real entry
+ * point with nothing left to return to, matching this file's own
+ * StartThread() comment ("$ra - real threads never return; treated as
+ * ExitThread-equivalent dead end if they do"). Mirrors the live
+ * sysnum==36 (ExitDeleteThread) handler body exactly: marks the
+ * current thread DORMANT/not-in-use, then reschedule()s so any other
+ * READY thread gets real CPU time instead of this dead one. */
+void ee_hle_thread_exit_current(ee_state_t *st);
+
 /* Diagnostics (mirrors iop_hle_thread's own get_thread_count/etc). */
 int ee_hle_thread_get_thread_count(void);
 int ee_hle_thread_get_current_thread_id(void);

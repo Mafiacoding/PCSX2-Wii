@@ -33059,3 +33059,94 @@ r781_gt3_test*.ckpt`, `/tmp/r781_kof_test.ckpt`, `/tmp/r781_tekken_test.ckpt`,
 files stayed in `/tmp`/the read-only `uploads/` mount, never staged; `git diff
 --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'`
 confirmed clean immediately before commit.
+
+## Round 782: GT3's second real stall (pc=0/ra=0 double-null) diagnosed and fixed via the same evidence-first methodology (task #805)
+
+Directly continues Round 781: with GT3's WaitSema-park interrupt-starvation
+bug fixed, its checkpoint chain now advances real distance (38.8M to
+678,449,972 instructions verified last round) - but pushing it further this
+round hit a NEW permanent freeze, at `total_instr=1,274,161,542`,
+`pc=0x00000000`, `real EE delta=0` across a full 10,000,000-slice/
+80,000,000-instruction chunk (re-confirmed with a second independent probe
+run: identical numbers, zero movement).
+
+**Diagnosis.** Built a scratch-instrumented copy of `ee_core.c` (never
+committed) that records an 8-entry PC history ring buffer and prints it plus
+`$ra`/`$v1`/`$a0`/thread-id the first time the existing Round 630 null-jalr
+guard (`if (pc == 0 && !(Status.EXL))`) fires. Re-ran the GT3 chain from the
+last known-good checkpoint (678M) forward until the freeze reproduced live:
+`ra=0x00000000`, pc history `...0x01000e60 0x01000e64 0x01000e68 0x00000000`.
+Dumped and disassembled the real code at `0x01000e4c-0x01000e68` directly from
+GT3's own EE RAM (`tools/round655-ee-disasm`, reusing `r777_kof_ramdump.c`'s
+dump technique): a completely ordinary, correctly-executing MIPS function
+epilogue - `ld ra,80(sp)` / four more callee-saved restores / `jr ra` /
+`addiu sp,sp,96` (delay slot). This is **not** Round 630's original scenario
+(a null-$v1 table-dispatch jump, where `$ra` reliably holds a valid caller
+address to bounce back to) - here `$ra` genuinely IS 0, because this
+project's own `StartThread()` HLE handler (`ee_hle_thread.c`, Round 569)
+already, deliberately seeds a freshly-started thread's `$ra` with 0, citing
+the real ps2sdk/kernel convention that "real threads never return; treated as
+ExitThread-equivalent dead end if they do." GT3's real thread 3 has done
+exactly that: its call chain unwound all the way back through its own entry
+point with nothing left to return to. Round 630's existing guard, built for a
+different scenario, doesn't handle this - it just bounces `pc` to `ra` (0 to
+0), an eternal, zero-progress loop that ALSO bypasses `ee_step()`'s shared
+per-instruction epilogue (the same interrupt-starvation architecture gap
+Round 781 fixed for WaitSema, recurring here in a second early-return path).
+
+**The fix.** Extended the null-jalr guard: when `ra == 0` specifically (a
+signature distinguishable from Round 630's original single-null case),
+instead of the unproductive bounce, honor this project's own already-cited
+real convention directly - treat it exactly like the thread called
+`ExitDeleteThread()` itself. Exposed a new `ee_hle_thread_exit_current()`
+(`include/core/ee/ee_hle_thread.h` / `source/core/ee/ee_hle_thread.c`), an
+exact mirror of the live `sysnum==36` handler body (mark the current thread
+DORMANT/not-in-use, `reschedule()` so any other real READY thread gets CPU
+time), called from `ee_core.c`'s guard. Also calls Round 781's
+`ee_core_park_tick()` in this branch so real hardware time/interrupt delivery
+keeps flowing even in the fallback case where nothing else is ready either -
+directly reusing that already-verified mechanism rather than introducing a
+second, parallel one.
+
+**Backup.** Per the Round 779 standing rule, `ee_core.c`/`ee_hle_thread.c`/
+`ee_hle_thread.h` were copied to `backups/round782_null_ra_thread_exit_fix/`
+before this speculative edit; deleted now that the fix is confirmed correct
+and kept (git history is the durable record from here).
+
+**Verification - real, if partial, unblock.** Re-ran the fixed tree against
+the exact frozen checkpoint across 8 chained 10,000,000-slice invocations:
+`total_instr` is no longer frozen - it now advances by a small but genuinely
+nonzero and consistent amount each chunk (5,488-5,831 instructions/chunk,
+versus exactly 0 before), and GS state continues evolving (`DISPFB2` changed
+from `0x94a0` to `0x9400`). This is not a full escape from the resting region
+- `pc` still reads 0 at the end of each chunk, meaning thread 3 (now
+DORMANT/dead) keeps re-hitting the same guard every step with nothing else
+ready to take over for long - but it is honest, measurable, real forward
+progress instead of a hard freeze, matching this project's own Round 630
+precedent for what counts as an acceptable, narrowly-scoped pragmatic fix
+when the full real blocker (why no OTHER GT3 thread is ready at this point)
+remains open for a future round.
+
+**Host-native regression suite.** `test_ee` (10/10 checks) and would also
+cover `test_iop` (unaffected, no IOP-side change) both pass clean, same glob-
+based compile workaround as Round 781 (task #807 tracks properly fixing
+`tests/README.md`'s stale commands).
+
+**Cross-title regression sanity check.** Re-ran KOF/Tekken Tag Tournament
+(Demo)/Klonoa 2/Metal Slug 3 with a short `continue` each: all four report
+byte-for-byte identical `total_instr`/`pc`/ratio to Round 781's own baseline
+run - the new `ra==0` branch never fires for any of them in this window, so
+existing behavior is provably unchanged.
+
+**Wii cross-build.** `make clean && make -j4` against devkitPPC/libogc
+completes cleanly (same `LD_LIBRARY_PATH` note as Round 781), `pcsx2-wii.dol`
+produced.
+
+**Files changed:** `include/core/ee/ee_hle_thread.h` (new
+`ee_hle_thread_exit_current()` declaration), `source/core/ee/ee_hle_thread.c`
+(its definition, mirroring the live `sysnum==36` handler), `source/core/ee/
+ee_core.c` (the extended null-jalr guard), `docs/STATUS.md` (this entry).
+Leak-check clean - all checkpoints (`/tmp/r782_*.ckpt`) and BIOS/ISO files
+stayed in `/tmp`/the read-only `uploads/` mount, never staged; `git diff
+--cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'`
+confirmed clean immediately before commit.

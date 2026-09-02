@@ -3267,8 +3267,46 @@ static int ee_step(void)
      * signature only) so it cannot mask any other, unrelated fault
      * class. */
     if (pc == 0 && !(st->cop0[12] & 0x2u)) {
-        g_ee_null_jalr_guard_hits++;
         uint32_t ra = (uint32_t)st->gpr[31].ud0;
+        /* Round 782 (task #805, GT3 checkpoint-chain permanent-stall
+         * fix): if $ra is ALSO 0, the plain "bounce back to $ra" logic
+         * below just lands on pc=0 again - an eternal, zero-progress
+         * loop (empirically confirmed live: GT3's real thread 3 hit
+         * this exact signature and made literally 0 forward progress
+         * across a full 10,000,000-slice/80,000,000-instruction chunk,
+         * this fix's own regression re-run below). Root-caused via a
+         * scratch pc-history instrumentation build: the immediately-
+         * preceding real code (0x01000e4c-0x01000e68, disassembled
+         * live from GT3's own EE RAM) is a completely ordinary,
+         * correctly-executing MIPS function epilogue - `ld ra,80(sp)`
+         * followed by `jr ra` - so this is NOT Round 630's original
+         * null-$v1-table-dispatch scenario at all (that guard's own
+         * "bounce to $ra" premise assumed $ra always holds a valid
+         * caller address to return to). Here, $ra genuinely IS 0,
+         * because this project's own StartThread() HLE handler (see
+         * ee_hle_thread.c, Round 569) deliberately seeds a freshly-
+         * started thread's $ra with 0, with the comment "real threads
+         * never return; treated as ExitThread-equivalent dead end if
+         * they do" - a real, already-cited ps2sdk/kernel convention.
+         * GT3's thread 3 has now done exactly that: its own call chain
+         * unwound all the way back through its true entry point with
+         * nothing left to return to. Honor that project's own existing
+         * convention literally instead of the generic bounce: kill
+         * this thread for real (ee_hle_thread_exit_current(), an exact
+         * mirror of the live ExitDeleteThread syscall handler) so any
+         * OTHER real, already-created thread gets genuine CPU time,
+         * and - per Round 781's own citation trail on why any early-
+         * return path here must not silently starve real hardware
+         * time - also run ee_core_park_tick() so VBLANK/timer/DMAC
+         * interrupt delivery keeps flowing even in the fallback case
+         * where reschedule() finds nothing else ready either. */
+        if (ra == 0) {
+            g_ee_null_jalr_guard_hits++;
+            ee_hle_thread_exit_current(st);
+            ee_core_park_tick(st);
+            return 0;
+        }
+        g_ee_null_jalr_guard_hits++;
         st->pc = ra;
         st->next_pc = ra + 4;
         st->branch_pending = 0;

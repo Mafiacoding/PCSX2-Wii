@@ -812,6 +812,21 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
 #undef EE_ADVANCE
 }
 
+/* Round 782 (task #805): see ee_hle_thread.h's declaration comment for
+ * the full citation/rationale. Exact mirror of the live sysnum==36
+ * (ExitDeleteThread) handler body above (lines ~470-478), exposed for
+ * ee_core.c's null-jalr guard to call directly rather than duplicating
+ * this logic. */
+void ee_hle_thread_exit_current(ee_state_t *st)
+{
+    int cur = g.current_thread_id;
+    if (cur) {
+        tcb(cur)->status = EE_THS_DORMANT;
+        tcb(cur)->in_use = 0;
+    }
+    reschedule(st);
+}
+
 int ee_hle_thread_get_thread_count(void) { return g.thread_count; }
 int ee_hle_thread_get_current_thread_id(void) { return g.current_thread_id; }
 uint32_t ee_hle_thread_get_status(int thid)

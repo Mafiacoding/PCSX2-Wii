@@ -1830,6 +1830,23 @@ int iop_core_step(void)
     if (g_iop.halted)
         return 1;
 
+#ifdef R814_CLOSECONFIG_TRACE
+    /* Round 814: consume the post-SCMD_CLOSECONFIG-dispatch trace
+     * armed by iop_cdvd.c's dispatch_scmd() (see that call site's own
+     * R814_CLOSECONFIG_TRACE comment). Logs the real IOP CPU's own
+     * PC/opcode/$ra for a bounded window right after the completion
+     * boundary, so the actual caller's (CDVDMAN's real init code, per
+     * Round 337) own next branch targets can be read directly off
+     * stderr. Purely observational (read-only), no control-flow
+     * effect. */
+    if (g_r814_iop_post_trace_remaining > 0) {
+        uint32_t opc = iop_mem_read32(&g_iop, g_iop.pc);
+        fprintf(stderr, "[R814EVT] IOP-POST-TRACE step=%d pc=0x%08x opc=0x%08x ra=0x%08x\n",
+                R814_IOP_POST_TRACE_STEPS - g_r814_iop_post_trace_remaining, g_iop.pc, opc, g_iop.gpr[31]);
+        g_r814_iop_post_trace_remaining--;
+    }
+#endif
+
     /* Task #214/#215 continuation (85th/86th findings): real IOP
      * counters/timers run off the system clock, independent of
      * whatever the CPU itself is doing - this is called

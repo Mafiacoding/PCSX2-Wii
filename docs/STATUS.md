@@ -34038,3 +34038,135 @@ correct and kept via the clean regression suite above.
 **Leak-check:** clean - no BIOS/ISO/checkpoint files staged;
 `git diff --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'`
 confirmed empty immediately before commit.
+
+## Round 814: SCMD_CLOSECONFIG completion-boundary trace (task #811/#818) - EE-side call site never fires; the real dispatch is IOP MMIO, not SIF RPC
+
+**User's request (verbatim intent).** Round 813 closed the CDVD-
+dispatch hypothesis with a definitive negative (zero SIF CDVD RPC
+calls across 480M further instructions). The user's own next-step
+instruction, framed by an external review, asked for the EE-side
+completion boundary to be traced precisely:
+```
+SCMD_CLOSECONFIG completion -> EE return/status value -> caller
+continuation -> branch or wait condition -> expected loader/read
+request
+```
+with PC/$ra, syscall number, $v0 before/after, $a0-$a3, thread ID,
+thread status/context, and the next several branch targets recorded
+at the completion boundary - observation only, no fix to
+`dispatch_ncmd()`/SIF/CDVD-completion/semaphore-signaling without a
+directly observed EE-side request.
+
+**Wrong-hypothesis attempt (caught and corrected mid-round).** Round
+813's own "13 S-command calls ending in SCMD_CLOSECONFIG" framing was
+initially (mis)read as describing an EE-issued `SIF_SID_CDVD_SCMD`
+RPC with `rpc_number==0xF` (real `CD_SCMD_CLOSE_CONFIG`). Built and
+ran instrumentation targeting exactly that call site in `ee_core.c`'s
+SIF RPC catch-all (plus a matching delayed-delivery event and
+post-delivery PC trace) - it produced **zero hits**, despite the same
+run's `scmd=13, last_scmd=67` confirming the S-command burst did
+happen. Direct grepping
+(`grep -n "dispatch_scmd(" source/core/ee/ee_core.c source/hw/iop_cdvd.c`)
+showed why: `dispatch_scmd()` in `iop_cdvd.c` is called **only** from
+`iop_cdvd_mmio_write8()` - the real IOP hardware `OFF_SCOMMAND`
+register-write path (Round 261's already-cited real protocol) - never
+from `ee_core.c`'s SIF RPC dispatch. This is itself a useful
+correction to Round 813's own framing: the 13-call S-command burst is
+universal BIOS/CDVDMAN MMIO init boilerplate, not a SIF-RPC sequence
+and not GT3-specific. The wrong-hypothesis `ee_core.c` instrumentation
+was fully reverted (`git checkout`) once this was confirmed, per the
+Round 779 backup-before-experimenting rule; the pre-edit backup
+(`backups/round814/ee_core.c.bak`) was deleted after `diff` confirmed
+a byte-identical revert.
+
+**Corrected instrumentation.** Retargeted to the true, synchronous
+completion boundary: `dispatch_scmd()` itself in `source/hw/iop_cdvd.c`,
+gated behind a new `R814_CLOSECONFIG_TRACE` macro (unset/zero-cost in
+every normal and Wii build). When `cmd == SCMD_CLOSECONFIG`, it logs
+one `[R814EVT] SCMD_CLOSECONFIG-DISPATCH` line capturing **both**
+cores' state in a single snapshot: IOP `pc`/`ra`/current-thread-ID/
+thread-status, and EE `pc`/`ra`/current-thread-ID/thread-status/
+wait_type/wait_id/`$v0` (via new externs in `include/core/hw/iop_cdvd.h`
+and accessors already present for both cores). It then arms a 48-step
+post-completion IOP instruction trace, consumed once per instruction
+inside `iop_core_step()` in `source/core/iop/iop_core.c`
+(`[R814EVT] IOP-POST-TRACE step=N pc=... opc=... ra=...`), giving the
+"next several branch targets" the user asked for directly off stderr.
+A new checkpoint-chained cold-boot survey driver,
+`tools/round729-gt3-discboot/r814_closeconfig_trace.c` (same resumable
+structure as `r812_eventlog.c`/`r813_eecdvd_trace.c`), drives it - cold
+boot is required because Round 813 established SCMD_CLOSECONFIG fires
+very early (long before any multi-billion-instruction checkpoint's
+resting point).
+
+**Captured evidence.** A fresh cold-boot run (320M instructions,
+`ncmd=0 scmd=13 last_scmd=67`, matching Round 813's own boilerplate
+count) produced 3 `SCMD_CLOSECONFIG-DISPATCH` events, all structurally
+identical:
+```
+[R814EVT] SCMD_CLOSECONFIG-DISPATCH iop_pc=0x0000aa9c iop_ra=0x0000abe8
+  iop_tid=0 iop_status=0x0 | ee_pc=0x9fc41080 ee_ra=0x9fc41024 ee_tid=0
+  ee_status=0x0 ee_wtype=0 ee_wid=0 ee_v0=0x00000001
+```
+(the third event shows `ee_pc=0x9fc41084`/`ee_v0=0x00000009` - the EE
+side is mid-BIOS-ROM boot code at this point, not GT3's own code -
+expected, since this fires during the shared, pre-game BIOS init
+phase). The 48-step IOP-side post-completion trace for each event
+shows a short, self-contained, correctly-functioning subroutine:
+first, a busy-wait poll of the real `OFF_SDATAIN` register at its real
+KSEG1-aliased address (`0xBF402017`), masking bit 0x80 (BUSY, exactly
+Round 261's cited real hardware protocol) and looping on it; once
+clear, it drains the result byte, then at step 42 executes `jr ra`
+(`0x03e00008`) back to its immediate caller at `ra=0x0000abe8` (the
+call site that invoked `dispatch_scmd()`'s real IOP-side wrapper).
+That immediate caller runs 5 more instructions - restore stack
+(`addiu sp,sp,0x48`), reload its own saved `$ra` from the stack
+(`lw ra,0x18(sp)` -> `ra=0x0000b11c`), clear a completion flag at the
+fixed address `0x0000B530` (`lui at,1; sw v0,-0x4AD0(at)` = effective
+address `0x0000B530`), then itself returns (`jr ra`) to a *further*
+caller at `0x0000b11c` - i.e., a clean two-level return with no error
+path, no retry storm, and no blocking wait anywhere in the traced
+window.
+
+**Conclusion - the completion boundary is generic BIOS/CDVDMAN init
+boilerplate, not GT3 game logic.** This directly and conclusively
+answers the user's request: SCMD_CLOSECONFIG's real return value is a
+clean, synchronous completion (no error), its caller chain unwinds two
+levels cleanly with a flag clear and no branching to any wait/retry
+condition, and the EE side at the moment of completion is executing
+generic BIOS ROM code (`pc=0x9fc4108x`, KSEG1 ROM range), not GT3's
+own loaded game code. There is no "expected loader/read request" to
+map here because this S-command burst is universal system-init
+plumbing shared by every title this project has traced (Round 813's
+own point, now further sharpened) - GT3's actual blocker for task #811
+must lie further downstream, in GT3's own later EE-side code, well
+past this early/shared init window. Per the user's own explicit
+instruction, **zero functional/dispatch changes were made** -
+`dispatch_ncmd()`, SIF, CDVD completion, and semaphore signaling are
+all untouched; the only changes are observational, macro-gated,
+zero-cost-when-unset instrumentation.
+
+**Host-native regression suite.** Full 135-test suite re-run in full
+(resumable `xargs -P2` chunks): 135/135 coverage confirmed via an
+empty `comm -23` diff against the complete test list, exactly 3
+failures - the same pre-existing, already-tracked `test_gs_reglist_image`
+IMAGE-mode row-wrap failures (task #808), untouched by this round. No
+new regressions.
+
+**Wii cross-build.** `make clean && make -j4` against devkitPPC/libogc
+completes with zero warnings/errors; `pcsx2-wii.dol` (511,360 bytes)
+produced.
+
+**Files changed:** `include/core/hw/iop_cdvd.h` (new
+`R814_CLOSECONFIG_TRACE`-gated externs), `source/hw/iop_cdvd.c` (the
+`dispatch_scmd()` completion-boundary log), `source/core/iop/iop_core.c`
+(the `iop_core_step()` post-trace consumer),
+`tools/round729-gt3-discboot/r814_closeconfig_trace.c` (new,
+checkpoint-chained survey driver), `docs/STATUS.md` (this entry).
+`source/core/ee/ee_core.c`'s wrong-hypothesis instrumentation was
+fully reverted before commit (see above) - not part of this round's
+final diff.
+
+**Leak-check:** clean - no BIOS/ISO/checkpoint files staged;
+`git diff --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'`
+confirmed empty immediately before commit.

@@ -378,4 +378,20 @@ typedef struct {
 void iop_cdvd_checkpoint_save(iop_cdvd_checkpoint_t *out);
 void iop_cdvd_checkpoint_load(const iop_cdvd_checkpoint_t *in);
 
+#ifdef R814_CLOSECONFIG_TRACE
+/* Round 814 (task #811/#818): countdown armed by dispatch_scmd() in
+ * iop_cdvd.c the instant it processes the real SCMD_CLOSECONFIG
+ * command (the actual completion boundary - this project resolves
+ * every S-command synchronously, so there is no separate async
+ * "delivery" event to wait for here, unlike the SIF-RPC-based CDVD
+ * services). iop_core_step() decrements this once per real IOP
+ * instruction and logs PC/opcode while it's nonzero, letting a human
+ * read off the real caller's (whichever real IOP module code issued
+ * the OFF_SCOMMAND write - see Round 337's CDVDMAN citation) own next
+ * branch targets directly from stderr. Zero cost / unset in every
+ * normal build. */
+extern int g_r814_iop_post_trace_remaining;
+#define R814_IOP_POST_TRACE_STEPS 48
+#endif
+
 #endif

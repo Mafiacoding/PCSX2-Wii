@@ -5,6 +5,14 @@
 #include "core/hw/iop_dma.h"   /* Round 206: iop_dma_channel_write_bytes() */
 #include "core/hw/iop_intc.h"  /* Round 206: real IRQ2 raise (shared with legacy CD-ROM, iop_cdrom_legacy.c) */
 #include <string.h>
+#ifdef R814_CLOSECONFIG_TRACE
+#include <stdio.h>
+#include "core/iop/iop_core.h"
+#include "core/hw/iop_hle_thread.h"
+#include "core/ee/ee_core.h"
+#include "core/ee/ee_hle_thread.h"
+int g_r814_iop_post_trace_remaining = 0;
+#endif
 
 /* Register offsets within the page (real hardware, ps2tek + PCSX2's
  * pcsx2/CDVD/CDVD.cpp cdvdRead/cdvdWrite switch statements). */
@@ -307,6 +315,43 @@ static void dispatch_scmd(uint8_t cmd)
 {
     g_scmd_call_count++; /* Round 732 - see field comment */
     g_last_scmd_issued = cmd;
+
+#ifdef R814_CLOSECONFIG_TRACE
+    /* Round 814 (task #811/#818, direct continuation of Round 813 +
+     * the user-relayed external-review plan's own next-step request):
+     * this project resolves every real S-command SYNCHRONOUSLY right
+     * here - there is no separate async "delivery" step to wait for,
+     * so this IS the completion boundary the plan asked to be
+     * recorded at. cmd==SCMD_CLOSECONFIG (0x43) is real, cited (see
+     * this function's own header comment + Round 261's citation) and
+     * is the LAST of the real CDVDMAN init module's own S-command
+     * config burst (Round 337's own citation: CDVDMAN's real compiled
+     * init code runs once at boot, issues OPENCONFIG/READCONFIG.../
+     * CLOSECONFIG via real OFF_SCOMMAND register writes, then goes
+     * dormant). Captures BOTH cores' live state at this exact instant:
+     * the real IOP CPU's own pc/$ra (whichever real module code is
+     * mid-way through the store instruction that reached here - the
+     * genuine "caller"), and the EE's own pc/$ra/tid/thread-status/
+     * wait_type/wait_id for cross-core context (since both cores run
+     * interleaved, not to claim the EE is the caller of an IOP-local
+     * MMIO write). A bounded post-completion PC trace is armed on the
+     * IOP side (see iop_core_step()'s own R814 block) to capture the
+     * real caller's own next branch targets. Purely observational; no
+     * dispatch/result/interrupt behavior changed in any way. Unset
+     * (zero cost) in every normal/Wii build. */
+    if (cmd == SCMD_CLOSECONFIG) {
+        iop_state_t *iop = iop_core_get_state();
+        int iop_tid = iop_hle_thread_get_current_thread_id();
+        ee_state_t *ee = ee_core_get_state();
+        int ee_tid = ee_hle_thread_get_current_thread_id();
+        fprintf(stderr, "[R814EVT] SCMD_CLOSECONFIG-DISPATCH iop_pc=0x%08x iop_ra=0x%08x iop_tid=%d iop_status=0x%x | ee_pc=0x%08x ee_ra=0x%08x ee_tid=%d ee_status=0x%x ee_wtype=%u ee_wid=%u ee_v0=0x%08x\n",
+                iop->pc, iop->gpr[31], iop_tid, iop_hle_thread_get_status(iop_tid),
+                ee->pc, (uint32_t)ee->gpr[31].ud0, ee_tid, ee_hle_thread_get_status(ee_tid),
+                ee_hle_thread_get_wait_type(ee_tid), ee_hle_thread_get_wait_id(ee_tid),
+                (uint32_t)ee->gpr[2].ud0);
+        g_r814_iop_post_trace_remaining = R814_IOP_POST_TRACE_STEPS;
+    }
+#endif
 
     g_sresult_count = 0;
     g_sresult_pos = 0;

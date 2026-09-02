@@ -44,6 +44,8 @@ int main(int argc, char **argv)
     }
     printf("[R778-REGDUMP] $a2=0x%016llx $a3=0x%016llx\n",
            (unsigned long long)ee->gpr[6].ud0, (unsigned long long)ee->gpr[7].ud0);
+    printf("[R778-REGDUMP] $a0=0x%016llx $v0=0x%016llx $v1=0x%016llx\n",
+           (unsigned long long)ee->gpr[4].ud0, (unsigned long long)ee->gpr[2].ud0, (unsigned long long)ee->gpr[3].ud0);
     /* ctx2 fields relative to s3-0x3698 (0xC948 as signed 16-bit = -14008 = -0x36B8) */
     uint32_t s3 = (uint32_t)ee->gpr[19].ud0;
     uint32_t ctx = s3 - 14008u;

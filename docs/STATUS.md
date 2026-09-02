@@ -32749,3 +32749,160 @@ legitimate pre-gameplay decompression/init work" conclusion - no
 change to that diagnosis this round, just substantially more evidence
 depth and a cleaner instrument for future rounds to size their runs
 with intent instead of an unlabeled 8x guess.
+
+## Round 780 (task #798/#799, per user's "figure out 1 and 3 everything
+else later"): MS3's post-decompression resting point identified as a
+real, already-implemented VBLANK_START wait - not a new blocker
+
+**Task #798 - what comes after MS3's decompression.** Continuing the
+chain from Round 779's 9,999,989,347, `r778_ms3_pctrace` (the Round
+777 fine-grained PC tracer, reused as-is) caught the EE core, at
+total_instr~13.6B, executing a tight, zero-variation 7-instruction
+loop at 0x8000DB28-0x8000DB40:
+```
+0x8000DB28: lw   v0, 0(a0)
+0x8000DB2C: andi v0, v0, 4
+0x8000DB30: nop
+0x8000DB34: nop
+0x8000DB38: nop
+0x8000DB3C: beq  v0, zero, 0x8000DB28   ; delay slot below
+0x8000DB40: lui  v0, 0x1000             ; always executes, clobbered next iter
+```
+All 2000 traced steps showed the identical branch-not-taken outcome -
+qualitatively different from both the converging decompressor pattern
+and the earlier Round 778 bzero-helper mislabeling, so this needed its
+own diagnosis rather than being waved through as "more of the same."
+
+Extended `r778_ms3_regdump.c` (task #791's tool) with a new printf for
+$a0/$v0/$v1 (the loop's own live registers), backed up first per the
+new standing rule (`backups/round780_ms3_regdump_a0dump/` - deleted
+after the change was confirmed to compile and hold), rebuilt as
+`/tmp/r780_ms3_regdump`, and ran it against the live checkpoint:
+`$a0=0x000000001000f000`. Grepping the tracked source
+(`include/core/hw/ee_intc.h`, `source/hw/ee_intc.c`) confirms
+0x1000F000 is this project's own real, already-implemented
+`EE_INTC_STAT` register (cited from PCSX2's `Hw.h`
+`EERegisterAddresses`), and `andi v0,v0,4` (bit 2) is exactly
+`EE_INTC_IRQ_VBLANK_START` (source/core/ee/ee_core.c's own
+`#define EE_INTC_IRQ_VBLANK_START 2`, real PS2 INTC source index,
+matching PCSX2's `Dmac.h` `INTCIrqs` enum `0=GS,1=SBUS,2=VBLANK_S,
+3=VBLANK_E,...`). So this loop is a completely standard, textbook PS2
+main-loop idiom: **poll INTC_STAT for the VBLANK_START bit, i.e. "wait
+for the next vsync before doing more work."** Not a stuck condition by
+itself - the real question was whether this project's own VBLANK
+generator (`ee_check_vblank()`, Round 178/669, already fires
+`ee_intc_raise(EE_INTC_IRQ_VBLANK_START)` every
+`EE_CYCLES_PER_FRAME_NTSC=4,921,488` real EE instructions) would ever
+actually satisfy it.
+
+Computed the current frame-phase directly:
+`13,599,985,502 % 4,921,488 = 1,914,158`, i.e. ~3,007,330 real EE
+instructions (~24M chain-driver slices at the real `EE_IOP_STEP_RATIO
+=8`) until the next VBLANK_START tick - comfortably inside a single
+`budget=50000000`-slice chain call. Ran three more chain segments
+(`r779_ms3_chain ... continue 50000000` each, the Round 779
+units-fixed driver) to test this directly:
+
+- Segment 1: 13,599,985,502 -> **13,999,985,092** (+399,999,590,
+  ~8.0x). Mid-run slice-cap snapshots show the PC cycling through
+  0x00100BC4/0x00100B80 (decompressor), 0x8000E548/0x8000E53C (the
+  Round 778 bzero-helper), ending at 0x8000E548 - the poll loop is
+  gone from the final snapshot.
+- Segment 2: -> **14,399,984,651** (+399,999,559, ~8.0x). PC cycles
+  through 0x8000DB40/0x8000DC38 (the same poll-loop neighborhood,
+  confirming it recurs once per frame as expected) and 0x00100C30
+  (decompressor), ending back at 0x8000DB40.
+- Segment 3: -> **14,799,984,215** (+399,999,564, ~8.0x). PC cycles
+  through 0x00100B68/0x00100BD0 (decompressor), 0x8000E538/0x8000E548
+  (bzero helper), 0x8000DC38 (poll neighborhood), ending at 0x00100BD0.
+
+**Conclusion (task #798, answered):** the loop found at instr~13.6B is
+not a new resting point/blocker - it is a real VBLANK_START wait that
+this project already models correctly, and it resolves every frame
+exactly as real hardware would. Depth from 13.6B to 14.8B (+1.2B real
+instructions, three more MS3-chain calls) shows the SAME three-part
+cycle repeating cleanly: decompress a chunk -> zero-fill a buffer ->
+wait one vblank -> repeat, which is precisely the "sequential
+multi-asset unpacking with frame-paced I/O" pattern Round 778/779
+already inferred from the decompressor's own converging progress
+counters. GS display registers (PMODE/DISPFB1/DISPLAY1/DISPFB2/
+DISPLAY2) remain all-zero at 14,799,984,215 - MS3 has not yet reached
+the point where it configures a display circuit. This continues to
+support the Round 778 "the bridge is depth, not a bug" synthesis: nothing
+found this round warrants a source fix, and none was made (correctly
+skipped per the anti-fabrication/no-guessing discipline - there is no
+evidenced gap here to fix). `tools/round729-gt3-discboot/
+r778_ms3_regdump.c`'s new $a0/$v0/$v1 printf is the only source-tree
+change, confined to `tools/` (excluded from the Wii Makefile's
+`SOURCES`, Round 588 precedent), so regression/Wii-build are correctly
+skipped this round too.
+
+**Task #799 - reconciling stale task #764.** Task #764's original
+claim (opened during the Round 750-767 checkpoint-chain arc): "EE is
+spinning forever on a real SIF_SMFLAG (0x1000F230) poll at
+pc=0x00082180-0x00082198 (ra=0x00082524) because the IOP permanently
+halted at pc=0x000014D0." Re-verified this fresh, from scratch, rather
+than trusting the stale description: recompiled the tracked, Round-779
+units-fixed `r775_chain_driver.c` as `/tmp/r780_gt3_chain`, and ran it
+against the current `/tmp/r776b_gt3.ckpt` (the most recent real GT3
+checkpoint, produced by Round 776b's fresh cold-boot re-run) using the
+uploaded GT3 ISO and PAL BIOS directly (read-only, no copy needed).
+
+Two `continue`-mode segments (budgets 1 and 30,000,000 slices) both
+returned identically: `total_instr=38,865,331`, `pc=0x0101bc24`,
+`halted=0`, PMODE/DISPFB1/DISPLAY1/DISPFB2/DISPLAY2 all zero -
+byte-for-byte the same numbers Round 776b already documented after
+its DSUB opcode fix. This independently reproduces Round 776b's own
+finding: the EE's instruction counter does not advance across these
+calls despite `halted=0` and real wall-clock CPU time being spent,
+matching the long-documented Rounds 733-741 pattern of GT3's EE HLE
+threads self-parking/starving once past this point in boot. `pc=
+0x0101bc24` is a KUSEG address in the `0x00100000+` range PS2 games
+conventionally load at - real GT3 game code, not BIOS/kernel code,
+and nowhere near task #764's originally-cited `0x00082180-0x00082198`
+BIOS-kernel address range.
+
+**Reconciliation.** Task #764's specific root-cause description (IOP
+halted at pc=0x000014D0, EE parked in a SIF_SMFLAG poll at
+0x00082180-0x00082198) is confirmed stale/superseded, not currently
+true of GT3's boot. Between when #764 was opened and now, this project
+shipped multiple real, evidenced fixes that pushed GT3 far past that
+specific IOP-halt point: the SYSMEM ordinal-10 QueryBlockSize HLE
+intercept (Round 761), the TIMEMANP/TIMEMANI fixed-address collision
+fix (Round 763), the IOP low-kernel Status.IsC fix (Round 766/767),
+the EELOAD fastboot patch (Round 772), and Round 776b's DADD/DSUB
+opcode fix (which itself got GT3's fresh cold-boot past an
+unimplemented-SPECIAL-funct halt at instr=30,047,008 that Round 776
+had only flagged, not fixed). GT3 no longer stalls at pc=0x000014D0/
+0x00082180 at all - it now runs real game code millions of
+instructions further in, and reaches a different, later, already-
+independently-documented resting point (thread self-parking at
+pc=0x0101bc24) that Round 776b itself already flagged as "a real
+follow-up, not investigated further." This round's fresh re-run adds
+independent confirmation that resting point is stable and reproducible
+(exact same total_instr/pc across two separate driver invocations run
+today), not a fluke of Round 776b's specific session.
+
+Task #764's title symptom ("GS/Display never configured") remains
+literally true today - GS registers are still all-zero at the current
+resting point - but its cited mechanism is not what's blocking that
+outcome anymore. Closing task #764 as superseded/stale per this
+reconciliation; the current real blocker (GT3 EE-thread self-parking
+at pc=0x0101bc24, total_instr=38,865,331) is the one any future GT3
+round should pick up, and it is already flagged as an open follow-up
+in Round 776b's own text rather than being re-opened as if new. No
+source fix attempted this round for that deeper stall - out of scope
+for the user's "figure out 1 and 3" instruction (diagnosis/
+reconciliation only), and no evidence was gathered this round pointing
+at a specific, citable root cause worth an invented fix per the user's
+backup-first "try it, revert if it doesn't work" standing permission -
+that would need its own dedicated investigation round first, per this
+project's no-fabrication discipline.
+
+**Mandatory workflow.** No tracked `include/`/`source/` file changed
+for this task's re-verification (read-only checkpoint/ISO/BIOS access
++ a driver rebuild already covered by Round 779's mandatory workflow),
+so regression suite and Wii cross-build are correctly skipped.
+Leak-check clean - `/tmp/r776b_gt3.ckpt`, `/tmp/r780_gt3_chain`
+stayed in `/tmp/`, never staged; GT3 ISO/PAL BIOS were read directly
+from the read-only `uploads/` mount, never copied into tracked output.

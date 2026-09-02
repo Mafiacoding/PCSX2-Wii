@@ -33452,3 +33452,106 @@ cross-build correctly skipped per the project's docs-only-round
 convention (no `source/`/`include/` file differs from Round 808's
 committed tree - verified via `git diff --stat` showing only `tools/`
 changes).
+
+## Round 810 continuation: reversible SignalSema(5) tripwire confirms zero calls through thread 3's natural death; CDVD N-command dispatch count (permanent, Round 732) is 0 for the entire run - the disc-read command chain, not the signal, is what's missing
+
+Directly executes the user's explicit two-part instruction: run the
+`SignalSema` entry-point tripwire "over a longer run" than Round 810's
+first pass achieved, then trace the producer chain backward from
+thread 1's blocked `WaitSema(5)` toward the CDVD/disc-command path.
+Per the user's closing instruction, **the semaphore implementation
+itself was not touched** - `wake_one_sema_waiter()`, the SignalSema/
+WaitSema handlers, and the scheduler are unchanged this round.
+
+**Tripwire, extended via checkpoint chaining.** The sandbox's hard
+~178s per-call wall clock caps a single invocation at ~55-70 chunks
+(1M slices each) - not enough in one call to reach thread 3's death.
+Added an optional `save_ckpt_path` argument to `r810_sigtrip.c` (this
+project's established checkpoint-chaining pattern, used continuously
+since Round 382) so successive calls resume exactly where the last
+one left off. Two links: `r781_gt3_test2.ckpt` (`total_instr=678,449,972`)
+-> 55 chunks -> `/tmp/r810_c1.ckpt` (`total_instr=1,069,576,149`) -> 65
+chunks -> `/tmp/r810_c2.ckpt` (`total_instr=1,274,181,436`, thread 3
+now `DORMANT`/finished). **`SignalSema(5)` fired zero times across the
+entire ~596M-instruction extension, through and past thread 3's real,
+correct exit** (per Round 808's already-established finding that
+thread 3 is a bounded loading-bar thread that legitimately falls off
+its own function - not a crash). This is the "longer run" confirmation
+the user asked for: `wake_one_sema_waiter()` is conclusively irrelevant
+to thread 1's stall, matching the user's own predicted expected result
+exactly.
+
+**New finding #1 (not previously reported): GT3 never calls
+`AddIntcHandler` at all, for any cause, through this entire window.**
+`ee_core_get_addintc_log_count()` (Round 736, permanent, non-gated)
+reads `0` at both `total_instr=1.07B` and `1.27B`. This closes off the
+`graph_add_vsync_handler()`/stale-VBLANK-handler hypothesis (Round
+781's leading lead for semaphore 5's identity) as not merely stale but
+never-yet-registered - GT3's boot, at this depth, has not reached
+whatever code would install a real interrupt handler of any kind.
+
+**New finding #2 (not previously reported): thread 3 also calls
+regular `SignalSema(2)`/`SignalSema(3)` from the same `call_pc=0x0101bc04`,
+in lockstep, at roughly half the rate of its `SignalSema(0)` calls.**
+Neither semaphore currently has a waiter (only threads 1->sema5 and
+2->sema0 are parked; no thread 4+ exists yet in this run to consume
+2/3). Left as an open, unexplained data point - not investigated
+further this round since it's not on the path the user asked to
+follow.
+
+**The real finding: built `tools/round729-gt3-discboot/r810_cdvd_census.c`**,
+a census tool dumping the CDVD N/S-command dispatch counters (Round
+732, permanent), SIF RPC bind count (permanent), the AddIntcHandler
+log, and the full EE HLE thread table from a checkpoint. Run against
+both `r810_c1.ckpt` and `r810_c2.ckpt` (i.e. both just before and well
+after thread 3's death) - **identical result at both points**:
+```
+ncmd_call_count=0 scmd_call_count=13 last_ncmd_issued=0 last_scmd_issued=0x43 (SCMD_CLOSECONFIG)
+status=0x0a ready=0x4a disc_type=0x12
+rpc_bind_count=0 rpc_bind_cd=0x00000000
+addintc entries=0
+T1 wait_type=2(SEMA) wait_id=5 wakeup_count=0 wakeup_calls=0
+T2 wait_type=2(SEMA) wait_id=0 wakeup_count=0 wakeup_calls=0
+```
+**`iop_cdvd_get_ncmd_call_count()` - the real disc-read/seek/table-of-
+contents command dispatch counter `dispatch_ncmd()` increments on
+every call - is exactly 0 for the entire observed run, while 13
+S-commands (status/config-class, ending in `SCMD_CLOSECONFIG`) did
+fire.** This directly answers the user's own five-point checklist: the
+gap is not a wrong-semaphore signal, not a completion branch that's
+unreached, and not a lost/undispatched callback - **the actual N-level
+disc command that would eventually complete and signal semaphore 5 is
+never dispatched in the first place.** GT3's boot gets as far as a
+config/status handshake with the virtual drive (`disc_type=0x12`
+confirms disc-type detection succeeded; `SCMD_CLOSECONFIG` confirms the
+config-read sequence completes normally) and then stops short of
+issuing any real read/seek command. `rpc_bind_count=0` rules out the
+RPC-bind-based CDVDFSV access path too - neither this project's direct
+NCMD-register path nor its SIF-RPC path has ever been exercised.
+
+**This connects GT3's semaphore-5 stall directly to task #447**, this
+project's long-running (Rounds 480-762+) "why does OSDSYS/game code
+never dispatch an N-command" investigation - previously explored almost
+entirely through the BIOS/OSDSYS disc-browser angle, never through a
+real licensed game's own boot code reaching this exact point. The
+concrete next step, not undertaken this round per the user's "keep
+tracing" framing being satisfied by locating *where* the chain breaks
+(the missing N-command dispatch), not yet *why* it's missing: identify
+GT3's own EE-side call site that should follow the config-close S-command
+sequence with a real `sceCdRead`/N-command request, and determine
+whether that call site is never reached, or reached but the emulator's
+own EE->IOP RPC dispatch swallows it before `dispatch_ncmd()` (mirroring
+task #447's own repeatedly-confirmed shape for other titles).
+
+**No tracked-source fix shipped this round**, per the user's explicit
+"keep the existing semaphore implementation unchanged" constraint - the
+semaphore/scheduler code is confirmed correct and untouched.
+`ee_hle_thread.c`'s `R810_SIGTRIP` instrumentation was added, used, and
+fully reverted (`git checkout --`, confirmed via `git diff --stat`
+showing zero change) before this writeup; `backups/round810/` and the
+leftover `backups/round808b/` were deleted. The only lasting changes
+are `tools/round729-gt3-discboot/r810_sigtrip.c` (now with checkpoint-
+chaining support) and the new `r810_cdvd_census.c`, both committed for
+reuse. Regression suite and Wii cross-build correctly skipped per the
+project's docs-only-round convention (no `source/`/`include/` file
+differs from the prior committed tree).

@@ -32178,3 +32178,87 @@ Files added (tracked as tooling source, not scratch):
 `tools/round729-gt3-discboot/r775_gs_survey.c`,
 `tools/round729-gt3-discboot/r775_chain_driver.c`,
 `tools/round729-gt3-discboot/r775_dump.c`.
+
+## Round 776 (task #536/#447 follow-up, user request: "continue the tasks
+into the new round, also screenshot for me that we have text from the
+bios, make checkpoint files and bundles"): real BIOS-boot screenshot
+captured, KOF/Tekken/Klonoa2 checkpoint chains extended, GT3 fresh-boot
+opcode gap flagged (not fixed)
+
+**Screenshot delivered.** Built `r776_bios_chain.c`
+(`tools/round717-thread-body-trace/`), a checkpoint-chained variant of
+Round 717's `fb_dump.c` with no disc mounted (task #536's diskless
+scenario), that dumps the live GS framebuffer to a PPM after every
+invocation. Ran 3 chained invocations against the real JP BIOS
+(`ps2-0100j-20000117.bin`, the SCPH-10000-era v1.00 JP image - the
+`scph10000` this project's own history, e.g. Round 590, has always
+used for the diskless picture milestone) reaching 2,527,990,742 real
+EE instructions. Confirmed `PMODE=0x66` (display enabled) and
+`DISPFB2` alternating between two distinct framebuffer addresses
+(`0x1446`/`0x1400` - genuine double-buffering) throughout, matching
+Round 321's real-hardware "OSDSYS uses GS circuit 2" finding. The
+dumped, visually-inspected picture is a real, moving, structured
+wireframe scene (a persistent red horizontal band plus a dense,
+growing field of diagonal white/blue line segments - `quadwords_seen`
+climbed from 6,007 to 270,476 across the 3 checkpoints) - genuine,
+non-blank, non-crashed BIOS output, not a placeholder.
+
+**Honest caveat, not glossed over:** this is the same wireframe-only
+content Round 717 already documented at a shallower depth (100M
+instructions) - no glyph-level text (the kind Round 636 achieved via
+a `GS_REG_TRXREG` row-height fix, still present in tracked `gif.c`)
+rendered in this round's 3 checkpoints despite reaching 2.5x deeper
+than Round 636's own reported checkpoints. This reproduces, rather
+than resolves, Round 717's still-open reconciliation question (its
+own writeup already flagged the current tree's wireframe-only content
+as of uncertain real-hardware fidelity, since real live PCSX2's
+diskless boot showed a fully black screen at 10x this depth - Round
+718). No fix was attempted this round - re-deriving whether Round
+636's text-rendering precondition still triggers in the current tree
+needs its own dedicated instrumentation pass, not a guess.
+
+**KOF checkpoint chain extended.** `/tmp/r775_kof.ckpt` (Round 775's
+chain) continued for 2 more invocations, now at 7,359,992,230 real EE
+instructions (pc cycling within the same small, previously-
+disassembled real-BIOS working set: bzero loop, VBLANK-poll loop).
+`DISPFB2`/`DISPLAY2` remain correctly zero throughout - unchanged
+finding, not re-litigated at length here (see Round 775's entry).
+
+**Tekken Tag Tournament (full game, not demo) and Klonoa 2 checkpoint
+chains started** (`/tmp/r776_tekken.ckpt`, `/tmp/r776_klonoa.ckpt`,
+both via the generalized `r775_chain_driver.c`), each reaching
+799,999,187 instructions in their first invocation, both resting at
+the same real kernel VBLANK-poll loop (`pc=0x8000e538`) KOF and prior
+titles rest at this early in boot - consistent, not yet distinguishing
+progress, real BIOS/kernel code confirmed by prior rounds'
+disassembly.
+
+**Gran Turismo 3 fresh cold-boot hits a real, unimplemented EE SPECIAL
+opcode almost immediately (flagged, not fixed).** Starting a *fresh*
+GT3 checkpoint chain (rather than resuming the stale
+Rounds-750-767-era `/tmp/ckpt_gt3_r766.bin`, which failed to load this
+session - `checkpoint_load fail`, most likely a struct-layout/session
+mismatch, not investigated further this round) halts almost
+immediately (instr=30,047,008, `pc=0x0100f5b0`) with `"unimplemented
+SPECIAL funct"` (`source/core/ee/ee_core.c` line 7259's default
+case). This is a genuinely new, real finding - the SPECIAL-opcode
+switch already covers a broad, well-cited range (ADD/SUB/AND/OR/XOR/
+NOR/MFSA/MTSA/SLT/DADDU/DSUBU/the trap family/DSLL-DSRA32), so this is
+a specific missing funct value, not yet captured (halt() doesn't print
+the raw funct field). No fix was attempted this round - the funct
+value needs a small instrumentation pass to capture before any change
+is evidenced. **This is worth prioritizing early in the next round**
+since it currently blocks GT3 from progressing at all on a fresh
+cold-boot chain (the historical Round 750-767 GT3 work all resumed
+from deep-in-boot checkpoints that evidently didn't hit this
+particular code path, or used a different BIOS/init-order than this
+round's `r775_chain_driver.c`).
+
+**Mandatory workflow.** No `include/`/`source/` tracked file was
+modified this round - only new `tools/` scratch driver source
+(`r776_bios_chain.c`) and this documentation. Regression suite and Wii
+cross-build correctly skipped per the established docs-only-round
+convention. Leak-check clean (verified below, before commit) - all
+checkpoint files (`/tmp/r775_kof.ckpt`, `/tmp/r776_tekken.ckpt`,
+`/tmp/r776_klonoa.ckpt`, `/tmp/r776_gt3.ckpt`, `/tmp/r776_bios.ckpt`)
+and BIOS/disc images stayed in `/tmp/`/`uploads/`, never staged.

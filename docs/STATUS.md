@@ -32561,3 +32561,117 @@ instructions (+1,099,998,834 this segment), `halted=0` throughout,
 GS display registers still all-zero (expected, per the finding
 above). No tracked source changed by this step either - regression/
 Wii-build correctly skipped again.
+
+## Round 778: Metal Slug 3 cross-title check + "the bridge" synthesis (tasks #789-793)
+
+User uploaded `Metal Slug 3 (Europe) (En,Fr,De,Es,It).iso` and asked
+to focus on getting GS circuit 1 or 2 configured for this second 2D
+title, "use all our resources to finally figure out the bridge which
+is keeping us from hitting in game or atleast a picture." Verified
+the ISO is real/valid (raw SYSTEM.CNF/BOOT2 string search at ISO byte
+offset 534657: `BOOT2 = cdrom0:\SLES_525.99;1`, `VER = 1.02`,
+`VMODE = PAL`) and built a fresh checkpoint chain with the same
+proven methodology as GT3/Tekken/KOF, reaching 5,199,994,484
+instructions by end of round.
+
+**Research: is there a missing generic "bridge" call in the shared
+boot path?** Extracted the fresh, complete real ps2sdk source
+(`ps2sdk-master.zip`, more complete than this repo's existing 17-file
+`docs/reference/ps2sdk/` subset) and read `ee/startup/src/crt0.c` in
+full: `__start()` -> `_main()` -> `SetupHeap/FlushCache/_InitSys/
+_libcglue_*` -> `main()` -> `Exit()`. **`SetGsCrt` is never called
+anywhere in this generic runtime path.** `grep -rl "SetGsCrt"` across
+the whole ps2sdk tree finds it in exactly 3 opt-in library files
+(`ee/graph/src/graph_mode.c:189`, `ee/libgs/src/libgs.c:53`,
+`ee/debug/src/scr_printf.c:64`), all called from a game's own
+application code, never from crt0/kernel init. This generalizes
+Round 777's KOF finding: there is no missing kernel-level "bridge"
+call being skipped anywhere in the shared boot path - GS/CRTC setup
+is exclusively the game's own opt-in responsibility, invoked from
+wherever the game's `main()` chooses to call it.
+
+**Instrumented survey (task #791).** Reapplied Round 777's GS-write/
+SetGsCrt instrumentation (`gs.c` MMIO watch on PMODE/DISPFB1/DISPLAY1/
+DISPFB2/DISPLAY2, `ee_core.c` sysnum==2 watch) plus a new
+CreateThread/StartThread call-site watch (`ee_hle_thread.c`
+sysnum==32/34, extending Round 612/613's post-hoc census with live
+interception) to a fresh scratch build (`/tmp/scratch_ms3dbg/`).
+Across 1.2B+ instructions: **zero GS-register writes, zero SetGsCrt
+calls, zero CreateThread calls** - identical negative signature to
+KOF's Round 777 result. `r777_kof_census.c` (confirmed generic/
+reusable despite its filename) shows `thread_count=1` for MS3 too,
+matching KOF exactly.
+
+**What is MS3's game code actually doing?** Dumped and disassembled
+(`tools/round655-ee-disasm/disasm.c`) the real code MS3's EE core
+was executing at `0x00100B60-0x00100D00`. This is a genuine, well-
+formed **LZ-style bit-stream decompressor**: a bit-refill helper
+(`0x00100C60-0x00100CE4`, packs 4 stream bytes into a 32-bit bit-
+buffer and updates a bit-count field) feeds a main decode loop
+(`0x00100B68-0x00100C34`) that branches per-bit between a literal
+single-byte store and a back-reference copy, advancing a destination
+pointer (`$s0`) until it reaches a target length read from context
+field `ctx+0x00`. Register-probed the live context directly
+(`tools/round729-gt3-discboot/r778_ms3_regdump.c`, new this round):
+at instr=3,199,996,601, target size = `0xa7eb4` = 686,260 bytes,
+bytes written so far (`$s0-$s2`) = `0x25c2c7-0x200000` = 378,055
+bytes - **55% complete and genuinely converging**, not stuck. This
+is the same class of finding as Round 643's real OSDSYS ELF
+decompressor and Round 777's real 32MB RAM-clear loop: legitimate,
+expected early-execution work, not a bug.
+
+Also re-examined the BIOS-side `0x8000E4D0-0x8000E558` code the CPU
+repeatedly rests in between game-code slices (previously labelled a
+"32MB EE-RAM zero-fill" in Round 777). Full disassembly shows this is
+actually a **generic bounds-parameterized zero-fill helper** (calls
+`0x80000C40` to obtain a `[s0,a0)` range, then a simple 16-byte-per-
+iteration `SQ` store loop) - a shared bzero-style library routine
+reused across many different callers/buffer sizes, not one single
+mega-loop. Repeated visits to this PC range across different
+`total_instr` depths are separate, legitimate, unrelated calls, not
+evidence of a stall - this corrects an over-interpretation made
+mid-round before the full body was re-disassembled.
+
+**Synthesis (task #792): is there a common systemic "bridge" across
+all 4 titles?** Cross-referencing KOF (Round 777) and MS3 (this
+round) - the only two titles instrumented this deeply so far -
+they show an **identical signature**: zero GS writes, zero SetGsCrt,
+zero CreateThread, `thread_count=1`, real/legitimate/converging code
+execution (RAM-clear + decompression), across billions of chained
+instructions. Combined with the ps2sdk research above (no generic
+runtime call is being skipped), the most evidenced conclusion is:
+**"the bridge" is not a missing or broken call in this project's
+emulation - it is depth/reachability.** Every title surveyed so far
+is still executing legitimate pre-gameplay work (BIOS init, library
+routine calls, asset decompression) at the point our checkpoint
+chains have reached. None has yet reached the point in its own code
+where it would call SetGsCrt or write GS registers, because that
+point comes later than any chain has run so far. MS3's own decoder
+was measured at ~55% through a ~670KB decompression target after
+3.2B instructions - real, slow, but finite forward progress.
+
+**Classification + fix decision (task #793).** No tracked-source fix
+is warranted or shipped this round. There is no evidenced bug: the
+BIOS zero-fill helper is correct generic code, the LZ decompressor is
+correct and converging, and the real ps2sdk source confirms no
+generic-runtime GS/display call is being missed. Per this project's
+anti-fabrication discipline, guessing at a "bridge" fix here would
+mean inventing a change with no evidence behind it - correctly
+skipped. The one actionable lever the evidence supports is the one
+already in use: **keep extending the checkpoint chains** (particularly
+MS3's, which is closer to a concrete, measurable completion point -
+finishing its current decompression pass - than KOF's less legible
+oscillation between BIOS and title-select re-entries).
+
+**Mandatory workflow.** No tracked `include/`/`source/` file was
+modified this round (all instrumentation lived in
+`/tmp/scratch_ms3dbg/`, never touching the tracked tree) - regression
+suite and Wii cross-build correctly skipped per the docs-only
+convention. Leak-check clean: `/tmp/ms3.iso`, `/tmp/pal_bios.bin`,
+`/tmp/r778_ms3.ckpt`, `/tmp/scratch_ms3dbg/`, and all `/tmp/r778_ms3_*`
+binaries/dumps stayed in `/tmp/`, never staged. New tracked tooling
+added this round (diagnostic drivers only, no BIOS/disc/checkpoint
+content): `tools/round729-gt3-discboot/r778_ms3_regdump.c` (new) and
+`r777_kof_pctrace.c` (existed only in Round 777's scratch dir until
+now - added to the tracked tree per this project's existing-tool
+convention, since it proved useful again this round).

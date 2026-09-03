@@ -34670,3 +34670,78 @@ positive (81-line ASCII C source file, confirmed via `file`/`head`, not a checkp
 No actual BIOS/ISO/checkpoint artifact was staged or committed. Both persisted checkpoint files
 (`checkpoints/gt3_round817_...ckpt`, `checkpoints/gt3_round818_...ckpt`) remain gitignored and
 untouched by this round's `git add`.
+
+## Round 820: cracked down further on 0x01047B00 - it's a status-block head, not a bare flag (task #834-#838)
+
+Per the user's explicit follow-up instruction ("crack down 0x01047B00... make sure we have backups of
+this session local... search all Sources/SDKs/etc for the real CDVD Drive Gap"). GT3 remains loaded
+via the project's existing virtual-drive ISO mount (`iop_cdvd_mount_iso()` + `iop_cdvd_set_disc_present
+(0x12)`), unchanged this round - noted per the user's reminder, no change needed there.
+
+**Backup/persistence check (task #835):** confirmed clean before continuing. `git log` shows Round 819's
+commit `d4be514` intact; `git status --porcelain` shows a clean tree (only pre-existing untracked
+`r815_*.c` scratch files from an earlier round, harmless); both checkpoint files
+(`checkpoints/gt3_round817_...ckpt`, `checkpoints/gt3_round818_...ckpt`, 77MB total) are present,
+correctly gitignored, and living in the tracked repo's own `checkpoints/` directory on the user's
+persistent outputs folder - not `/tmp` scratch, so nothing from Round 819 is at risk from a sandbox
+reset. Only this round's own throwaway scratch instrumentation (built in `/tmp/r819scratch`,
+`/tmp/r819build`) is ephemeral, matching every prior round's disposable-probe convention - nothing of
+substance lives only there.
+
+**Real CDVD/SIF-RPC protocol research (task #836):** read the uploaded real IOP `sifcmd.c` (roman's
+2003 decompiled SIFCMD module source, already vetted by this project in earlier rounds). Found the
+exact real-hardware blocking pattern for `sceSifCallRpc()`/`sceSifBindRpc()`: the synchronous client
+path does `client->rpcd.tid = GetThreadId(); sceSifSendCmd(...); SleepThread();` to block the calling
+thread, and the real IOP-side `cmd80000008_END` handler (processing an inbound SIF `END` command, i.e.
+an RPC reply) does `if (packet->client->rpcd.tid >= 0) iWakeupThread(packet->client->rpcd.tid);` to wake
+it back up. This is the SAME SleepThread-to-block / WakeupThread-to-resume idiom Round 819 found in
+GT3's own wait loop - strong, sourced evidence that GT3's home-grown wait mechanism is architecturally
+the same shape as (though not literally) a real Sony RPC-completion wait, not an ad hoc GT3 invention.
+
+**Deeper disassembly (task #837) - 0x01047B00 is the head of a small status/counter struct, not a bare
+boolean.** Disassembled the two callers surrounding 0x0100D8D0 (Round 819's raw wait primitive) and
+found it is itself wrapped by a second function at **0x0100D9A8**: a generic "wait until
+`(*(0x01047B00) - baseline) >= threshold`" primitive, where `baseline = *(0x01047B08)` is snapshotted
+once at entry and `threshold` is passed in `$a0`. Live instrumentation (new bounded scratch PC-watch,
+`R819_PCWATCH2`, never applied to tracked source) caught this wrapper being called with **threshold=3**
+(`ra=0x0100da24`) and **threshold=2** (`ra=0x0100da08`) in strict alternation, both from thread 3 - i.e.
+GT3 is waiting for at least 2, then at least 3, completions relative to a running counter at
+`0x01047B00`, exactly the shape of a real generation/sequence-number completion count, not a simple
+flag. The wrapper also unconditionally writes a scratchpad-resident byte at **`0x70000000+0x1BC`
+(offset 444 from a fixed `$s3=0x70003000` base)** on every pass - copying either `0` or `*(0x01047B14)`
+depending on `*(0x01047B99)` - very plausibly a globally-readable "current load/status" flag other GT3
+subsystems (menu, loading-screen UI) poll via cheap scratchpad access. Its caller (whoever invokes
+0x0100D9A8 with threshold=2/3) was not yet located - flagged as task #838 for the next round.
+
+**Corrected/refined the Round 819 write-watch (important precision fix, not a reversal).** Round 819's
+`R819_ADDR_WATCH` only covered `0x01047AF0-0x01047B10` (32 bytes) and found zero writes across 21.3M
+instructions. This round widened the watch to `0x01047B00-0x01047C00` (256 bytes, covering the whole
+struct implied by the offsets disassembled above: +0x00 gate, +0x08 baseline, +0x14 payload, +0x40
+scratch, +0x99 mode byte) and re-ran across a much larger window - resuming from the Round 817
+checkpoint (217M) forward 15,000,000 budget-units to total_instr=323,889,372 (~106.7M more real
+instructions, the widest window surveyed yet). Result: offset **+0x40 does get written every single
+loop iteration** (alternating `0` and the caller's own `$sp`, e.g. `0x010459f0`) - but this is confirmed
+to be pure per-iteration SP-chain/reentrancy-bookkeeping scratch space (matches the disassembly at
+0x0100D904/0x0100D974 exactly: `sw sp, 0x40(s2)` then later `sw v0, 0x40(s2)` to reset it), NOT the wait
+condition itself. Every OTHER field in the struct - including offset +0x00 (the actual gate Round 819
+found the loop blocks on) - was written **zero times** across this much wider 106.7M-instruction,
+cross-checkpoint window. This strengthens rather than weakens Round 819's core finding: the real gate is
+confirmed untouched over a substantially larger sample, and the one field that DOES change is now
+fully, harmlessly explained.
+
+**Classification unchanged, now on stronger evidence:** the CD-read request is still never issued - nothing
+in ~106.7M instructions of additional survey writes the actual wait-gate at `0x01047B00+0`. No fix
+implemented this round (still correctly nothing to fix - GT3's own wait/wake/heartbeat machinery
+continues to behave exactly as designed; what's missing is upstream of everything traced so far).
+
+**Regression / Wii build:** correctly skipped - purely investigative round, no tracked `source/` file
+modified (`git diff --stat source/` empty). All new instrumentation (`R819_PCWATCH2`, the widened
+`R819_ADDR_WATCH` range) lives only in `/tmp` scratch copies, per the project's standing disposable-probe
+convention - never applied to tracked source.
+
+**Files changed:** none in `source/`; no new tool files committed this round (all diagnostics were
+throwaway scratch, matching precedent - e.g. Round 818's `R818_MSGQ_TRACE` probe, also never committed).
+
+**Leak-check:** trivially clean - nothing was staged this round besides this `docs/STATUS.md` update
+(confirmed via `git diff --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'`
+returning empty once STATUS.md alone is staged).

@@ -34887,3 +34887,116 @@ Round 819's `r819_resume_watch.c` unmodified, just recompiled against the new sc
 
 **Leak-check:** trivially clean - only this `docs/STATUS.md` update is staged
 (`git diff --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'` empty).
+
+## Round 823: CDVD-over-ISO dispatch model explained against real PCSX2 source, real PCSX2
+game-launch/IOP research, and thread 1's WaitSema(5) corruption re-timed to near-immediate (task
+#844/#845/#846)
+
+User's Round 823 message asked four things: (1) how should CD-ROM dispatch conceptually work when this
+project runs against a mounted ISO rather than real disc hardware; (2) focus the round on CDVD issues and
+GT3 specifically; (3) only try self-directed source fixes if evidenced, revert if they break anything;
+(4) check how real PCSX2 launches games and writes to the IOP, using the already-uploaded
+`pcsx2-master.zip` reference source. All four are addressed below. No tracked source was changed this
+round (confirmed via `git diff --stat source/` at the end - empty).
+
+**Task #844 - CDVD-over-ISO dispatch model, verified against real PCSX2 source.** Extracted and read
+`pcsx2-master/pcsx2/CDVD/{CDVD.cpp,CDVDcommon.cpp,CDVDisoReader.cpp}` (real PCSX2's actual CDVD
+subsystem). The real architecture is a clean three-layer split, and this project's own design already
+mirrors it correctly:
+- **IOP-side command protocol** (`CDVD.cpp`): the IOP's CDVDMAN/CDVDFSV modules issue N-commands
+  (`N_CD_READ` etc., `CDVD.cpp` line ~1987) and S-commands over the same hardware register interface
+  real disc hardware exposes - this layer has no idea whether the medium is a real disc or a file.
+- **Medium abstraction** (`CDVDcommon.cpp`): `N_CD_READ`'s handler calls `DoCDVDreadTrack(lsn, mode)`
+  (`CDVDcommon.cpp` line 467), which calls through a runtime-selected provider vtable, `CDVD->readTrack(...)`.
+  `CDVD` is swapped at mount time between several interchangeable backends: real disc (`CDVDdiscReader.cpp`),
+  ISO file (`CDVDisoReader.cpp`), CHD, CSO, gzip, blockdump. The N-command dispatcher never knows or cares
+  which one is active.
+- **ISO backend** (`CDVDisoReader.cpp`): when the mounted medium is a `.iso` file (the common case, and
+  this project's exact scenario), `ISOopen()`/`iso.Open()` wraps a `static InputIsoFile iso` object that
+  does an ordinary host file seek+read, translating LSN to a byte offset in the file. From the IOP
+  command-dispatcher's perspective this looks and behaves identically to a real disc read.
+- Sector bytes then flow back through `cdvdReadSector()` (`CDVD.cpp` line 1101), which does a raw
+  `memcpy()` into IOP physical RAM at the DMA3 channel's `MADR` and clears the target cache range - genuine
+  IOP-side DMA delivery of real sector content, not a synthetic shortcut.
+
+This project's `iop_cdvd_mount_iso()` + `iop_cdvd.c`'s N-command read handler (reading directly from the
+mounted ISO file and delivering via SIF/IOP DMA) is architecturally the same shape as real PCSX2's
+ISO-backend path - confirmed correct in principle. **This does not by itself explain GT3's problem**: the
+architecture, if reached, would work correctly. The open question (task #811, unchanged) is why GT3's EE
+code never issues the N-command in the first place, not whether the ISO-backed response would be correct
+if it did.
+
+**Task #845 - real PCSX2 game-launch / IOP-write path.** Also extracted and read `IopBios.cpp` (real
+PCSX2's IOP-side HLE-BIOS module) and `Elfheader.cpp`. Key finding: real PCSX2 actually has **two
+separate, non-overlapping dispatch tiers**, and this project's own tree already spans both of them:
+- **Full/organic BIOS boot** (what this project's GT3 chain is doing): the real low-level N/S-command
+  protocol above is mandatory - every file the game reads goes through genuine CD-ROM command dispatch.
+- **Fast/HLE BIOS boot** (`IopBios.cpp`'s `namespace ioman`, ~850 lines): real PCSX2 can *skip* the
+  low-level command protocol entirely for file I/O by intercepting the IOP kernel's `ioman`/`iomanx`
+  library-call vector directly in emulator code (`_dread_HLE`, `_getStat_HLE`, `host_stat()`,
+  `ioman::host_path()`) and redirecting `open`/`read`/`lseek`/`close` straight to a host-side path
+  resolver that pulls bytes out of the mounted filesystem, bypassing NCMD/SCMD dispatch altogether for
+  these calls. This is real PCSX2's genuine "fast boot" mode, not a hack.
+
+This project already has an analog of *both* tiers from earlier rounds: the full NCMD/SCMD register model
+(Rounds 261/347) for organic boot, and a comparable cdrom0:/cdrom1: FILEIO-to-ISO9660 shortcut (Round 367,
+task #94) for fast-boot-style access. Since GT3's chain in this project is running the **organic** tier
+(real BIOS, real EELOAD, real SYSTEM.CNF parse - confirmed many rounds back), real PCSX2's own behavior in
+this same tier is that NCMD dispatch is mandatory and non-optional - reinforcing that task #811's blocker
+(GT3 never issuing that first NCMD) is a genuine EE-side gap in this project, not a case where a
+legitimate fast-boot shortcut should have been taken instead. No fix implemented from this research alone
+- it's confirmatory/comparative, not a source of a new bug fix.
+
+**Task #846 - thread 1's WaitSema(5) corruption, MAJOR RE-TIMING (was ~850M instructions after park,
+now measured at ~400-800 instructions after park).** Built a fine-grained in-process bisection tool
+(`/tmp/r846build/finebisect.c`, scratch-only, not committed) that polls
+`ee_hle_thread_get_saved_pc(1)`/`get_status(1)`/`get_wait_id(1)` after small `system_run_interleaved()`
+increments from a cold boot, with no checkpoint save/load in the loop. Bisecting down from a 50,000-slice
+step to a 100-slice step pinned two facts precisely and repeatably:
+- Thread 1's genuine, uncorrupted first entry into `WaitSema(5)` (`saved_pc=0x0101bc24`, the correct
+  universal WaitSema return address) happens at **total_instr=38,865,331** - a small, fully cold-boot-reproducible
+  number, not a `checkpoint`-dependent one.
+- The saved pc corrupts to `0x0101bb28` (the iWakeupThread stub's return address, Round 812/817's original
+  finding) within roughly **400-800 raw instructions** of that park - by total_instr≈38,865,719-38,866,119
+  across repeated runs. **This directly overturns the working assumption carried since Round 812** that
+  this corruption happens deep into the run (~850M instructions after park); it in fact happens almost
+  immediately, every single cold boot.
+- A companion tool (`park_capture.c` + a `-DR812_EVENTLOG`-instrumented resume) tried to catch the exact
+  corrupting event by checkpointing right at the genuine park and resuming with full event logging. This
+  **did not reproduce the corruption at all** - post-checkpoint-restore, thread 1 instead loops indefinitely
+  re-entering `WaitSema(5)` at the correct, uncorrupted pc every scheduler tick, never progressing and
+  never corrupting. This is a **separate, real finding**: `checkpoint_save()`/`checkpoint_load()` do not
+  faithfully preserve whatever scheduling state leads to the corruption in a live run - meaning any
+  investigation of this specific bug via saved checkpoints (as Rounds 812/817 originally did) cannot
+  reproduce it faithfully, and only a continuous in-process run can currently observe it.
+- A direct EE-RAM dump at the moment of detection (`dumpregion.c`) is **not reliable as a causal pc**: two
+  different polling granularities landed on two different addresses (`0x8000a0ac`/`0x8000a0bc` at one step
+  size, `0x01026a24` at another) - both are just "wherever the currently-scheduled thread happens to be"
+  at the moment we polled, not necessarily the instruction that performed the corrupting `reschedule()`
+  call. Pinning the exact causal instruction requires full `R812_EVENTLOG` coverage of this ~800-instruction
+  window specifically, which this round's disk budget (repeatedly hit 98-100% full against a 9.6GB sandbox
+  cap) could not sustain long enough to capture cleanly.
+
+**No fix implemented, correctly so.** The exact causal event (what code, at what pc, calls `reschedule()`
+or `WakeupThread` against thread 1 within that ~800-instruction window, and whether `Status.EXL`/`ERL` is
+set at that moment - the precondition for Round 812's existing guard) is still not captured with certainty.
+Implementing a fix now would be guessing at the mechanism, which this project's anti-fabrication
+discipline (and the user's own "only try own codes if they break revert them" framing, which presumes an
+evidenced attempt) rules out. What Round 823 does contribute is real: the corruption is now known to be
+fast and deterministic (not rare/late), and checkpoint-based investigation of it is now known to be
+unreliable - both change how a future round should approach task #846 (continuous in-process runs with
+`R812_EVENTLOG` gated to just past total_instr=38,865,331, not checkpoint-and-resume).
+
+**Regression / Wii build:** correctly skipped - `git diff --stat source/` empty, purely investigative
+round. All new tooling (`finebisect.c`, `park_capture.c`, `gated_eventlog.c`, `dumpregion.c`,
+`chain_driver`/`thread_census` recompiles) lives only under `/tmp/r846build/` and `/tmp/r846_srcs.txt`,
+never applied to tracked `source/`. The pre-existing `/tmp/r823scratch/ee_hle_thread.c`
+(Status-register-logging additions to `R812_EVENTLOG`, from the prior round in this session) also remains
+scratch-only.
+
+**Files changed:** only this `docs/STATUS.md` update.
+
+**Leak-check:** clean - `git diff --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'`
+empty; the one checkpoint created this round (`/tmp/r846_park.ckpt`) was scratch-only and deleted before
+this commit, per the standing rule that persisted checkpoints only ever go to the gitignored
+`checkpoints/` directory, never `/tmp/`-only artifacts left lying around.

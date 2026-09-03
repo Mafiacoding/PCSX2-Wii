@@ -35366,3 +35366,94 @@ not further S-command-side speculation.
 
 No checkpoint files, BIOS images, or disc images were committed
 (leak-check run and clean before commit, per standing rule).
+
+## Round 828 (task #811, disassembly hunt for GT3's real semaphore-5
+producer, per user's explicit request): corrected Round-811b's
+misidentified call site, fully reverse-engineered the live CreateSema
+(5)->register-event->WaitSema(5) chain, pinned the open question to a
+single, precisely-named missing event.
+
+**Method.** Built `chain_driver.c` with `-DR818_SEMA_TRACE` (an
+existing, always-safe diagnostic macro, Round 818) to log every
+CreateSema/SignalSema call across a full 58.5M-instruction fresh GT3
+cold boot with real return addresses (`ra`). Cross-referenced against
+`r811b_thread1_gpr.c` (Round 811, already existing) to read thread 1's
+full saved register context at its current park point, and
+`r819_ckpt_disasm.c` to dump/disassemble the surrounding EE RAM.
+
+**Correction to Round 811b.** That round's stack-trace assumed thread
+1 was parked inside a small, generic-looking wrapper at `0x0101E0D0`
+(CreateSema + register-event-0x80000009 + WaitSema + DeleteSema). That
+function is real and does exist, but is NOT where thread 1 is
+currently parked - it's a sibling function for a *different* event.
+Reading thread 1's saved `$ra` register only gives the return address
+from the *innermost* `jal` (the WaitSema syscall itself), not the
+wrapper's own caller; the wrapper's real caller has to come off the
+stack (`[$sp+96]` for that specific frame). Doing that walk correctly
+led to a different, larger function.
+
+**The real live chain (verified byte-for-byte against thread 1's
+actual saved PC/GPRs from a fresh checkpoint).** Thread 1 is parked
+inside a ~570-byte function at `0x0101F200-0x0101F438` that: (1)
+copies a NUL-terminated string/descriptor from its own first argument
+into a persistent struct at `$s1+0x14` (empty in the current run -
+consistent with this NOT being a filename-based request), (2) calls
+`CreateSema(init=0, max=1)` directly (`jal 0x0101BBE0` at
+`0x0101F320`) - this is the actual semaphore-5 creation, confirmed via
+`R818SEMA`'s trace (`ra=0x0101F328` matches exactly), (3) builds a
+transfer-descriptor with two buffer/count pairs (`$s2/$s3` and
+`$s4/$s5`, registered via a generic enqueue primitive at `0x0101D9A0`,
+called up to 3 times depending on flags), (4) calls a function at
+`0x0101E290` which allocates its own descriptor (`jal 0x0101DC18`,
+the same slot-allocator the Round-811b wrapper also used), fills it
+with the same buffer pairs, and registers it against a specific,
+fixed **event ID `0x8000000A`** via `jal 0x0101D7F8` (a thin
+register-shuffle trampoline that tail-calls `0x0101D6C0`, a generic
+"add this semaphore to the completion-dispatch table for event X"
+primitive - the same primitive Round-811b's sibling wrapper used for
+event `0x80000009`), and (5) only after that registration succeeds,
+calls `WaitSema(5)` (`jal 0x0101BC20` at `0x0101F3A8`, syscall executes
+at `0x0101F3AC`... corrected: matches saved_pc `0x0101BC24` exactly).
+
+**What `0x80000009` vs `0x8000000A` most likely means.** Both IDs
+share the same `0x80000000`-tagged high bit (almost certainly a
+"registered/valid" flag rather than a real EE INTC cause - real EE
+INTC causes are 0-15, per Round 468's established citation) with a
+sequential low byte (9 vs 10). This is the signature of GT3's own,
+game-internal event-ID enum built on top of the generic
+`0x0101D6C0`/`0x0101D878` register/dispatch primitives (0x0101D878,
+decoded this round too, is the actual firing side - a two-table,
+`jalr`-based indirect dispatcher that looks up a registered handler by
+ID and calls it). Task #811's earlier findings (Round 811's own
+CDVD-trace: zero SIF RPC binds, zero CDVD MMIO writes, `ncmd_call_count`
+frozen at 0 for the entire run) are fully consistent with event
+`0x8000000A` simply never being fired by anything in this project's
+current CDVD model.
+
+**Decisive confirmation semaphore 5 is never signaled.** The
+`R818_SEMA_TRACE` log across the complete 58.5M-instruction run
+contains exactly one `CreateSema sem=5` line (matching this function,
+`ra=0x0101E138`... corrected to the real caller `ra=0x0101F328`) and
+**zero** `SignalSema sem=5` lines anywhere, from any thread. This
+matches (and sharpens) Round 827's already-reverted CLOSECONFIG
+experiment finding: nothing in the currently-implemented CDVD
+S/N-command dispatch path ever reaches whatever real IOP-side
+completion signal is supposed to fire event `0x8000000A`.
+
+**Outcome.** No tracked source changed this round - purely read-only
+disassembly/instrumentation using existing, already-safe diagnostic
+macros (`R818_SEMA_TRACE`, `r811b_thread1_gpr.c`, `r819_ckpt_disasm.c`,
+none of which are wired into any real build). Regression suite and Wii
+cross-build correctly skipped (docs-only). Task #811 remains open, but
+is now narrowed to a single, concrete, well-evidenced question: what
+real IOP-side (or EE-side interrupt) event should invoke the completion
+handler for GT3's internal event ID `0x8000000A`, and why does the
+currently-implemented CDVD command path never produce it. The most
+promising next step is disassembling `0x0101D878`'s callers (who
+actually FIRES registered events) to see whether that dispatcher is
+ever invoked at all in this run, and if so, with which event IDs -
+narrowing whether this is a "never fires anything" gap or a "fires
+other events but never 0x8000000A" gap.
+
+No checkpoint files, BIOS images, or disc images were committed
+(leak-check run and clean before commit, per standing rule).

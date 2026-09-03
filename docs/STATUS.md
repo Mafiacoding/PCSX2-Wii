@@ -35109,3 +35109,31 @@ disk budget; the small evidence excerpt is preserved verbatim above instead.
 
 **Leak-check:** clean - `git diff --cached --name-only | grep -iE
 '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'` empty.
+
+## Round 825: refreshed persisted GT3 checkpoint against the Round 824 fixed
+## scheduler tree (docs-only, task #848)
+
+Re-ran the GT3 checkpoint chain (`tools/round729-gt3-discboot/chain_driver.c`,
+rebuilt host-native against the current tree) in `continue` mode starting
+from the Round 818 persisted checkpoint
+(`checkpoints/gt3_round818_steady_state_288332636instr.ckpt`,
+total_instr=288,332,636), against the Round 824-fixed
+`reschedule()`/`save_context()` tree, for a 150,000,000-instruction budget.
+
+**Result:** ran cleanly to `total_instr=1,170,824,645` (882M further
+instructions past the Round 818 checkpoint) with no crash, no halt, and no
+sign of the Round 812/824 thread-1 saved-pc corruption recurring - EE pc
+cycles normally between the thread-1 park loop (`0x0100D930-0x0100D938`)
+and the thread-3 handoff region (`0x0101BB00-0x0101BB08`) across each
+10M-slice sub-chunk, consistent with the fixed scheduler correctly leaving
+thread 1's saved context alone while thread 3 runs. `pmode=0x66`,
+`dispfb2=0x00009400` (GS circuit 2 still configured as in every prior
+round), `gif_path1=0`/`qw_seen=18997` (VU1/XGKICK still not reached on this
+path - task #811 territory, unchanged).
+
+Persisted the new checkpoint to `checkpoints/gt3_round825_steady_state_
+1170824645instr.ckpt` (gitignored, not committed/rsynced as source -
+matches the existing `checkpoints/` convention). The two prior checkpoints
+(`gt3_round817_...`, `gt3_round818_...`) were left in place for now.
+
+No tracked source changed this round; docs-only entry.

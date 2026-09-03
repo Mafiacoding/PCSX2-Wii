@@ -35280,3 +35280,89 @@ this narrower, more reliable state to build on next round.
 
 No checkpoint files, BIOS images, or disc images were committed (leak-check
 run and clean before commit, per standing rule).
+
+## Round 827 (task #811, per user's explicit "write a dummy solution,
+keep it if it works, revert it if not, and try your own code"
+instruction): speculative CLOSECONFIG->SignalSema(5) experiment, tested
+and cleanly reverted - decisive negative result, task #811 still open.
+
+**Context.** Round 826 (this same session) fixed a genuine scheduler
+save-context gap so that GT3 thread 1's parked state (WAIT/SEMA/5,
+saved_pc=0x0101bc24) is now verified-accurate for the first time,
+making Round 817's original `GT3_SEM5_PROBE` idea newly testable
+without its previous "corrupted by an unrelated bug" caveat. The user
+then asked for a fresh, self-directed speculative attempt at task
+#811 (find GT3's real CDVD N-command dispatch call site): implement
+something, test it honestly, keep it only if it demonstrates real
+forward progress, otherwise revert cleanly.
+
+**Hypothesis tried.** `SCMD_CLOSECONFIG` (0x43) is the last command in
+CDVDMAN's real init S-command burst (Round 337's citation,
+`source/hw/iop_cdvd.c`'s `dispatch_scmd()`). The idea: some real,
+currently-unmodeled IOP-to-EE completion signal fires at that boundary
+and is what GT3's thread 1 is actually waiting for via
+`WaitSema(5)`. Implemented as a call to the already-existing,
+project-internal diagnostic accessor `ee_hle_thread_debug_signal_sema(5)`
+(Round 817) from inside the `SCMD_CLOSECONFIG` case, gated behind a new
+`R827_SPECULATIVE_SEM5_SIGNAL` build macro (never defined in any real
+build - `main.c`/Wii target and the normal host-native test suite are
+completely unaffected regardless of outcome). Backed up
+`source/hw/iop_cdvd.c` to `backups/iop_cdvd.c.round827_experiment.bak`
+first per the Round 779 standing rule.
+
+**Test method.** Built a scratch host-native binary with the macro
+defined, ran a fresh GT3 cold boot (`chain_driver ... start
+60000000`, not a checkpoint resume - resuming from the existing Round
+826 checkpoint was tried first and correctly rejected as invalid,
+since the S-command burst had already completed before that
+checkpoint was saved and would never fire again on a `continue` run).
+Cross-checked with `r819_ckpt_disasm` (thread table + `ncmd`/`scmd`
+counters) and a purpose-built `-DR812_EVENTLOG` run filtered to tid=1
+to see the real event stream.
+
+**Result - decisively negative, not just "no effect".** The debug
+signal call fired three times (once per S-command burst repetition
+across the 60M-instruction window) but
+`ee_hle_thread_debug_signal_sema(5)` returned 0 (its own documented
+"semid invalid/unused" case) every time - confirmed by a temporary
+`fprintf` added for this diagnosis. Semaphore 5 does not exist yet at
+the moment `CLOSECONFIG` completes; GT3's own thread 1 only calls
+`CreateSema` for id 5 much later in its own init code, and only then
+begins its `WaitSema(5)` retry loop (first hit at event-log seq=55,
+continuing for all 506,588 further WaitSema-block events across the
+run, `count=0` throughout). This is not a timing coincidence than
+could maybe be fixed by reordering - it is direct proof that
+`CLOSECONFIG`, which happens during the BIOS-driven config-negotiation
+phase, is chronologically **before** GT3's own thread-1 init has even
+created the semaphore it later blocks on. The hypothesis is falsified
+by evidence, not merely unconfirmed. `ncmd_call_count` stayed at 0 and
+`scmd_call_count` stayed at 13 (identical to the Round 826 baseline)
+in every run, with or without the experimental signal.
+
+**Outcome.** Reverted `source/hw/iop_cdvd.c` to the pre-experiment
+backup (byte-for-byte, confirmed via `git diff --stat` showing zero
+difference vs. `HEAD`), deleted the backup per the Round 779 rule.
+Nothing shipped, nothing kept - a clean, evidence-backed negative
+result. Host-native regression suite and Wii cross-build are correctly
+skipped this round: no tracked source differs from the last commit, so
+there is nothing new to test or rebuild. Per the project's standing
+anti-fabrication discipline, no fix is claimed for task #811, which
+remains open.
+
+**What this narrows down for a future round.** The real trigger for
+GT3's thread 1 to stop blocking on `WaitSema(5)` is NOT anywhere in
+the existing S-command dispatch path (`dispatch_scmd()`'s already-
+implemented commands) - that entire path completes and goes idle
+(`scmd_call_count` frozen at 13) long before semaphore 5 is even
+created. The real producer must be inside GT3's own later-running
+code (whatever creates semaphore 5 and is expected to eventually
+signal it), which is disc-content-derived and outside this project's
+own BIOS/HW-emulation source, or inside a not-yet-implemented N-command
+/interrupt path that hasn't fired yet in any traced run to date. A
+disassembly of GT3's own semaphore-5 producer code (once located via
+static/dynamic scan of the loaded ELF, similar to Round 818's
+successful semaphore-0 producer hunt) is the most promising next step,
+not further S-command-side speculation.
+
+No checkpoint files, BIOS images, or disc images were committed
+(leak-check run and clean before commit, per standing rule).

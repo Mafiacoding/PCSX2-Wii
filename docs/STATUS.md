@@ -34745,3 +34745,69 @@ throwaway scratch, matching precedent - e.g. Round 818's `R818_MSGQ_TRACE` probe
 **Leak-check:** trivially clean - nothing was staged this round besides this `docs/STATUS.md` update
 (confirmed via `git diff --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'`
 returning empty once STATUS.md alone is staged).
+
+## Round 821: found the real caller of 0x0100D9A8 - GT3's own loading-percentage renderer (task #838-#840)
+
+Continuation of task #838 (find who calls the threshold-wait wrapper 0x0100D9A8 with the 2/3 values
+Round 820 observed) and task #840 (trace readers of the scratchpad status byte at 0x70000000+0x1BC).
+
+**Correction to Round 820's "alternating threshold=2/3" claim.** Added a new scratch hook
+(`R820_CALLER_WATCH`, targeting pc==0x0100D9A8 itself, never applied to tracked source) and re-ran from
+the Round 817 checkpoint (217M) forward 20,000,000 budget-units (to total_instr=359,446,434, the deepest
+survey yet). Every one of the 9+ captured hits showed the SAME external caller: `ra=0x01000db0`,
+`a0=0x00000002` - i.e. there is exactly one real external call site, not two alternating ones. Round
+820's "threshold=3 (ra=0x0100da24) / threshold=2 (ra=0x0100da08)" observation came from the OLDER
+`R819ENTRY` hook, which watches entries into 0x0100D8D0 (the raw primitive one layer further down) - so
+those two `ra` values were return addresses INSIDE 0x0100D9A8's own body (its own internal calls into
+0x0100D8D0), not two different external callers supplying different thresholds. This is a correction,
+not a new contradiction: 0x0100D9A8 does still call 0x0100D8D0 more than once internally, but only ONE
+outside function calls 0x0100D9A8 itself with the observed a0=2, in the loop we now identify below.
+
+**Disassembled the real caller: function 0x01000C88, a loading-percentage/progress UI renderer.**
+Dumped and disassembled 0x01000C00-0x01000E9C. 0x01000C88 opens with a standard prologue (`addiu
+sp,sp,-96`) and contains FOUR call sites into 0x0100D9A8: a0=1 at entry (set once, well before any
+call), a0=1 conditionally (only when a flag at `-32364(gp)` equals 4), a0=2 on every pass through an
+internal loop (`s1` counted 0..~124/125, with branch thresholds at 12/70/112/125 - the live-observed
+`ra=0x01000db0` call), and a0=1 once more after the loop exits. The loop body performs float division
+(`div.s`) scaled from `s1`, calls a glyph/digit-draw primitive at 0x01000B40 (which itself calls
+0x0100D3A0/0x0100D438 against a font/lookup table at 0x01045B00), and only actually renders when the
+`-32364(gp)` flag is clear. Traced 0x01000C88's own caller (0x01000AC0): it registers 0x01000C88's own
+address (literal `0x01000C88`) as a callback pointer into a text/message-widget struct (buffer
+`0x01049670`, size 0x4000, count 2) via calls into 0x0101B9E0/0x0101BAD0/0x0101BA70/0x0101BA00. This is
+strong, though not externally-confirmed, evidence that 0x01000C88 is GT3's on-screen loading-percentage
+(or similar numeric progress) display routine, and that 0x0100D9A8's "wait for N more ticks at
+0x01047B00" primitive is this routine's own frame-pacing mechanism - i.e. the display advances one
+digit/frame only once the counter at 0x01047B00 has incremented, which ties directly back to Round
+819/820's finding that this counter is never written anywhere in the trace. This reframes, without
+contradicting, the "CD-read never issued" classification: 0x01047B00 looks like a progress/tick counter
+that this on-screen readout is waiting to see move, and it never does, so the loading display is stuck
+rendering its very first frame - consistent with a genuine stalled-progress condition, not a crash.
+
+**Task #840: scratchpad flag at 0x70000000+0x1BC is written but never read in this trace window.** Added
+a second scratch hook (`R820_SPR_READ_WATCH`, in `ee_mem_read8()`, never applied to tracked source) and
+re-ran the same 217M-to-359M-instruction window. Zero reads of offset 0x1BC were captured, even though
+Round 820 already confirmed 0x0100D9A8 writes it every pass. The reader is either downstream of the same
+stalled counter (i.e. code that only runs once the loading percentage actually advances) or lives in one
+of the two other, currently-starved GT3 threads (tid 1 parked on WaitSema(5) at saved_pc=0x0101bb28, tid
+2 parked on WaitSema(0) at saved_pc=0x0101bc24, per the unchanged Round 817/818 findings) that never get
+scheduled in this trace. Not yet located; flagged as a follow-up if useful, but lower priority now that
+the caller chain above is understood.
+
+**Classification unchanged, further narrowed:** thread 3 is parked inside its own loading-percentage
+renderer's frame-pacing wait, itself gated on the same never-incremented counter at 0x01047B00 this
+investigation has tracked since Round 819. No fix implemented - nothing evidenced as wrong in GT3's own
+code; the counter's real writer (presumably tied to actual CD-read progress) remains upstream and
+unlocated.
+
+**Backup/persistence:** re-verified before starting (per the user's standing concern) - `git log` showed
+commit `2656cc7` (Round 820) intact, both checkpoint files present/gitignored in the tracked repo's
+`checkpoints/` directory. This round's own scratch work lives only in `/tmp/r820scratch`,
+`/tmp/r820build` - disposable, per the established convention.
+
+**Regression / Wii build:** correctly skipped - purely investigative, `git diff --stat source/` empty.
+
+**Files changed:** none in `source/`; no new tool files committed (throwaway scratch only, matching
+precedent).
+
+**Leak-check:** trivially clean - only this `docs/STATUS.md` update is staged
+(`git diff --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'` empty).

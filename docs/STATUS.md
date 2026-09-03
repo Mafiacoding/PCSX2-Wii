@@ -35000,3 +35000,112 @@ scratch-only.
 empty; the one checkpoint created this round (`/tmp/r846_park.ckpt`) was scratch-only and deleted before
 this commit, per the standing rule that persisted checkpoints only ever go to the gitignored
 `checkpoints/` directory, never `/tmp/`-only artifacts left lying around.
+
+## Round 824: root-caused and fixed the GT3 thread-1 WaitSema(5) saved-pc
+corruption (task #846) - reschedule() switch-out was unconditionally saving
+a transient execution's live context over a genuinely-parked (non-RUN)
+thread's real state
+
+Continuing directly from Round 823's precise re-timing of the corruption window
+(total_instr=38,865,331 park to ~38,866,119-38,869,319 corruption, ~300-800
+instructions later) and the checkpoint-fidelity finding that only a continuous
+in-process run can observe it, this round built a corrected capture tool
+(`gated2.c`, scratch-only) that gates `R812_EVENTLOG` logging directly on
+`ee->instructions_executed` (raw total_instr) against the known park target,
+rather than on slice-count as Round 823's `gated_eventlog.c` attempt did - and
+stops the fine phase the instant the corruption signature (`saved_pc==0x0101bb28`)
+is observed, keeping log volume bounded on this sandbox's tight ~250MB-free disk
+budget.
+
+**Root cause, captured live for the first time:** the corrupting event is
+`WakeupThread(target=3)` firing at EE vaddr `pc=0x0101bb24` while
+`g.current_thread_id` is still 1 (thread 1, genuinely parked in
+`WaitSema(5)`/`WAIT`), followed immediately by `reschedule()` finding
+`next=3 != current_thread_id=1` and taking the switch-out branch. That branch's
+`save_context(st, g.current_thread_id)` call was **unconditional** - it saved
+`st` (the live register file, which at that instant holds the *transient*
+execution's context, not thread 1's) into thread 1's TCB regardless of whether
+thread 1 was actually the one running. Since thread 1's real status was WAIT
+(not RUN), `st` did not reflect thread 1's own state - the transient execution
+runs "on top of" the idle CPU state that `reschedule()`'s own none-ready branch
+deliberately leaves untouched when nothing is ready. The corrupting write
+overwrote thread 1's real, already-correctly-saved pc (`0x0101bc24`) with the
+transient execution's pc (`0x0101bb28`), a completely unrelated syscall
+trampoline's return address.
+
+Exact captured evidence (seq numbers from the `R812_EVENTLOG` trace,
+reproduced identically across two separate runs at total_instr=38,865,639):
+```
+event=WakeupThread target=3 target_status=0x4 target_wait_type=1 pc=0x0101bb24 status=0x70030c10
+event=reschedule old_current=1 next=3 pc=0x0101bb28 status=0x70030c10
+event=save-context pc=0x0101bb28 reason=reschedule-switch-out
+```
+Critically, `status=0x70030c10` at the corrupting event has `Status.EXL=0` and
+`Status.ERL=0` (bits 1-2 both clear) - so Round 812's existing mid-exception
+guard (`if (st->cop0[12] & 0x6u) { ...defer... }`) does **not** fire here. The
+only bit that differs from every prior genuinely-idle `reschedule()` call in the
+same run (`status=0x70030c11`, i.e. `IE=1`) is bit 0 (`IE`), which the Round 812
+guard never checked. This confirms Round 812's own code-comment hypothesis
+(interrupt/critical-section-driven `WakeupThread` running on the idle CPU state)
+was correct in mechanism, but the guard it shipped keyed off the wrong Status
+bits for this specific code path.
+
+**Fix implemented** in `source/core/ee/ee_hle_thread.c`'s `reschedule()`
+(both the none-ready branch and the switch-out branch): `save_context(st,
+g.current_thread_id)` is now only called when `tcb(g.current_thread_id)->status
+== EE_THS_RUN`. The switch-out branch's READY-downgrade (`cur->status =
+EE_THS_READY`) was already correctly gated on this same check - only the
+`save_context()` call itself was left unconditional, which was the actual bug.
+When the current-thread-id's own tracked status isn't RUN, `g.current_thread_id`
+is stale bookkeeping from the last genuinely-running thread, not a live
+description of what `st` currently holds, and must not be blindly saved over.
+Per the Round 779 backup-before-edit rule, `source/core/ee/ee_hle_thread.c` was
+backed up to `backups/ee_hle_thread.c.round824.bak` before editing and deleted
+once the fix was confirmed correct.
+
+**Verification:** rebuilt the fixed tracked source with the same
+`R812_EVENTLOG` instrumentation hooks re-applied (isolated 33-line
+instrumentation-only diff, confirmed to touch only logging format strings, no
+behavior) and re-ran the identical total_instr-gated capture twice. Both runs
+reproduced the exact same `WakeupThread(target=3)`/`reschedule(next=3)` event
+at the same total_instr (confirming this is a deterministic, reproducible
+event, not a rare race) - but with the fix in place, thread 1's saved pc was
+**not** overwritten (`corrupted=0`, saved_pc unchanged from its pre-park value)
+on both runs.
+
+**Regression:** ran the full 135-file host-native test suite (`tests/run_test.sh`,
+batched into 12 groups of ~9-14 tests each due to the sandbox's ~178s per-call
+budget). 134/135 pass; the sole failure is `test_gs_reglist_image`, the
+pre-existing, already-tracked task #808 GS IMAGE-mode row-wrap bug (touches
+`gif.c`/`gs_mem.c`, unrelated to scheduling) - confirmed not a new regression.
+Separately ran the 6 tests that directly exercise `ee_hle_thread.c`/scheduling
+(`test_ee_hle_reschedule_exl_guard` - the exact Round 812 regression test -
+plus `test_ee_syscall_setupthread`, `test_ee_syscall_thread_family`,
+`test_iop_hle_thread`, `test_ee_syscall_full_audit_sweep` (69-syscall sweep),
+`test_iop_hle_event_flags_alarm`) individually first for fast, targeted
+confidence; all passed cleanly.
+
+**Wii build:** devkitPPC toolchain located at
+`/sessions/sharp-youthful-pascal/devkitpro/devkitPPC` (previously assumed
+unavailable in this sandbox in some earlier rounds' notes) - required
+`LD_LIBRARY_PATH=$DEVKITPPC/lib` for `cc1` to find `libmpfr.so.4`, which is
+present in that lib dir but not on the default loader search path. With that
+set, `make -j4` completed with zero errors/warnings, producing
+`pcsx2-wii.elf`/`pcsx2-wii.dol`; build artifacts and `build/` deleted after
+the health check per convention (not committed).
+
+**Task status:** task #846 is now resolved with an evidenced fix (not just
+diagnosed). Task #811 (GT3's real CDVD N-command dispatch call site) remains
+open and unrelated - fixing this scheduler hazard does not by itself resolve
+that separate architectural gap; it only stops the WaitSema(5)-park's real
+state from being silently corrupted while GT3 waits.
+
+**Files changed:** `source/core/ee/ee_hle_thread.c` only (+41/-4 lines,
+`reschedule()`'s none-ready and switch-out branches). All scratch tooling
+(`/tmp/r846build/`, `/tmp/r846g2_stdout.log`, `/tmp/r846g2_stderr.log`,
+`/tmp/r846_capture_context.log`, `/tmp/r846fix2_stdout.log`,
+`/tmp/r846fix2_stderr.log`) deleted after use to manage the sandbox's tight
+disk budget; the small evidence excerpt is preserved verbatim above instead.
+
+**Leak-check:** clean - `git diff --cached --name-only | grep -iE
+'\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'` empty.

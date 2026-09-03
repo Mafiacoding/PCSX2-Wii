@@ -390,8 +390,16 @@ static void reschedule(ee_state_t *st)
          * advancing-pc convention still applies as the honest last
          * resort when literally nothing is ready). */
         if (g.current_thread_id != 0) {
-            EVT(g.current_thread_id, "event=save-context pc=0x%08x reason=reschedule-none-ready", st->pc);
-            save_context(st, g.current_thread_id);
+            /* Round 824 fix (task #846): see the switch-out branch below
+             * for the full evidence writeup - the same unconditional-
+             * save hazard applies here whenever g.current_thread_id's
+             * own tracked status isn't RUN (e.g. WAIT). Only re-save
+             * when it's genuinely the live running thread. */
+            ee_tcb_t *cur0 = tcb(g.current_thread_id);
+            if (cur0 && cur0->status == EE_THS_RUN) {
+                EVT(g.current_thread_id, "event=save-context pc=0x%08x reason=reschedule-none-ready", st->pc);
+                save_context(st, g.current_thread_id);
+            }
         }
         return;
     }
@@ -401,9 +409,38 @@ static void reschedule(ee_state_t *st)
             if (cur && cur->status == EE_THS_RUN) {
                 EVT(g.current_thread_id, "event=status old=0x%x new=0x2 reason=reschedule-switch-out pc=0x%08x", cur->status, st->pc);
                 cur->status = EE_THS_READY;
+                EVT(g.current_thread_id, "event=save-context pc=0x%08x reason=reschedule-switch-out", st->pc);
+                save_context(st, g.current_thread_id);
             }
-            EVT(g.current_thread_id, "event=save-context pc=0x%08x reason=reschedule-switch-out", st->pc);
-            save_context(st, g.current_thread_id);
+            /* Round 824 fix (task #846, GT3 WaitSema(5) saved-pc
+             * corruption - live-captured causal event, R846G2 tool,
+             * seq=2532941-2532943, total_instr=38865639, ~308
+             * instructions after thread 1's genuine park):
+             * g.current_thread_id can point at a thread that is NOT
+             * actually RUN (e.g. thread 1 correctly parked in
+             * WaitSema(5)/WAIT) while the live "st" register file
+             * instead holds a transient execution - here, an
+             * interrupt/critical-section-driven WakeupThread(target=3)
+             * call (event=WakeupThread ... pc=0x0101bb24) that runs "on
+             * top of" the idle CPU state because reschedule()'s own
+             * none-ready branch leaves st untouched when nothing is
+             * ready. Captured live: Status=0x70030c10 at the corrupting
+             * reschedule (EXL=ERL=0, so Round 812's existing mid-
+             * exception guard above does not fire; only IE, bit0, is
+             * observed clear here) vs 0x70030c11 (IE=1) on every prior
+             * genuinely-idle reschedule - confirming this is a real,
+             * distinct code path from the EXL/ERL case Round 812
+             * targeted, not a duplicate. Before this fix,
+             * save_context(st, g.current_thread_id) ran unconditionally
+             * here, so it silently overwrote thread 1's real saved pc
+             * (0x0101bc24, already correctly persisted) with the
+             * transient execution's pc (0x0101bb28) merely because
+             * g.current_thread_id still read 1. Gating the save on
+             * cur->status == EE_THS_RUN (matching the existing
+             * READY-downgrade guard just above, which was already
+             * conditional - only the save call itself was not) leaves
+             * thread 1's real parked state untouched; the target thread
+             * (3) is still loaded and marked RUN normally below. */
         }
         load_context(st, next);
         EVT(next, "event=load-context pc=0x%08x reason=reschedule-switch-in", st->pc);

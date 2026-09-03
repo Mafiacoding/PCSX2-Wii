@@ -790,6 +790,15 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
                 EE_RET(0); /* pre-set: the real return value once woken */
                 EE_ADVANCE();
                 EVT(cur, "event=status old=0x%x new=0x4 wait_type=SLEEP reason=SleepThread pc=0x%08x", t->status, this_pc);
+                /* Round 826 fix (task #811): same stale-saved-pc gap as
+                 * WaitSema-block above (see that comment for the full
+                 * evidence writeup) - this self-block also sets status
+                 * to WAIT before calling reschedule(), so reschedule()'s
+                 * Round-824 status==RUN save gate would otherwise skip
+                 * persisting this thread's own live, just-advanced pc
+                 * (this_pc+4, the real post-syscall resume point). Save
+                 * directly here while status is still RUN. */
+                save_context(st, cur);
                 t->status = EE_THS_WAIT;
                 t->wait_type = EE_TSW_SLEEP;
                 t->wait_id = 0;
@@ -971,6 +980,38 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
             if (t) {
                 EVT(cur, "event=status old=0x%x new=0x4 wait_type=SEMA wait_id=%d reason=WaitSema-block pc=0x%08x",
                     t->status, semid, this_pc);
+                /* Round 826 fix (task #811, GT3 thread-1 saved-pc stale-
+                 * value bug): explicitly persist this thread's OWN live
+                 * context (st->pc==this_pc, the real busy-park address)
+                 * into its tcb HERE, before flipping status to WAIT and
+                 * calling reschedule(). Evidence: a fresh Round-824-fixed
+                 * cold boot (checkpoint tool, total_instr=572,756,907)
+                 * showed thread 1 persisted with saved_pc=0x0101ba08 (the
+                 * jr-ra return address of the StartThread/sysnum-34
+                 * syscall stub, per this round's disassembly of
+                 * 0x0101B9C0-0x0101BA24) while wait_type/wait_id
+                 * correctly read SEMA/5 - i.e. the tcb's saved pc was
+                 * STALE (left over from an earlier, unrelated StartThread-
+                 * triggered switch-out) even though wait_type/wait_id
+                 * reflect a real, current WaitSema(5) block. Root cause:
+                 * reschedule()'s switch-out save_context() call (Round
+                 * 824, task #846) is gated on `cur->status ==
+                 * EE_THS_RUN` - correct for that round's actual bug
+                 * (an interrupt-context syscall corrupting an ALREADY-
+                 * parked thread's saved pc), but this WaitSema-block path
+                 * sets t->status = EE_THS_WAIT two lines below, BEFORE
+                 * calling reschedule() just below - so by the time
+                 * reschedule() reaches its save-context gate, this
+                 * thread's own status already reads WAIT, not RUN, and
+                 * the gate silently skips saving even though `st` right
+                 * now unambiguously holds THIS thread's own live,
+                 * synchronous (non-interrupt, EXL/ERL clear) context.
+                 * Calling save_context() directly here, while status is
+                 * still RUN, closes that gap without weakening Round
+                 * 824's own fix (which remains necessary for the
+                 * asynchronous/interrupt-context case reschedule() still
+                 * guards against). */
+                save_context(st, cur);
                 t->status = EE_THS_WAIT;
                 t->wait_type = EE_TSW_SEMA;
                 t->wait_id = semid;

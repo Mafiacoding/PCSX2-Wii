@@ -35182,3 +35182,101 @@ build was still re-run as a full health check per the standing workflow.
 
 **Task status.** Task #808 resolved - closing as "test bug, not an
 emulator bug," with the fix landed in the test file itself.
+
+---
+
+## Round 826 (task #811 continuation, task #846/#824 follow-up): fixed a
+second, distinct scheduler save-context gap exposed by Round 824's own fix
+- WaitSema/SleepThread self-blocks were never persisting their own park PC
+
+**Context.** Per the user's "bundle and checkpoint after that task 808 and
+811" instruction, after shipping Round 825's task #808 fix (see above) and
+refreshing the GT3 checkpoint, this round resumed task #811 (find GT3's
+real CDVD N-command dispatch call site). The investigation started by
+re-verifying Round 824's `reschedule()` fix against a **genuinely fresh
+cold boot** (`chain_driver ... start ...`, not a `continue` from an old
+checkpoint) - a corrected methodology, since Round 823's own prior finding
+placed the real thread-1 corruption event at ~38.8M instructions into a
+cold boot, far earlier than the existing round817/818/825 checkpoints
+(217M-1.17B instructions), which had that corruption already baked in
+*before* Round 824's fix ever existed to prevent it. A fresh boot is
+required to actually test whether the fix works.
+
+**New finding.** In that fresh, Round-824-fixed boot (checkpoint tool,
+total_instr=572,756,907), thread 1 persisted with `wait_type=SEMA
+wait_id=5` (correct - it IS blocked on WaitSema(5)) but `saved_pc=
+0x0101ba08` - disassembly of `0x0101B9C0-0x0101BA24` showed this is the
+`jr ra` return address immediately after a **different** syscall trampoline
+entirely: `addiu v1,zero,34 / syscall` (sysnum 34 = StartThread, confirmed
+against `ee_core.c`'s own `case 34` / `case 32` sysnum-family comment
+block, not the MIPS-opcode `case 0x22` red herrings a naive grep for
+"case 34" turns up first). Thread 1's saved PC was stale, pointing at an
+earlier, unrelated StartThread-triggered switch-out - not the real
+WaitSema(5) syscall address the project has cited across many prior
+rounds (`0x0101bc24`, e.g. Round 812/817/824's own writeups).
+
+**Root cause.** `ee_hle_thread.c`'s WaitSema-block path (sysnum 68, ~line
+966) and SleepThread-block path (sysnum 50, ~line 793) both set the
+blocking thread's `status = EE_THS_WAIT` *before* calling `reschedule()`.
+Round 824's fix (task #846) gated `reschedule()`'s switch-out
+`save_context()` call on `cur->status == EE_THS_RUN` - correct for
+*that* round's bug (an interrupt-context syscall like iWakeupThread
+corrupting an ALREADY-parked thread's saved pc while `g.current_thread_id`
+was stale), but as an unintended side effect it ALSO silently skips
+saving a thread's own, genuine, just-now park PC: by the time
+`reschedule()` reaches its save-context gate, the WaitSema/SleepThread
+handler has already flipped this thread's own status to WAIT two lines
+earlier, so the gate sees "not RUN" and skips the save - even though `st`
+right now unambiguously holds this exact thread's own live, synchronous
+(non-interrupt, EXL/ERL clear) register file. The thread's tcb `pc`/`gpr`
+fields are left at whatever they were from the LAST time they were
+correctly saved (in this case, an earlier StartThread-triggered
+preemption), not the real WaitSema/SleepThread block point.
+
+**Fix.** Added an explicit `save_context(st, cur)` call directly inside
+both self-block paths (`ee_hle_thread.c`, WaitSema ~line 968 and
+SleepThread ~line 792), called *before* the status flip to WAIT and
+before `reschedule()` runs - persisting the thread's live context at the
+moment it's still correctly known to be its own. This closes the gap
+without weakening Round 824's fix, which remains necessary for the
+asynchronous/interrupt-context case it targeted (that gate is unchanged;
+this only adds an additional, always-correct save at the self-block call
+sites themselves).
+
+**Verified.**
+- Host-native compile: clean, 42/42 source files, 0 errors.
+- Full regression suite: **135/135 pass** (including
+  `test_ee_syscall_thread_family` and `test_ee_hle_reschedule_exl_guard`,
+  the two most directly relevant existing tests).
+- Wii/devkitPPC cross-build: 0 errors, all 41 SOURCES compiled,
+  `pcsx2-wii.elf`/`.dol` produced.
+- Fresh GT3 cold-boot re-run against the fixed tree (`chain_driver ...
+  start`, total_instr=58,594,303 after ~80M slices): thread 1 now
+  persists with `saved_pc=0x0101bc24` - disassembly confirms this is
+  `addiu v1,zero,68 / syscall`, i.e. the real WaitSema syscall
+  instruction itself, exactly matching the "genuine WaitSema(5) park pc"
+  this project has cited since Round 812/817. This is the direct,
+  positive confirmation the fix works: thread 1's saved state now
+  correctly reflects its own real block point instead of a stale,
+  unrelated address.
+- Thread 3 in this same fresh checkpoint shows `status=DORMANT` (already
+  a known, separately-tracked crash - task #809/Round 808's "GT3
+  thread-3 null-jalr crash" - not new or caused by this round's fix).
+  With threads 1/2 WAIT and thread 3 DORMANT, nothing is READY, so
+  `total_instr` growth per slice-budget is now much lower than
+  pre-fix runs (which had spurious wake/reschedule churn) - this is
+  expected, correctly-idle behavior, not a regression: real hardware
+  would also do very little work once every thread is genuinely parked
+  or dead.
+
+**Task #811 status.** Still open - the underlying question ("what should
+dispatch a real CDVD N-command for GT3") is unchanged by this fix. What
+this round establishes is that the scheduler's thread-state bookkeeping is
+now trustworthy for this investigation going forward: any future trace of
+thread 1's resume behavior can rely on `saved_pc` being accurate. Per this
+project's anti-fabrication discipline, no CDVD N-command dispatch fix is
+claimed this round since none was evidenced - task #811 remains open with
+this narrower, more reliable state to build on next round.
+
+No checkpoint files, BIOS images, or disc images were committed (leak-check
+run and clean before commit, per standing rule).

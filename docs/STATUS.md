@@ -35601,3 +35601,25 @@ This **supersedes Round 829's characterization of `0x0101D878` entirely**. The r
 **Task #811 remains open.** The concrete, narrowed state going into the next round: the real SIF0/DMAC interrupt line fires 30 times for real during GT3's cold boot but is never actually taken (no vector entry, either address), and none of Round 829's proposed handler/registration/EnableDmac code is ever reached. The 30 real interrupts' actual source/purpose and GT3's real (not misidentified) CDVD-dispatch/semaphore-5-producer code path both remain unlocated. Next step: re-run the same static JAL/pointer scan methodology with independent runtime corroboration at each step (as this round's `r830_dmac_trace.c`-style PC-hit tracking now allows), rather than trusting an unverified static match, to avoid a third misidentification.
 
 No tracked source (`ee_core.c`, `dma.c`, or any other `source/`/`include/` file) was modified this round - this was a pure diagnostic/investigation round. `tools/round729-gt3-discboot/r830_dmac_trace.c` (new, read-only diagnostic tool, calls only existing public accessors) is added and committed. Regression suite and Wii cross-build correctly skipped (no tracked source changed). No checkpoint files, BIOS images, or disc images were committed - leak-check run and confirmed clean before commit.
+
+## Round 830b (task #811): correction to Round 830 - the AddDmacHandler call site/handler were NOT a misidentification; they're real, unreached code
+
+Round 830's entry above concluded the whole `0x0101D878`/registration-site identification was "very likely a second static-scan misidentification," reasoning from the fact that the enclosing code region was never visited by PC during the 58.5M-instruction trace. Extending `r830_dmac_trace.c` with a post-run (not pre-run - GT3's ELF isn't resident in RAM yet at cold-boot start) raw memory dump of both regions disproves that conclusion:
+
+```
+0x0101d500: ADDIU r4, r0, 5          ; a0 = 5 (channel)
+0x0101d504: ADDIU r5, r5, -10120     ; a1 += 0xd878 (paired with an earlier LUI - constructs a1 = 0x0101D878)
+0x0101d508: JAL 0x0101b8f0           ; call wrapper (likely AddDmacHandler's real syscall-18 stub/wrapper)
+0x0101d50c: DADDU r6, r0, r0         ; delay slot: a2 = 0 (next)
+
+0x0101d878: ADDIU sp, sp, -144       ; real function prologue (144-byte stack frame)
+0x0101d87c: SD s0, 0x70(sp)
+0x0101d880: SD ra, 0x80(sp)
+0x0101d884: JAL 0x01022bb0
+```
+
+This is genuine, correctly-formed MIPS code, exactly matching Round 829's `AddDmacHandler(channel=5, handler=0x0101D878, next=0)` characterization - not a stale/misaligned static-scan artifact. **Corrected conclusion: the call site and handler are real GT3 code that is simply never reached yet** by GT3's boot sequence at the point thread 1 parks in `WaitSema(5)` (the established ~58.5M-instruction baseline) - not dead code, not a misidentification, just not-yet-executed. This also means the 30 real Cause.IP3/DMAC interrupts observed firing during that same window are **not** serviced by this handler (which hasn't been registered yet) and must come from a different source - most plausibly ordinary BIOS/IOP SIF0 module-loading traffic that predates GT3's own SIF0-driver init, not a GT3-specific bug.
+
+**Task #811's next concrete step, now correctly framed:** find the real caller chain into the enclosing init function (starts at or before `0x0101D380`, per Round 830's func-range probe) that contains this `AddDmacHandler` call - i.e., what condition GT3's own code is waiting on before it ever reaches its own SIF0-driver setup, and why that hasn't happened yet at the thread-1-park point. This is a cleaner, better-scoped version of the same open question, now with the false "misidentification" detour removed.
+
+Docs-only correction (no tracked source changed); the same `tools/round729-gt3-discboot/r830_dmac_trace.c` was extended in place (post-run raw-memory dump added) rather than replaced. Leak-check clean, no checkpoint/BIOS/disc files committed.

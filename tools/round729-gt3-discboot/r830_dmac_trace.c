@@ -68,6 +68,7 @@ int main(int argc, char **argv)
     ee_state_t *ee = ee_core_get_state();
     dma_state_t *dma = dma_get_state();
 
+
     uint64_t handler_hits = 0;
     uint64_t status_bit_set_transitions = 0;
     uint64_t enable_bit_set_transitions = 0;
@@ -146,6 +147,23 @@ int main(int argc, char **argv)
            GEN_VECTOR_BEV, (unsigned long long)vector_bev_hits, (unsigned long long)first_vector_bev_instr);
     printf("[R830-DMAC] enclosing func range [0x%08x,0x%08x) entries=%llu first_at_instr=%llu\n",
            FUNC_LO, FUNC_HI, (unsigned long long)func_range_hits, (unsigned long long)first_func_range_instr);
+
+    /* Post-run dump (RAM is only populated once GT3's ELF is actually
+     * loaded partway through the boot, so this must run AFTER the
+     * stepping loop, not before) - does memory at the claimed
+     * registration call site / handler body actually contain what
+     * Round 829's static scan believed, independent of whether the
+     * CPU is ever OBSERVED to visit it? All-zero here would mean the
+     * static disasm read a wrong/stale region entirely; real non-zero
+     * MIPS-looking content here but zero PC visits would instead mean
+     * the code is genuinely loaded but genuinely unreached (dead on
+     * this boot path). */
+    printf("[R830-STATIC] reg-site region 0x0101D500-0x0101D520 (post-run):\n");
+    for (uint32_t a = 0x0101D500u; a < 0x0101D520u; a += 4)
+        printf("  0x%08x: %08x\n", a, ee_mem_read32(ee, a));
+    printf("[R830-STATIC] handler region 0x0101D870-0x0101D890 (post-run):\n");
+    for (uint32_t a = 0x0101D870u; a < 0x0101D890u; a += 4)
+        printf("  0x%08x: %08x\n", a, ee_mem_read32(ee, a));
 
     if (ee->halted) {
         printf("[R830-DMAC] EE halted: %s\n", ee->halt_reason);

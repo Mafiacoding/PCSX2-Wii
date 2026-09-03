@@ -34576,3 +34576,97 @@ change correct and kept.
 `git diff --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'`
 confirmed empty immediately before commit. Both checkpoint files remain gitignored and were never
 staged.
+
+## Round 819: traced GT3's resting-loop into a self-consistent, fully-explained idle cycle (task #828-#833)
+
+Per the user's explicit 5-point directive this round ("move forward from GT3's main loop and trace the
+condition that directly reaches the first CD-ROM command... The strongest next breakpoint is the
+earliest CD/DVD request - not another synchronization primitive"). Round 817/818's semaphore-0/
+semaphore-5 findings are preserved above verbatim, unchanged, per the user's explicit instruction to
+keep them as a ruled-out result rather than remove them.
+
+**Method:** built `tools/round729-gt3-discboot/r819_ckpt_disasm.c`, a fast checkpoint-load tool using
+`checkpoint_load()` (declared in `include/core/checkpoint.h`) to resume directly from the Round 818
+persisted checkpoint (`checkpoints/gt3_round818_steady_state_288332636instr.ckpt`, total_instr=
+288,332,636) instead of re-running a slow cold boot. It dumps EE register state, the full HLE thread
+table, and chosen EE RAM ranges to flat files for offline disassembly with the existing
+`tools/round655-ee-disasm/disasm.c` tool. Confirmed the checkpoint loads cleanly and matches its
+Round-818-recorded state exactly (pc=0x0100d934, ncmd=0, scmd=13, current_thread_id=3 via the
+pre-existing `ee_hle_thread_get_current_thread_id()` accessor).
+
+**Finding 1 - the resting pc is a manual "wait for value to change" loop, not a message-queue wait.**
+Disassembling 0x0100D8D0-0x0100D9A4 (the function containing the checkpoint's resting pc=0x0100d934)
+shows GT3's own hand-rolled condition-wait idiom: it snapshots `*(0x01047B00)` into `$s1` (via a small
+critical-section-style helper at 0x01022BB0), then loops calling `SleepThread()` (EE syscall 50) and
+re-reading the live value at 0x01047B00 into `$v0`, looping back to sleep again as long as
+`v0 == s1`. This is built from raw SleepThread/WakeupThread (syscalls 50/51/53, confirmed against
+`ee_hle_thread.c`'s own `sysnum == 50`/`sysnum == 51 || sysnum == -52`/`sysnum == 53 || sysnum == -54`
+handlers - not guessed), not the kernel's EventFlag or Semaphore primitives. When the condition
+eventually breaks, control falls into 0x0100D93C, which reads further struct fields off the same base
+(s2 = 0x01040000 + 0x7B00) and appears to process an arrived job/message - this code was never reached
+in any window observed this round.
+
+**Finding 2 - the loop is alive (thread 3 keeps getting woken) but its exit condition never fires.**
+Added two independent, bounded, scratch-only diagnostics (never applied to tracked source - confirmed
+by `git diff --stat source/` showing zero changes for this round): `R819_SLEEP_TRACE` in a `/tmp`
+scratch copy of `ee_hle_thread.c` (logs SleepThread-park and WakeupThread call sites, capped at 200
+lines each) and `R819_ADDR_WATCH` in a `/tmp` scratch copy of `ee_core.c` (logs every write to EE
+vaddr 0x01047AF0-0x01047B10, capped at 300 lines). Built `tools/round729-gt3-discboot/r819_resume_watch.c`
+to resume the Round 818 checkpoint and run forward with both diagnostics active. Result over a further
+21,334,137 instructions (to total_instr=309,666,773): thread 3 was parked and woken roughly 200+ times
+(`[R819SLEEP]`/`[R819WAKE]` both hit their caps), confirming the loop is genuinely cycling, not stuck
+mid-instruction - but **zero** `[R819WATCH]` lines fired. The guarded memory range was never written
+even once across the entire window. The loop's exit condition (`v0 != s1`) never becomes true.
+
+**Finding 3 - identified exactly what wakes thread 3, and it's Round 818's own heartbeat.** The
+`WakeupThread(3)` calls all originate from `ra=0x0101c6d0`. Disassembling that call site
+(0x0101C670-0x0101C707) reveals GT3's message-queue **consumer** dispatcher - the direct counterpart to
+the **producer** wrappers Round 818 already found at 0x0101C7E0/0x0101C878/0x0101C8F8 (posting message
+types 0/1/2). This consumer walks a byte-typed ring buffer (head index at `queue+0 & 0x1FF`, type byte
+at `queue+8+idx`, payload byte at `queue+9+idx`) and dispatches by type: type 0 -> `WakeupThread(payload
+_byte)` (exactly matching the captured call, with payload_byte=3); type 1 -> EE syscall 43; type 2 ->
+EE syscall 55 (both real, BIOS-passthrough syscalls per the existing `sysnum == ... || sysnum == 43 ||
+... || sysnum == 55 ...` exception-vectoring list in `ee_core.c`, unrelated to this investigation); type
+>=3 -> a plain subroutine call to 0x0101D270. Since Round 818 already found thread 3 itself posts a
+type-0 heartbeat message roughly once per EE video frame (matching `EE_CYCLES_PER_FRAME_NTSC` almost
+exactly), the full cycle is now completely traced and self-consistent: thread 3's own per-frame
+heartbeat -> posts a type-0 "wake tid 3" message -> the consumer dispatcher (running once per frame,
+likely from VBLANK-interrupt context, since the observed calling `current_thread_id` was 2, not 3, at
+the moment of the call, even though thread 2 is independently WaitSema(0)-parked per Round 817) ->
+`WakeupThread(3)` -> thread 3 rechecks `*(0x01047B00)`, finds it unchanged, calls `SleepThread()` again.
+Nothing is broken in this cycle; it is a well-formed, correctly-functioning per-frame poll that is
+starved because the thing it is polling for never arrives.
+
+**Classification (per the user's point 5 framework): the disc-read request is never issued.** Not
+issued-and-rejected, not issued-and-pending - the code path that would issue it (whatever sits past
+0x0100D93C, and any CDVD dispatch further downstream of that) is never reached at all, because the
+specific wait condition gating it (`*(0x01047B00)` changing) is never satisfied anywhere in the 309.7M
+instructions of boot traced so far. `iop_cdvd_get_ncmd_call_count()` stays at 0 and
+`iop_cdvd_get_scmd_call_count()` stays at 13 throughout, unchanged from every prior round's baseline -
+independently confirming no new CDVD activity happened in this window.
+
+**Open per the user's point 2 (not yet done this round):** the *producer* side of `0x01047B00` -
+whatever real GT3 code is supposed to write that address to release this wait - has not yet been
+located. Only the *wake* side (WakeupThread's caller chain) was traced this round; finding the *writer*
+of 0x01047B00 requires a broader static/dynamic scan of GT3's loaded code (potentially several MB) that
+was out of scope for this round's time budget. This is the natural next-round continuation.
+
+**No fix implemented this round** - correctly skipped per the project's anti-fabrication discipline:
+the loop, the wake mechanism, and the heartbeat are all confirmed to be behaving exactly as designed:
+the emulator is not the thing failing here. What's missing is whatever real event (very likely, though
+not yet proven, an IOP-side CDVD-completion or menu/asset-load trigger) should eventually write
+0x01047B00 - which hasn't been located yet, so no evidenced fix exists to make.
+
+**Regression / Wii build:** correctly skipped - no tracked source file was modified this round (`git
+diff --stat source/` is empty); only two new scratch/tool files were added under
+`tools/round729-gt3-discboot/`.
+
+**Files changed:** `tools/round729-gt3-discboot/r819_ckpt_disasm.c`,
+`tools/round729-gt3-discboot/r819_resume_watch.c` (both new). No tracked `source/` files touched.
+
+**Leak-check:** clean - `git diff --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'`
+matched `r819_ckpt_disasm.c` only on the substring "ckpt" in its filename; verified this is a false
+positive (81-line ASCII C source file, confirmed via `file`/`head`, not a checkpoint/BIOS/ISO binary).
+No actual BIOS/ISO/checkpoint artifact was staged or committed. Both persisted checkpoint files
+(`checkpoints/gt3_round817_...ckpt`, `checkpoints/gt3_round818_...ckpt`) remain gitignored and
+untouched by this round's `git add`.

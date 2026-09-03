@@ -34811,3 +34811,79 @@ precedent).
 
 **Leak-check:** trivially clean - only this `docs/STATUS.md` update is staged
 (`git diff --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'` empty).
+
+## Round 822: MAJOR CORRECTION - 0x01047B00 IS written every frame; Rounds 819-821's "never written" finding was a watch-tooling gap, not a real emulator bug (task #841-#843)
+
+Per the user's explicit push to "continue the search on the writer, disassemble everything... crack every
+single address which calls the loading screen of GT3... if you figure it out yourself fix the loop."
+
+**Root cause of the false negative (task #842):** Every prior write-watch (`R819_ADDR_WATCH`, used
+across Rounds 819-821) was placed ONLY inside `ee_mem_write32()`. It never covered `ee_mem_write8()`,
+`ee_mem_write16()`, or `ee_mem_write64()` - and Round 819's own disassembly had already shown the counter
+is READ via a 64-bit `ld`, which in hindsight was the tell that the WRITE is plausibly a 64-bit `sd` too.
+Added matching watch hooks to all three previously-uncovered write functions (`R822_WIDE_WRITE_WATCH`,
+scratch-only) plus a check on the one bulk-copy path that bypasses `ee_mem_write*` entirely -
+`dma_channel_receive_quadwords()` in `source/hw/dma.c` (`memcpy(g_ee_ram + ch->madr, data, len)`, used by
+real inbound SIF0/SIF2 DMA delivery, task #843) - added as `R822_DMA_WATCH` in a scratch copy of `dma.c`.
+
+**Result: 0x01047B00 is written every single frame, like clockwork.** Re-ran from the Round 817
+checkpoint (217M) forward 20,000,000 budget-units. The widened watch immediately caught it:
+`[R822W64] ... addr=0x01047b00 val=0x0000000000000027 pc=0x0100e6ac ra=0x00081fec` - and every ~4,921,483
+instructions thereafter (0x27, 0x28, 0x29, 0x2a, ... climbing by exactly 1 each time, in lock-step with
+`EE_CYCLES_PER_FRAME_NTSC`), for the entire 142M-instruction survey window, zero gaps, zero stalls.
+
+**Disassembled the writer: 0x0100E630, GT3's own real VBLANK-interrupt service routine.** This is a
+self-contained function (prologue at 0x0100E630) that: reads/accumulates the R5900's COP0 Performance
+Counter register ($25) into two profiling accumulators at struct offsets +0x48/+0x50 (`0x01047B48`,
+`0x01047B50` - explaining the R822W64 hits at those addresses too); reads the real GS CSR register
+(0x12001000) and extracts bit 13 (a VSYNC/FIELD-parity bit) into offset +0x14 (`0x01047B14`); THEN
+unconditionally increments the counter at offset +0x00 (0x01047B00) by 1 (`ld v1,31488(a2); daddiu
+v1,v1,1; sd v1,31488(a2)` - the exact instruction the watch caught); and finally branches on an
+enable/mode flag at offset +0x10 into further per-frame work. Its caller (`ra=0x00081fec`) sits right
+next to the generic kernel dispatch/ERET-glue trampoline Round 467 already identified at 0x00081FE0 -
+consistent with this being invoked once per real VBLANK interrupt. This is also right next to Round
+818's already-documented "mundane per-VBLANK heartbeat" wrapper (0x0101C7E0, called from ra=0x0100e6e0,
+a few instructions past this function's own tail) - i.e. Round 818 had already traced through this exact
+function's neighborhood and correctly called it a heartbeat, just without specifically watching this one
+field's 64-bit store.
+
+**Correction to the core classification (Rounds 819-821):** thread 3 is NOT permanently parked waiting
+on a counter that never advances. It is a healthy, correctly-functioning per-frame pacing loop: GT3's
+loading-percentage renderer (0x01000C88, identified last round) calls the wait wrapper (0x0100D9A8) with
+threshold=2, and the counter it polls advances by 1 every real VBLANK - so each wait resolves in ~2
+frames, exactly as designed. Confirmed directly: the `R820CALLER` hits (thread 3 re-entering
+0x0100D9A8's dominant call site) landed at instr 225884813, 235727787, 245570761, 255413735, 265256709,
+275099683, 284942657, 294785631, 304628605, 314471579, 324314553, 334157527, 344000501, 353843475 -
+spaced ~9,842,974 instructions apart, EVERY time, with zero missed cycles across the full 130M-instruction
+window (2 frames' worth, matching threshold=2). GT3's loading-screen digit animation is actively,
+continuously advancing through its ~125-step loop the entire time this project has been tracing it - it
+only ever *looked* stuck because every prior checkpoint sample landed during the (statistically dominant,
+~80%+) "waiting for the next frame tick" phase of an otherwise ordinary cooperative-threading cycle.
+
+**What does NOT change:** `iop_cdvd_get_ncmd_call_count()` is still 0 across this entire run (confirmed
+again in this round's FINAL line) - no CD N-command has ever been dispatched. That finding was always
+independent of thread 3's rendering loop (it comes straight from the CDVD subsystem's own call counter,
+not from watching this counter), and remains fully valid. What's now corrected is only the EXPLANATION:
+thread 3's loading-screen pacing loop is not the cause and was never blocking anything - it is healthy,
+active code. The real, still-open question is task #811: what should be issuing GT3's first real CD read
+request, and why does that never happen. That gap is now known to be somewhere else entirely in GT3's own
+code (or in the IOP-side dispatch this project models) - not in the EE-side loading-screen animation this
+investigation spent Rounds 819-822 tracing.
+
+**No fix implemented, and correctly so.** Per the user's request to "fix the loop yourself if you figure
+it out" - the loop is not broken. Forcibly altering it (e.g. skipping the wait, or synthetically
+advancing the counter faster) would be a fabricated change with no evidenced bug behind it, and would
+violate this project's no-fabricated-fix discipline. The honest, evidenced result this round is a
+correction to earlier analysis, not a source-code fix - and that correction is itself real progress: it
+retires a three-round-long false lead and points the remaining "task #811" investigation at the right
+subsystem (CD-command dispatch) instead of a rendering loop that was never the problem.
+
+**Regression / Wii build:** correctly skipped - purely investigative, `git diff --stat source/` empty.
+All new instrumentation (`R822_WIDE_WRITE_WATCH`, `R822_DMA_WATCH`) lives only in `/tmp/r820scratch` and
+`/tmp/r822scratch` scratch copies of `ee_core.c` and `dma.c`, never applied to tracked source.
+
+**Files changed:** none in `source/`; no new tool files committed this round (scratch driver reused
+Round 819's `r819_resume_watch.c` unmodified, just recompiled against the new scratch copies).
+
+**Leak-check:** trivially clean - only this `docs/STATUS.md` update is staged
+(`git diff --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'` empty).

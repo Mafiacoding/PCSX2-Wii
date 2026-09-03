@@ -34493,3 +34493,86 @@ the change correct and kept.
 `git diff --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'`
 confirmed empty immediately before commit. The new `checkpoints/` directory and `.ckpt` file are
 gitignored and were never staged.
+
+---
+
+## Round 818: semaphore-0 producer traced and identified as a mundane per-VBLANK heartbeat, not a CDVD gate (task #811/#823-827)
+
+**User's request.** Following Round 817's correction (the real, cleanly-testable loader-adjacent wait
+is semaphore 0/thread 2/pc=0x0101bc24, not semaphore 5/thread 1) and clean-negative result (releasing
+it does not lead to a CDVD import), the user asked to trace semaphore 0's real `CreateSema` call site
+and expected producer, per the exact chain: `CreateSema -> semid=0 -> WaitSema(0) -> expected producer
+-> SignalSema(0) -> GT3 loader proceeds -> first CDVD import`. The user also asked to persist a
+checkpoint to their own drive so nothing is lost between sessions.
+
+**New diagnostic accessor: `R818_SEMA_TRACE`** (`source/core/ee/ee_hle_thread.c`, disabled by default,
+zero cost in normal builds - verified via standalone compiles with/without the flag and alongside
+`R812_EVENTLOG`). Unlike `R812_EVENTLOG`'s `WaitSema-entry` logging (which re-fires every single
+scheduler tick once a thread busy-parks, making it unusable for a long survey), this logs ONLY
+`CreateSema` and `SignalSema`/`iSignalSema` calls - each with semid, caller `$ra`, and pc - so it stays
+bounded even across a hundred-million-plus-instruction window.
+
+**New driver: `tools/round729-gt3-discboot/r818_sema_producer.c`** (cold-boot-only, same pattern as
+r816/r817). A first run (budget yielding `total_instr=46,545,489`) captured the real `CreateSema`
+chain: semaphore 0 (`init_count=0, max_count=255` - a counting/job semaphore, not a binary one) is
+lazily created inside a small self-initializing function at `pc=0x0101c708` (guarded by a one-shot init
+flag at RAM `0x0103D3A8`), called from `ra=0x0101c738` - i.e., the creation is self-contained inside
+GT3's own generic message-queue subsystem, not injected by any external caller.
+
+**Disassembly (`tools/round655-ee-disasm/disasm.c` against a fresh RAM dump via new
+`tools/round729-gt3-discboot/r818_ramdump.c`).** The function at `0x0101C708` is a lazy-init wrapper
+around a small generic inter-thread messaging subsystem: three near-identical "post message type
+N" entry points at `0x0101C7E0` (type 0), `0x0101C878` (type 1), and `0x0101C8F8` (type 2), each of
+which posts an event into a 512-entry ring buffer and then calls a shared primitive at `0x0101BC10`
+that performs the actual `SignalSema()` on the target's semaphore (semid passed via `a0`). This is a
+generic, semid-parameterized "post + wake" primitive - not something CDVD-specific.
+
+**Finding the real producer (`R818_MSGQ_TRACE`, scratch-only instrumentation in a throwaway copy of
+`ee_core.c` under `/tmp` - never applied to tracked source, per the project's established convention
+for exploratory PC-watch probes).** A 20M-tick (`total_instr=146,104,814`) run hooking every fetch of
+`0x0101C7E0`/`0x0101C878`/`0x0101C8F8`/`0x0101BC10` shows the real producer clearly: thread 3 calls
+into the type-0 wrapper (`ra=0x0100e6e0`, `a0=3`) which in turn calls `0x0101BC10` with `a0=0` (semid
+0) at a **highly regular ~4,921,463-4,921,489-instruction interval** - i.e., once per real EE video
+frame (`EE_CYCLES_PER_FRAME_NTSC = 4,921,488`, the same constant already cited in Round 712's
+cadence work). Across the full 146M-instruction window this fired 21 times, back-to-back, with no
+gaps and no stalling.
+
+**Classification: semaphore 0 is a mundane per-VBLANK heartbeat/job-post mechanism, not the CDVD
+gate.** This directly explains and reinforces Round 817's clean-negative finding: thread 2 (the
+consumer) really is fed a fresh job every single video frame, processes it, and correctly re-parks on
+`WaitSema(0)` waiting for the next frame's job - exactly the "thread runs real code, no import
+follows" outcome Round 817 observed. There is no missing producer, no stuck initialization, and no
+evidenced bug here at all - the semaphore does exactly what a generic per-frame tick/message system
+should do. Task #811/#810's semaphore-0 thread is now closed: it was never the CDVD request gate, and
+no fix is warranted here (correctly not implemented, per this project's standing anti-fabrication
+discipline - there is nothing broken to fix). The real CDVD-dispatch call site (task #811's original
+scope) remains open and should be searched elsewhere - likely gated by a completely different
+condition than either semaphore 0 or 5.
+
+**Checkpoint persistence refreshed (task #827).** Verified the Round 817 checkpoint
+(`checkpoints/gt3_round817_steady_state_217218888instr.ckpt`) still loads and resumes correctly under
+the current (Round 818) tree via `chain_driver` in `continue` mode (confirms this round's diagnostic-
+only change has zero effect on checkpoint compatibility). Advanced it a further 71,113,748
+instructions and saved the result as a new checkpoint,
+`checkpoints/gt3_round818_steady_state_288332636instr.ckpt` (`total_instr=288,332,636`,
+`pc=0x0100d934`, `tid=3`, `pmode=0x66`, `dispfb2=0x00009400`), kept alongside the Round 817 one as a
+second, fresher resume point. Both remain gitignored (`checkpoints/`, `*.ckpt`) and live only on the
+user's own outputs folder, never committed.
+
+**Regression:** 134/135 host-native tests pass (matches every prior round's baseline exactly; the sole
+failure, `test_gs_reglist_image`, is the pre-existing task #808 GS IMAGE-mode bug, unrelated to this
+round).
+
+**Wii cross-build:** clean, 0 warnings/0 errors.
+
+**Files changed:** `source/core/ee/ee_hle_thread.c` (new `R818_SEMA_TRACE`-gated CreateSema/SignalSema
+fprintf instrumentation, disabled by default). `tools/round729-gt3-discboot/r818_sema_producer.c`,
+`tools/round729-gt3-discboot/r818_ramdump.c` (new scratch survey/dump drivers). No fix to
+`ee_hle_thread.h` or any other tracked file this round. Backup made per the Round 779 rule
+(`backups/round818/ee_hle_thread.c.bak`) before editing, deleted after regression/build confirmed the
+change correct and kept.
+
+**Leak-check:** clean - no BIOS/ISO/checkpoint files staged;
+`git diff --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'`
+confirmed empty immediately before commit. Both checkpoint files remain gitignored and were never
+staged.

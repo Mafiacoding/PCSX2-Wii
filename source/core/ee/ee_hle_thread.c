@@ -4,6 +4,22 @@
  * experiment negative result that motivated this file.
  */
 #include <string.h>
+/* Round 818 (task #823/#824, per user's next-step trace-back request):
+ * a lightweight, always-independent-of-R812_EVENTLOG diagnostic that
+ * logs only CreateSema and SignalSema/iSignalSema calls (never
+ * WaitSema), so it can run for the ENTIRE boot window without the
+ * unbounded stderr growth R812_EVENTLOG's WaitSema-entry logging would
+ * cause once a thread starts busy-parking (that handler re-executes
+ * and re-logs every single scheduler tick once blocked - fine for a
+ * short targeted window, unusable for a full multi-hundred-million-
+ * instruction survey). Purpose: identify the real CreateSema call site
+ * (and its caller $ra) that allocates semid 0 - the semaphore thread 2
+ * genuinely WaitSema-parks on at pc=0x0101bc24 (Round 817 correction) -
+ * and every SignalSema(0)/iSignalSema(0) call (with caller $ra) that
+ * should be releasing it, to find semid 0's real, expected producer. */
+#ifdef R818_SEMA_TRACE
+#include <stdio.h>
+#endif
 #include "core/ee/ee_hle_thread.h"
 
 #define EE_HLE_THREAD_MAX_THREADS 32
@@ -804,6 +820,10 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
             s->attr = attr; s->option = option;
             s->max_count = max_count;
             s->count = init_count;
+#ifdef R818_SEMA_TRACE
+            fprintf(stderr, "[R818SEMA] event=CreateSema tid=%d sem=%d init_count=%d max_count=%d ra=0x%08x pc=0x%08x\n",
+                    cur, slot, init_count, max_count, (uint32_t)st->gpr[31].ud0, this_pc);
+#endif
             EE_RET(slot);
         }
         EE_ADVANCE();
@@ -860,6 +880,10 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
             if (s->count < s->max_count) {
                 s->count++;
                 EVT(cur, "event=SignalSema sem=%d count=%d pc=0x%08x", semid, s->count, this_pc);
+#ifdef R818_SEMA_TRACE
+                fprintf(stderr, "[R818SEMA] event=SignalSema tid=%d sem=%d count=%d ra=0x%08x pc=0x%08x sysnum=%d\n",
+                        cur, semid, s->count, (uint32_t)st->gpr[31].ud0, this_pc, sysnum);
+#endif
                 wake_one_sema_waiter(semid); /* bookkeeping only - does not gate the increment above */
                 EE_RET(0);
             } else {

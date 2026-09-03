@@ -6127,8 +6127,19 @@ static int ee_step(void)
                                  * attempt this RPC at all" independent
                                  * of whether it's individually
                                  * recognized/dispatched below. */
-                                fprintf(stderr, "[R813EVT] sid=NCMD rpc_number=%u call_recvbuf=0x%08x call_cd=0x%08x pc=0x%08x\n",
-                                        rpc_number, call_recvbuf, call_cd, st->pc);
+                                /* Round 816 (task #811 continuation,
+                                 * per user's game-side CDVD import
+                                 * trace spec): widened to also log
+                                 * $ra (the GT3-side call site that
+                                 * issued this RPC, i.e. the "import"
+                                 * address) and the current EE thread
+                                 * ID, so a survey driver can attribute
+                                 * the call to a specific game
+                                 * function/thread without needing
+                                 * GT3's own (unavailable) symbols. */
+                                fprintf(stderr, "[R813EVT] sid=NCMD rpc_number=%u call_recvbuf=0x%08x call_cd=0x%08x pc=0x%08x ra=0x%08x tid=%d\n",
+                                        rpc_number, call_recvbuf, call_cd, st->pc,
+                                        (uint32_t)st->gpr[31].ud0, ee_hle_thread_get_current_thread_id());
 #endif
                                 /* Round 473 (CDVDFSV/audio-stream protocol
                                  * depth, per explicit user request):
@@ -6542,8 +6553,12 @@ static int ee_step(void)
                                  * above for full rationale. Same
                                  * observational log for the S-command
                                  * (synchronous/config) service. */
-                                fprintf(stderr, "[R813EVT] sid=SCMD rpc_number=%u call_recvbuf=0x%08x call_cd=0x%08x pc=0x%08x\n",
-                                        rpc_number, call_recvbuf, call_cd, st->pc);
+                                /* Round 816: same $ra/tid widening as
+                                 * the SIF_SID_CDVD_NCMD branch above -
+                                 * see that comment for rationale. */
+                                fprintf(stderr, "[R813EVT] sid=SCMD rpc_number=%u call_recvbuf=0x%08x call_cd=0x%08x pc=0x%08x ra=0x%08x tid=%d\n",
+                                        rpc_number, call_recvbuf, call_cd, st->pc,
+                                        (uint32_t)st->gpr[31].ud0, ee_hle_thread_get_current_thread_id());
 #endif
                                 /* Round 302 GENERALIZED catch-all,
                                  * CORRECTED in Round 303: same

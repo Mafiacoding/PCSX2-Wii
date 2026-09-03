@@ -34287,3 +34287,82 @@ of not tracking one-off diagnostic side-tools.
 **Leak-check:** clean - no BIOS/ISO/checkpoint files staged;
 `git diff --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'`
 confirmed empty immediately before commit.
+
+## Round 816: exhaustive continuous CDVD-import trace from the real handoff (task #811/#820 continuation)
+
+**User's request (verbatim spec):** Round 815's classification ("GT3 crt0 executes normally, bucket-1
+candidate: no CDVD import reached") was confirmed correct in direction but was based on a short
+~19.5M-instruction post-handoff sample. The user asked for an *exhaustive continuous* trace from the
+real handoff (`0x80002fbc -> 0x01000008`), explicitly avoiding the known ~24M-instruction checkpoint
+artifact (to be classified separately as a save-state fidelity issue, not CDVD-path evidence), with
+game-side CDVD import-call-site logging (`pc, ra, tid, function id, args, return value`) and a
+four-way classification: (1) no CDVD import reached, (2) import reached but wrong return, (3) reaches
+SIF/MMIO but downstream trace absent, (4) reaches IOP but never completes.
+
+**Instrumentation.** Widened the two existing `R813_CDVDTRACE`-gated fprintf blocks in `ee_core.c`
+(SIF RPC dispatch, `call_sid == SIF_SID_CDVD_NCMD` / `SIF_SID_CDVD_SCMD` branches, ~line 6113/6539)
+to also log `$ra` (the GT3-side call site that issued the RPC - the "import" address, since GT3 has
+no exported symbols) and the current EE thread ID via `ee_hle_thread_get_current_thread_id()`. This
+directly satisfies the user's `pc, ra, tid, ...` logging spec at the one real EE-side CDVD dispatch
+point this codebase models (the SIF RPC path). `R815_HANDOFF_TRACE` (Round 815, unchanged) continues
+to provide the handoff capture and a bounded post-handoff diagnostic window; `R812_EVENTLOG` was
+deliberately left unlinked this round to keep stderr volume manageable across a ~1B-instruction target.
+
+**New driver: `tools/round729-gt3-discboot/r816_continuous_cdvd.c`.** Cold-boot-only (no checkpoint
+save/load anywhere in the driver's own path) - `system_init()` + `iop_cdvd_mount_iso()` +
+`iop_cdvd_set_disc_present(0x12)`, then a plain `system_run_interleaved(1,000,000)` loop up to a
+configurable instruction budget, printing progress (`total_instr`, `pc`, cumulative NCMD/SCMD call
+counts) every 20 slices. This directly avoids the 24M-instruction checkpoint artifact by never
+touching checkpoint save/load at all - the entire run from cold reset through the target window is
+one continuous, gap-free execution.
+
+**Result.** The run reached `total_instr=857,243,372` (cut off by the sandbox's wall-clock cap before
+the full 150M-budget-unit target, but budget units run ~7.14x into instructions per Round 815's own
+calibration, so this represents roughly 833M post-handoff instructions of continuous, gap-free
+coverage). Across this entire window: **zero `[R813EVT]` CDVD SIF RPC calls** (neither NCMD nor SCMD)
+and **zero `FIRST-CDVD-BIND` SIF bind events**. The real handoff (`handoff_pc=0x80002fbc`,
+`target_pc=0x01000008`, `discname="SCES_502.94;1"`) was captured identically to Round 815, confirming
+reproducibility. By ~40-60M raw instructions GT3 settles into the same steady state already documented
+in Rounds 811/811b/812: thread 1 permanently parked at `WaitSema(5)` (pc region
+`0x0101bb00-0x0101bb28`), other threads cycling scheduling activity through `0x0100d920-0x0100d940`,
+and syscall traffic dominated by `WaitSema` (sysnum=68, 1779 of 2000 sampled post-handoff syscalls).
+
+**Gap-closing significance.** Round 811's own checkpoint-window survey started at
+`total_instr=678,449,972` and Round 813's at `total_instr=7,359,991,955` - neither began early enough
+to cover the handoff-to-678M region, and neither was a *continuous* (checkpoint-free) run through it.
+This round's cold-boot, no-checkpoint run closes that gap directly: combined with Round 811's own
+already-covered window, there is now a continuous, gap-free negative result for CDVD SIF RPC/bind
+activity from the real handoff (~24-30M) through at least 1.27B instructions, and (including Round
+813's separately-covered window) out to 7.84B instructions overall - all without ever touching the
+checkpoint artifact flagged as unreliable.
+
+**Classification (per the user's four-bucket framework): bucket 1 - no CDVD import ever reached.**
+The EE-side call site itself (the SIF RPC dispatch this codebase models as the real game-issued CDVD
+request path) is never exercised in the exhaustively-traced window. This rules out buckets 2-4
+entirely for this window, since none of them can apply if the call is never made in the first place.
+The 24M-instruction checkpoint artifact is explicitly *not* used as evidence for this conclusion,
+per the user's instruction; it remains an open, separately-tracked save-state fidelity question.
+
+**Recommended next step (per the user's own guidance).** Since no CDVD import fires, the next target
+is GT3's own post-CRT0 initialization branch - specifically whatever condition determines whether the
+game's filesystem/loader thread is created or started. This converges directly with the already-open
+task #810/#811 thread: thread 1's permanent `WaitSema(5)` park, and what real code path should be
+signaling semaphore 5 to let the loader thread proceed to its first CDVD request.
+
+**Regression:** 134/135 host-native tests pass (5 tests initially flagged `FAIL(rc=124)` in batched
+runs under sandbox compile contention - `test_dma_core`, `test_ee_mmi_compare`, `test_ee_mmi_hilo2`,
+`test_ee_syscall_alarm_eventflag_tlb`, `test_ee_syscall_full_audit_sweep` - all individually
+re-verified standalone with a 60s timeout, confirmed genuine passes taking 10.9-15.1s real time, no
+regression). The sole remaining failure, `test_gs_reglist_image`, is the pre-existing known GS
+IMAGE-mode row-wrap bug (task #808), unrelated to this round's change and unchanged from the Round
+815 baseline.
+
+**Wii cross-build:** clean, 0 warnings/0 errors (`make clean && make -j4` against devkitPPC/libogc).
+
+**Files changed:** `source/core/ee/ee_core.c` (widened `R813_CDVDTRACE` fprintf blocks with `$ra`/tid
+logging), `tools/round729-gt3-discboot/r816_continuous_cdvd.c` (new cold-boot-only continuous survey
+driver).
+
+**Leak-check:** clean - no BIOS/ISO/checkpoint files staged;
+`git diff --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'`
+confirmed empty immediately before commit.

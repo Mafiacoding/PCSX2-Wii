@@ -35137,3 +35137,48 @@ matches the existing `checkpoints/` convention). The two prior checkpoints
 (`gt3_round817_...`, `gt3_round818_...`) were left in place for now.
 
 No tracked source changed this round; docs-only entry.
+
+## Round 825: fixed task #808 - `test_gs_reglist_image`'s IMAGE-mode
+## row-wrap "failure" was the test's own stale TRXREG packet encoding,
+## not an emulator bug
+
+Investigated the long-standing, already-tracked `test_gs_reglist_image`
+failure (first flagged Round 748, reconfirmed unrelated/pre-existing in
+every regression run since). `source/hw/gif.c`'s `GS_REG_TRXREG` case
+already reads `RRW` from the low word (`data_lo & 0xFFF`) and `RRH` from
+the high word (`data_hi & 0xFFF`) - the real-hardware-verified layout fixed
+in Round 636 (task #536/#614), cross-checked then against `docs/reference/
+pcsx2/pcsx2/GS/GSRegs.h`.
+
+**Root cause.** `tests/test_gs_reglist_image.c`'s IMAGE-mode host-to-local
+test packet (written before Round 636 existed) packed `RRH` into the LOW
+word's bits 16-27 (`3u | (2u << 16), 0`) - the old, incorrect convention
+that matched gif.c's behavior *before* Round 636, but not after. Since
+Round 636 corrected gif.c to read `RRH` from `data_hi`, and this test kept
+passing `data_hi=0`, `trx_rrh` silently read back 0 for this packet,
+tripping `image_write_pixel_qwords()`'s row-wrap check
+(`trx_cur_y >= trx_rrh`) after row 0 and failing the three row-2 pixel
+CHECKs. The test's own TRXPOS line directly above it already uses the
+correct low/high split for DSAX/DSAY, making the TRXREG line's stale
+encoding an obvious oversight once compared side by side.
+
+**Fix.** One-line test change: `write_ad_packet(buf, &off, 3u, 2u,
+GS_REG_TRXREG)` (RRW in `data_lo`, RRH in `data_hi`) instead of packing
+both into `data_lo`. Backed up first to `backups/test_gs_reglist_image.c.
+round825.bak` per the Round 779 rule, deleted once confirmed correct.
+
+**Verified.** Standalone compile+run of the fixed test: all 15 checks pass,
+including all three previously-failing row-2 pixel assertions and the
+`trx_active` auto-deactivate check. Full host-native regression suite
+(135 tests, run in ~20 timeout-safe batches): **135/135 pass** - the first
+fully clean regression run in this project's history (every prior round
+carried this one pre-existing failure). Wii/devkitPPC cross-build: 0
+warnings, 0 errors, all 41 SOURCES files compiled, `pcsx2-wii.elf`/`.dol`
+produced.
+
+No `source/` file changed this round - `tests/test_gs_reglist_image.c` was
+the only file touched, so no Wii-build-relevant source moved; the cross-
+build was still re-run as a full health check per the standing workflow.
+
+**Task status.** Task #808 resolved - closing as "test bug, not an
+emulator bug," with the fix landed in the test file itself.

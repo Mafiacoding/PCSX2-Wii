@@ -119,7 +119,27 @@ int main(void)
         int off = 0;
         write_ad_packet(buf, &off, (0u & 0x3FFFu), (1u & 0x3Fu) << 16 | (TEX_PSM_PSMCT32 << 22), GS_REG_BITBLTBUF); /* DBP=0, DBW field=1 (1*64=64px), DPSM=PSMCT32 */
         write_ad_packet(buf, &off, 0, (1u) | (1u << 16), GS_REG_TRXPOS); /* DSAX=1, DSAY=1 */
-        write_ad_packet(buf, &off, 3u | (2u << 16), 0, GS_REG_TRXREG);   /* RRW=3, RRH=2 */
+        /* Round 825 fix (task #808): real GIFRegTRXREG splits RRW into
+         * the LOW word (bits 0-11) and RRH into the HIGH word (bits
+         * 0-11) - see source/hw/gif.c's GS_REG_TRXREG case (Round 636
+         * fix, task #536/#614, verified against docs/reference/pcsx2's
+         * GSRegs.h). This test packet predates that fix and packed
+         * RRH into data_lo's bits 16-27 instead (the old, incorrect
+         * convention) - harmless before Round 636 since the source
+         * read RRH from that same wrong location, but after Round 636
+         * corrected the source to read RRH from data_hi, this stale
+         * test packet made trx_rrh silently read back 0 (data_hi was
+         * still 0 here), tripping the row-wrap check after row 0 and
+         * failing every pixel-position CHECK below at (1,2)/(2,2)/
+         * (3,2) - the "GS IMAGE-mode row-wrap bug" this task
+         * described. Confirmed via `git stash` (Round 748) that this
+         * failure reproduces identically on trees both before and
+         * after every GS/GIF-related fix since Round 636, i.e. it was
+         * always this test's own packet encoding, never a real
+         * emulator bug. Fixed by moving RRH into data_hi, matching the
+         * TRXPOS line directly above (DSAX/DSAY already correctly
+         * split low/high). */
+        write_ad_packet(buf, &off, 3u, 2u, GS_REG_TRXREG);   /* RRW=3, RRH=2 */
         write_ad_packet(buf, &off, TRXDIR_HOST_TO_LOCAL, 0, GS_REG_TRXDIR); /* triggers the transfer */
 
         write_giftag(buf, &off, 2 /* nloop: 2 qwords = 8 pixels */, 2 /* IMAGE */, 0, 0, 0, 0, 0);

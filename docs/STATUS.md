@@ -35457,3 +35457,118 @@ other events but never 0x8000000A" gap.
 
 No checkpoint files, BIOS images, or disc images were committed
 (leak-check run and clean before commit, per standing rule).
+
+## Round 829 (task #811): "disassemble everything" - 0x0101D878 corrected: it's a real AddDmacHandler-registered SIF0 DMAC completion handler, not a custom event dispatcher
+
+Per the user's explicit "disassemble everything" instruction, continued
+Round 828's disassembly hunt for GT3's semaphore-5 producer by
+statically scanning GT3's ENTIRE loaded boot ELF (extracted directly
+from the real disc's `SCES_502.94;1` via SYSTEM.CNF, confirmed program
+header range `0x01000000-0x0104D814`, 317,972 bytes - fully covered by
+a 2MB dump, so this scan is exhaustive over every byte of code this
+project's boot ever has resident in EE RAM) for every direct `jal`
+call to `0x0101D878` (Round 828's "event fire/dispatch" candidate) and
+every raw 32-bit pointer-constant reference to that address (LUI+ADDIU/
+ORI reconstruction, covering indirect-call-via-register patterns too).
+
+**Result: zero direct callers of any kind.** This forced a full
+re-disassembly of `0x0101D878` itself and its two real callers'
+context, rather than assuming Round 828's "two-table dispatcher" theory
+was correct.
+
+**Corrected finding: `0x0101D878` is not a custom event dispatcher -
+it is a real SIF0 DMAC channel completion interrupt handler, registered
+through the genuine EE kernel `AddDmacHandler` syscall (sysnum 18).**
+Fully decoded the registration call site (`0x0101D4E0-0x0101D50C`,
+inside the same init function Round 828 found registers semaphore 5 and
+event `0x8000000A`):
+```
+addiu a0, zero, 5          ; channel = DMA_CHANNEL_SIF0 (confirmed via
+                            ; include/core/hw/dma.h's own #define)
+lui   a1, 0x0102            ; a1 = handler function pointer...
+addiu a1, a1, -10120        ; ...= 0x0101D878 (verified: 0x01020000-0x2788)
+jal   0x0101B8F0             ; AddDmacHandler(channel=5, handler=0x0101D878, next=0)
+daddu a2, zero, zero        ; next = NULL
+```
+`0x0101B8F0` is confirmed (by direct disassembly) to be a syscall stub
+table entry `addiu v1,zero,18 / syscall / jr ra / nop` - and this
+project's OWN `ee_core.c` (line 4227, task #180) already documents
+syscall 18 as real `AddDmacHandler`, deliberately let through as a
+genuine `EE_EXC_CODE_SYS` exception specifically so the real, resident
+BIOS kernel code populates its own internal per-channel handler table -
+this project does not (and by design should not) guess at that table's
+layout. `0x0101D878` itself, once disassembled in full, is exactly the
+kind of function a real driver registers for this purpose: it reads a
+queue-descriptor byte-count from a per-channel structure, converts it
+to a quadword count, copies that many quadwords out of a source buffer,
+then calls `isceSifSetDChain()` (syscall -120, this project's existing
+no-op-stub form of the real SIF0 chain-mode re-arm syscall) - a
+textbook "DMA completion: re-arm the next chunk" handler body, not a
+generic multi-ID event dispatcher.
+
+**Also found, by extending the same JAL-target static-scan technique to
+the surrounding syscalls, that GT3 genuinely exercises the full real
+SIF0 driver-level call sequence, not just registration:**
+- `sceSifSetDma` (syscall 119, real DMA-send primitive - already fully
+  implemented in this project, `ee_core.c` line ~7050) is called from
+  4 separate sites in GT3's own code (`0x0100C5B8`-class region among
+  them); its lowest-form sibling `isceSifSetDma` (syscall -119) from 1
+  site.
+- `_EnableDmac` (syscall 22) is called from 7 sites.
+- `AddDmacHandler` (syscall 18) is called from 4 sites total (Round
+  828 only found the one at `0x0101D508`; the other 3 register
+  handlers for other channels/IDs, not yet individually decoded).
+
+Confirmed this project's own DMAC completion interrupt DELIVERY path is
+real and already correctly modeled, not a gap: `dma_channel_signal_done
+(DMA_CHANNEL_SIF0)` is called for real inside the syscall-119 handler
+(so a genuine GT3-issued `sceSifSetDma` really does set `D_STAT`'s SIF0
+status bit), and Cause.IP3 (the real, separate R5900 DMAC interrupt
+line, distinct from Cause.IP2/INTC - see `ee_check_dmac_interrupt()`,
+fixed for real at Round 307) correctly tracks `dma_dmac_interrupt_pending()`
+combining `D_STAT`'s status bit with its own per-channel enable bit
+(`D_STAT` bits 16-25, set via `dma_channel_set_irq_enable()`, the real
+end-state effect of syscall 22).
+
+**One concrete anomaly flagged, not yet resolved:** the two `_EnableDmac`
+(syscall 22) calls sitting directly adjacent to the `AddDmacHandler(5,
+0x0101D878)` registration (`0x0101D59C`/`0x0101D5AC`, in the very same
+function) pass `a0 = 0x80000000`-class values, not the plain small
+channel index (5) `ee_core.c`'s own existing implementation expects -
+`dma_channel_set_irq_enable((int)0x80000000, 1)` fails this project's
+`channel < 0` bounds check (0x80000000 as a signed int is negative) and
+silently no-ops. If this is really how the genuine game encodes the
+channel/mask argument (rather than, e.g., a different a0 use this
+disassembly excerpt doesn't yet explain), then channel 5's real DMAC
+interrupt ENABLE bit may never get set by this exact call - meaning
+`dma_dmac_interrupt_pending()` could stay false even after a real
+`sceSifSetDma` sets the status bit, explaining why `0x0101D878` (and
+therefore `SignalSema(5)`) never runs. This is flagged as a real,
+evidenced, still-open lead, not a confirmed root cause - the exact
+semantics of that specific `a0` value are not yet cross-referenced
+against a citable real ps2sdk/PCSX2 source for `_EnableDmac`'s true
+calling convention, and no source fix is implemented this round without
+that citation, per this project's standing anti-fabrication rule.
+
+**Disposition.** Task #811 is further re-scoped by this round, in a way
+that meaningfully narrows (not just re-labels) the open question:
+Round 828 believed `0x0101D878` was an uncalled generic event
+dispatcher; this round shows it is a correctly-designed, correctly-
+registered real DMAC handler sitting behind an architecturally sound
+and already-fixed (Round 307) interrupt-delivery mechanism, and that
+GT3 genuinely drives the whole real SIF0 send/enable/handler chain -
+the remaining gap, if any, is narrow and specific: whether channel 5's
+DMAC interrupt-enable bit is ever actually set correctly, given the
+unexplained `a0 = 0x80000000`-class `_EnableDmac` argument found at the
+one call site adjacent to the semaphore-5 registration. Next concrete
+step: cross-reference a citable real `_EnableDmac`/`EnableDmac` source
+(ps2sdk `dmacman.h`/kernel.h or PCSX2's own syscall table) for its true
+argument convention, and live/offline-instrument whether `D_STAT`'s
+bits 16-25 (enable mask) ever actually get channel 5's bit set during a
+real GT3 boot, before considering any source change.
+
+Docs-only, read-only static disassembly (existing `tools/round655-ee-
+disasm/disasm.c`, `tools/round729-gt3-discboot/r819_ckpt_disasm.c`,
+`pycdlib`-based ELF extraction from the real disc image) - no tracked
+source changed, regression/Wii build correctly skipped, leak-check
+clean. No checkpoint files, BIOS images, or disc images were committed.

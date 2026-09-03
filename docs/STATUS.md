@@ -34366,3 +34366,130 @@ driver).
 **Leak-check:** clean - no BIOS/ISO/checkpoint files staged;
 `git diff --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'`
 confirmed empty immediately before commit.
+
+---
+
+## Round 817: GT3_SEM5_PROBE diagnostic wake (task #811/#821), sema-0/sema-5 correction, checkpoint persisted to outputs (task #822)
+
+**User's request (three parts).** (1) Explicit infrastructure ask: build a checkpoint on the user's
+own hard drive (not `/tmp` scratch) so nothing is lost between sessions. (2) A narrowly-gated,
+one-shot diagnostic wake of semaphore 5 - explicitly NOT a fix - to answer "does releasing thread 1
+allow GT3 to reach its first CDVD call?", with an exact spec: use the existing wake path (never
+mutate the TCB directly), gate strictly on GT3 being active + ncmd==0 + scmd>=13 + a thread found
+genuinely WAIT/SEMA/5, log full before/after thread-table state, and classify the result against a
+four-outcome framework (import follows -> sema is the gate; thread runs but no import -> sema
+downstream/incidental; no observable resume -> wrong semid/wake-path/checkpoint-state issue;
+crash/invalid execution -> revert, not a valid compatibility path). (3) A "next step" trace-back
+target: find the real `CreateSema`/producer/`SignalSema` chain for whichever semaphore is the true
+loader gate.
+
+**New diagnostic accessor: `ee_hle_thread_debug_signal_sema(int semid)`**
+(`source/core/ee/ee_hle_thread.c` / `include/core/ee/ee_hle_thread.h`). This is the "existing wake
+path" the user's spec required: a byte-for-byte mirror of the real `SignalSema`/`iSignalSema`
+handler's own count-increment + `wake_one_sema_waiter()` sequence (see the sysnum==66/-67 handler),
+exposed as a directly-callable function so a diagnostic driver can signal a semaphore without
+fabricating a syscall calling context. Count is incremented (bounded by `max_count`, matching the
+real `E_KERNEL_SEMA_OVF` case) and `wake_one_sema_waiter()` runs exactly as the live handler's own
+copy does. Deliberately does not call `reschedule()` itself - the existing WaitSema busy-park idiom
+re-checks `s->count` and calls `reschedule()` on its own very next tick regardless, so a separate call
+here is neither needed nor safe. Never wired into any real EE syscall path; same diagnostic-only
+convention as `ee_hle_thread_debug_force_wakeup()` (Round 733) and
+`ee_hle_thread_debug_force_rotate()` (Round 734). Returns 1 on success, 0 if semid is invalid/unused,
+-1 if already at `max_count`. Standalone compile clean (`-O1 -Wall -Wextra -Werror`).
+
+**New driver: `tools/round729-gt3-discboot/r817_sem5_probe.c`.** Cold-boot-only continuous survey
+(same no-checkpoint pattern as Round 816's driver), with the probe itself compiled in only under
+`-DGT3_SEM5_PROBE` (disabled by default, per the user's explicit build-gating requirement). The gate
+(`maybe_probe_gt3_sem5()`) fires at most once: waits for `total_instr >= 30,000,000` (past the real
+handoff per Rounds 815/816's own calibration), `ncmd==0`, `scmd>=13`, and a live thread genuinely in
+`status=WAIT(0x04)/wait_type=SEMA(2)/wait_id==R817_PROBE_SEMID` (compile-time override via
+`-DR817_PROBE_SEMID=N`, default 5). On fire: dumps the full thread table (status/wait_type/wait_id/
+saved_pc/priority for every thread) both immediately before and immediately after calling
+`ee_hle_thread_debug_signal_sema()`, plus 8 further per-tick `current_tid`/pc samples afterward.
+Built twice: default (`R817_PROBE_SEMID=5`) as `r817_sem5_probe`, and with `-DR817_PROBE_SEMID=0` as
+`r817_sem0_probe`.
+
+**Sema-5 probe result.** The probe fired correctly (gate satisfied at `total_instr=30,000,000`,
+`ncmd=0`, `scmd=13`+). `ee_hle_thread_debug_signal_sema(5)` returned `rc=1`; thread 1 correctly
+transitioned WAIT->READY exactly as the real wake path would. However, thread 1's *saved pc* was
+already `0x0101bb28` at the moment of the probe - not a fresh/valid GT3 continuation point, but a
+`jr $ra` return address sitting inside a WakeupThread-trampoline, matching the pre-existing (Round
+812-documented, NOT introduced by this round) scheduler hazard: an interrupt-context syscall handler
+calling `reschedule()` while genuinely mid-exception can silently overwrite a WAIT thread's saved pc
+with a different context's mid-flight pc, while status/wait_type/wait_id stay correctly WAIT/SEMA/5.
+This round's live probe is the first direct, instrumented catch of that exact corruption in action:
+thread 1 resumed, but execution quickly diverged into real BIOS ROM/kernel addresses
+(`0x8000CDFC`-`0x8000F870`, including the historically-cited `0x8000CF88` OSDSYS device-table/D_STAT
+decision point from the earliest investigation rounds) rather than continuing GT3's own code. Zero
+CDVD SIF RPC calls or SIF binds across the full further ~320M-instruction post-signal window.
+
+**Correction to Rounds 780/781/811's own citations.** Those rounds describe "thread 1 parked at
+`WaitSema(5)`, `pc=0x0101bc24`" as the central GT3 loader block. This round's live, full thread-table
+dump (captured at the moment of the sema-5 probe, before any corruption-inducing resume) proves this
+was imprecise: `pc=0x0101bc24` actually belongs to **thread 2**, which is waiting on **semaphore 0**,
+not semaphore 5. Thread 1 is genuinely `WAIT/SEMA/5`, but at a *different*, separately-corrupted
+saved pc (`0x0101bb28`, see above). Task #810's own title ("trace which call site should signal
+semaphores 5/0") already hedged both were candidates, so this is a precision correction, not a
+reversal of prior work - but it retargets the next investigation step from semaphore 5 to semaphore 0.
+
+**Sema-0 probe (follow-up, targeting the corrected hypothesis).** Re-ran with
+`-DR817_PROBE_SEMID=0`. At this earlier point in the boot only 2 threads exist yet, so no
+pre-existing corruption was present. `ee_hle_thread_debug_signal_sema(0)` returned `rc=1`; thread 2
+correctly resumed **at its real, uncorrupted saved pc** (`0x0101bc24`) and genuinely executed real
+GT3 code there. Execution then settled back into the already-well-documented steady state (thread 3
+cycling `0x0100d920-0x0100d940`). **Zero CDVD SIF RPC calls or SIF binds** across ~287M further
+instructions (final `total_instr=319,504,576`). This is a clean, uncorrupted, decisive result:
+releasing the genuine loader-blocking wait (semaphore 0, thread 2, `pc=0x0101bc24`) does **not** lead
+to a CDVD import.
+
+**Classification (per the user's four-outcome framework).**
+- Semaphore 5 / thread 1: inconclusive-by-corruption - "no observable resume" in the sense that the
+  resumed pc was invalid (a pre-existing, unrelated hazard, not a probe bug); this probe cannot by
+  itself validate or rule out semaphore 5 as a gate, because the resume target was already wrong
+  before the probe ran. This is exactly the outcome-3 case the user's spec anticipated
+  ("wrong semid/wake-path issue/invalid checkpoint-thread-state" - here, invalid pre-existing
+  thread-state, not a wake-path bug).
+- Semaphore 0 / thread 2: clean **outcome 2** - "thread runs but no import" - the real, uncorrupted
+  loader-adjacent wait resumes into genuine GT3 code and runs for hundreds of millions of further
+  instructions, but never reaches a CDVD import. Per the user's own framework, this means **the wait
+  is downstream/incidental, not the true gate**.
+
+**Recommended next step (per the user's own next-step guidance, now correctly retargeted).** Since
+releasing the *real* loader-blocking wait (semaphore 0, not 5) is a clean negative, the next round
+should trace semaphore 0's real `CreateSema` call site and expected producer thread/function within
+GT3, following the user's own chain: `CreateSema(initial_count) -> semid=0 -> WaitSema(0) [thread 2,
+pc=0x0101bc24] -> expected producer -> SignalSema(0) -> GT3 loader proceeds -> first CDVD import`.
+Semaphore 5/thread 1 remains a secondary open question, complicated by the pre-existing Round-812
+scheduler hazard corrupting its saved pc - that hazard itself may be worth a dedicated fix pass before
+semaphore 5 can be probed meaningfully again.
+
+**Checkpoint persisted to the user's outputs folder (task #822).** Built a fresh cold-boot checkpoint
+at a clean, well-past-steady-state point: `total_instr=217,218,888`, `pc=0x0101bb0c`, `tid=3`,
+`pmode=0x66`, `dispfb1=0x00000000`, `dispfb2=0x000094a0`. Verified via two independent equivalence
+tests: (1) immediate save-then-reload-and-report produced an identical state report; (2) two separate
+`continue`-mode runs launched from independent copies of the same checkpoint file produced
+byte-identical results after +10,000,000 further instructions each. Persisted to
+`checkpoints/gt3_round817_steady_state_217218888instr.ckpt` (40,028,924 bytes) inside the tracked
+repo directory, which lives on the user's own machine (survives between sessions, unlike `/tmp`
+scratch) - directly fulfilling the user's explicit request. `.gitignore` hardened with `checkpoints/`
+and `*.ckpt` entries so this (and any future checkpoint) can never be accidentally committed, as
+defense-in-depth alongside the standing pre-commit leak-check grep. Confirmed ignored via
+`git check-ignore -v`.
+
+**Regression:** 134/135 host-native tests pass, matching the Round 816 baseline exactly. The sole
+remaining failure, `test_gs_reglist_image`, is the pre-existing known GS IMAGE-mode row-wrap bug
+(task #808), unrelated to this round.
+
+**Wii cross-build:** clean, 0 warnings/0 errors (`make clean && make -j4` against devkitPPC/libogc).
+
+**Files changed:** `source/core/ee/ee_hle_thread.c` / `include/core/ee/ee_hle_thread.h` (new
+`ee_hle_thread_debug_signal_sema()` diagnostic accessor), `tools/round729-gt3-discboot/
+r817_sem5_probe.c` (new gated probe driver, disabled by default), `.gitignore` (checkpoint-ignore
+hardening). Backups made per the Round 779 rule
+(`backups/round817/ee_hle_thread.{c,h}.bak`) before editing, deleted after regression/build confirmed
+the change correct and kept.
+
+**Leak-check:** clean - no BIOS/ISO/checkpoint files staged;
+`git diff --cached --name-only | grep -iE '\.bin$|\.iso$|\.elf$|bios|ckpt|checkpoint'`
+confirmed empty immediately before commit. The new `checkpoints/` directory and `.ckpt` file are
+gitignored and were never staged.

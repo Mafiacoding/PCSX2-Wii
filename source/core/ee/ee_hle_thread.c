@@ -468,6 +468,44 @@ static int wake_one_sema_waiter(int semid)
     return 1;
 }
 
+/* Round 817 (task #811/#821, GT3 semaphore-5 probe, per user's
+ * explicit narrowly-gated diagnostic spec): exposes the EXACT real
+ * SignalSema(semid)/iSignalSema(semid) transition (see the
+ * sysnum==66/-67 handler above - this is a byte-for-byte mirror of
+ * its count-increment + wake_one_sema_waiter() sequence, not a new
+ * behavior) as a directly-callable function, so a compile-time-gated
+ * (GT3_SEM5_PROBE) diagnostic driver can signal a semaphore without
+ * fabricating a syscall/register calling context. This is the
+ * "existing wake path" the user's spec explicitly required ("do not
+ * edit the TCB directly... use the existing wake path"): count is
+ * incremented (bounded by max_count, matching the real E_KERNEL_
+ * SEMA_OVF error case) and wake_one_sema_waiter() is invoked exactly
+ * as SignalSema's own handler does. Deliberately does NOT call
+ * reschedule() itself (unlike the live syscall handler) - this is
+ * meant to be called from a driver's own slice loop, outside any EE
+ * instruction step, and the already-established WaitSema busy-park
+ * idiom re-checks s->count and calls reschedule() on its own very
+ * next tick regardless (see the sysnum==68 handler's own citation),
+ * so no separate reschedule() call is needed or safe to add here.
+ * NOT wired into any EE syscall path; never fires during organic
+ * emulation - same "diagnostic-only accessor" convention already
+ * established by ee_hle_thread_debug_force_wakeup() (Round 733) and
+ * ee_hle_thread_debug_force_rotate() (Round 734) above.
+ * Returns 1 on success, 0 if semid is invalid/unused, -1 if the
+ * semaphore is already at max_count (real overflow case - the real
+ * SignalSema handler's own -419 error path, surfaced here as a
+ * distinct return so a probe driver can tell "already signaled"
+ * apart from "nothing to signal"). */
+int ee_hle_thread_debug_signal_sema(int semid)
+{
+    ee_sema_internal_t *s = sema(semid);
+    if (!s || !s->in_use) return 0;
+    if (s->count >= s->max_count) return -1;
+    s->count++;
+    wake_one_sema_waiter(semid); /* bookkeeping only, matches real handler - does not gate the increment above */
+    return 1;
+}
+
 int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, int in_delay_slot)
 {
     (void)in_delay_slot;

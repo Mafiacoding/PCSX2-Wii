@@ -11,3 +11,15 @@ tests/test_*
 !tests/test_*.c
 !tests/README.md
 *.bundle
+
+# Round 817 (task #822, per the user's explicit request): checkpoint
+# files must NEVER be committed - they embed real BIOS/disc-derived
+# RAM content (see docs/checkpoint.h's own leak-prevention note and
+# the standing mandatory leak-check rule). Persisted checkpoints now
+# live under checkpoints/ on the user's own outputs folder (which
+# survives on their machine, unlike /tmp scratch) specifically so
+# they are NOT lost between sessions, while remaining permanently
+# untracked/uncommitted here as defense-in-depth alongside the
+# pre-commit leak-check grep.
+checkpoints/
+*.ckpt

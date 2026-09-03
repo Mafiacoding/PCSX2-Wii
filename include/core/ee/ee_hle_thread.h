@@ -275,6 +275,18 @@ void ee_hle_thread_debug_force_wakeup(int thid);
  * cited real-EE-kernel research). */
 void ee_hle_thread_debug_force_rotate(ee_state_t *st, int priority);
 
+/* Round 817 (task #811/#821): diagnostic-only accessor exposing the
+ * exact real SignalSema(semid) count-increment + wake_one_sema_waiter()
+ * transition, callable outside any EE syscall context. NOT wired into
+ * any EE syscall path; never fires during organic emulation - same
+ * convention as debug_force_wakeup()/debug_force_rotate() above. See
+ * ee_hle_thread.c's own definition comment for the full rationale
+ * (built for a GT3_SEM5_PROBE-gated scratch driver testing whether
+ * releasing GT3's thread 1 from WaitSema(5) unblocks its first CDVD
+ * import). Returns 1 on success, 0 if semid invalid/unused, -1 if
+ * already at max_count (real overflow case). */
+int ee_hle_thread_debug_signal_sema(int semid);
+
 /* Round 733 continuation: live call counter for RotateThreadReadyQueue
  * (sysnum 43/-44) - see ee_hle_thread.c's field comment. Answers
  * whether GT3's own code ever invokes the real PS2 kernel's documented

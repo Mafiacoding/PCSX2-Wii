@@ -35572,3 +35572,32 @@ disasm/disasm.c`, `tools/round729-gt3-discboot/r819_ckpt_disasm.c`,
 `pycdlib`-based ELF extraction from the real disc image) - no tracked
 source changed, regression/Wii build correctly skipped, leak-check
 clean. No checkpoint files, BIOS images, or disc images were committed.
+
+## Round 830 (task #811): "fix and enabledmac go" - EnableDmac self-correction, and a decisive live-instrumented finding that supersedes Round 829's whole AddDmacHandler/0x0101D878 story
+
+**Instruction 1 result - EnableDmac corrected, no bug found there.** Round 829 flagged an `a0=0x80000000`-class argument anomaly at `_EnableDmac` call sites as its leading open lead, based on an address (`0x0101BFE0`) identified by loose visual pattern-matching. This round built a proper systematic scanner (Python, pattern-matches every `addiu v1,zero,N / syscall / jr ra / nop` 4-instruction stub across the full 2MB dump, keyed on the real encoded immediate `N`) and re-derived every real EE BIOS syscall stub address by number. Result: `0x0101BFE0` is actually `sceSifSetReg` (syscall 121), not `_EnableDmac` (syscall 22). The real `_EnableDmac` stub is at `0x0101B940`, with exactly one caller (`0x0101C438`, inside ps2sdk's real `EnableDmac()` wrapper at `0x0101C408`). That wrapper's three callers include `0x0101D518`, which calls `EnableDmac(5)` with the **correct** channel argument (a0=5) - matching the AddDmacHandler(5, ...) registration Round 829 described nearby. **Conclusion: Round 829's "0x80000000 anomaly" was a misidentification artifact of tracing the wrong stub address, not a real bug in GT3's code. No fix was needed or made here.**
+
+**Instruction 2 - built `tools/round729-gt3-discboot/r830_dmac_trace.c` (new, committed this round) to get real runtime ground truth**, since two static-disassembly misidentifications in the same investigation (this round's EnableDmac mixup, and see below) mean static JAL/pointer scanning alone is no longer trustworthy for this area without runtime corroboration. The tool runs a fresh cold "start" boot (no checkpoint dependency) via `system_run_interleaved(1)` at true single-slice granularity, tracking rising-edge transitions of: D_STAT channel-5 status/enable bits, Cause.IP3, `dma_dmac_interrupt_pending()`, PC hits on the presumed handler (`0x0101D878`) and presumed registration call site (`0x0101D508`), PC entries into the real interrupt vectors (`0x80000200` for BEV=0, `0xBFC00400` for BEV=1), and PC entries into the whole enclosing code region `[0x0101D380, 0x0101D900)`. (Required a printf-suppression fix first: `system_run_interleaved()`'s own internal diagnostic printf fires on every single-slice call and dominated wall-clock time via raw `write(1,...)` I/O; fixed by redirecting fd 1 to `/dev/null` for the stepping loop only, restoring real stdout before the driver's own summary output.)
+
+**Decisive result, run to 58,557,945 instructions (matching/exceeding Round 826's established 58,594,303-instruction thread-1-park baseline):**
+
+```
+handler(0x0101D878) hits=0 first_at_instr=0
+D_STAT ch5 STATUS bit: rising_edges=10 first_at_instr=30001709 final_state=0 (d_stat=0x00a70000)
+D_STAT ch5 ENABLE bit: rising_edges=2 first_at_instr=30001563 final_state=1
+Cause.IP3: rising_edges=30 first_at_instr=30001709 final_state=0 (cop0[13]=0x00008020 cop0[12]=0x70030c11)
+dma_dmac_interrupt_pending(): rising_edges=30 first_at_instr=30001709 final_state=0
+semaphore-5 signal count=0
+general exception vector (0x80000200) entries=0 first_at_instr=0
+AddDmacHandler registration site (0x0101d508) hits=0 first_at_instr=0
+BEV interrupt vector (0xbfc00400) entries=0 first_at_instr=0
+enclosing func range [0x0101d380,0x0101d900) entries=0 first_at_instr=0
+```
+
+This **supersedes Round 829's characterization of `0x0101D878` entirely**. The real DMAC interrupt condition genuinely fires for real (D_STAT channel-5 status/enable bits behave correctly per the Round 176/307 model, Cause.IP3 rises 30 times, `dma_dmac_interrupt_pending()` correctly tracks all 30) - but across the *entire* cold boot to the established park point, GT3's own code **never once enters the whole `[0x0101D380, 0x0101D900)` region** that Round 829's static scan identified as containing both the `AddDmacHandler(5, 0x0101D878, 0)` registration call and the handler body itself. Neither real EE interrupt vector (`0x80000200` nor the boot-ROM `0xBFC00400`) is ever entered either, meaning `ee_raise_exception(EE_EXC_CODE_INT, ...)` is never actually invoked for any of the 30 Cause.IP3 rising edges - the per-instruction gating in `ee_check_dmac_interrupt()` (`IE=1,EXL=0,ERL=0,EIE=1,IM3=1`) must be failing throughout every one of those 30 pending windows, even though the same bits read as satisfied in the final post-run snapshot.
+
+**Combined with this round's EnableDmac correction, this means Round 829's entire `0x0101D878`/registration-site identification - not just the EnableDmac argument claim - was very likely a static-scan artifact** (misaligned JAL-target or pointer-constant match), not real, executed GT3 code reachable from this boot path. This is now the second static-disassembly misidentification caught and corrected within this same investigation; per the project's no-fabrication discipline, this is documented plainly rather than carried forward.
+
+**Task #811 remains open.** The concrete, narrowed state going into the next round: the real SIF0/DMAC interrupt line fires 30 times for real during GT3's cold boot but is never actually taken (no vector entry, either address), and none of Round 829's proposed handler/registration/EnableDmac code is ever reached. The 30 real interrupts' actual source/purpose and GT3's real (not misidentified) CDVD-dispatch/semaphore-5-producer code path both remain unlocated. Next step: re-run the same static JAL/pointer scan methodology with independent runtime corroboration at each step (as this round's `r830_dmac_trace.c`-style PC-hit tracking now allows), rather than trusting an unverified static match, to avoid a third misidentification.
+
+No tracked source (`ee_core.c`, `dma.c`, or any other `source/`/`include/` file) was modified this round - this was a pure diagnostic/investigation round. `tools/round729-gt3-discboot/r830_dmac_trace.c` (new, read-only diagnostic tool, calls only existing public accessors) is added and committed. Regression suite and Wii cross-build correctly skipped (no tracked source changed). No checkpoint files, BIOS images, or disc images were committed - leak-check run and confirmed clean before commit.

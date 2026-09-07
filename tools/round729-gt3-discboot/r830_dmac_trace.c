@@ -48,6 +48,8 @@
 #define REG_SITE_PC  0x0101D508u
 #define FUNC_LO      0x0101D380u
 #define FUNC_HI      0x0101D900u
+#define GUARD_FN_PC  0x0101DA50u  /* Round 831: SIF0-init-once guard fn (11 real callers) */
+#define GUARD_FLAG_ADDR 0x0103D3B8u  /* Round 831: the once-flag this guard checks/sets */
 
 int main(int argc, char **argv)
 {
@@ -81,6 +83,7 @@ int main(int argc, char **argv)
     uint64_t reg_site_hits = 0, first_reg_site_instr = 0;
     uint64_t vector_bev_hits = 0, first_vector_bev_instr = 0;
     uint64_t func_range_hits = 0, first_func_range_instr = 0;
+    uint64_t guard_fn_hits = 0, first_guard_fn_instr = 0;
     int prev_at_vector = 0, prev_at_vector_bev = 0, prev_in_func_range = 0;
 
     /* system_run_interleaved()'s own per-call diagnostic printf (via
@@ -147,6 +150,10 @@ int main(int argc, char **argv)
            GEN_VECTOR_BEV, (unsigned long long)vector_bev_hits, (unsigned long long)first_vector_bev_instr);
     printf("[R830-DMAC] enclosing func range [0x%08x,0x%08x) entries=%llu first_at_instr=%llu\n",
            FUNC_LO, FUNC_HI, (unsigned long long)func_range_hits, (unsigned long long)first_func_range_instr);
+    printf("[R831-GUARD] SIF0-init-once guard fn (0x%08x) hits=%llu first_at_instr=%llu\n",
+           GUARD_FN_PC, (unsigned long long)guard_fn_hits, (unsigned long long)first_guard_fn_instr);
+    printf("[R831-GUARD] once-flag global 0x%08x = 0x%08x (post-run)\n",
+           GUARD_FLAG_ADDR, ee_mem_read32(ee, GUARD_FLAG_ADDR));
 
     /* Post-run dump (RAM is only populated once GT3's ELF is actually
      * loaded partway through the boot, so this must run AFTER the

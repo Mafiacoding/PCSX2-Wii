@@ -36834,3 +36834,94 @@ rebuild are correctly skipped. Scratch tools
 (`r882_reset_vector_check.c`, `r883_freeze_probe.c`,
 `r884_freeze_dump.c`) live in the session's outputs, not committed
 (consistent with this project's scratch-tool convention).
+
+## Round 885 (task #867): reconciliation attempt - checkpoint file's saved state does not match what Rounds 865d/866 reported for it, at the exact same total_instr
+
+Picked up task #867 directly: is Round 884's permanent-park finding
+compatible with task #862's "GT3 confirmed NOT stuck" conclusion?
+
+**Onset scan** (`r885_onset_scan.c`, coarse-then-fine bisection):
+fresh-loaded `gt3_round861_fresh_chain.ckpt` and sampled pc from
+done=0 outward. `total_instr` at done=0 reads exactly
+**4,079,995,711** - matching, digit-for-digit, both Round 865's
+"continuing task #858 ... from `checkpoints/gt3_round861_fresh_chain.
+ckpt` (total_instr=4,079,995,711)" and Round 866's identical citation.
+So this is confirmed to be the same checkpoint *file* both of those
+rounds used. But the permanent park at `pc=0x8000fd74` is **already
+established by done=25,000** (just 200,000 raw instructions past the
+checkpoint) - confirmed with a second independent process re-run,
+byte-for-byte identical output (this codebase's execution is
+deterministic; ruled out as a randomness/race artifact).
+
+**Ruled out disc-path handling as the cause**: this session's own
+scratch driver tools (including this round's) pass `argv[2]` (the ISO
+path) straight through to `checkpoint_load()`'s `iso_path` parameter,
+and every earlier tool in this window had been passing `""` (empty
+string) rather than a real disc path or `NULL`. Since `checkpoint_load`
+does `if (iso_path) { iop_cdrom_legacy_rebind_iso(iso_path); ... }`,
+a non-NULL empty string would rebind CDVD to a bogus path - a real
+candidate for corrupting the trace. Re-ran the onset scan with the
+actual GT3 ISO path
+(`Gran Turismo 3 - A-Spec (Europe, Australia) ....iso`) substituted for
+`""`: **byte-for-byte identical trajectory, same done=25,000 park
+onset.** This is not a disc-path bug in this round's tooling.
+
+**The actual discrepancy, pinned down precisely**: Round 865d's own
+writeup states its zero-fill-loop trace "continues from the same
+checkpoint" and reports `$s0` (the loop's fill pointer, `ee->gpr[16]`)
+**starting at `0x1460cf0`** (~20.3MB into the 32MB clear, ~11.7MB
+still to go) and climbing to completion at `total_instr=4,227,195,549`.
+This round dumped the checkpoint's own register state immediately
+after `checkpoint_load()`, budget=0, no execution at all
+(`r884_freeze_dump.c` with `budget=0`): `pc=0x8000e538 ra=0x8000dbcc
+s0=0x01fcf980`. **`0x01fcf980` (~31.9MB into the clear, only ~112KB
+left) is a completely different value from Round 865d's cited
+starting `0x1460cf0`,** despite both being read from `gpr[16]`
+immediately after loading a checkpoint file both rounds identify by
+the identical `total_instr=4,079,995,711`. Since `$s0` only ever
+increases monotonically within this loop (per Round 865d's own
+finding) and `0x01fcf980 > 0x1460cf0`, there is no execution-order
+explanation that reconciles the two - the byte content of whatever
+`checkpoints/gt3_round861_fresh_chain.ckpt` was when Round 865d/866
+read it and the byte content of the file present on disk now are not
+the same save, despite sharing a filename and (coincidentally or not)
+an identical `total_instr` counter value.
+
+**Conclusion for task #867**: the apparent contradiction between this
+finding and task #862 is very likely NOT a live emulator bug at all -
+it's most plausibly explained by the checkpoint file having been
+overwritten/regenerated at some point between Round 866 and now (this
+project's own history shows the same descriptive-name-reuse pattern
+elsewhere - e.g. tasks #827/#848 explicitly "re-save/refresh the
+persisted GT3 checkpoint" under a stable name), with the newer save
+landing at a different internal point in the same zero-fill loop that
+happens to report an identical `total_instr` milestone. `checkpoints/*.
+ckpt` files are git-ignored (per `.gitignore`, and by design - binary
+checkpoints are never committed), so there is no version history to
+directly confirm this, and the file's mtime (2026-09-08 16:47, i.e.
+today) is inconclusive on its own since a whole-tree restore/bundle-
+extract would stamp every file with the same time regardless of the
+checkpoint's actual logical content/age. **This is a real methodology
+hazard worth a standing note**: this project's checkpoint files carry
+descriptive round-number names but are NOT immutable snapshots pinned
+to that round once created - a later round reusing the same filename
+(intentionally, as a "refresh") silently invalidates any earlier
+round's citations of that file's exact internal state, even when the
+coarse metadata (`total_instr`) happens to still match. Future rounds
+citing a specific checkpoint's internal register/memory state should
+re-verify that state fresh rather than trusting an older round's
+citation, exactly as this round did.
+
+**Net result**: task #862's "not stuck" and this round's "permanently
+parked" findings are most likely BOTH correct, just about two
+different underlying checkpoint saves that happen to share a filename
+- not a contradiction requiring a source-level fix. The permanent
+park at `pc=0x8000fd74` remains real and reproducible for whatever
+save is CURRENTLY on disk under this name, and is still worth
+understanding (see task #865's still-open next steps: trace
+`ra=0x80012614`'s real BIOS subsystem), but it should no longer be
+treated as in tension with task #862's separate, earlier finding.
+
+No source changed this round - purely diagnostic. Regression suite
+and Wii cross-build correctly skipped. `r885_onset_scan.c` lives in
+the session's outputs, not committed.

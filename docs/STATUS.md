@@ -36391,3 +36391,176 @@ survey shows forward-moving, diverse execution, not a flatlined loop.
 
 No source changes across Rounds 867-873 (investigation only).
 Regression suite and Wii cross-build correctly skipped.
+
+## Rounds 874-879 (task #863): the zero-fill loop is a real, periodic reboot-loop pattern, not a one-shot BIOS clear - root call site identified, upstream trigger still open
+
+User instruction this window: "start working on a jit maybe its missing
+and we will need jit for the emulation on the wii also work on the 863
+task." Two tracks: (1) JIT (see the next section below), (2) task #863.
+
+**Round 874-876**: dumped EE RAM 0x00080000-0x00120000 and
+0x00200000-0x00300000 (OSDSYS module-code region) from two checkpoints.
+Found the entire 0x200000-0x300000 range reading as all-zero at the
+later checkpoint (total_instr=4,719,995,022), despite Round 867 having
+found real decompressed OSDSYS code there earlier. Round 876 cross-
+checked direct-vs-KSEG0 reads at 5 sample addresses across 3
+checkpoints - identical results in all cases, ruling out a TLB/
+addressing artifact. The "gets wiped again" observation is a genuine
+memory-content fact.
+
+**Round 877**: exact-PC-match scan (pc==0x00082000, pc==0x8000E508)
+across an 80,000,000-"done"-unit (~640M raw instruction) window found
+zero hits for either - inconclusive due to the single-instruction-catch
+problem (coarse chunking can step over a one-instruction transition
+entirely), not evidence of absence.
+
+**Round 878**: switched to a register-delta detection approach -
+sampling $s0 (the zero-fill loop's fill pointer, established Round
+865d) whenever pc is inside the loop body (0x8000E500-0x8000E560), and
+flagging when $s0 drops by more than 1MB between consecutive samples
+(a genuine loop-restart signature, immune to the single-instruction
+problem). Result over the same 640M-instruction window: **21 restarts**,
+e.g. `s0 dropped 0x01c7a610 -> 0x007b4e00`, `0x01925290 -> 0x0045faa0`,
+etc. This directly contradicts Round 865's "one-shot, completes-and-
+moves-on" characterization of the zero-fill loop.
+
+**Round 879**: root-caused the restart mechanism. A finer instrumented
+run (chunk=2000, tracking $s0 AND $ra=$31 at each in-loop sample)
+against the same checkpoint found:
+
+```
+RESET#1 done=1898000  total_instr=4095179673 peak_s0=0x01ffc3c0 s0 01ffc3c0->0008a980 ra=0x8000dbcc pc=0x8000e538
+RESET#2 done=5588000  total_instr=4124699642 peak_s0=0x01ff73c0 s0 01ff73c0->00085970 ra=0x8000dbcc pc=0x8000e548
+RESET#3 done=9280000  total_instr=4154235611 peak_s0=0x01ffb290 s0 01ffb290->00089850 ra=0x8000dbcc pc=0x8000e534
+RESET#4 done=12970000 total_instr=4183755580 peak_s0=0x01fff180 s0 01fff180->00084850 ra=0x8000dbcc pc=0x8000e544
+RESET#5 done=16662000 total_instr=4213291549 peak_s0=0x01ffa170 s0 01ffa170->00088730 ra=0x8000dbcc pc=0x8000e530
+RESET#6 done=20352000 total_instr=4242811518 peak_s0=0x01ffe060 s0 01ffe060->00083730 ra=0x8000dbcc pc=0x8000e540
+```
+
+Three findings fall out of this table directly:
+
+1. **`peak_s0` sits at 0x01ff7000-0x01fff000 every single pass** - just
+   under 0x02000000 (32MB, this project's EE RAM size). The zero-fill
+   loop is not clearing some small scratch region; it is walking the
+   *entire* 32MB EE RAM to its top before each restart.
+2. **`$ra` (the return address of the call that reached the loop body)
+   is bit-for-bit identical across all 6 restarts: 0x8000dbcc.** This is
+   the single most important fact here - it proves the SAME call
+   instruction is re-executed each cycle, not six different call sites
+   scattered through a naturally-progressing boot. Something is
+   returning control all the way back to this one call site over and
+   over.
+3. **Restart cadence is tight and regular**: ~29.5M raw instructions
+   between resets (3,690,000/3,932,000/3,660,000/3,690,000/3,690,000
+   "done" units x8 ratio), consistent with a periodic re-trigger rather
+   than chaotic corruption.
+
+Disassembling the caller (KSEG0-forced dump of EE RAM 0x0-0x20000 at
+done=1,898,000, via `/tmp/eedisasm`) resolved what's actually at
+0x8000dbcc: it's inside a real subroutine at roughly 0x8000DAE8-
+0x8000DBFC (and an identical sibling copy immediately before it,
+0x8000D000ish-0x8000DAE8) that runs a *linear, non-looping* sequence of
+steps - each step is a `jal` to a distinct helper (0x8000E560,
+0x8000E590, 0x8000D900, 0x8000E438, 0x8000E508, 0x8000E4D0) interleaved
+with `jal 0x800073E8` debug-print calls (each loading a different
+string-literal address via `lui/addiu $a0, 0x8001xxxx`) - and ends with
+a normal `ld ra,0(sp)` / tail-jump epilogue. This has the unmistakable
+shape of a **BIOS-style sequential POST/init block**: "log step N, call
+subsystem-init N" repeated for several subsystems, one of which
+(0x8000E508, called with `$a0=0x00082000` = this project's own
+established `EE_EELOAD_START_PC` constant) is the RAM-clear.
+
+Two back-to-back copies of this block exist in kernel memory (a POST
+sequence with more than one stage), which is exactly what real PS2
+BIOS self-test code looks like. That part is legitimate. The bug is
+what Round 878/879 actually measured: **this exact block, at this
+exact address, is being re-entered from the top over and over - 21
+times across 640M instructions** - which is not what a real console
+does. Real PS2 hardware runs its POST/init sequence exactly once per
+cold boot; it does not re-run a full "clear all 32MB of RAM and re-init
+subsystems" cycle every ~29.5M instructions while a game is otherwise
+trying to load. This is the same *class* of bug this project has hit
+several times before under different guises (the old IOP-reboot-cycle
+investigations, tasks #99/293-312; the EE TLB-refill exception loop,
+task #730) - something is bouncing control back to this init block's
+entry rather than letting boot progress past it.
+
+**What's still open**: the identical $ra proves WHERE control returns
+to, but not WHAT sends it there. The init block's own prologue
+("ld ra,0(sp)" / tail-jump, "sd ra,0(sp)" at entry) is a completely
+normal subroutine - it doesn't contain a visible loop-back branch
+itself, so the restart must come from outside it (its own caller, or a
+genuine EE reset/exception re-entry). Note this is explicitly NOT a
+literal CPU reset in the emulator's own sense - `ee_core_init()`
+(source/core/ee/ee_core.c:2895-2924) only ever sets
+`pc = BIOS_RESET_VECTOR` (0xBFC00000) once, at cold start, and none of
+the 6 observed restarts land anywhere near that address. Finding the
+real trigger (the caller one level further up, or a periodic
+interrupt/exception re-vectoring into it) is the natural next step and
+is left as an explicit follow-up (task #865) rather than guessed at.
+
+Task #863's original framing ("is the OSDSYS-decompress routine at
+0x001000C0 re-invoked, and by what") is answered by extension: yes,
+and by the same upstream mechanism that re-invokes this whole POST
+block - the decompression call Round 867/871-872 found is very likely
+one of this same block's `jal` steps (or a sibling block's), re-run for
+the same reason. The two investigations converge on one bug, not two.
+
+No source changes across Rounds 874-879 (investigation only).
+Regression suite and Wii cross-build correctly skipped.
+
+## Round 874+ (task #864): JIT - existing PPC dynarec PoC found, assessed, and scoped
+
+Per the user's "start working on a jit maybe its missing" - it is not
+missing. `source/core/recompiler/ppc_dynarec.c` +
+`include/core/recompiler/ppc_dynarec.h` have existed since this
+project's very first commit, and `source/core/recompiler` IS included
+in the real Wii build's `SOURCES` list in the Makefile. But the PoC is
+**completely inert**: zero call sites reference `ppc_dynarec_*`
+anywhere in `ee_core.c`, `system.c`, or `main.c` - it compiles into the
+Wii binary as dead weight and has never actually recompiled a single
+instruction of real EE code.
+
+What the PoC actually does: translates exactly 2 MIPS opcodes (ADDIU,
+OR) into real, bit-accurate PPC750/Broadway machine code
+(`enc_lwz`/`enc_stw`/`enc_addi`/`enc_or`/`enc_blr`), using `r3` as the
+incoming context pointer (PowerPC EABI), allocates an executable buffer
+via `memalign`, and correctly calls `DCFlushRange()`/`ICInvalidateRange()`
+before returning a callable block - i.e. the codegen and cache-
+coherency mechanics are real and correct as far as they go. The
+header's own comment is honest about the gap: "no register allocation,
+no branch handling inside blocks, no linking between compiled blocks,
+no invalidation-on-write strategy."
+
+**A correctness bug found while reading it, not yet fixed**: the
+context representation (`uint32_t *gpr32`, one 32-bit word per
+register) does not model the EE R5900's real 64-bit register
+semantics - real MIPS64/R5900 `ADDU`/`ADDIU` etc. compute a 32-bit
+result and sign-extend it into the full 64-bit register; the PoC's
+`enc_addi`+`enc_stw` sequence only ever writes one 32-bit word and
+never touches the upper half. This has to be fixed before opcode
+coverage can be honestly expanded, or every JIT-compiled block will
+silently corrupt the upper 32 bits of every register it touches
+relative to the interpreter's own (correct) `ee_reg128_t.ud0`/`.ud1`
+semantics.
+
+**Sandbox constraint confirmed**: devkitPPC (`powerpc-eabi-gcc`,
+`powerpc-eabi-objdump`, Binutils 2.30) is present at
+`/sessions/.../devkitpro/devkitPPC/bin/`, but there is no `qemu-ppc`/
+`qemu-system-ppc` anywhere in this sandbox (checked via `which` and
+`find`). Real PPC machine code emitted by any expanded dynarec cannot
+be executed here directly - verification has to go through either (a)
+static disassembly via `powerpc-eabi-objdump -D -b binary -m powerpc`
+to confirm emitted mnemonics match intent, and/or (b) a small host-
+native (x86) interpreter for the specific PPC opcode subset the
+dynarec emits, executing the generated bytes and checking results
+against independently-computed reference arithmetic.
+
+Task #864 is scoped (register-context fix, careful opcode-by-opcode
+expansion, a verification harness built around the two methods above,
+explicitly NOT wired into `ee_core.c`'s execution path yet) but zero
+code has been written for it - the #863 investigation above took
+priority this window since it was already mid-flight. Real
+implementation work starts next.
+
+No source changes this round for the JIT track (assessment only).

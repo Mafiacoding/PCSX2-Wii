@@ -35871,3 +35871,69 @@ diskless-BIOS investigation if that thread is revisited.
 No source changes this round (pure diagnostic use of existing, already-
 tracked `iop_sio2_mc_insert_blank()`/`iop_sio2_mc_is_inserted()` hooks).
 Regression suite and Wii cross-build correctly skipped.
+
+## Round 861b (task #811 continuation): fresh-boot GT3 chain to 4.08B instructions refutes the WaitSema-deadlock framing - thread 1 is scheduler-starved, not blocked
+
+Continuing directly from Round 860's fresh-boot checkpoint
+(`/tmp/r860_fresh_gt3.ckpt`, `total_instr=479,999,502`, thread 1 already
+confirmed NOT in WaitSema there), this round chained that checkpoint forward
+through 5 further sandbox calls using a corrected driver
+(`/tmp/r860c_continue.c`, adapted from `r860b_continue.c` with a
+`checkpoint_save(ckpt_out)` added after every 10M-"done" chunk so progress
+survives the sandbox's ~170s per-call kill rather than being lost, as
+happened to Round 860's own continuation attempt).
+
+**Result:** thread 1's HLE-tracked state (`ee_hle_thread_get_status/
+wait_type/wait_id(1)`) was sampled continuously from `total_instr=480M`
+all the way to **`total_instr=4,079,995,711`** (~4.08B - roughly 70x past
+the suspect checkpoint's claimed 58,594,303-instruction WaitSema(5) depth,
+and ~7.3x past Round 860's own 560M-instruction confirmation). Across this
+entire ~3.6B-instruction extension, thread 1's `wait_type` **never once
+changed from `0`** (not waiting - i.e. nominally "ready"), `wait_id`
+stayed `0`, and its saved bookkeeping fields (`saved_pc=0x00083968`,
+`ra=0x00084bb0`, `a0=0x00093500`) never updated either, meaning thread 1
+was never revisited/context-switched back onto the CPU during this entire
+span. Meanwhile the raw EE core PC (sampled between chunks) is confirmed
+oscillating through a small, fixed set of low kernel/exception-vector
+addresses (`0x8000Dxxx`-`0x8000Exxx`, `0x00100Bxx` - the same set
+independently observed in this round's diskless-boot memory-card
+experiment above), consistent with the EE core spending all its time in
+kernel idle/interrupt-dispatch code with no thread actually being
+scheduled to run.
+
+**This corrects the working framing of task #811.** The task's title
+("threads 1/2 deadlocked on WaitSema, thread 3 exited/DORMANT") was
+derived from the `gt3_round826_fresh_scheduler_fix_58594303instr.ckpt`
+checkpoint, whose own provenance Round 860 already showed does not match
+any genuine fresh cold boot. This round's honest, continuously-chained
+fresh boot - now verified out to 4.08B instructions, an order of magnitude
+past where that checkpoint claimed WaitSema(5) was reached - shows thread 1
+never enters WaitSema at all under the current tree. The real, current-tree
+bug is scheduler-starvation of a nominally-ready thread, not a semaphore
+deadlock: thread 1 is marked runnable (`wait_type=0`) but the scheduler
+never dispatches it back onto the CPU, leaving the EE core parked in
+kernel idle/interrupt-dispatch code indefinitely instead.
+
+**Checkpoint persisted:** `checkpoints/gt3_round861_fresh_chain.ckpt`
+(`total_instr=4,079,995,711`, thread 1 status=1/wait_type=0/wait_id=0) -
+this is now the authoritative, verified-fresh GT3 checkpoint for any
+further task #811 work; the old `gt3_round826_...58594303instr.ckpt` should
+be treated as unreliable/stale provenance going forward and not used as a
+continuation basis.
+
+**Next step for task #811** (not done this round, flagged for follow-up):
+find why the scheduler never re-selects thread 1 for dispatch despite it
+being nominally ready - likely candidates given the project's own ready-
+queue/RotateThreadReadyQueue history (Rounds 512-514, 734): a ready-queue
+insertion that never happened for thread 1 (e.g. if thread 3's exit path,
+per task #808/#853/#854's ExitThread findings, was supposed to re-enqueue
+thread 1 but doesn't), or a priority/mask condition that permanently
+excludes thread 1 from the scheduler's candidate set. This is a different,
+narrower question than the semaphore-signal-source questions chased in
+Rounds 818-829, and should be the starting point next time task #811 is
+picked up.
+
+No source changes this round (pure diagnostic checkpoint-chaining with the
+existing, unmodified `system_run_interleaved`/`checkpoint_save`/
+`ee_hle_thread_get_*` APIs). Regression suite and Wii cross-build correctly
+skipped.

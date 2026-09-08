@@ -11130,3 +11130,10 @@ tracked-source fix (docs-only), regression/Wii-build correctly skipped.
   also flagged a drift finding - diskless boot's current resting state is
   now earlier/different than the Round 594-683 baseline, likely from
   intervening correctness fixes. No source change, docs-only round.
+
+- Round 861b: chained GT3 fresh-boot checkpoint to 4.08B instructions
+  (task #811) - thread 1 confirmed NEVER enters WaitSema in a genuine
+  fresh boot; corrected framing from "WaitSema deadlock" to "scheduler
+  never redispatches a ready thread". New authoritative checkpoint saved:
+  checkpoints/gt3_round861_fresh_chain.ckpt. Next: find why thread 1 is
+  never re-enqueued/redispatched. No source change, docs-only round.

@@ -673,12 +673,32 @@ int ee_hle_thread_try_handle(ee_state_t *st, int32_t sysnum, uint32_t this_pc, i
         return 1;
     }
     if (sysnum == 35 || sysnum == 36) {
-        /* ExitThread() / ExitDeleteThread() - no args, no return. */
+        /* ExitThread() / ExitDeleteThread() - no args, no return.
+         * Round 835 fix (task #811 continuation): every other syscall
+         * handler in this file calls EE_ADVANCE() (pc = this_pc+4)
+         * before reschedule() - this one didn't. Real MIPS `syscall`
+         * semantics require the trap handler to move PC past the
+         * trapping instruction; skipping that here meant that if
+         * reschedule() ever found nothing else ready (the exact
+         * situation this project's own scheduler has no idle-thread
+         * fallback for - see Round 833/834's STATUS.md writeup), pc
+         * was left pointing AT the `syscall` instruction itself, so
+         * the next ee_step() would re-decode and re-dispatch the very
+         * same ExitThread/ExitDeleteThread syscall on an already-
+         * dormant thread forever. This does not by itself explain the
+         * GT3 pc==0 case (that thread never reaches this syscall
+         * handler at all - it dies via the separate null-jalr guard's
+         * auto-exit heuristic in ee_core.c), but it is a real,
+         * independently evidenced bug on its own terms: any thread
+         * that legitimately calls ExitThread/ExitDeleteThread while no
+         * other thread is ready would hit this same never-advances
+         * park. Fixed to match every sibling handler's convention. */
         if (cur) {
             EVT(cur, "event=%s target=%d pc=0x%08x", sysnum == 36 ? "ExitDeleteThread" : "ExitThread", cur, this_pc);
             tcb(cur)->status = EE_THS_DORMANT;
             if (sysnum == 36) tcb(cur)->in_use = 0;
         }
+        EE_ADVANCE();
         reschedule(st);
         return 1;
     }

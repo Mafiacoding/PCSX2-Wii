@@ -11155,3 +11155,14 @@ tracked-source fix (docs-only), regression/Wii-build correctly skipped.
   checkpoint-chain round has used since Round 750. The old syscall-7
   trampoline is historical, not currently active. Task #861 closed as
   not needed. No source change, docs-only.
+
+- Round 865: fixed a RAM-dump methodology bug (KUSEG TLB-miss zero-fill
+  vs KSEG0 direct-physical reads - future RAM-dump tools must use
+  KSEG0) and used the corrected dump to test the "stuck full-RAM
+  zero-fill loop" hypothesis for task #858. Result: ruled out. Live
+  register sampling (`$s0`/`$a0` at pc=0x8000E500-0x8000E560) showed the
+  loop progresses monotonically to completion in ~14.7M instructions and
+  does not re-loop - real, correctly-bounded, one-shot code, not the
+  scheduler-starvation cause. Task #858 remains open; next lead should
+  go back to ready-queue/redispatch mechanics directly rather than more
+  "what is pc doing" spot-checks. No source change, docs-only.

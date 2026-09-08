@@ -36177,3 +36177,67 @@ currently-live problem.
 
 No source changes this round (verification/correction only). Regression
 suite and Wii cross-build correctly skipped.
+
+## Round 865: RAM-dump methodology fix (KUSEG vs KSEG0) + GT3 zero-fill-loop hypothesis for task #858 ruled out
+
+**Context:** continuing task #858 (find why GT3's scheduler never
+redispatches ready thread 1) from `checkpoints/gt3_round861_fresh_chain.
+ckpt` (total_instr=4,079,995,711).
+
+**Methodology bug found and fixed:** the first RAM-dump tool this round
+(`/tmp/r865b_ramdump.c`) read EE RAM via `ee_mem_read32(ee, addr)` with
+`addr` in KUSEG (`0x00000000-0x02000000`). Disassembling the dump at
+addresses the live trace's own `pc` was actively visiting showed nothing
+but zero-filled `nop`s - directly contradicting the live CPU. Root
+cause: KUSEG is a TLB-mapped segment, and `ee_mem_read32()` returns
+TLB-miss zero-fill for KUSEG addresses without a live TLB entry, even
+though the underlying physical RAM holds real data. Rewriting the dump
+to read via KSEG0 (`0x80000000u + offset` - unmapped, direct-physical,
+no TLB required) immediately produced correct, disassembleable code
+(`/tmp/r865c_ramdump.c`, output `/tmp/gt3_ram_kseg0.bin`). **Any future
+RAM-dump/disassembly tooling in this project must read via KSEG0
+addresses, not KUSEG, to get true physical content.**
+
+**Lead investigated:** the KSEG0 dump, disassembled with the existing
+`tools/round655-ee-disasm` tool, showed a real zero-fill loop at EE
+vaddr `0x8000E508-0x8000E558` (SQ-based, 16 bytes/iteration, ~7
+instructions/iteration including 2 apparent padding nops before the
+branch), whose end-bound is read from a global at `RAM[0x80016D90]` via
+a getter at `0x80000C40`. That global read `0x02000000` - exactly
+`EE_RAM_SIZE` (32MB) - raising the hypothesis that a full-RAM zero-fill
+loop, if stuck or repeatedly re-triggered, could be misattributed to
+"scheduler starvation."
+
+**Test and result (decisive, negative):** built `/tmp/r865d_looptrace.c`
+(continues from the same checkpoint, samples `$s0`/`$a0`/`$ra` via
+`ee->gpr[16/4/31].ud0` every 100K instructions whenever `pc` is in
+0x8000E500-0x8000E560) and ran it 20M instructions forward. Result: `$s0`
+climbs steadily and monotonically from `0x1460cf0` toward the `$a0`
+bound of `0x02000000` at a rate matching the loop's own cost exactly
+(~1.83M bytes zeroed per ~800K instructions observed, i.e. ~7
+instructions per 16-byte store - consistent with the static
+disassembly). At total_instr=4,227,195,549 (`s0=0x1ed7610`, ~1.2MB
+short of the bound), the loop completes and `pc` moves on to other code
+(`0x8000BAC0`, then the familiar `0x00100Bxx` idle-loop region, briefly
+`0x00200030` OSDSYS module code, then `0x8000DB30/DC40`) - it does **not**
+loop back into `0x8000E508`. This is real, correctly-bounded, single-
+pass, forward-progressing code, not a bug: a legitimate ~14.7M-
+instruction full-RAM clear that happens to be revisited once around this
+point in the trace, most likely a one-shot heap/BSS-style clear inside
+OSDSYS or GT3's own loader. It is **not** the cause of the multi-
+billion-instruction scheduler-starvation behavior task #858 is chasing.
+
+This closes out the zero-fill-loop lead for task #858 as ruled out by
+direct evidence, consistent with this project's anti-fabrication
+discipline (verify before attributing a fix or a root cause). Task #858
+remains open - next lead should return to the ready-queue/redispatch
+mechanics directly (per the task's original framing: check ready-queue
+insertion around thread 3's exit path and any priority/mask condition
+that could exclude thread 1 from the scheduler's candidate set), rather
+than further "what is pc doing right now" spot-checks, since two of
+those in a row (Round 862's OSDSYS-module-code claim, this round's zero-
+fill-loop lead) have turned out to be real-but-irrelevant code rather
+than the actual blocker.
+
+No source changes this round (investigation/methodology only).
+Regression suite and Wii cross-build correctly skipped.

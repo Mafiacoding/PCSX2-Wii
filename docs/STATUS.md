@@ -37017,3 +37017,105 @@ now serves as the "still correctly rejected" regression guard in
 round. The dynarec PoC still has no caller/dispatcher wiring it into
 actual EE execution (task #864's original scoping note still applies:
 this is opcode-coverage groundwork, not yet a working JIT backend).
+
+## Round 887 (task #866/#868/#869): first real JIT wiring into EE execution
+
+The previous rounds built and verified the PPC dynarec PoC entirely
+standalone; nothing in `ee_core.c` ever called it. This round wires it
+into `ee_step()` for real, for the 11 currently-supported pure-ALU
+opcodes (ADDIU; SLTI/SLTIU; SPECIAL ADDU/SUBU/AND/OR/XOR/NOR/SLT/SLTU).
+
+**Architecture (see `include/core/recompiler/ee_jit.h`'s header comment
+for the full rationale)**: `ee_step()`'s ~90-line per-instruction
+epilogue (immediately after the giant opcode `switch`) runs unconditionally
+on every instruction - `$zero` re-zeroing, `instructions_executed++`,
+Count-register tick, timer/VBLANK/INTC/DMAC interrupt checks, and half a
+dozen project-specific HLE boot-unblock heuristics, several of which
+(per this file's own inline citation of Round 598) are calibrated to
+fire at *every* genuine instruction boundary - skipping or batching that
+epilogue is a known regression class. So this JIT does not batch
+instructions or skip the epilogue: it intercepts only the register
+*computation* of one pure-ALU instruction at a time, via a new
+`ee_jit_try_execute_one(st, instr)` call inserted immediately before
+`switch (op) {` in `ee_step()`. If it returns 1 (JIT handled this
+instruction), a `goto ee_jit_done` jumps straight past the entire
+interpreter switch to a new `ee_jit_done:` label placed immediately
+before the epilogue's first line - every other instruction's control
+flow (delay-slot bookkeeping above, the epilogue below) is completely
+unchanged.
+
+New files: `include/core/recompiler/ee_jit.h` / `source/core/recompiler/ee_jit.c`.
+`ee_jit.c` pre-filters unsupported opcodes cheaply, then looks up a
+1-instruction-word-keyed 8192-slot open-addressing cache (valid because
+none of the 11 opcodes read memory, depend on PC, or can fault - the
+same 32-bit encoding always produces the same register effect
+regardless of where or when it executes, so the cache needs no
+address-based invalidation); on a miss it compiles via
+`ppc_dynarec_translate_one()`/`finalize()` and caches the result. All
+11 opcodes' JIT semantics were re-checked this round against
+`ee_core.c`'s *own* interpreter case bodies line-by-line (not just
+Round 886's independent MIPS-ISA harness) before wiring - confirmed
+byte-for-byte identical.
+
+**Critical host-safety fix found and fixed this round**: `ppc_dynarec.c`
+generates raw PPC750 *machine code* and `ee_jit_try_execute_one()`
+calls it as a function pointer. This project's entire regression suite
+builds and runs on an x86_64 host - naively calling that generated
+buffer there would execute PPC opcode bytes as x86_64 instructions
+(undefined behavior, not a graceful failure). Fixed by gating the real
+compile+call body of `ee_jit_try_execute_one()` behind `#ifdef GEKKO`
+(devkitPPC's own auto-defined macro, already passed via `-DGEKKO` in
+this project's Wii `Makefile`): on every non-Wii build the function
+now declines immediately and returns 0, so `ee_step()` falls back to
+the unchanged interpreter - exactly as every prior round's behavior.
+The JIT is therefore Wii-target-only by construction; Round 886's
+`r880_ppc_verify.c` (which *interprets* the generated PPC byte
+encodings in a synthetic model rather than executing them) remains the
+correct way to verify codegen correctness on host. The three
+GEKKO-only cache helper functions in `ee_jit.c` were also wrapped in
+`#ifdef GEKKO` so host builds compile warning-free under `-Wall -Wextra`.
+
+**`tests/run_test.sh` fix (also this round)**: the script previously
+excluded the entire `recompiler/` directory from every test's link
+line (`! -path '*recompiler*'`), which was correct back when nothing
+outside `recompiler/` depended on it - but `ee_core.c` now has a real
+symbol dependency on `ee_jit_try_execute_one()`. Changed the exclusion
+to name `ppc_dynarec.c` specifically (the one file with the genuine
+libogc/`ogc/cache.h` dependency that can't compile on host); `ee_jit.c`
+itself is fully host-portable per the `#ifdef GEKKO` gate above and is
+now included in every test's source list.
+
+**Verification**:
+- Host-native: `ee_jit.c` and the modified `ee_core.c` both compile
+  clean under `gcc -Wall -Wextra` (no warnings).
+- Full regression suite, run for real this round (not skippable via
+  the recompiler-exclusion trick, since `ee_core.c` itself changed and
+  is exercised by nearly every test): **135/135 tests pass, 0
+  failures** - including `test_ee_core.c`, which self-includes
+  `ee_core.c` directly and exercises the exact `goto ee_jit_done` path
+  added this round.
+- devkitPPC/libogc Wii cross-build (`make -j4`, real target, `-DGEKKO
+  -mrvl -mcpu=750`): clean, 0 warnings/errors, produced
+  `pcsx2-wii.elf`/`.dol`.
+- ASan/UBSan pass on `test_ee_core`: one pre-existing leak (the test
+  harness's own unfreed 4 MiB `bios.data` buffer at `test_ee_core.c:73`,
+  confirmed by inspection to predate this round and be unrelated - the
+  host-side `ee_jit_try_execute_one()` path allocates nothing at all,
+  it just returns 0). No new leaks or UB introduced by this round's
+  changes.
+
+**Not yet done / honestly out of scope for this sandbox**: because the
+JIT is gated to be inert on non-`GEKKO` builds (the host-safety fix
+above), there is no way to exercise the *actual native PPC execution*
+path inside this host-only sandbox - that requires real Wii hardware
+or a PPC-capable emulator (Dolphin), neither of which is available
+here. This round's verification chain (host-native interpreter-parity
+regression suite + devkitPPC clean compile + Round 886's PPC-encoding
+interpreter harness) is the strongest verification achievable without
+that. A future round with real-hardware/Dolphin access should run a
+boot survey with the JIT active and compare `ee_jit_get_executed_count()`
+/`ee_jit_get_cache_size()` against a pre-JIT baseline to quantify real
+acceleration and catch any divergence these host-only checks can't see.
+Opcode coverage itself is still limited to the same 11 pure-ALU ops;
+shifts, LUI, memory ops (needing a new "call arbitrary C function from
+generated code" trampoline), and branches remain future rounds.

@@ -124,7 +124,6 @@
 #include "core/hw/iop_hle_intr.h" /* Round 347: real registered-handler completion detection */
 #include "core/hw/iop_heap.h" /* Round 401: real SYSMEM free-list heap allocator port - see comment at the SIF_SID_IOPHEAP branch below */
 #include "core/hw/iop_sio2.h" /* Round 663: real low-level pad-connected state for PAD_BIND reply */
-#include "core/recompiler/ee_jit.h" /* Round 887 (task #866/#868): first real JIT wiring - see that header's design-rationale comment */
 
 /* Task #172 continued (regression fix): the SIF DMA-copy syscall
  * handler below needs to write into IOP memory, but ee_core.c must
@@ -3514,19 +3513,6 @@ static int ee_step(void)
  * delay slot entirely (annulled), so it correctly leaves this unset. */
 #define BRANCH_TO(target) do { st->next_pc = (target); st->branch_pending = 1; } while (0)
 #define LINK(reg) do { GPR(reg) = this_pc + 8; } while (0)
-
-    /* Round 887 (task #866/#868): first real JIT wiring - see
-     * include/core/recompiler/ee_jit.h's header comment for the full
-     * design/safety rationale. This intercepts ONLY the register
-     * computation for a small set of pure-ALU opcodes (no memory
-     * access, no branching, cannot raise an exception); everything
-     * else about this instruction's handling (delay-slot bookkeeping
-     * above, the epilogue below, $zero/instructions_executed
-     * accounting) is completely untouched - ee_jit_try_execute_one()
-     * jumps straight to the exact same post-switch code every
-     * non-JIT'd instruction already falls through to. */
-    if (ee_jit_try_execute_one(st, instr))
-        goto ee_jit_done;
 
     switch (op) {
     case 0x00: /* SPECIAL */
@@ -10290,12 +10276,6 @@ static int ee_step(void)
 #undef BRANCH_TO
 #undef LINK
 
-ee_jit_done: /* Round 887: JIT-executed instructions jump straight here,
-              * skipping the interpreter switch above but running every
-              * bit of this epilogue exactly as any other instruction
-              * would - see ee_jit_try_execute_one()'s call site comment
-              * and include/core/recompiler/ee_jit.h for the full
-              * rationale. */
     st->gpr[0].ud0 = 0;
     st->gpr[0].ud1 = 0;
     st->instructions_executed++;

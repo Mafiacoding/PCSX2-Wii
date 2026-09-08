@@ -56,7 +56,17 @@ build_and_run() {
     # first.
     self_incs=$(grep -oE '#include "(core|hw)/[a-zA-Z0-9_/]+\.c"' "$src" | sed -E 's/#include "(.*)"/\1/' | sort -u)
 
-    exclude_args="! -path '*recompiler*' ! -name 'main.c'"
+    # Round 887: used to exclude the whole recompiler/ directory, but
+    # ee_core.c now has a real dependency on ee_jit.c (the JIT dispatch
+    # layer wired into ee_step() - see include/core/recompiler/ee_jit.h),
+    # so blanket-excluding recompiler/ would leave every test that links
+    # ee_core.c with an undefined reference to ee_jit_try_execute_one().
+    # ee_jit.c itself is fully host-portable (its real body is compiled
+    # out via #ifdef GEKKO on non-Wii builds - see that file's
+    # host-safety-gate comment), so only ppc_dynarec.c needs to stay
+    # excluded here: it #includes <ogc/cache.h>, a libogc header that
+    # only exists under the devkitPPC toolchain, not on this host.
+    exclude_args="! -name 'ppc_dynarec.c' ! -name 'main.c'"
     if [ -n "$self_incs" ]; then
         for inc in $self_incs; do
             exclude_args="$exclude_args ! -name '$(basename "$inc")'"

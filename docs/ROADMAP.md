@@ -11004,3 +11004,30 @@ diagnostic); `R856_SIFDMA_TRACE` instrumentation fully reverted
 correctly skipped. Task #811 remains open: real next step is locating
 the genuine `_EnableDmac(5)` call site and/or GT3's still-unlocated
 real disc-read dispatch call. See STATUS.md's Round 856 entry.
+
+## Round 857 (task #811 continuation, per user's approved plan): dynamic
+proof GT3's own code never calls `sceSifSetDma` at all - deadlock root
+cause is "never issued", not "issued but not completing"
+
+Instrumented the syscall-119 (`sceSifSetDma`) handler (reversible
+`R857_SIFDMA_CALLER_TRACE` define) and re-ran a fresh cold-boot trace
+(real PAL BIOS + real GT3 disc) to 480,000,000 EE instructions - well
+past GT3's own ELF load (~50-58M) and thread 3's real exit. Every single
+captured `sceSifSetDma` call (9 total) came from `ra=0x0008428c`, the
+already-understood BIOS `rom0:OSDSYS` periodic-reload path (Round 856) -
+**not one of GT3's own 4 statically-located call sites
+(`0x010144D0`/`0x0101D7CC`/`0x0101E910`/`0x01022988`) ever fires.** This
+is the first dynamic (not just static) confirmation that GT3's loader
+thread genuinely never reaches any of its own SIF-DMA dispatch sites
+before parking - resolving Round 819/833's open "never issued vs.
+issued-but-stuck" question in favor of "never issued". Also confirmed
+via disassembly that thread 3's pre-exit `SleepThread`-based poll loop
+(`0x0100D8F8`-`0x0100D944`) is real, correctly-formed ps2sdk-style glue
+code, not corruption - it waits for a value that nothing ever writes.
+No tracked-source fix this round (purely diagnostic, per standing
+anti-fabrication discipline); `R857_SIFDMA_CALLER_TRACE` fully reverted,
+zero net diff. Regression/Wii-build correctly skipped. Task #811,
+narrowed: next step is a *forward* trace from thread 3's entry
+(`0x01000c88`) to find the real branch that routes it into the wait loop
+instead of toward one of its 4 DMA-dispatch sites. See STATUS.md's
+Round 857 entry.

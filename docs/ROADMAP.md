@@ -11109,3 +11109,18 @@ this round (correctly skipped - R859_NEG119_TRACE re-applied only for
 this diagnostic, fully reverted, diff confirmed zero). Next: build a
 fresh, fully-documented checkpoint chain and re-check thread 1's
 WaitSema(5) park against it directly.
+
+## Round 860 (task #811): built genuinely fresh, documented GT3 checkpoint - confirms old checkpoint's provenance mismatch
+
+Built /tmp/r860_fresh_checkpoint.c + r860b_continue.c (plain cold-boot,
+no shortcuts). Fresh boot's thread 1 is still NOT in WaitSema even at
+total_instr=560M - 8-9x past the old gt3_round826 checkpoint's claimed
+58,594,303-instruction WaitSema(5) park. Confirms Round 859/859b's
+"checkpoint provenance mismatch" hypothesis directly: that checkpoint
+was not built from a genuine fresh boot under the current tree. Round
+856-859's disassembly of thread 1's real WaitSema(5) call chain (via
+CreateSema->SIF-bind->WaitSema) remains a valid code decode, but the
+"exercised by instruction 58.6M" claim is retracted. Next: keep
+chaining the new fresh checkpoint until thread 1 actually reaches
+WaitSema(5), then check for a real sceSifSetDma dispatch there. No
+tracked-source fix (docs-only), regression/Wii-build correctly skipped.

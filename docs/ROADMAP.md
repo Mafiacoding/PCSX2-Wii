@@ -11166,3 +11166,18 @@ tracked-source fix (docs-only), regression/Wii-build correctly skipped.
   scheduler-starvation cause. Task #858 remains open; next lead should
   go back to ready-queue/redispatch mechanics directly rather than more
   "what is pc doing" spot-checks. No source change, docs-only.
+
+- Round 866: MAJOR CORRECTION - dumped the full EE HLE thread table at
+  the same GT3 checkpoint and found `ee_hle_thread_get_thread_count()
+  == 1`. GT3 has only ONE EE thread at this point (thread 1, which is
+  also g.current_thread_id, status=RUN). Task #811/#858's entire
+  "scheduler never redispatches ready thread 1" framing was wrong -
+  with only one in-use thread, pick_next_ready()/reschedule() always
+  correctly pick it; there is no starvation, no second thread, and no
+  ready-queue/priority gap to find. Task #811/#858 closed as answered-
+  by-correction. New task #862 opened with the corrected question:
+  is thread 1's own single-threaded execution making real forward
+  progress through BIOS/kernel code, or is it permanently stuck in a
+  non-scheduler loop (leading candidate: the 0x00100Bxx resting region
+  it bounces in after the Round 865 zero-fill loop completes)? No
+  source change, docs-only.

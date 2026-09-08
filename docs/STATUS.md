@@ -36241,3 +36241,63 @@ than the actual blocker.
 
 No source changes this round (investigation/methodology only).
 Regression suite and Wii cross-build correctly skipped.
+
+## Round 866: MAJOR CORRECTION - task #811/#858's "scheduler starvation" framing was wrong; GT3 has only ONE EE thread
+
+Immediately followed up on Round 865's "go back to ready-queue/
+redispatch mechanics directly" recommendation by dumping the FULL EE
+HLE thread table (all 32 slots) at the same checkpoint
+(`checkpoints/gt3_round861_fresh_chain.ckpt`, total_instr=4,079,995,711)
+via a new `/tmp/r866_threadtable.c` driver, using the existing
+`ee_hle_thread_get_thread_count()`/`get_status()`/`get_priority()`/
+`get_wait_type()`/`get_wait_id()`/`get_entry()`/`get_saved_pc()`/
+`get_wakeup_count()` accessors plus `ee_hle_thread_get_current_thread_
+id()`.
+
+**Result: `ee_hle_thread_get_thread_count() == 1`.** There is exactly
+one EE thread in the entire system at this point in GT3's boot: thread
+1, which is also `g.current_thread_id` (confirmed via
+`ee_hle_thread_get_current_thread_id()`), status=RUN, priority=64,
+wait_type=0, wait_id=0.
+
+**This means task #811/#858's entire framing - "why does the scheduler
+never redispatch ready thread 1" - was built on a false premise.**
+`pick_next_ready()` iterates all in-use threads and picks the lowest-
+priority-number one that's RUN/READY; with only one in-use thread that
+IS already both RUN and the live current thread, `reschedule()` calling
+`pick_next_ready()` and getting `next==1==g.current_thread_id` every
+time is not a bug or a redispatch failure - it is the only correct
+answer. There is no second thread being starved, and no ready-queue-
+insertion or priority/mask gap to find, because there is nothing else
+in the ready queue to insert. Rounds 811b/818/850's framing of this as
+"scheduler starvation" (thread 1 ready-but-never-picked, implying some
+OTHER thread or the scheduler mechanism itself was the obstacle) is
+corrected here: thread 1 was always being picked, every single time,
+because it was always the only candidate.
+
+**Corrected next question (not a scheduler question at all):** since
+thread 1 IS the CPU for this entire trace, is its own single-threaded
+code execution making legitimate forward progress through real BIOS/
+kernel work, or has it become permanently stuck in a loop that has
+nothing to do with dispatch/scheduling? Round 865d's own trace already
+contains a first data point: after the confirmed-legitimate zero-fill
+loop completes near total_instr~4.227B, `pc` moves to `0x8000BAC0`,
+then repeatedly bounces within the `0x00100Bxx` region (a kernel idle/
+wait-loop area referenced many times across this project's history -
+tasks #513/#529/#598 among others), briefly touches `0x00200030`
+(OSDSYS module code), then `0x8000DB30`/`0x8000DC40`, all within about
+a 1.8M-instruction window through total_instr~4.24B. Whether this
+represents real, if slow, forward progress (new code regions keep
+being visited over a much longer window) or a permanent plateau in one
+tight loop is not yet determined - see task #862 for the concrete next
+steps (disassemble the 0x00100Bxx resting region's actual poll
+condition; extend the checkpoint chain much further to see if new code
+keeps getting visited or execution truly flatlines).
+
+Task #811/#858 is closed as answered-by-correction (no scheduler bug
+exists to find); a new, correctly-framed task (#862) continues the
+underlying question of what's actually happening in GT3's boot past
+this point.
+
+No source changes this round (investigation only). Regression suite
+and Wii cross-build correctly skipped.

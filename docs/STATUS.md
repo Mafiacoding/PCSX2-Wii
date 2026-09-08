@@ -37207,3 +37207,89 @@ sandbox limitation as Round 887 applies: real native-PPC-execution
 correctness for LUI still can't be verified without Wii/Dolphin
 access - this round's harness verifies the generated *encoding*, not
 native execution.
+
+### Round 888 (task #866/#868/#869 continuation): SLL/SRL/SRA/SLLV/
+### SRLV/SRAV - the shift opcodes
+
+Direct continuation of Round 887b: added all six MIPS shift opcodes
+(SLL/SRL/SRA taking an immediate 5-bit shift amount from the `sa`
+instruction field; SLLV/SRLV/SRAV taking a variable shift amount from
+a register, masked to its low 5 bits) as the 13th-18th JIT-accelerated
+opcodes.
+
+**The opcode addition**: `ppc_dynarec.c` gained three new X-form
+encoders - `enc_slw`/`enc_srw`/`enc_sraw` (PowerPC `slw`/`srw`/`sraw`,
+extended opcodes 24/536/792 within primary opcode 31) - plus two new
+`translate_one()` dispatch blocks covering all six opcodes. Both
+blocks reuse the *same* shift-emission shape: load the value-to-shift
+from context, materialize the shift amount into a scratch register
+(via a plain `li` for the immediate forms, or via `lwz` + the
+already-existing `andi.`-based 0x1F mask for the variable forms), emit
+one `slw`/`srw`/`sraw`, then the same store-plus-`srawi`-sign-extend
+tail every other pure-ALU opcode in this file uses. Sharing one
+emission path for both the immediate and variable forms (rather than
+writing six near-duplicate blocks) keeps the six-opcode addition to
+about 60 new lines. `sa` (bits 6-10 of the instruction) is now decoded
+alongside the file's other operand fields at the top of
+`translate_one()`.
+
+A genuine correctness question worth documenting: PowerPC's `slw`/
+`srw`/`sraw` only guarantee well-defined behavior for the low 5 (or,
+per the ISA, low 6 on 64-bit implementations - PPC750/Broadway is
+32-bit so 5 is the relevant width) bits of the shift-count register;
+if the full register value is >=32, results are either 0 (`slw`/`srw`)
+or an arithmetic full-shiftout (`sraw`). MIPS's SLL/SRL/SRA use a
+literal 5-bit `sa` field (mechanically always 0-31) and SLLV/SRLV/SRAV
+explicitly mask with `rs32 & 0x1F` in `ee_core.c`'s own interpreter
+(and in this dynarec's generated code, via the `andi.` step) before
+ever reaching the shift - so the generated PPC code's shift-count
+register is *always* pre-masked to 0-31 by construction, meaning PPC's
+>=32 edge case is provably unreachable from any of these six MIPS
+opcodes. Documented in-code both above the three new encoders and
+above each dispatch block, so this isn't left as an implicit
+assumption for a future round to rediscover.
+
+**Verification harness**: `r888_shift_verify.c`, following the same
+methodology Round 887b established (calls the REAL
+`ppc_dynarec_translate_one()`, interprets the real generated PPC bytes
+with a small PPC750 subset simulator - this round's simulator gained
+`slw`/`srw`/`sraw`/`andi.` support alongside the existing `lwz`/`stw`/
+`li`/`srawi`/`blr`). Exercises all 6 opcodes across 6 test values
+(0x00000000, 0x00000001, 0x80000001, 0xFFFFFFFF, 0x12345678,
+0x7FFFFFFF - chosen to cover the all-zero, low-bit-set, sign-bit-set,
+all-ones, mixed-bit, and max-positive cases) crossed with 5 shift
+amounts for the immediate forms (0/1/4/16/31) and 7 shift-amount
+*source register values* for the variable forms (0/1/4/31/32/37/
+0xFFFFFFFF - the last three specifically chosen to exercise the 0x1F
+masking: 32 masks to 0, 37 masks to 5, 0xFFFFFFFF masks to 31), plus
+$zero-destination no-op checks for all 6 opcodes and the literal
+all-zero-word MIPS NOP encoding. **Result: 223/223 checks passed.**
+
+**Verification**:
+- Host-native: `ppc_dynarec.c` and `ee_jit.c` both compile clean under
+  `gcc -O2 -Wall -Wextra` (0 warnings).
+- `r888_shift_verify.c`: **223/223 checks passed**.
+- Full regression suite, chunked per the established pattern:
+  **135/135 tests pass, 0 failures**.
+- devkitPPC/libogc Wii cross-build (`make clean && make -j4`, real
+  target): clean, 0 warnings/errors, fresh `pcsx2-wii.elf`
+  (2,972,772 bytes) / `.dol` (528,224 bytes).
+
+**Status**: 18 opcodes now JIT-accelerated (ADDIU, SLTI, SLTIU, ADDU,
+SUBU, AND, OR, XOR, NOR, SLT, SLTU, LUI, SLL, SRL, SRA, SLLV, SRLV,
+SRAV) - essentially the complete pure-ALU MIPS-I subset that needs no
+memory access, no branching, and cannot raise an exception. Remaining
+gaps in that category are thin: MOVZ/MOVN (conditional register move,
+funct 0x0A/0x0B) and the various MULT/DIV/MFHI/MFLO family (which
+would need HI/LO register modeling this dynarec doesn't have context
+slots for yet). Beyond that, meaningfully expanding coverage further
+needs the two harder categories flagged since Round 887: memory ops
+(LW/SW/LB/LBU/LH/LHU/SB/SH - require a new "call arbitrary C function
+from generated PPC code" trampoline mechanism, since `ee_mem_read/
+write*` are C functions with side effects this dynarec's
+codegen-only-writes-context-fields model can't reach) and branches/
+jumps (require either real block-level translation with correct
+delay-slot semantics, or continuing to leave all control flow to the
+interpreter). Same sandbox limitation as every prior JIT round: real
+native-PPC-execution correctness still can't be verified without Wii
+hardware or Dolphin access in this sandbox.

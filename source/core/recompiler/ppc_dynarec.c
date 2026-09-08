@@ -165,6 +165,42 @@ static inline uint32_t enc_andi_dot(int rA, int rS, uint16_t uimm)
     return (28u << 26) | ((uint32_t)rS << 21) | ((uint32_t)rA << 16) | uimm;
 }
 
+/* Round 888 (task #866/#868/#869 continuation): slw/srw/sraw - X-form
+ * variable-shift instructions (same "dest is really rA field, rS at
+ * bits6-10 is source, rB at bits16-20 is the shift-amount register"
+ * layout as enc_and/enc_or/enc_xor/enc_nor above). Used for BOTH the
+ * immediate-shift MIPS ops (SLL/SRL/SRA - the shift amount is
+ * materialized into a scratch register with a plain `li` first) and
+ * the variable-shift ones (SLLV/SRLV/SRAV), so translate_one only
+ * needs one shift-emission path instead of two. PPC's shift
+ * instructions only look at the low 5 (slw/srw) or 6 (on 64-bit PPC;
+ * PPC750 is 32-bit so effectively 5) bits of rB's shift count and
+ * behave exactly like MIPS's 0-31 range here - no >=32 edge case is
+ * reachable from any of these six MIPS opcodes (sa is a literal 5-bit
+ * field; rs32 & 0x1F is explicitly masked by the interpreter, and this
+ * dynarec masks it the same way below), so there's no divergence to
+ * worry about between PPC's and MIPS's shift-amount overflow rules.
+ * All three encodings verified bit-for-bit against real devkitPPC
+ * (powerpc-eabi-as/-objdump): "slw r4,r5,r6" -> 0x7CA43030,
+ * "srw r4,r5,r6" -> 0x7CA43430, "sraw r4,r5,r6" -> 0x7CA43630 - all
+ * reproduced exactly by the formulas below (note sraw's XO=792 sits
+ * right next to srawi's already-verified XO=824 in the standard PPC
+ * extended-opcode table, which is a useful cross-check). */
+static inline uint32_t enc_slw(int rA, int rS, int rB)
+{
+    return (31u << 26) | ((uint32_t)rS << 21) | ((uint32_t)rA << 16) | ((uint32_t)rB << 11) | (24u << 1);
+}
+
+static inline uint32_t enc_srw(int rA, int rS, int rB)
+{
+    return (31u << 26) | ((uint32_t)rS << 21) | ((uint32_t)rA << 16) | ((uint32_t)rB << 11) | (536u << 1);
+}
+
+static inline uint32_t enc_sraw(int rA, int rS, int rB)
+{
+    return (31u << 26) | ((uint32_t)rS << 21) | ((uint32_t)rA << 16) | ((uint32_t)rB << 11) | (792u << 1);
+}
+
 /* Scratch PPC GPRs used by generated code. r3 is the incoming context
  * pointer (ppc_dynarec_gpr128_t *gpr) per the PowerPC EABI calling
  * convention - we never touch r1 (stack ptr) or r2/r13 (TOC/small-
@@ -265,6 +301,7 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
     uint32_t rs    = (mips_instr >> 21) & 0x1F;
     uint32_t rt    = (mips_instr >> 16) & 0x1F;
     uint32_t rd    = (mips_instr >> 11) & 0x1F;
+    uint32_t sa    = (mips_instr >> 6) & 0x1F; /* Round 888: shift-amount field, used by SLL/SRL/SRA */
     int32_t  imm   = (int16_t)(mips_instr & 0xFFFF);
     uint32_t funct = mips_instr & 0x3F;
 
@@ -405,9 +442,67 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
         return 0;
     }
 
-    /* Unsupported: NOP/SLL-by-zero, branches, loads/stores, MMI, COP1/2,
-     * everything else. Real coverage would require this switch to be
-     * the size of ee_core's interpreter (or larger, with scheduling). */
+    if (op == 0x00 && (funct == 0x00 || funct == 0x02 || funct == 0x03)) {
+        /* MIPS: sll/srl/sra rd, rt, sa -> gpr[rd] = sign_extend_64(
+         * (int32_t)(shift_op(gpr[rt].lo32, sa))), where sa is the
+         * literal 5-bit shift-amount field (bits 6-10 of the
+         * instruction, already decoded into the local `sa` variable
+         * above). Same 32-bit-compute-then-sign-extend shape as
+         * ADDU/SUBU. The shift amount is materialized into a scratch
+         * register with a plain `li` so the SAME slw/srw/sraw emission
+         * below serves both this immediate form and the *V variable
+         * form right after it. rd==0 (which includes the literal
+         * all-zero-word NOP encoding, sa==rd==rt==rs==0) is a true
+         * no-op on real hardware - decline without emitting anything,
+         * consistent with every other opcode above. */
+        if (rd == 0)
+            return 0;
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rt)));
+        emit(ctx, enc_addi(SCRATCH_B, 0, (int16_t)sa)); /* li SCRATCH_B, sa (0-31, fits) */
+        if (funct == 0x00) { /* SLL */
+            emit(ctx, enc_slw(SCRATCH_A, SCRATCH_A, SCRATCH_B));
+        } else if (funct == 0x02) { /* SRL */
+            emit(ctx, enc_srw(SCRATCH_A, SCRATCH_A, SCRATCH_B));
+        } else { /* funct == 0x03: SRA */
+            emit(ctx, enc_sraw(SCRATCH_A, SCRATCH_A, SCRATCH_B));
+        }
+        emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_LO(rd)));
+        emit(ctx, enc_srawi(SCRATCH_C, SCRATCH_A, 31));
+        emit(ctx, enc_stw(SCRATCH_C, CTX_REG, REG_HI(rd)));
+        return 0;
+    }
+
+    if (op == 0x00 && (funct == 0x04 || funct == 0x06 || funct == 0x07)) {
+        /* MIPS: sllv/srlv/srav rd, rt, rs -> gpr[rd] = sign_extend_64(
+         * (int32_t)(shift_op(gpr[rt].lo32, gpr[rs].lo32 & 0x1F))). Same
+         * shape as the immediate sll/srl/sra above, but the shift
+         * amount comes from a register (masked to its low 5 bits, per
+         * the real MIPS ISA and ee_core.c's own `rs32 & 0x1F`) instead
+         * of the sa field. andi. is reused from the SLT/SLTI machinery
+         * above purely for its masking effect; CR0 (which andi. also
+         * sets, being the only non-dot "andi" PPC has) is never read by
+         * any code this dynarec generates. */
+        if (rd == 0)
+            return 0;
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rt)));
+        emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_LO(rs)));
+        emit(ctx, enc_andi_dot(SCRATCH_B, SCRATCH_B, 0x1F));
+        if (funct == 0x04) { /* SLLV */
+            emit(ctx, enc_slw(SCRATCH_A, SCRATCH_A, SCRATCH_B));
+        } else if (funct == 0x06) { /* SRLV */
+            emit(ctx, enc_srw(SCRATCH_A, SCRATCH_A, SCRATCH_B));
+        } else { /* funct == 0x07: SRAV */
+            emit(ctx, enc_sraw(SCRATCH_A, SCRATCH_A, SCRATCH_B));
+        }
+        emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_LO(rd)));
+        emit(ctx, enc_srawi(SCRATCH_C, SCRATCH_A, 31));
+        emit(ctx, enc_stw(SCRATCH_C, CTX_REG, REG_HI(rd)));
+        return 0;
+    }
+
+    /* Unsupported: branches, loads/stores, MMI, COP1/2, everything
+     * else. Real coverage would require this switch to be the size of
+     * ee_core's interpreter (or larger, with scheduling). */
     return -1;
 }
 

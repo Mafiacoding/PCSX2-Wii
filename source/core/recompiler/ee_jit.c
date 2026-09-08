@@ -33,12 +33,13 @@ static uint64_t g_jit_executed = 0;
 /* Whether `instr` is one of the MIPS opcodes ppc_dynarec_translate_one()
  * currently supports: ADDIU (op 0x09); SLTI/SLTIU (op 0x0A/0x0B); LUI
  * (op 0x0F, Round 887b); SPECIAL (op 0x00) ADDU/SUBU/AND/OR/XOR/NOR/
- * SLT/SLTU (funct 0x21/0x23-0x27/0x2A/0x2B). Kept in sync by hand with
- * translate_one()'s own dispatch - see that function's own comments
- * for the authoritative list. This is a cheap pre-filter so the (much
- * more expensive) cache lookup/compile path is never attempted for the
- * vast majority of real instructions ppc_dynarec.c can't handle yet
- * (branches, loads/stores, MMI, COP0/1/2, ...). */
+ * SLT/SLTU (funct 0x21/0x23-0x27/0x2A/0x2B); SLL/SRL/SRA/SLLV/SRLV/SRAV
+ * (funct 0x00/0x02-0x04/0x06/0x07, Round 888). Kept in sync by hand
+ * with translate_one()'s own dispatch - see that function's own
+ * comments for the authoritative list. This is a cheap pre-filter so
+ * the (much more expensive) cache lookup/compile path is never
+ * attempted for the vast majority of real instructions ppc_dynarec.c
+ * can't handle yet (branches, loads/stores, MMI, COP0/1/2, ...). */
 static int ee_jit_opcode_supported(uint32_t instr)
 {
     uint32_t op = (instr >> 26) & 0x3Fu;
@@ -48,6 +49,9 @@ static int ee_jit_opcode_supported(uint32_t instr)
     if (op == 0x00u) {
         uint32_t funct = instr & 0x3Fu;
         switch (funct) {
+        case 0x00: /* SLL (and the all-zero-word NOP encoding, harmlessly - see translate_one's rd==0 guard) */
+        case 0x02: case 0x03: /* SRL / SRA */
+        case 0x04: case 0x06: case 0x07: /* SLLV / SRLV / SRAV */
         case 0x21: case 0x23: /* ADDU / SUBU */
         case 0x24: case 0x25: case 0x26: case 0x27: /* AND / OR / XOR / NOR */
         case 0x2A: case 0x2B: /* SLT / SLTU */

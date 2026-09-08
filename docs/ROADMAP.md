@@ -11124,3 +11124,9 @@ CreateSema->SIF-bind->WaitSema) remains a valid code decode, but the
 chaining the new fresh checkpoint until thread 1 actually reaches
 WaitSema(5), then check for a real sceSifSetDma dispatch there. No
 tracked-source fix (docs-only), regression/Wii-build correctly skipped.
+
+- Round 861: memory-card-insert diskless-boot experiment (task #536/#447) -
+  honest negative result (identical to no-card control at ~960M instr);
+  also flagged a drift finding - diskless boot's current resting state is
+  now earlier/different than the Round 594-683 baseline, likely from
+  intervening correctness fixes. No source change, docs-only round.

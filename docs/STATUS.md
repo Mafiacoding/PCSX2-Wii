@@ -35802,3 +35802,72 @@ No checkpoint files, BIOS images, or disc images were committed (leak-check run 
 A new, verified-fresh checkpoint (`/tmp/r860_fresh_gt3.ckpt`, `total_instr=479,999,502`) and its continuation (in progress, not yet reaching WaitSema) exist as scratch artifacts only (per `checkpoint.h`'s standing leak-check-scope rule, never committed). Continuing this chain far enough to observe thread 1's real WaitSema(5) transition (and check whether a real `sceSifSetDma` dispatch precedes it this time) is the natural next step, but at ~560M instructions per ~170s sandboxed call, reaching it will take several more rounds of chaining - flagged honestly as unfinished rather than extrapolated.
 
 No tracked-source fix this round (correctly - purely a diagnostic/provenance-verification round). Regression suite and Wii cross-build correctly skipped (no tracked source changed).
+
+## Round 861 (task #536/#447 continuation): memory-card-insert diskless-boot experiment - honest negative result, plus a drift finding
+
+User explicitly asked (before continuing GT3/task #811) whether inserting a
+real memory card into the existing, previously-unused
+`iop_sio2_mc_insert_blank()` opt-in hook, combined with a genuine *organic*
+diskless (no-disc) boot, would let OSDSYS's own Browser/menu-escalation logic
+advance further than the long-documented frozen state (Rounds 594-608,
+669-671, 683 all found `+0x450` sticks at 5 with no picture beyond
+lines/wireframe, always gated on real Sony code checking for a disc/card that
+was never present in prior tests).
+
+This is architecturally distinct from the already-tried, already-closed
+Round 745 FreeMcBoot experiment (which loaded FMCB's own ELF directly via
+the syscall-7 trampoline, bypassing OSDSYS's organic boot entirely). This
+round instead let the normal `system_init()` diskless boot run completely
+organically, with only `iop_sio2_mc_insert_blank()` called once up front so
+`g_mc.inserted=1` for the IOP's entire run - exactly the untested scenario
+Round 683's own synthesis had named as the next concrete experiment.
+
+**Method:** two new scratch drivers, both against the real PAL BIOS
+(`PS2 Bios 30004R V6 Pal.bin`), no disc mounted, budget 150,000,000 "done"
+units (~1.2B real EE instructions per the established ~8x done:instr ratio,
+though the run was cut short by the sandbox's ~170s call ceiling at 12
+chunks / ~960M instructions):
+  - `/tmp/r861_mc_insert.c`: calls `iop_sio2_mc_insert_blank()` right after
+    `system_init()`, then samples RAM[0x001C0450] (the Browser-state field
+    cited since Round 594) and GS PMODE/DISPFB1/DISPFB2 every 10M-"done"
+    chunk, printing only on change.
+  - `/tmp/r861b_nocard.c`: byte-identical driver with the
+    `iop_sio2_mc_insert_blank()` call removed (pure control).
+
+**Result:** the two runs are indistinguishable. Both oscillate EE PC through
+the exact same sequence (`0x8000E538` -> `0x00100BE8` -> `0x8000E544` ->
+`0x8000E538` -> `0x8000DB30` -> `0x00100BCC` -> `0x8000E538` -> `0x8000DB30`
+-> `0x00100BF0` -> `0x8000E538` -> `0x8000E548` -> `0x8000DC38`, repeating),
+IOP PC frozen at `0x00155B40` for the entire run, and `+0x450` stays at
+`0x00000000` (never even reaching the historically-documented value of 5)
+across all ~960M instructions sampled. GS PMODE/DISPFB1/DISPFB2 remain zero
+in both runs too - no display setup happens at all at this depth, card or no
+card.
+
+**Conclusion:** inserting a real memory card via the existing opt-in hook
+makes *zero* observable difference to this diskless boot's control flow at
+this depth. This is an honest negative result, consistent with (in fact an
+even stronger version of) Round 683's prediction: the current code path
+never even reaches the point where real OSDSYS card-presence-checking code
+would run, so a present card has nothing to react to yet.
+
+**Secondary finding (flagged, not chased this round):** this also reveals
+the diskless boot's resting state has drifted since the Round 594-683
+characterization. Those rounds found the boot reaches OSDSYS's own loaded
+module code (`0x00200000-0x00220000` range) and settles with `+0x450`
+oscillating between values including 5. This round's fresh boot (both
+card and no-card) never leaves low kernel/exception-vector addresses
+(`0x8000Dxxx`-`0x8000Exxx`, `0x00100Bxx`) even after ~960M instructions -
+an order of magnitude past where OSDSYS's module code has historically been
+reached (tens of millions of instructions in past rounds). This is most
+likely a side effect of the many EE/IOP correctness fixes shipped between
+Round 683 and now (opcode implementations, scheduler/threading rewrites,
+timer fixes, etc.) changing timing/control-flow enough to trip an earlier
+exception-retry loop that wasn't hit under the older, less-complete tree.
+Not investigated further this round per the user's explicit priority to
+move on to GT3 (task #811) next; flagged here as a candidate future
+diskless-BIOS investigation if that thread is revisited.
+
+No source changes this round (pure diagnostic use of existing, already-
+tracked `iop_sio2_mc_insert_blank()`/`iop_sio2_mc_is_inserted()` hooks).
+Regression suite and Wii cross-build correctly skipped.

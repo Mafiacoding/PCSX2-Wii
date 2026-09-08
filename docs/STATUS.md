@@ -36564,3 +36564,99 @@ priority this window since it was already mid-flight. Real
 implementation work starts next.
 
 No source changes this round for the JIT track (assessment only).
+
+## Round 880 (task #864): shipped the 64-bit sign-extension fix + a host-native verification harness for the PPC dynarec PoC
+
+Implemented the register-context fix scoped above. Summary of the
+actual change (`source/core/recompiler/ppc_dynarec.c` +
+`include/core/recompiler/ppc_dynarec.h`):
+
+- Context type changed from a flat `uint32_t *gpr32` to
+  `ppc_dynarec_gpr128_t gpr[32]` (`{uint64_t ud0; uint64_t ud1;}` per
+  slot), laid out identically to this project's real
+  `ee_reg128_t gpr[32]` (`include/core/ee/ee_core.h`) so a future real
+  wiring can pass `&ee->gpr[0]` straight in with no copying.
+- **Endianness**: PPC750/Broadway is big-endian, so within each 8-byte
+  `ud0` the 32-bit word at the lower address is the HIGH half and
+  +4 is the LOW half - opposite of a little-endian host. New
+  `REG_HI()`/`REG_LO()` offset macros encode this explicitly and are
+  documented in both files so it isn't silently re-broken later.
+- **ADDIU** now correctly computes a 32-bit result and sign-extends it
+  into the full 64-bit register, via a new `srawi rX, rY, 31`
+  encoder (arithmetic-shift-by-31 turns the result's sign bit into an
+  all-0s/all-1s fill word - exactly the MIPS64 sign-extension rule).
+  This is the fix for the bug identified last round: the old code
+  only ever wrote one 32-bit word and left the upper half whatever
+  garbage was already in the context.
+- **OR** now correctly performs a genuine full 64-bit bitwise OR (both
+  halves independently) - MIPS logical ops (OR/AND/XOR/NOR), unlike
+  ADDIU/ADDU, never truncate or sign-extend. Getting this distinction
+  right (32-bit-compute-then-sign-extend for arithmetic ops vs.
+  full-64-bit for logical ops) is the actual substance of the fix -
+  applying ADDIU's rule to OR (or vice versa) would have been just as
+  wrong as the original flat-32-bit bug.
+- Writes to `$zero` (rt==0 for ADDIU, rd==0 for OR) now translate to
+  zero PPC instructions, matching real hardware's unconditional
+  discard of writes to register 0 - needed for correctness the moment
+  this context is ever backed by a real, shared `gpr[0]` that must
+  stay 0.
+- Worst-case buffer sizing bumped from 4 to 8 PPC instructions per
+  MIPS instruction (OR is now 8 real instructions: load/or/store x2
+  halves), and the `used_words + N` bounds check updated to match.
+
+**srawi's encoding was verified against ground truth, not memory**:
+assembled `srawi r5,r4,31` / `srawi r0,r3,0` with the real devkitPPC
+toolchain (`powerpc-eabi-as`/`-objdump`) and confirmed the formula
+`(31<<26)|(rS<<21)|(rA<<16)|(SH<<11)|(824<<1)` reproduces the real
+bytes (`0x7C85FE70`, `0x7C600670`) exactly, bit for bit. The
+pre-existing `enc_lwz`/`enc_stw`/`enc_addi`/`enc_or` encoders were
+cross-checked the same way before building on top of them, and also
+matched exactly.
+
+**Verification** (no qemu-ppc in this sandbox, so real PPC machine
+code can't execute directly here - see Round 874+'s note above):
+built a host-native (x86) interpreter, `r880_ppc_verify.c`, covering
+only the exact opcode subset the dynarec can emit (lwz/stw/addi/or/
+srawi/blr). It calls the REAL `ppc_dynarec_translate_one()`/
+`finalize()` to get real machine-code bytes, then interprets them
+against an explicitly big-endian-packed byte buffer (manual
+byte-order packing/unpacking, independent of the host's own x86
+little-endian layout, so the host's endianness can't accidentally
+paper over a bug) and compares against independently-computed MIPS64
+reference values. 12/12 checks pass: ADDIU sign-extension across
+positive/negative/overflow/zero cases plus "garbage in the untouched
+high word must not leak into a 32-bit-truncated result", source
+register left unmodified, OR correctness across low-only/high-only/
+full-width bit patterns, both `$zero`-write-discard cases, and a
+regression guard confirming a still-unsupported opcode (SUBU) is
+still correctly rejected.
+
+**Real target compile check**: the devkitPPC toolchain in this
+sandbox was missing `libmpfr.so.4` on `cc1`'s runtime linker path
+(unrelated to this change - a sandbox library-path gap); found a
+working copy already present under
+`devkitpro/devkitPPC/lib/libmpfr.so.4` and pointed `LD_LIBRARY_PATH`
+at it. With that, `powerpc-eabi-gcc -mrvl -mcpu=750 -meabi
+-mhard-float` compiles the updated `ppc_dynarec.c` cleanly (exit 0,
+zero warnings) - confirmed via `powerpc-eabi-objdump` that all four
+public functions are present in the resulting object.
+
+**Regression suite**: not re-run this round. `tests/run_test.sh`
+derives its link line by globbing `source/**/*.c` with
+`! -path '*recompiler*'` explicitly excluding this file - none of the
+existing 130+ tests link against `ppc_dynarec.c` at all, so this
+change is structurally incapable of affecting their outcome. The
+host-native verification harness above is the real regression check
+for this file.
+
+Still explicitly NOT done (unchanged from the Round 874+ scoping):
+opcode coverage is still just ADDIU/OR, still no register allocation,
+no branch handling, no block linking, no self-modifying-code
+invalidation strategy, and the dynarec is still not called from
+anywhere in `ee_core.c`/`system.c`/`main.c` - it remains a verified-
+correct but inert building block, not a wired-in JIT. Next increment
+should either expand opcode coverage further (ADDU/SUBU/AND/XOR/NOR
+are the natural next set, each needing the same "is this a 32-bit-
+truncating op or a full-64-bit op" classification this round applied
+to ADDIU vs OR) or start the harder architectural work (register
+allocation / block boundaries) needed before any real wiring is safe.

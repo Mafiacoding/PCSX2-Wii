@@ -16,21 +16,50 @@
  *
  * What this file actually does: translates a short, straight-line
  * (no internal branches) run of MIPS instructions into native PPC750
- * machine code operating on an in-memory 32-bit register file, using
- * the classic "load operands from context, compute, store back"
- * template pattern. It supports exactly two MIPS opcodes (ADDIU, and
+ * machine code operating on an in-memory register file, using the
+ * classic "load operands from context, compute, store back" template
+ * pattern. It supports exactly two MIPS opcodes (ADDIU, and
  * SPECIAL/OR) as a demonstration that dynamic codegen + icache
  * invalidation works end-to-end on Wii hardware via libogc. Any
  * instruction it doesn't recognize aborts translation of that block;
  * the caller (ee_core) should fall back to the interpreter for it.
  *
- * There is no register allocation, no branch handling inside blocks,
- * no linking between compiled blocks, and no invalidation-on-write
- * strategy for self-modifying code. All of that would be required
- * before this could be called a real recompiler.
+ * Round 880 (task #864) fix: the register context used to be a flat
+ * `uint32_t *gpr32` (one 32-bit word per register), which silently
+ * dropped the EE R5900's real 64-bit register semantics - MIPS64
+ * ADDIU/ADDU etc. compute a 32-bit result and sign-extend it into the
+ * full 64-bit register, and MIPS OR/AND/XOR/NOR operate on the full
+ * 64-bit value with no truncation at all. Getting these two rules
+ * mixed up (or ignoring them) silently corrupts the upper 32 bits of
+ * every register a translated block touches. The context is now
+ * `ppc_dynarec_gpr128_t gpr[32]`, laid out identically to this
+ * project's own `ee_reg128_t gpr[32]` (see include/core/ee/ee_core.h)
+ * so a real integration can eventually pass `&ee->gpr[0]` straight in
+ * with no copying - each slot is 16 bytes: `ud0` (the low 64 bits,
+ * what these Phase-1 opcodes read/write) followed by `ud1` (the high
+ * 64 bits, only touched by MMI ops - left completely alone here).
+ *
+ * IMPORTANT (PPC750/Broadway is BIG-ENDIAN): within each 8-byte `ud0`
+ * field, the 32-bit word at the LOWER address is the HIGH half of the
+ * 64-bit value, and the word at address+4 is the LOW half - the
+ * opposite of what a little-endian (x86) host would use. Every load/
+ * store offset in this file accounts for that; see REG_HI()/REG_LO().
+ *
+ * There is still no register allocation, no branch handling inside
+ * blocks, no linking between compiled blocks, and no invalidation-on-
+ * write strategy for self-modifying code. All of that would be
+ * required before this could be called a real recompiler. This PoC is
+ * also still NOT called from anywhere in ee_core.c/system.c/main.c -
+ * wiring it into real execution is explicitly out of scope for this
+ * round (see docs/STATUS.md task #864).
  */
 
-typedef void (*ppc_block_fn)(uint32_t *gpr32);
+typedef struct {
+    uint64_t ud0; /* low 64 bits - what ADDIU/OR (Phase 1) operate on */
+    uint64_t ud1; /* high 64 bits - MMI-only, untouched by this PoC */
+} ppc_dynarec_gpr128_t;
+
+typedef void (*ppc_block_fn)(ppc_dynarec_gpr128_t *gpr);
 
 typedef struct {
     uint32_t *code;         /* executable buffer (memalign'd, 32 bytes) */

@@ -36660,3 +36660,71 @@ are the natural next set, each needing the same "is this a 32-bit-
 truncating op or a full-64-bit op" classification this round applied
 to ADDIU vs OR) or start the harder architectural work (register
 allocation / block boundaries) needed before any real wiring is safe.
+
+## Round 881 (task #866): opcode coverage expanded to ADDU/SUBU/AND/XOR/NOR (7 opcodes total now)
+
+Direct continuation of Round 880's pattern - implemented exactly the
+opcode set that round's writeup flagged as the natural next increment.
+
+`source/core/recompiler/ppc_dynarec.c` gained 5 new PPC encoders
+(`enc_add`, `enc_subf`, `enc_and`, `enc_xor`, `enc_nor`), each verified
+bit-for-bit against real devkitPPC toolchain output before use, same
+discipline as Round 880's `enc_srawi`:
+
+```
+add r4,r5,r6  -> 0x7C853214
+subf r4,r5,r6 -> 0x7C853050
+and r4,r5,r6  -> 0x7CA43038
+xor r4,r5,r6  -> 0x7CA43278
+nor r4,r5,r6  -> 0x7CA430F8
+```
+
+All five formulas reproduce these exactly. One easy-to-get-backwards
+detail worth flagging for anyone touching this later: PPC `subf
+RT,RA,RB` computes `RT = RB - RA` (the SECOND operand is subtracted
+FROM the third) - the intuitive "subtract second from first" reading
+is wrong. SUBU's codegen accounts for this explicitly
+(`enc_subf(SCRATCH_A, SCRATCH_B, SCRATCH_A)` to get `rs - rt`, not the
+other way around).
+
+Opcode classification, continuing the rule Round 880 established:
+- **ADDU/SUBU** (MIPS funct 0x21/0x23): 32-bit-compute-then-sign-
+  extend, exactly like ADDIU - just both operands come from registers
+  instead of an immediate. 6 PPC instructions each.
+- **AND/XOR/NOR** (funct 0x24/0x26/0x27): genuine full 64-bit bitwise
+  ops, exactly like OR - both halves combined independently, no
+  truncation. 8 PPC instructions each (same worst case as OR, so no
+  buffer resize needed). The OR/AND/XOR/NOR paths were merged into one
+  shared code block in `ppc_dynarec_translate_one()` since they only
+  differ in which single PPC instruction pair gets emitted.
+- `$zero`-write discard (rd==0) applies to all 5, same as the existing
+  opcodes.
+
+**Verification**: extended the Round 880 host-native interpreter
+(`r880_ppc_verify.c` in the session's scratch outputs, not committed)
+with the same big-endian-explicit-packing technique - added decode
+support for the 5 new PPC XO values (266/40/28/316/124) plus 27 new
+test cases (up from 12): sign-extension edge cases for ADDU/SUBU
+(including an "hi garbage in both operands must be dropped" case
+mirroring Round 880's ADDIU test), full-width bit-pattern checks for
+AND/XOR/NOR (hand-computed reference values, cross-checked twice after
+catching two arithmetic slips of my own while deriving them by hand),
+and `$zero`-write-discard checks for all 5 new opcodes. The SLT opcode
+now takes over as the "still correctly rejected" regression guard,
+since SUBU (the previous guard's example) is real now. **39 total
+checks, 0 failures.**
+
+**Real target compile**: `powerpc-eabi-gcc -mrvl -mcpu=750 -meabi
+-mhard-float` on the updated file - clean, exit 0.
+
+**Regression suite**: still structurally unaffected - `ppc_dynarec.c`
+remains excluded from `tests/run_test.sh`'s glob.
+
+Opcode count is now 7 (ADDIU, OR, ADDU, SUBU, AND, XOR, NOR). Still
+not wired into `ee_core.c`/`system.c`/`main.c`, still no register
+allocation, no branch handling, no block linking. Task #866 remains
+open for further opcode growth (SLT/SLTU/SLTI/SLTIU next - these
+introduce a genuinely new wrinkle: the *comparison* is 64-bit-signed/
+unsigned on real MIPS64 but the *result* written back is always 0 or
+1, zero-extended - different from both rules used so far) or the
+harder register-allocation/branch-handling work.

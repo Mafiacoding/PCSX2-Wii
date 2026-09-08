@@ -33,6 +33,46 @@ static inline uint32_t enc_or(int rA, int rS, int rB)
     return (31u << 26) | ((uint32_t)rS << 21) | ((uint32_t)rA << 16) | ((uint32_t)rB << 11) | (444u << 1);
 }
 
+/* Round 881 (task #866) additions: add/subf/and/xor/nor. All five
+ * encodings verified bit-for-bit against real devkitPPC
+ * (powerpc-eabi-as/-objdump) before use here, same as enc_srawi was -
+ * e.g. "add r4,r5,r6" -> 0x7C853214, "subf r4,r5,r6" -> 0x7C853050,
+ * "and r4,r5,r6" -> 0x7CA43038, "xor r4,r5,r6" -> 0x7CA43278,
+ * "nor r4,r5,r6" -> 0x7CA430F8 - all reproduced exactly by the
+ * formulas below. */
+
+/* add rD, rA, rB -> rD = rA + rB. Field layout: rD at bits6-10,
+ * rA at bits11-15, rB at bits16-20 (like enc_addi's rD/rA, not the
+ * "dest last" pattern enc_or/and/xor/nor use). */
+static inline uint32_t enc_add(int rD, int rA, int rB)
+{
+    return (31u << 26) | ((uint32_t)rD << 21) | ((uint32_t)rA << 16) | ((uint32_t)rB << 11) | (266u << 1);
+}
+
+/* subf rT, rA, rB -> rT = rB - rA (PPC reverses the intuitive operand
+ * order: the SECOND operand is subtracted FROM the third). */
+static inline uint32_t enc_subf(int rT, int rA, int rB)
+{
+    return (31u << 26) | ((uint32_t)rT << 21) | ((uint32_t)rA << 16) | ((uint32_t)rB << 11) | (40u << 1);
+}
+
+/* and/xor/nor rA(dest), rS, rB - same "dest first, but destination
+ * field is really rA at bits11-15" layout as enc_or. */
+static inline uint32_t enc_and(int rA, int rS, int rB)
+{
+    return (31u << 26) | ((uint32_t)rS << 21) | ((uint32_t)rA << 16) | ((uint32_t)rB << 11) | (28u << 1);
+}
+
+static inline uint32_t enc_xor(int rA, int rS, int rB)
+{
+    return (31u << 26) | ((uint32_t)rS << 21) | ((uint32_t)rA << 16) | ((uint32_t)rB << 11) | (316u << 1);
+}
+
+static inline uint32_t enc_nor(int rA, int rS, int rB)
+{
+    return (31u << 26) | ((uint32_t)rS << 21) | ((uint32_t)rA << 16) | ((uint32_t)rB << 11) | (124u << 1);
+}
+
 /* srawi rA, rS, SH - arithmetic shift right by SH, used here purely to
  * produce a 64-bit sign-extension fill word: srawi rA, rS, 31 leaves
  * rA = 0x00000000 if rS's sign bit is clear, or 0xFFFFFFFF if it's
@@ -75,8 +115,9 @@ int ppc_dynarec_init(ppc_codegen_ctx_t *ctx, size_t max_instructions)
 {
     memset(ctx, 0, sizeof(*ctx));
 
-    /* Worst case is OR's 8 PPC instructions per MIPS instruction (see
-     * ppc_dynarec_translate_one), plus one trailing blr. */
+    /* Worst case is the 64-bit logical ops' (OR/AND/XOR/NOR) 8 PPC
+     * instructions per MIPS instruction (see ppc_dynarec_translate_one
+     * - ADDIU/ADDU/SUBU are cheaper at 5-6), plus one trailing blr. */
     size_t words = max_instructions * 8 + 1;
     ctx->code = memalign(32, words * sizeof(uint32_t));
     if (!ctx->code)
@@ -133,22 +174,52 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
         return 0;
     }
 
-    if (op == 0x00 && funct == 0x25) {
-        /* MIPS: or rd, rs, rt -> gpr[rd] = gpr[rs] | gpr[rt], as a
-         * genuine full 64-bit bitwise OR - unlike ADDIU above, MIPS
-         * logical ops (OR/AND/XOR/NOR) never truncate or sign-extend;
-         * both halves must be ORed independently. Discard writes to
-         * $zero (rd==0) the same way ADDIU does. */
+    if (op == 0x00 && (funct == 0x25 || funct == 0x24 || funct == 0x26 || funct == 0x27)) {
+        /* MIPS: or/and/xor/nor rd, rs, rt -> genuine full 64-bit
+         * bitwise ops - unlike ADDU/SUBU below, MIPS logical ops
+         * never truncate or sign-extend; both halves must be combined
+         * independently. Discard writes to $zero (rd==0). */
         if (rd == 0)
             return 0;
         emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs)));
         emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_LO(rt)));
-        /* PPC 'or' takes (rA=dest, rS=src1, rB=src2) in that field order */
-        emit(ctx, enc_or(SCRATCH_A, SCRATCH_A, SCRATCH_B));
-        emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_LO(rd)));
         emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_HI(rs)));
         emit(ctx, enc_lwz(SCRATCH_D, CTX_REG, REG_HI(rt)));
-        emit(ctx, enc_or(SCRATCH_C, SCRATCH_C, SCRATCH_D));
+        if (funct == 0x25) { /* OR */
+            emit(ctx, enc_or(SCRATCH_A, SCRATCH_A, SCRATCH_B));
+            emit(ctx, enc_or(SCRATCH_C, SCRATCH_C, SCRATCH_D));
+        } else if (funct == 0x24) { /* AND */
+            emit(ctx, enc_and(SCRATCH_A, SCRATCH_A, SCRATCH_B));
+            emit(ctx, enc_and(SCRATCH_C, SCRATCH_C, SCRATCH_D));
+        } else if (funct == 0x26) { /* XOR */
+            emit(ctx, enc_xor(SCRATCH_A, SCRATCH_A, SCRATCH_B));
+            emit(ctx, enc_xor(SCRATCH_C, SCRATCH_C, SCRATCH_D));
+        } else { /* funct == 0x27: NOR */
+            emit(ctx, enc_nor(SCRATCH_A, SCRATCH_A, SCRATCH_B));
+            emit(ctx, enc_nor(SCRATCH_C, SCRATCH_C, SCRATCH_D));
+        }
+        emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_LO(rd)));
+        emit(ctx, enc_stw(SCRATCH_C, CTX_REG, REG_HI(rd)));
+        return 0;
+    }
+
+    if (op == 0x00 && (funct == 0x21 || funct == 0x23)) {
+        /* MIPS: addu/subu rd, rs, rt -> gpr[rd] = sign_extend_64(
+         * (int32_t)(gpr[rs].lo32 +/- gpr[rt].lo32)). Same 32-bit-
+         * compute-then-sign-extend rule as ADDIU above, just with both
+         * operands coming from registers instead of an immediate. */
+        if (rd == 0)
+            return 0;
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs)));
+        emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_LO(rt)));
+        if (funct == 0x21) { /* ADDU */
+            emit(ctx, enc_add(SCRATCH_A, SCRATCH_A, SCRATCH_B));
+        } else { /* funct == 0x23: SUBU. subf RT,RA,RB computes RB-RA;
+                  * we want rs-rt, so RA=SCRATCH_B(rt), RB=SCRATCH_A(rs). */
+            emit(ctx, enc_subf(SCRATCH_A, SCRATCH_B, SCRATCH_A));
+        }
+        emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_LO(rd)));
+        emit(ctx, enc_srawi(SCRATCH_C, SCRATCH_A, 31));
         emit(ctx, enc_stw(SCRATCH_C, CTX_REG, REG_HI(rd)));
         return 0;
     }

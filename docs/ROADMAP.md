@@ -11090,3 +11090,22 @@ documented checkpoint chain under the new instrumentation) before
 drawing further conclusions from checkpoint-derived thread state, or
 before pursuing Pfad B (larger instruction budget). See STATUS.md's
 Round 859 entry.
+
+## Round 859b (task #811): declined 3 forced-signal/patch proposals; ruled out nondeterminism
+
+Declined the user's three proposed fixes (SIF-bind-success hook, scheduler
+DMAC/semaphore bypass, MIPS branch patch on GT3's own code) - all three
+inject signals/edits that wouldn't occur under real emulated conditions,
+same category already rejected at Round 549/827. Instead ruled out two
+more candidate explanations for Round 859's checkpoint-vs-fresh-boot
+discrepancy: (1) grepped all EE/IOP core source for rand()/time()/clock()
+- zero hits, no nondeterminism source exists in the simulated logic; (2)
+reproduced the fresh cold boot independently to 1.2B instructions (2x
+Round 859's budget) - identical zero-GT3-origin result. Remaining honest
+explanation: the round826 checkpoint's own build provenance is unverified
+in this session (no reproducible command trail), despite STATUS.md's
+prior citation describing it as a fresh cold boot. No tracked-source fix
+this round (correctly skipped - R859_NEG119_TRACE re-applied only for
+this diagnostic, fully reverted, diff confirmed zero). Next: build a
+fresh, fully-documented checkpoint chain and re-check thread 1's
+WaitSema(5) park against it directly.

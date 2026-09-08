@@ -264,12 +264,17 @@ int ppc_dynarec_init(ppc_codegen_ctx_t *ctx, size_t max_instructions)
 {
     memset(ctx, 0, sizeof(*ctx));
 
-    /* Worst case is SLT/SLTI's 13 PPC instructions per MIPS instruction
-     * (4 setup loads/li's + 6 for the signed emit_slt_core chain + 3
-     * store/li/store - see ppc_dynarec_translate_one; SLTU/SLTIU are
+    /* Round 889 (task #866/#868/#869 continuation): worst case is now
+     * MOVN's 20 PPC instructions per MIPS instruction (6 setup loads +
+     * 4 for the mask computation + 1 extra nor to invert it for MOVN
+     * specifically + 1 notmask nor + 6 for the hi/lo and/and/or blends
+     * + 2 stores - see ppc_dynarec_translate_one's MOVZ/MOVN block).
+     * MOVZ is one instruction cheaper (19, no invert). Previously SLT/
+     * SLTI's 13 (4 setup loads/li's + 6 for the signed emit_slt_core
+     * chain + 3 store/li/store) were the worst case; SLTU/SLTIU are
      * cheaper at 11, the 64-bit logical ops OR/AND/XOR/NOR at 8,
      * ADDIU/ADDU/SUBU cheaper still at 5-6), plus one trailing blr. */
-    size_t words = max_instructions * 13 + 1;
+    size_t words = max_instructions * 20 + 1;
     ctx->code = memalign(32, words * sizeof(uint32_t));
     if (!ctx->code)
         return -1;
@@ -294,7 +299,7 @@ static void emit(ppc_codegen_ctx_t *ctx, uint32_t instr)
 
 int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
 {
-    if (ctx->used_words + 13 > ctx->capacity_words)
+    if (ctx->used_words + 20 > ctx->capacity_words) /* Round 889: was 13, MOVN's 20-word worst case */
         return -1; /* out of buffer space */
 
     uint32_t op    = (mips_instr >> 26) & 0x3F;
@@ -497,6 +502,79 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
         emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_LO(rd)));
         emit(ctx, enc_srawi(SCRATCH_C, SCRATCH_A, 31));
         emit(ctx, enc_stw(SCRATCH_C, CTX_REG, REG_HI(rd)));
+        return 0;
+    }
+
+    if (op == 0x00 && (funct == 0x0A || funct == 0x0B)) {
+        /* MIPS: movz/movn rd, rs, rt -> conditional 64-bit register
+         * move: if (rd && test(GPR(rt))) GPR(rd) = GPR(rs); - test is
+         * "==0" for MOVZ, "!=0" for MOVN (see ee_core.c's own case
+         * bodies right above this comment's citation). This is the
+         * FIRST dynarec opcode in a genuinely new class: every prior
+         * opcode always overwrites rd unconditionally, so its OLD
+         * value never mattered and never needed to be read back from
+         * context. Here, when the condition is false, rd must be left
+         * completely untouched - so this block loads rd's OLD hi/lo
+         * words too, and blends old-vs-new per word with a branch-free
+         * mask trick (PPC750 predates the "isel" conditional-select
+         * instruction, so an actual PPC branch or a bitmask blend are
+         * the only two options - the mask blend was chosen to keep
+         * this dynarec's straight-line-only code-generation model,
+         * with no new branch-target/label bookkeeping needed).
+         *
+         * The mask is built ENTIRELY from already-verified encoders
+         * used elsewhere in this file - no new PPC encodings needed
+         * for this opcode pair at all:
+         *   1. rtOr = rt.hi | rt.lo (enc_or, from the AND/OR/XOR/NOR
+         *      block above) - the full 64-bit "is rt zero" test
+         *      collapsed into one 32-bit OR, since MIPS's condition is
+         *      over the FULL 64-bit rt, not just its low word.
+         *   2. subfc(throwaway, one, rtOr) sets CA = 1 iff rtOr>=1
+         *      (i.e. rtOr!=0), reusing the exact same subfc/CA-setting
+         *      idiom emit_slt_core uses for its borrow chain.
+         *   3. subfe(mask, one, one) = one-one+CA-1 = CA-1, giving
+         *      mask=0xFFFFFFFF when CA=0 (rtOr==0, i.e. MOVZ's "move"
+         *      condition) or mask=0 when CA=1 (rtOr!=0) - this is
+         *      exactly emit_slt_core's documented "self-subtract
+         *      carry-to-mask trick" (rD==rA==rB), just reused here for
+         *      a different comparison. For MOVN the desired condition
+         *      is inverted, so one extra `nor mask,mask,mask` (a
+         *      bitwise NOT, already used elsewhere to build SLTU's
+         *      64-bit logical NOR) flips 0<->0xFFFFFFFF.
+         *   4. notmask = NOT mask (another enc_nor reuse).
+         *   5. Per word (hi, then lo): result = (rs_word & mask) |
+         *      (rd_old_word & notmask) - two enc_and's and one enc_or,
+         *      the classic branch-free "bit select" idiom.
+         * rd==0 is declined exactly like every other opcode (matching
+         * ee_core.c's own `if (rd && ...)` guard - $zero is never a
+         * valid move target either way). */
+        if (rd == 0)
+            return 0;
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rt)));
+        emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_HI(rt)));
+        emit(ctx, enc_or(SCRATCH_A, SCRATCH_A, SCRATCH_B)); /* SCRATCH_A = rtOr */
+        emit(ctx, enc_addi(SCRATCH_B, 0, 1)); /* li SCRATCH_B, 1 */
+        emit(ctx, enc_subfc(SCRATCH_D, SCRATCH_B, SCRATCH_A)); /* SCRATCH_D = rtOr-1 (throwaway), CA = (rtOr != 0) */
+        emit(ctx, enc_subfe(SCRATCH_A, SCRATCH_B, SCRATCH_B)); /* SCRATCH_A = mask: 0xFFFFFFFF iff rtOr==0, else 0 */
+        if (funct == 0x0B) /* MOVN wants the opposite condition */
+            emit(ctx, enc_nor(SCRATCH_A, SCRATCH_A, SCRATCH_A)); /* SCRATCH_A = ~mask */
+
+        /* --- lo word --- */
+        emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_LO(rs)));
+        emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_LO(rd))); /* rd's OLD lo word */
+        emit(ctx, enc_and(SCRATCH_D, SCRATCH_B, SCRATCH_A)); /* SCRATCH_D = rs.lo & mask */
+        emit(ctx, enc_nor(SCRATCH_B, SCRATCH_A, SCRATCH_A)); /* SCRATCH_B = notmask (reused for hi below too) */
+        emit(ctx, enc_and(SCRATCH_C, SCRATCH_C, SCRATCH_B)); /* SCRATCH_C = rd_old.lo & notmask */
+        emit(ctx, enc_or(SCRATCH_D, SCRATCH_D, SCRATCH_C)); /* SCRATCH_D = blended lo result */
+        emit(ctx, enc_stw(SCRATCH_D, CTX_REG, REG_LO(rd)));
+
+        /* --- hi word (SCRATCH_A=mask, SCRATCH_B=notmask still valid) --- */
+        emit(ctx, enc_lwz(SCRATCH_D, CTX_REG, REG_HI(rs)));
+        emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_HI(rd))); /* rd's OLD hi word */
+        emit(ctx, enc_and(SCRATCH_D, SCRATCH_D, SCRATCH_A)); /* SCRATCH_D = rs.hi & mask */
+        emit(ctx, enc_and(SCRATCH_C, SCRATCH_C, SCRATCH_B)); /* SCRATCH_C = rd_old.hi & notmask */
+        emit(ctx, enc_or(SCRATCH_D, SCRATCH_D, SCRATCH_C)); /* SCRATCH_D = blended hi result */
+        emit(ctx, enc_stw(SCRATCH_D, CTX_REG, REG_HI(rd)));
         return 0;
     }
 

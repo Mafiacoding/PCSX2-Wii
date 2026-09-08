@@ -37293,3 +37293,77 @@ delay-slot semantics, or continuing to leave all control flow to the
 interpreter). Same sandbox limitation as every prior JIT round: real
 native-PPC-execution correctness still can't be verified without Wii
 hardware or Dolphin access in this sandbox.
+
+## Round 889: MOVZ/MOVN dynarec opcodes (conditional move)
+
+Adds MOVZ (`funct 0x0A`, move if `rt == 0`) and MOVN (`funct 0x0B`,
+move if `rt != 0`) to `ppc_dynarec.c`/`ee_jit.c`. This is the first
+opcode pair in a genuinely new architectural class for this dynarec:
+every opcode through Round 888 unconditionally overwrote its
+destination register, so codegen never needed to read `rd`'s *old*
+value. MOVZ/MOVN's whole point is that `rd` is left completely
+untouched when the condition is false, so this is the first opcode
+where the generated code must load the old low AND high words of `rd`
+before deciding what to store back.
+
+**Design - branch-free bitmask blend, not a real PPC branch**: PPC750
+predates POWER ISA's `isel` (conditional-select) instruction, so the
+two real options were an actual PPC branch (which this dynarec's
+codegen has no label/branch-target infrastructure for - every opcode
+so far emits pure straight-line code) or a branch-free mask blend. We
+chose the mask blend, reusing the same "self-subtract carry-to-mask"
+trick `emit_slt_core` already uses (Round 886): `subfc` against a
+materialized `1` sets XER.CA to exactly "is the OR'd 64-bit `rt`
+nonzero", then `subfe rT,rX,rX` turns that carry into an all-0s or
+all-1s mask (`-1 + CA`). MOVN just runs a `nor` over the mask to invert
+the condition. The mask (and its NOR'd complement) is then used to
+blend `rs` and the old `rd` into the new `rd`, word by word, for both
+the hi and lo halves - covering the full 64-bit MIPS register width,
+not just the low 32 bits (verified explicitly with an
+0x0000000100000000 hi-only-nonzero test value to catch a
+low-word-only bug class). No new PPC encodings were needed at all -
+the whole opcode reuses only already-verified `or`/`addi`/`subfc`/
+`subfe`/`nor`/`and`/`lwz`/`stw`. Buffer-sizing per-instruction PPC-word
+budget bumped from 13 to 20 words to fit MOVN's 20-instruction worst
+case (MOVZ is 19; MOVN adds one `nor` to invert the condition).
+
+**Verification**: `r889_movzn_verify.c` - same host-native
+call-the-real-`ppc_dynarec_translate_one()`-and-interpret-the-bytes
+methodology as Rounds 887b/888, this time with a PPC subset simulator
+that models real `subfc`/`subfe` XER.CA propagation between
+consecutive instructions (a `g_ca` global), since the mask trick's
+correctness genuinely depends on carry flowing from one instruction to
+the next - the first round this dynarec's verification harness has
+needed that. Tests both opcodes across 5 `rt` values (0x0,
+0x0000000000000001, 0x0000000100000000, 0xFFFFFFFFFFFFFFFF,
+0x8000000000000000 - chosen to cover zero, lo-only-nonzero,
+hi-only-nonzero, all-ones, and hi-bit-only) with fixed sentinel `rs`/
+old-`rd` values, checking BOTH the condition-true (moved) and
+condition-false (untouched) branch for every value, plus $zero-
+destination true-no-op checks for both opcodes. **Result: 12/12
+checks passed.**
+
+- Host-native: `ppc_dynarec.c` and `ee_jit.c` both compile clean under
+  `gcc -O2 -Wall -Wextra` (0 warnings).
+- `r889_movzn_verify.c`: **12/12 checks passed**.
+- Full regression suite, chunked per the established pattern:
+  **135/135 tests pass, 0 failures**.
+- devkitPPC/libogc Wii cross-build (`make clean && make -j4`, real
+  target): clean, 0 warnings/errors, fresh `pcsx2-wii.elf`
+  (2,978,912 bytes) / `.dol` (528,544 bytes).
+
+**Status**: 20 opcodes now JIT-accelerated (ADDIU, SLTI, SLTIU, ADDU,
+SUBU, AND, OR, XOR, NOR, SLT, SLTU, LUI, SLL, SRL, SRA, SLLV, SRLV,
+SRAV, MOVZ, MOVN). That's the complete pure-ALU MIPS-I subset needing
+no memory access, no branching, no exception, AND no HI/LO register
+context - the only remaining gap in that exact category is the
+MULT/DIV/MFHI/MFLO family, which needs new HI/LO context-slot support
+this dynarec doesn't model yet (a real, scoped, non-trivial next
+increment: it needs two new context fields, not just new opcode
+dispatch). Beyond that, the same two harder categories flagged since
+Round 887 remain: memory ops (need a "call arbitrary C function from
+generated PPC code" trampoline) and branches/jumps (need real
+block-level translation with delay-slot semantics, or continued
+interpreter fallback for all control flow). Same sandbox limitation as
+every prior JIT round: real native-PPC-execution correctness still
+can't be verified without Wii hardware or Dolphin access here.

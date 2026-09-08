@@ -10979,3 +10979,28 @@ cross-build clean. Does not by itself unblock GT3 - the real gate is
 semaphore 5 (Round 810), unrelated to this fix. See STATUS.md's Round
 855 entry for full detail. Next: pivot to the semaphore-5
 investigation per the user's own explicit sequencing.
+
+## Round 856 (task #810/#811 continuation, per user's "go"): confirmed
+GT3's deadlock is total/permanent, corrected a false lead
+
+Fresh cold-boot `sceSifSetDma` trace initially looked like it caught
+GT3's semaphore-5 producer, but on inspection was the BIOS's own,
+already-working periodic `rom0:OSDSYS` LOADFILE reload (unrelated,
+pre-GT3-handoff activity reusing the same HLE thread-ID number - a
+real methodology trap, now documented). Resuming the most-advanced
+persisted GT3 checkpoint (1,170,824,645 instr) for 15,000,000 slices
+produced **zero** EE instruction progress: threads 1/2 are WAIT/SEMA
+(ids 5/0), thread 3 is DORMANT (already exited, per Round 808) - no
+thread is ever READY, so the three-thread deadlock is proven total and
+permanent from this checkpoint state onward, not a slow-poll illusion.
+Separately, re-disassembled Round 829's flagged `_EnableDmac(0x80000000)`
+anomaly directly against the real ps2sdk `kernel.h` signature and the
+live checkpoint's own bytes: the two flagged calls are actually real
+`sceSifSetReg(0x80000000/0x80000001, ...)` (syscall 121), not
+`_EnableDmac` (syscall 22) at all - Round 829's anomaly is closed as a
+misattribution, not a bug. No tracked-source fix this round (purely
+diagnostic); `R856_SIFDMA_TRACE` instrumentation fully reverted
+(`git diff --stat` confirmed zero net change). Regression/Wii-build
+correctly skipped. Task #811 remains open: real next step is locating
+the genuine `_EnableDmac(5)` call site and/or GT3's still-unlocated
+real disc-read dispatch call. See STATUS.md's Round 856 entry.

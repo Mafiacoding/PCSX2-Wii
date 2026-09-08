@@ -36728,3 +36728,109 @@ introduce a genuinely new wrinkle: the *comparison* is 64-bit-signed/
 unsigned on real MIPS64 but the *result* written back is always 0 or
 1, zero-extended - different from both rules used so far) or the
 harder register-allocation/branch-handling work.
+
+## Rounds 882-884 (task #865): the periodic zero-fill restart is NOT the end state - `gt3_round861_fresh_chain.ckpt` reaches a genuine, durable permanent-park poll at pc=0x8000FD74 by done~30M, still parked at done=80M (400M+ raw instructions later)
+
+Continuing task #865's open question ("what calls back into the
+zero-fill POST block at ra=0x8000dbcc") from where Round 881 left it:
+two static scans of the full 128KB low-kernel dump (direct JAL, and
+LUI+ORI/ADDIU address-construction) targeting the POST-block range
+both came back with zero matches. Round 882 pivoted to directly
+testing the simplest remaining hypothesis - does the EE's own PC ever
+literally revisit the real MIPS reset vector (0xBFC00000/0x9FC00000/
+0x1FC00000) during normal execution, which would trivially explain a
+full-boot-sequence replay.
+
+**Round 882** (`r882_reset_vector_check.c`): fresh run from
+`gt3_round861_fresh_chain.ckpt`, chunk=2000, budget=30,000,000 "done"
+units. Result: **zero reset-vector hits, zero near-hits** - but pc was
+identical (`0x8000fd74`) at literally every sampled chunk boundary
+across the whole run. That is the aliasing artifact this project has
+been burned by before (task #862), so it needed to be ruled out before
+drawing any conclusion.
+
+**Round 883** (`r883_freeze_probe.c`): fast-forwarded to
+done=29,900,000 with large chunks, then switched to chunk=50 (40x
+finer) for a 100,000-unit fine window (2,000 samples) and logged every
+single PC change. Result: **zero PC transitions across all 2,000
+fine-grained samples** - pc stays bit-for-bit `0x8000fd74` the entire
+window. This rules out chunk-boundary aliasing conclusively: the EE is
+genuinely, continuously parked at one exact instruction, not looping
+through a short body that happens to realign with the sample grid.
+
+**Round 884** (`r884_freeze_dump.c`): re-ran to the same point and read
+the live register/memory state directly via `ee_mem_read32` (no
+disassembly guessing). Confirmed: `pc=0x8000fd74 ra=0x80012614
+s0=0xb000f000`. Disassembling the (freshly re-dumped, not stale)
+low-kernel region at `0x8000FD30-0x8000FDC4` via `/tmp/eedisasm` shows
+this is a small helper that polls two fixed KSEG1-uncached (i.e.
+cache-bypassing) EE-RAM addresses as if they were status flags:
+
+```
+0x8000FD48: lui v0,0xB000 / ori v0,v0,0xE010   ; v0 = 0xB000E010 (phys 0x0000E010)
+0x8000FD50: lw v1,0(v0) ; andi v1,v1,0x80      ; test bit 7
+...
+0x8000FD6C: lui s0,0xB000 / ori s0,s0,0xF000   ; s0 = 0xB000F000 (phys 0x0000F000)
+0x8000FD74: lw v0,0(s0) ; andi v0,v0,0x0002    ; test bit 1  <-- FROZEN HERE
+0x8000FD7C: beq v0,zero,0x8000FDBC             ; spin/return if bit1==0
+```
+
+The live values read back: `*0x0000E010=0xafa00000` (bit7=0),
+`*0x0000F000=0x27bd0020` (bit1=0). **The second value is not a status
+flag at all - it's the literal encoding of `addiu sp,sp,32`,** the
+`jr ra` delay-slot instruction at `0x8000EFFC-0x8000F000` (confirmed
+by disassembling that exact address in the fresh dump: it's the tail
+of an unrelated small helper that ends `jr ra` / `addiu sp,sp,32`, part
+of the same debug-print-driven POST-block family Round 879 mapped).
+Physical `0x0000E010`/`0x0000F000` are ordinary EE main RAM (real EE
+hardware MMIO lives at physical `0x10000000-0x1000FFFF`, nowhere near
+here) - grepped the tracked source and confirmed neither address has
+any special-case handling anywhere in `hw/` or `core/`, so our memory
+decoder is correctly treating this as plain RAM. That means the poll
+condition (bit 1 of whatever 32-bit word currently sits at physical
+0x0000F000) is coupled entirely to accidental code-layout, not to any
+real device-ready signal - it can only become true if some unrelated
+write happens to land there with bit 1 set, which nothing in the
+current boot path does.
+
+**This looks like the genuine terminal blocker for this checkpoint's
+BIOS-phase progress**, and it's a DIFFERENT mechanism from Round 879's
+periodic zero-fill restart (different address, different function,
+`ra=0x80012614` here vs `ra=0x8000dbcc` there) - most likely a LATER
+phase that the boot reaches only after the restart cycle Round 879
+observed finally stops repeating. Verified this is not a transient
+pause: re-ran to done=80,000,000 (400M+ additional raw instructions,
+`total_instr` climbed from 4,319,995,711 to 4,719,995,711) and pc is
+**still** exactly `0x8000fd74`.
+
+**Open tension flagged, not resolved**: this appears to contradict
+task #862's "GT3 confirmed NOT stuck - diverse real BIOS/kernel
+progress" conclusion (Rounds 867-873). Possible reconciliations, none
+yet checked: (a) task #862's survey may have used a different
+checkpoint or a different starting offset than a *fresh* load of
+`gt3_round861_fresh_chain.ckpt` at done=0; (b) the "diverse progress"
+Round 862 measured may all have occurred *before* done~30M, i.e. both
+findings could be true of different windows of the same run; (c) one
+of the two investigations has a methodology gap not yet identified.
+This needs to be checked before anything else, since it determines
+whether this freeze is actually reachable from a truly cold boot or
+only from this specific checkpoint's saved state.
+
+**Not yet done / explicit next steps**: (1) reconcile against task
+#862 as above; (2) if the freeze is confirmed reachable from a cold
+boot, trace backward from `ra=0x80012614` to find what real BIOS
+subsystem this poll belongs to (candidates given the sibling
+`0x0000E010` bit-7 check and the shared debug-print call chain: some
+kind of hardware-readiness handshake the real BIOS expects an actual
+device or ROM region to answer, not EE RAM) and cross-reference against
+real ps2sdk/psx-spx documentation for what's conventionally stored at
+low physical EE RAM offsets during early kernel boot; (3) only once
+the real intended semantics are understood, decide whether this is a
+genuine emulator modeling gap (something our code should write to
+that address and currently doesn't) or a correct-but-currently-
+unsatisfiable wait that needs a different upstream fix. No source was
+changed this round - purely diagnostic, so regression suite and Wii
+rebuild are correctly skipped. Scratch tools
+(`r882_reset_vector_check.c`, `r883_freeze_probe.c`,
+`r884_freeze_dump.c`) live in the session's outputs, not committed
+(consistent with this project's scratch-tool convention).

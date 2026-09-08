@@ -11137,3 +11137,14 @@ tracked-source fix (docs-only), regression/Wii-build correctly skipped.
   never redispatches a ready thread". New authoritative checkpoint saved:
   checkpoints/gt3_round861_fresh_chain.ckpt. Next: find why thread 1 is
   never re-enqueued/redispatched. No source change, docs-only round.
+
+- Round 863: decoded real PCSX2's Fast Boot mechanism (task #860) - it
+  never synthetically hijacks a thread; it lets real EELOAD run
+  organically and patches the "rom0:OSDSYS" string in EELOAD's own memory
+  once pc==eeload_main, plus an optional launch-arg patch at a BIOS-
+  version-specific internal offset. This project's own syscall-7
+  trampoline instead skips EELOAD/OSDSYS init entirely, which is the
+  direct cause of the Round 468 orphaned-AddIntcHandler bug and likely
+  other TCB/$ra corruption issues from Rounds 457-469/553/772.
+  Recommendation: reimplement fast-boot the PCSX2 way. Not yet
+  implemented - flagged for a future round. No source change, docs-only.

@@ -36009,3 +36009,102 @@ independent of whether a card is present.
 Task #859's memory-card re-test is now complete with a confirmed, honest
 negative result. No source changes. Regression suite and Wii cross-build
 correctly skipped (docs-only).
+
+## Round 863 (task #860): real PCSX2's Fast Boot mechanism decoded - it patches real EELOAD's own memory, never synthetically hijacks a thread
+
+Compared how real PCSX2 boots games under its three modes, using the
+already-incorporated `docs/reference/pcsx2/pcsx2` reference source
+(`R5900.cpp`, `Interpreter.cpp`, `x86/ix86-32/iR5900.cpp`, `CDVD/CDVD.cpp`,
+`IopBios.cpp`), against this project's own three equivalent paths
+(diskless BIOS menu, real disc+BIOS boot via OSDSYS/EELOAD, and this
+project's own "syscall-7 trampoline" fast-boot substitute used for GT3/
+Tekken/KOF/MS3 since Round 457).
+
+**Mode 1 - full/normal boot (disc, real BIOS/OSDSYS/EELOAD chain):**
+matches this project's own model closely - real IPL -> OSDSYS -> EELOAD
+"rom0:PS2LOGO" -> EELOAD "<game ELF>" -> game crt0. No divergence found
+here beyond what's already tracked across Rounds 594-717/750-861.
+
+**Mode 2 - diskless (no disc, BIOS menu only):** PCSX2 has no special
+"diskless menu" mode of its own - `eeloadHook()`'s fast-boot path
+explicitly checks `cdvdGetDiscInfo(...&disc_type...)`, and if
+`disc_type != CDVDDiscType::PS2Disc` it prints "Not allowing fast boot for
+non-PS2 ELF" and leaves `elfname` empty, which falls through to
+`DisableFastBoot()` - i.e. PCSX2 falls back to genuine, un-patched OSDSYS
+behavior when there's no real PS2 disc, exactly like real hardware. This
+confirms (independently, from PCSX2's own source rather than only from
+this project's own Round 594-683 empirical findings) that there is no
+special "boot straight to an interactive no-disc menu" trick available -
+our Round 861/862/862b memory-card negative result is consistent with
+this: no real code path exists for a disc-less menu to escalate through
+that a card alone would unlock.
+
+**Mode 3 - PCSX2's real "Fast Boot" (skip splash, jump to game):** this is
+the big finding. PCSX2 does NOT synthetically hijack a thread, does NOT
+directly set $pc/$a0/$gp to some computed entry point, and does NOT skip
+the BIOS/EELOAD boot process at all. Instead (`R5900.cpp` `eeloadHook()`
+and `iR5900.cpp`/`Interpreter.cpp`'s `eeload_main`/`eeload_exec` PC-trap
+logic):
+
+  1. The CPU runs the real reset vector, real IPL, and real EELOAD `_start`
+     completely organically, exactly like a normal boot.
+  2. When `pc == EELOAD_START` (EELOAD's real `_start`, always the same
+     address across BIOS versions), PCSX2 reads the raw JAL opcode at
+     `EELOAD_START+0x9c` and decodes its jump target to find EELOAD's real
+     `main()` address dynamically (`g_eeloadMain`) - not hardcoded, since
+     it can vary in theory, though empirically it's derived once per boot
+     from the BIOS's own compiled code.
+  3. When `pc == eeload_main` fires (this happens exactly once, on
+     EELOAD's real first invocation from IPL), `eeloadHook()` runs. In
+     fast-boot mode with `elfname` still empty, it does a plain string
+     search for the literal ASCII string `"rom0:OSDSYS"` inside EELOAD's
+     own already-loaded memory image (`EELOAD_START` to
+     `EELOAD_START+EELOAD_SIZE`, 64-bit aligned) and overwrites it in
+     place with the target game's ELF path. That's it - no register or
+     PC manipulation. EELOAD's own real, unmodified code then goes on to
+     load whatever string is sitting in that slot, which is now the game
+     ELF instead of OSDSYS.
+  4. Separately, to support launch arguments, PCSX2 identifies EELOAD's
+     internal `_ExecPS2`-equivalent entry point using BIOS-version-
+     specific fixed byte offsets - four known variants ("type A/B/C/D",
+     `EELOAD_START+0x470/0x5B0/0x618/0x600`), picked by reading whichever
+     offset holds a real `JAL` opcode (`opcode>>26==3`) to identify the
+     BIOS version, then mapping to a corresponding fixed internal offset
+     (`+0x170` or `+0x2B8`). When PC reaches that computed address,
+     `eeloadHook2()` fires to inject argv - again without touching
+     $pc/$gp/register state synthetically; it only runs when EELOAD's own
+     already-executing code naturally reaches that point.
+
+**Why this matters for this project:** this project's own `_ExecPS2`
+"syscall-7 trampoline" (Rounds 457-772, still the only working fast-path
+for GT3/Tekken/KOF/MS3) works completely differently - it directly
+overwrites a hijacked EE thread's $pc/$gp/$a0 and raises a synthetic
+exception to force-dispatch straight to the game's entry point, entirely
+bypassing EELOAD's and OSDSYS's own real code. Round 468's own root-cause
+finding (OSDSYS's real `AddIntcHandler(VBLANK-END, ...)` registration,
+made during genuine pre-boot init, gets silently orphaned because
+`ee_elf_load()` zero-fills that memory when the trampoline skips the
+phase that would have run it) is a direct, textbook consequence of this
+divergence: our trampoline skips real init code that real PCSX2's
+approach never skips, because PCSX2 always lets the genuine EELOAD binary
+run - it just changes one string constant in its own memory and, when
+relevant, patches launch-argument injection at a point EELOAD's own code
+reaches by itself.
+
+**Recommendation (not yet implemented, flagged for a future round):**
+replace or supplement this project's syscall-7/`_ExecPS2` trampoline with
+a PCSX2-style approach: let the diskless or disc-boot BIOS run 100%
+organically through real IPL -> EELOAD `_start` -> `main()`, detect
+`pc==eeload_main` (computable the same way, by decoding the JAL at
+EELOAD_START+0x9c once EELOAD is loaded), and at that point do a plain
+string patch of "rom0:OSDSYS" to the target game's path inside EELOAD's
+own already-loaded memory - no synthetic register/PC hijack, no skipped
+init phases. This should let real OSDSYS/EELOAD interrupt-handler
+registration and any other genuine pre-boot setup happen exactly as on
+hardware, which would likely eliminate the entire class of "orphaned
+handler" / "TCB corruption" / "missing $ra" bugs found and worked around
+piecemeal across Rounds 457-469, 553, 772, and would need to be
+validated per-title (GT3/Tekken/KOF/MS3) once implemented.
+
+No source changes this round (research/comparison only). Regression
+suite and Wii cross-build correctly skipped.

@@ -11181,3 +11181,19 @@ tracked-source fix (docs-only), regression/Wii-build correctly skipped.
   non-scheduler loop (leading candidate: the 0x00100Bxx resting region
   it bounces in after the Round 865 zero-fill loop completes)? No
   source change, docs-only.
+
+- Rounds 867-873 (task #862): disassembled 0x00100B00-0x00100C60 -
+  it's real OSDSYS-module decompression code (output base 0x00200000),
+  not an idle loop. A coarse 1M-chunk page-bucket survey (Round 868)
+  showed only 6 distinct pages over 720M instructions, looking stuck;
+  a much finer 2000-instruction-chunk re-test (Round 873) showed pc
+  visiting dozens of distinct pages in just 10M instructions, including
+  addresses next to EE_EELOAD_START_PC - directly contradicting Round
+  868. Root cause: coarse periodic PC sampling structurally hides real
+  control-flow diversity behind whichever loop dominates cumulative
+  instruction count (same class of trap as Round 865's KUSEG/KSEG0
+  bug) - future stuck-vs-progressing surveys must use fine-grained or
+  event-driven sampling. Synthesis: GT3 is not stuck in a tight
+  infinite loop; it's genuinely, if slowly, executing diverse real
+  BIOS/kernel work and moving toward EELOAD. No source change,
+  docs-only.

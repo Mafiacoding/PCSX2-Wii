@@ -36301,3 +36301,93 @@ this point.
 
 No source changes this round (investigation only). Regression suite
 and Wii cross-build correctly skipped.
+
+## Rounds 867-873 (task #862): "0x00100Bxx idle region" is real OSDSYS-decompression code; coarse PC sampling was a second methodology trap
+
+Continuing task #862 (is GT3's single EE thread legitimately slow or
+genuinely stuck) directly from where Round 866 left off.
+
+**Round 867:** disassembled the `0x00100B00-0x00100C60` region (the
+"resting region" pc kept bouncing through after Round 865's zero-fill
+loop) via a live dump read through the SAME address space `pc` itself
+uses (not KSEG0 - that fix was for a different, stale-checkpoint
+scenario; here the TLB entry is provably valid since code is actively
+fetching from it). Result: this is **not an idle/wait loop at all** -
+it is a real, bounded byte-stream decompression routine (reads a
+compressed stream via `a1`, does run-length/back-reference style byte
+copying into an output buffer via `$s0`, counted by a `$s1` chunk
+counter that decrements from 30, returns to caller when exhausted).
+The output base (`$s2`) is `0x00200000` - this project's own
+long-established OSDSYS-module-code load address (first identified
+Round 274). So this is OSDSYS's real BIOS-side module decompression,
+not a bug or a stall.
+
+**Round 868:** built a coarse page-bucket survey (1M-"done"-chunk
+sampling, ~8M raw instructions per sample) over a 720M-instruction
+extension of the chain. Found only 6 distinct 4KB code pages visited
+the entire time, cycling among the zero-fill loop, the decompress
+routine, and one more small region (`0x8000DB2x-DB4x`) - superficially
+looking like a real stuck cycle.
+
+**Round 870:** finer sampling (500K-chunk, ~4M raw instructions per
+sample) of the decompressor's own output pointer (`$s0`) showed it
+does NOT increase monotonically over the window - it climbs to
+`~0x2a75c3` (~683KB past the `0x200000` base) then drops back down to
+`~0x2045f8` and later `~0x200bcb`, i.e. genuinely restarts near the
+base multiple times. Combined with Round 868, this looked at first
+like a bug: the same ~683KB OSDSYS-module decompression being
+re-triggered over and over indefinitely.
+
+**Round 871-872:** statically located the real caller by dumping and
+disassembling the surrounding kernel code (`0x00100000-0x00102000`,
+read live from a saved mid-loop checkpoint) and searching for the
+exact `jal` opcode encodings targeting the decompress wrapper. Found
+exactly one static call site, at `0x001000E4`, inside a straight-line,
+no-loop "decompress-OSDSYS-then-jump-to-it" boot routine
+(`0x001000C0-0x00100124`) that calls the decompressor exactly once
+per invocation of ITSELF, then proceeds to call `0x001001B0`
+(apparently transferring control toward OSDSYS's own decompressed
+code). No loop is visible in this routine's own body - if it's really
+being invoked several times, something ELSE (not yet located, likely
+outside the 8KB dumped window) must be calling it repeatedly.
+
+**Round 873 (the decisive correction):** re-tested with MUCH finer
+sampling (2000-instruction chunks) over a 10M-instruction window and
+logged every newly-visited 4KB page. Result: pc visits **dozens of
+distinct code pages** in this window alone - `0x8000baXX`, `0x800002xx`
+`0x800076xx`, `0x80006exx`, `0x80013628/634`, OSDSYS module addresses
+(`0x00200018/1c/2c`), and - notably - addresses right next to this
+project's own `EE_EELOAD_START_PC` constant (`0x00082020`,
+`0x0008351c`, close to `0x00082000`). **This directly contradicts
+Round 868's "only 6 pages" finding.** The explanation: Round 868's
+1M-chunk (~8M-instruction) sampling only checks `pc` at chunk
+*boundaries*, which structurally biases the sample toward whichever
+code consumes the largest share of cumulative instructions (the
+zero-fill and decompress loops, which are genuinely expensive) while
+completely missing the much shorter visits to everything else - the
+same class of methodology trap as the KUSEG-vs-KSEG0 RAM-dump bug from
+Round 865, just for periodic PC sampling instead of memory reads.
+**Any future "is this stuck or progressing" survey in this project
+must use fine-grained (thousands, not millions, of instructions per
+sample) sampling, or event-driven instrumentation, never large
+periodic chunks - large chunks systematically hide real diversity of
+control flow behind whatever loop happens to dominate cumulative
+instruction count.**
+
+**Synthesis:** GT3's post-4.08B-instruction execution is not stuck in
+a tight infinite loop. It is genuinely, if very slowly (given this
+project's interpreted, non-JIT execution model), executing a mix of
+real BIOS/kernel work: a legitimate one-shot 32MB zero-fill (Round
+865), real OSDSYS-module decompression that gets invoked more than
+once (plausibly once per distinct resource/module using a shared
+`0x200000` scratch buffer - a normal pattern for BIOS multi-resource
+loaders, not necessarily a bug), and excursions into dozens of other
+kernel code regions including ones adjacent to the real EELOAD start
+address - a positive sign that boot IS moving toward EELOAD, just
+very slowly. The repeated-decompression question (is `0x001000C0`
+really re-invoked, and by what/how many times) remains open but is no
+longer the leading suspect for "GT3 is stuck" - the fine-grained
+survey shows forward-moving, diverse execution, not a flatlined loop.
+
+No source changes across Rounds 867-873 (investigation only).
+Regression suite and Wii cross-build correctly skipped.

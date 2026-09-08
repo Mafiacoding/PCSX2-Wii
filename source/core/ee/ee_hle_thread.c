@@ -382,13 +382,25 @@ static void reschedule(ee_state_t *st)
         return;
     }
     if (next == 0) {
-        /* Nothing at all is ready - nothing meaningful to fall back
-         * to on the EE side (unlike the IOP, this project has no
-         * existing "idle" flag on ee_state_t) - simply leave the live
-         * context exactly as-is (whatever the caller already set
-         * st->pc/next_pc to, e.g. WaitSema's own park-by-not-
-         * advancing-pc convention still applies as the honest last
-         * resort when literally nothing is ready). */
+        /* Nothing at all is ready. Round 855 fix (task #855, user's
+         * "1 dann 2 dann 3" step 3): this USED TO simply leave the
+         * live context exactly as-is (whatever the caller already set
+         * st->pc/next_pc to) - correct for WaitSema's own deliberate
+         * park-by-not-advancing-pc convention (Round 569/781), but a
+         * real, live-reproduced bug for SleepThread's self-block path
+         * (which calls EE_ADVANCE() BEFORE reschedule()): with no
+         * other thread to switch to, ee_step() just kept fetching/
+         * decoding/executing the SLEEPING thread's own subsequent
+         * code forever, despite its status correctly reading
+         * EE_THS_WAIT the whole time. Proved live via
+         * tools/round855-idle-scheduler/r855_repro.c (see
+         * ee_core.h's `idle` field doc comment for the full citation).
+         * Fix: when the thread that was just live is no longer
+         * actually RUN (the exact bug signature), set st->idle instead
+         * of leaving its stale context to be replayed - ee_step() then
+         * stops fetching real instructions until the real scheduler
+         * (called again via ee_hle_thread_reschedule_kick(), from
+         * ee_step()'s own idle-tick loop) finds something ready. */
         if (g.current_thread_id != 0) {
             /* Round 824 fix (task #846): see the switch-out branch below
              * for the full evidence writeup - the same unconditional-
@@ -399,10 +411,23 @@ static void reschedule(ee_state_t *st)
             if (cur0 && cur0->status == EE_THS_RUN) {
                 EVT(g.current_thread_id, "event=save-context pc=0x%08x reason=reschedule-none-ready", st->pc);
                 save_context(st, g.current_thread_id);
+            } else if (cur0) {
+                /* The live "st" register file belongs to a thread that
+                 * is no longer RUN (it just self-blocked) and nothing
+                 * was loaded to replace it - Round 855's exact bug
+                 * signature. Go idle instead of letting ee_step() keep
+                 * executing this thread's own stale/stray code. */
+                EVT(g.current_thread_id, "event=idle-set pc=0x%08x reason=reschedule-none-ready-not-run status=0x%x", st->pc, cur0->status);
+                st->idle = 1;
             }
         }
         return;
     }
+    /* Real forward progress is about to happen (a thread either keeps
+     * running or gets switched in below) - Round 855: always clear
+     * `idle` here so a just-woken thread's own real fetch/decode/
+     * execute resumes normally next ee_step() call. */
+    st->idle = 0;
     if (next != g.current_thread_id) {
         if (g.current_thread_id != 0) {
             ee_tcb_t *cur = tcb(g.current_thread_id);
@@ -1115,6 +1140,19 @@ void ee_hle_thread_exit_current(ee_state_t *st)
 }
 
 int ee_hle_thread_get_thread_count(void) { return g.thread_count; }
+
+/* Round 855 (task #855): public wrapper so ee_core.c's ee_step() can
+ * re-invoke the real scheduler while st->idle is set (after running
+ * a real hardware tick), without exposing reschedule()/pick_next_
+ * ready()'s internals. Idempotent: if still nothing is ready, this
+ * just re-sets st->idle (already 1, a no-op); if something became
+ * ready (e.g. a real interrupt-context WakeupThread/SignalSema call
+ * during the tick), it performs the real context switch and clears
+ * st->idle itself - see reschedule()'s own comments for both paths. */
+void ee_hle_thread_reschedule_kick(ee_state_t *st)
+{
+    reschedule(st);
+}
 int ee_hle_thread_get_current_thread_id(void) { return g.current_thread_id; }
 uint32_t ee_hle_thread_get_status(int thid)
 {

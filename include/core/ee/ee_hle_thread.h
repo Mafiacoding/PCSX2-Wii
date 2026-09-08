@@ -188,6 +188,8 @@ void ee_hle_thread_exit_current(ee_state_t *st);
 
 /* Diagnostics (mirrors iop_hle_thread's own get_thread_count/etc). */
 int ee_hle_thread_get_thread_count(void);
+/* Round 855 (task #855): re-invokes the real scheduler while ee_state_t.idle is set (see ee_core.h's `idle` field doc comment) - called from ee_step()'s idle-tick loop, not meant for general use. */
+void ee_hle_thread_reschedule_kick(ee_state_t *st);
 int ee_hle_thread_get_current_thread_id(void);
 uint32_t ee_hle_thread_get_status(int thid);
 uint32_t ee_hle_thread_get_priority(int thid);

@@ -3315,6 +3315,28 @@ uint64_t g_r832_bev_vector_hits = 0;   /* pc == 0xBFC00400 (real EE interrupt ve
 static int ee_step(void)
 {
     ee_state_t *st = &g_state;
+
+    /* Round 855 (task #855, user's "1 dann 2 dann 3" step 3): see
+     * ee_core.h's `idle` field doc comment for the full evidence
+     * trail (a live-reproduced bug: a thread self-blocked via
+     * SleepThread() with nothing else ready kept executing its own
+     * subsequent code forever, despite being marked EE_THS_WAIT).
+     * Mirrors this project's own already-accepted IOP-side `idle`
+     * mechanism: skip real fetch/decode/execute entirely while idle
+     * (never fabricate specific "idle loop" instruction content),
+     * but keep every already-modeled real hardware source ticking
+     * every single call via the exact same sequence the Round 630/
+     * 782 null-jalr guard's own dead-thread case already uses
+     * (ee_core_park_tick()), then re-invoke the real scheduler so a
+     * thread made READY by any of that (e.g. a real interrupt
+     * handler calling WakeupThread/SignalSema) gets loaded in
+     * immediately - clearing `idle` itself if it does. */
+    if (st->idle) {
+        ee_core_park_tick(st);
+        ee_hle_thread_reschedule_kick(st);
+        return 0;
+    }
+
     uint32_t pc = st->pc;
 
     /* Round 832: real per-instruction hit counters, see the block

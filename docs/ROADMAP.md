@@ -10955,3 +10955,27 @@ is flagged as worth deeper investigation in a future round rather than
 conclusively classified either way. No live PCSX2 connection available
 this round. No tracked-source fix evidenced; regression/Wii-build
 correctly skipped (docs-only + new tooling-source round).
+
+## Round 855 (task #855, user's "Beides - erst 3, dann Semaphore-5"):
+real EE idle-thread scheduler fallback implemented and shipped
+
+Closed task #855 (step 3 of the user's "1 dann 2 dann 3" plan, deferred
+until the "Beides" decision). Found and fixed a real, independently
+reproduced bug: `reschedule()`'s "nothing ready" branch left a just-
+self-blocked thread's stale register file live when the outgoing
+thread was no longer RUN - harmless for WaitSema (which pins pc at the
+syscall) but not for SleepThread (which advances pc first), letting a
+sleeping thread's own subsequent code keep executing despite
+`status==EE_THS_WAIT`. Proved with a minimal host-native repro before
+writing any fix. Mirrors the project's own already-accepted IOP-side
+`idle` mechanism: new `ee_state_t.idle` field, set/cleared inside
+`reschedule()`, checked at the top of `ee_step()` to skip real fetch/
+decode/execute while idle but still run the same real hardware-tick
+sequence the Round 630/782 null-jalr guard already uses, then
+re-invoke the real scheduler so any newly-READY thread loads in
+immediately. Full 135/135 host-native regression suite passes (two
+harness-false-positive greps manually verified as real passes). Wii
+cross-build clean. Does not by itself unblock GT3 - the real gate is
+semaphore 5 (Round 810), unrelated to this fix. See STATUS.md's Round
+855 entry for full detail. Next: pivot to the semaphore-5
+investigation per the user's own explicit sequencing.

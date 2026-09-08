@@ -211,6 +211,44 @@ typedef struct {
     uint64_t instructions_executed;
     uint8_t  halted;
     char     halt_reason[128];
+
+    /* Round 855 (task #855, user's "1 dann 2 dann 3" step 3): real,
+     * live-reproduced bug fix - see tools/round855-idle-scheduler/
+     * r855_repro.c and docs/STATUS.md's Round 855 writeup for the
+     * full evidence trail. reschedule() (source/core/ee/
+     * ee_hle_thread.c)'s own "nothing ready" branch used to just
+     * leave the live register file exactly as-is when a thread
+     * self-blocked (e.g. SleepThread()) and no other thread was
+     * ready - but SleepThread's self-block path calls EE_ADVANCE()
+     * BEFORE reschedule(), unlike WaitSema's own deliberate "pin pc
+     * at the syscall itself" park convention (Round 569/781). With
+     * nothing to switch to, that advanced pc was simply left live,
+     * so ee_step() kept fetching/decoding/executing the SLEEPING
+     * thread's own subsequent code forever - a real, confirmed
+     * correctness bug (proved by r855_repro.c: a single self-blocked
+     * thread's own marker instruction, placed right after its
+     * SleepThread() call, executed despite the thread's status
+     * reading EE_THS_WAIT the whole time).
+     *
+     * Fix mirrors this project's own already-accepted, already-cited
+     * IOP-side `idle` mechanism (include/core/iop/iop_core.h) exactly:
+     * when reschedule() finds nothing ready AND the thread that was
+     * just live is no longer actually RUN, set `idle` instead of
+     * leaving the stale context to be replayed. ee_step() then skips
+     * real fetch/decode/execute entirely while idle (this project's
+     * own standing discipline forbids fabricating specific "idle
+     * loop" instruction bytes real hardware might contain), but still
+     * runs the exact same real hardware-tick sequence
+     * ee_core_park_tick() already runs for the Round 630/782 null-
+     * jalr-guard's own dead-thread case (VBLANK/timers/DMAC/INTC/SIF/
+     * RPC/CDVD-pending) every single call, then re-invokes the real
+     * scheduler (ee_hle_thread_reschedule_kick()) so a thread made
+     * READY by any of that (e.g. a real interrupt handler calling
+     * WakeupThread/SignalSema) gets loaded in immediately, clearing
+     * `idle` itself. Defaults to 0 (never idle) for every existing
+     * test/boot path that never hits this exact self-block-with-
+     * nothing-ready condition - a no-op everywhere else. */
+    uint8_t  idle;
 } ee_state_t;
 
 int  ee_core_init(const bios_image_t *bios);

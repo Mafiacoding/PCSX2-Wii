@@ -35977,3 +35977,35 @@ the immediately following entry for that re-test.
 
 No source changes this round. Regression suite and Wii cross-build
 correctly skipped (docs-only diagnostic correction).
+
+## Round 862b (task #859): memory-card re-test with corrected fine-grained sampling - negative result confirmed, not a methodology artifact
+
+Following Round 862's correction (OSDSYS module code IS periodically
+reached, Round 861 just under-sampled it), re-ran the memory-card-insert
+experiment with `/tmp/r862b_mc_finegrain.c`: 1M-instruction-granularity
+sampling of RAM[0x001C0444]/[0x001C0450]/[0x001C0454] (the three Browser-
+state fields cited since Round 594), diskless PAL BIOS, card vs no-card,
+each run to ~74M "done" (~592M real EE instructions - enough to span
+several of the OSDSYS-module-code windows Round 862 located at
+total_instr~104M/488M).
+
+**Result:** identical in both runs. All three fields stay at `0x00000000`
+for the entire ~592M-instruction span in both the card-inserted and
+no-card cases - no transition is ever observed, including during and
+immediately after the confirmed OSDSYS-module-code execution windows.
+
+**Conclusion:** Round 861's core negative finding (memory-card insertion
+makes no observable difference to Browser-state escalation) is confirmed
+under corrected, non-under-sampled methodology - it was not a sampling
+artifact. Only the secondary "resting-state drift" claim from Round 861
+was wrong (corrected in Round 862). The combined, now-solid finding: with
+the current tree, on the PAL BIOS, OSDSYS's periodic module-code
+executions do not write to the Browser-state fields at all in the first
+~592M instructions, card present or not - so per Round 683's original
+framing, the code path that would react to card presence (if any exists
+in these BIOS's own real code) has not yet been reached by this depth,
+independent of whether a card is present.
+
+Task #859's memory-card re-test is now complete with a confirmed, honest
+negative result. No source changes. Regression suite and Wii cross-build
+correctly skipped (docs-only).

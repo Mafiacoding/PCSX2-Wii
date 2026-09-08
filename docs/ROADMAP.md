@@ -11148,3 +11148,10 @@ tracked-source fix (docs-only), regression/Wii-build correctly skipped.
   other TCB/$ra corruption issues from Rounds 457-469/553/772.
   Recommendation: reimplement fast-boot the PCSX2 way. Not yet
   implemented - flagged for a future round. No source change, docs-only.
+
+- Round 864: corrected Round 863 - the PCSX2-style EELOAD string-patch
+  fast-boot technique is ALREADY implemented (ee_check_eeload_fastboot_
+  patch(), Round 552/554/772) and is what every GT3/Tekken/KOF/MS3
+  checkpoint-chain round has used since Round 750. The old syscall-7
+  trampoline is historical, not currently active. Task #861 closed as
+  not needed. No source change, docs-only.

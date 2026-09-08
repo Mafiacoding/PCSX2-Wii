@@ -36108,3 +36108,72 @@ validated per-title (GT3/Tekken/KOF/MS3) once implemented.
 
 No source changes this round (research/comparison only). Regression
 suite and Wii cross-build correctly skipped.
+
+## Round 864 (task #861/#860 correction): the PCSX2-style EELOAD string-patch fast-boot technique is ALREADY implemented - Round 863's recommendation was based on stale information
+
+Before starting task #861 ("reimplement fast-boot using PCSX2's real
+EELOAD string-patch technique instead of syscall-7 trampoline"), checked
+whether the old Round 457-469 `_ExecPS2` synthetic-thread-hijack
+trampoline is actually still the mechanism driving GT3/Tekken/KOF/MS3
+boots. It is not.
+
+**Verified via direct source inspection:**
+  - `source/main.c` (the real Wii production boot entry point, lines
+    384-452): calls `system_init()` then `iop_cdvd_mount_iso()` only - no
+    manual `pc`/`gp`/`a0` register writes anywhere in the file. Pure
+    organic boot.
+  - `tools/round730-gt3-fbdump/chain_driver_fb.c` (the actual tool used
+    to drive every GT3/Tekken/KOF/MS3 checkpoint-chain round from Round
+    750 through this session's Round 861/862): same - `system_init()` +
+    `iop_cdvd_mount_iso()` only, no `st->pc =`/`ee->pc =` assignment
+    anywhere in the file.
+  - `source/core/ee/ee_core.c` already contains
+    `ee_check_eeload_fastboot_patch()` (introduced Round 552 as scratch/
+    disposable code, promoted to permanent tracked source and verified
+    in Round 772 - see that round's own docs entry, commit history, and
+    the function's own citation comments at lines 963-1107). This
+    function is wired into the main EE dispatch loop and called every
+    step (`ee_core.c` lines 4084, 10317, 10387).
+
+**What `ee_check_eeload_fastboot_patch()` actually does (re-read in full
+this round):** functionally identical in spirit to the real PCSX2
+mechanism decoded in Round 863 - it waits for `pc==EE_EELOAD_START_PC`
+(0x00082000, the real, version-independent EELOAD load address), then:
+gates to disc boots only (returns immediately on diskless, per Round
+607's finding that diskless boots must never be touched here); reads the
+real, mounted disc's own SYSTEM.CNF via the already-tested ISO9660
+accessors and extracts the real BOOT2 target path (bails - no guess - if
+absent); scans EELOAD's own just-loaded resident memory for the literal
+`"rom0:OSDSYS"` string (bails if not found at this BIOS's layout, rather
+than hardcoding an offset - a direct fix of Round 552's own hardcoded-
+offset limitation); and only overwrites it if the new path fits inside
+the real zero-padding already following the matched string, so it can
+never corrupt adjacent genuine EELOAD data. One-shot per boot. No
+register or PC manipulation anywhere - EELOAD's own unmodified code goes
+on to load whatever string ends up in that slot.
+
+This is not merely "similar to" PCSX2's approach - it is the same
+technique (runtime string scan-and-replace inside EELOAD's own loaded
+memory, gated to disc presence, triggered once EELOAD is resident),
+independently arrived at in this project across Rounds 552/554/772,
+before this session's Round 863 rediscovered the same idea by reading
+PCSX2's actual source. The one difference from PCSX2's exact trigger
+point (PCSX2 traps at `eeload_main`, computed dynamically by decoding a
+JAL at `EELOAD_START+0x9c`; this project traps at `EELOAD_START` itself,
+`_start`) is immaterial - the target string is static data already
+present in EELOAD's ROM-copied-to-RAM image by the time `_start` is
+reached (Round 544), not something initialized between `_start` and
+`main()`, so patching at either point is functionally equivalent.
+
+**Correction:** Round 863's recommendation to "reimplement fast-boot the
+PCSX2 way" was made without first checking whether this project's own
+trampoline was still the active mechanism. It is not - it was already
+superseded by a functionally-equivalent, independently-developed
+technique two years' worth of rounds ago (Round 552-772). Task #861 is
+closed as not needed. The historical Round 457-469 trampoline mechanism,
+and the Round 468 orphaned-`AddIntcHandler` bug it caused, are exactly
+that: historical - already fixed by this exact supersession, not a
+currently-live problem.
+
+No source changes this round (verification/correction only). Regression
+suite and Wii cross-build correctly skipped.

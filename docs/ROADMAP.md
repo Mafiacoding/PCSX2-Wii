@@ -11031,3 +11031,28 @@ narrowed: next step is a *forward* trace from thread 3's entry
 (`0x01000c88`) to find the real branch that routes it into the wait loop
 instead of toward one of its 4 DMA-dispatch sites. See STATUS.md's
 Round 857 entry.
+
+## Round 858 (task #811 continuation): DEFINITIVE - thread 3 never
+touches semaphore 5 or 0; creates/waits/signals its own private
+semaphore then legitimately self-exits via ExitDeleteThread
+
+Forward-disassembled thread 3's full entry function (`0x01000C88`-
+`0x01000E68`) end-to-end. Found it `CreateSema`s (syscall 64) its own
+binary semaphore at init, `WaitSema`s (68) it immediately (lock-acquire),
+runs a legitimate loading-screen fade/texture routine, then at the very
+end `SignalSema`s (66) that SAME private semaphore (not 5, not 0) and
+calls `ExitDeleteThread` (36) on itself - a fully legitimate, correct
+exit. This rules out thread 3 as a producer for semaphore 5/0 with
+certainty, confirming and fully explaining Round 808's "real, correct,
+bounded exit" finding. Combined with Round 857's dynamic proof that
+GT3 never issues a real `sceSifSetDma` call, and Round 856's confirmed-
+correct DMAC channel-5 registration, the deadlock's full causal chain is
+now evidenced end-to-end: every individual component (scheduler,
+semaphore syscalls, DMAC registration, thread 3's own code) is
+independently correct - the deadlock is purely a consequence of the real
+CD-read DMA dispatch never being issued anywhere in the traced 480M-
+instruction window. No tracked-source fix (purely diagnostic, static
+disassembly only). Regression/Wii-build correctly skipped. Task #811,
+maximally narrowed: the sole remaining question re-converges with task
+#447 - why GT3 never attempts the CD-read dispatch within this window.
+See STATUS.md's Round 858 entry.

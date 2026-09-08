@@ -3288,10 +3288,43 @@ static int r815_mark_new_pc(uint32_t pc)
 static int g_r815_syscall_budget = 2000; /* cap post-handoff per-syscall-number log lines, independent of the 100,000-instruction block-trace budget above */
 #endif
 
+/* Round 832 (task #811, per user request "do the compiled in counter"):
+ * fixes a real methodology flaw found in Round 831. That round's
+ * external r830_dmac_trace.c tool sampled ee->pc once per
+ * system_run_interleaved(1) call, but each such call executes up to
+ * EE_IOP_STEP_RATIO (8) real EE instructions before returning - so any
+ * short function that both enters and returns inside one 8-instruction
+ * batch is invisible to exact-PC-equality polling from outside, even
+ * though it demonstrably ran (Round 831 proved this via a side-channel:
+ * a once-flag global flipped 0->1 despite its writer's own PC never
+ * being "seen"). These counters instead increment from directly inside
+ * ee_step() - the real per-instruction step function, called exactly
+ * once per genuine EE instruction with no sampling gap - settling
+ * whether GT3's registered SIF0 DMAC completion handler (0x0101D878,
+ * see Round 829-831) is ever actually reached, independent of external
+ * polling granularity. Always compiled in (not #ifdef-guarded): each
+ * check is a single pc-compare, cheap enough to leave permanently
+ * enabled like g_ee_null_jalr_guard_hits above, and unlike the R815
+ * trace this has no per-instruction printf/hash-set overhead. */
+uint64_t g_r832_handler_hits = 0;      /* pc == 0x0101D878 (the registered SIF0 completion handler body) */
+uint64_t g_r832_guardfn_hits = 0;      /* pc == 0x0101DA50 (the init-once guard fn wrapping AddDmacHandler/EnableDmac) */
+uint64_t g_r832_addcall_hits = 0;      /* pc == 0x0101D508 (the real AddDmacHandler call site itself) */
+uint64_t g_r832_vector_hits = 0;       /* pc == 0x80000200 (real EE interrupt vector, BEV=0) */
+uint64_t g_r832_bev_vector_hits = 0;   /* pc == 0xBFC00400 (real EE interrupt vector, BEV=1/boot-ROM) */
+
 static int ee_step(void)
 {
     ee_state_t *st = &g_state;
     uint32_t pc = st->pc;
+
+    /* Round 832: real per-instruction hit counters, see the block
+     * comment above g_r832_handler_hits for why this replaces external
+     * PC-sampling for this specific question. */
+    if (pc == 0x0101D878u) g_r832_handler_hits++;
+    else if (pc == 0x0101DA50u) g_r832_guardfn_hits++;
+    else if (pc == 0x0101D508u) g_r832_addcall_hits++;
+    else if (pc == 0x80000200u) g_r832_vector_hits++;
+    else if (pc == 0xBFC00400u) g_r832_bev_vector_hits++;
 
 #ifdef R815_HANDOFF_TRACE
     if (g_r815_armed) {

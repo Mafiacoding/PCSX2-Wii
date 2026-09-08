@@ -36925,3 +36925,95 @@ treated as in tension with task #862's separate, earlier finding.
 No source changed this round - purely diagnostic. Regression suite
 and Wii cross-build correctly skipped. `r885_onset_scan.c` lives in
 the session's outputs, not committed.
+
+## Round 886 (task #866/#868): PPC dynarec - SLT/SLTU/SLTIU/SLTI implemented and verified
+
+Continuing the JIT track (task #866's "expand opcode coverage" line),
+this round adds MIPS SLT/SLTU (register form, `funct=0x2A/0x2B`) and
+SLTI/SLTIU (immediate form, `op=0x0A/0x0B`) to `ppc_dynarec.c`. These
+are the first *comparison* opcodes the dynarec supports - everything
+before this round (ADDIU/OR/AND/XOR/NOR/ADDU/SUBU) was pure arithmetic/
+logic with no need to synthesize a genuine 64-bit ordering relation.
+
+**The core problem**: PPC750/Broadway has no native 64-bit compare
+(it's a 32-bit implementation), so `(rs < rt)` on the full 64-bit MIPS
+register pair has to be built from 32-bit primitives. The standard
+technique - verified against real devkitPPC and against a corrected
+host-native interpreter this round - is a multi-word subtract-with-
+borrow chain:
+
+- `subfc rD,rA,rB` computes `rD = rB - rA` and sets `XER.CA = 1` iff
+  no borrow occurred (`rB >= rA` unsigned).
+- `subfe rD,rA,rB` does the same but folds in the incoming carry,
+  letting a second `subfc`/`subfe` pair propagate a borrow across the
+  hi/lo 32-bit halves of a 64-bit subtraction.
+- A self-referencing `subfe rT,rX,rX` (`~rX + rX + CA = -1 + CA`)
+  turns the final carry into a clean `0x00000000` / `0xFFFFFFFF` mask,
+  independent of `rX`'s actual value.
+- `andi. rD,rT,1` narrows that mask to an exact `0`/`1`.
+
+For **signed** SLT/SLTI, an `xoris rA,rS,0x8000` flips just bit 31 of
+both operands' high words before the same unsigned chain runs - the
+standard trick that maps two's-complement 64-bit ordering onto
+unsigned ordering. SLTIU still sign-extends its 16-bit immediate to
+64 bits first (the classic MIPS gotcha: only the *comparison* is
+unsigned, not the immediate's extension) - built via the same `li`
++ `srawi`-by-31 pattern ADDIU already used for its own sign-extension.
+
+All four new PPC encodings (`subfc`, `subfe`, `xoris`, `andi.`) were
+verified bit-for-bit against real devkitPPC (`powerpc-eabi-as`/
+`-objdump`) before use: `subfc r4,r5,r6`->`0x7C853010`, `subfe r4,r5,r6`
+->`0x7C853110`, `subfe r4,r4,r4`->`0x7C842110`, `xoris r4,r5,0x8000`->
+`0x6CA48000`, `andi. r4,r5,1`->`0x70A40001` - all reproduced exactly.
+
+**A real bug caught by the harness, not asserted away**: the first
+implementation had the `subfc`/`subfe` operand order backwards (rA/rB
+swapped), which computed `right - left` instead of `left - right` -
+every SLT/SLTU/SLTI/SLTIU test came back exactly inverted (0 instead
+of 1 and vice versa) when the extended `r880_ppc_verify.c` harness was
+run. Root-caused by re-deriving the borrow-chain algebra from scratch
+(PPC's `subfc rD,rA,rB` computes `rD=rB-rA`, so the value being
+subtracted goes in the `rA` slot - the initial code had `rA=left,
+rB=right`, backwards for computing `left-right`), fixed by swapping the
+two operand arguments in both the low-word `subfc` and high-word
+`subfe` calls, and re-verified clean. This is exactly the kind of
+subtle-but-total sign error the project's host-native-harness-before-
+devkitPPC-compile discipline exists to catch - a devkitPPC compile
+alone would have produced clean, warning-free, wrong code.
+
+**Verification**: extended `r880_ppc_verify.c` (scratch, session
+outputs) with a big-endian-safe interpreter for the four new PPC
+opcodes (including a proper `XER.CA` carry flag threaded through
+`subfc`/`subfe`) and 22 new test cases covering unsigned/signed
+64-bit comparisons, high-word-only-differs edge cases, the classic
+low-word-would-be-wrong-without-full-64-bit-compare case, SLTIU's
+sign-extend-then-unsigned-compare gotcha, and `$zero`-write discard
+for all four opcodes. Full harness: **51/51 checks pass, 0 failures**
+(after the fix above). Also recompiled `ppc_dynarec.c` directly against
+real devkitPPC (`powerpc-eabi-gcc -mrvl -mcpu=750 -meabi -mhard-float
+-Wall -Wextra`) - clean, warning-free.
+
+**Buffer sizing**: SLT/SLTI's worst case is 13 PPC instructions per
+MIPS instruction (4 setup loads/li's + 6 for the signed `emit_slt_core`
+chain + 3 store/li/store), up from the previous worst case of 8
+(OR/AND/XOR/NOR). `ppc_dynarec_init()`'s buffer multiplier and
+`ppc_dynarec_translate_one()`'s headroom guard were both bumped from
+8 to 13 accordingly.
+
+**Regression/build**: `ppc_dynarec.c` is structurally excluded from
+every `tests/*.c` link line (`! -path '*recompiler*'` in
+`tests/run_test.sh`), so the existing test suite cannot observe this
+change at all; a representative subset (`test_ee_core`,
+`test_ee_mmi_compare`, `test_dma_sif2`, `test_bios_loader`) was run
+directly as a sanity check and passed clean (0 failures each). Full
+Wii cross-build (`make -j4` under devkitPPC/libogc) succeeded with no
+errors or warnings.
+
+**Not yet done**: LB/LBU/LH/LHU/LW/SB/SH/SW-family memory ops, branches
+(BEQ/BNE/etc.), and the rest of MIPS SPECIAL (SLL/SRL/SRA/JR/JALR/
+MULT/DIV/...) remain unimplemented in the dynarec - `SLL` (funct=0x00)
+now serves as the "still correctly rejected" regression guard in
+`r880_ppc_verify.c`, replacing SLT which graduated to a real test this
+round. The dynarec PoC still has no caller/dispatcher wiring it into
+actual EE execution (task #864's original scoping note still applies:
+this is opcode-coverage groundwork, not yet a working JIT backend).

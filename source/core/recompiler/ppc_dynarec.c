@@ -90,6 +90,55 @@ static inline uint32_t enc_blr(void)
     return 0x4E800020u;
 }
 
+/* Round 886 (task #866) additions: subfc/subfe/xoris/andi. - the
+ * building blocks for a genuine 64-bit signed/unsigned less-than
+ * comparison (SLT/SLTU/SLTI/SLTIU), synthesized from 32-bit PPC750
+ * primitives via the standard multi-word subtract-with-borrow idiom
+ * (PPC750 has no native 64-bit compare - it's a 32-bit implementation).
+ * All four encodings verified bit-for-bit against real devkitPPC
+ * (powerpc-eabi-as/-objdump): "subfc r4,r5,r6" -> 0x7C853010,
+ * "subfe r4,r5,r6" -> 0x7C853110, "subfe r4,r4,r4" -> 0x7C842110,
+ * "xoris r4,r5,0x8000" -> 0x6CA48000, "andi. r4,r5,1" -> 0x70A40001 -
+ * all reproduced exactly by the formulas below. */
+
+/* subfc rD, rA, rB -> rD = rB - rA, sets XER.CA = 1 iff NO borrow
+ * (i.e. rB >= rA unsigned). Same rD/rA/rB field layout as enc_add. */
+static inline uint32_t enc_subfc(int rD, int rA, int rB)
+{
+    return (31u << 26) | ((uint32_t)rD << 21) | ((uint32_t)rA << 16) | ((uint32_t)rB << 11) | (8u << 1);
+}
+
+/* subfe rD, rA, rB -> rD = rB - rA + (CA_in - 1) (i.e. subtract with
+ * incoming borrow), and updates CA with the new borrow/carry. Used
+ * both to propagate the borrow into the high word of a 64-bit
+ * subtract (subfe hi, bHi, aHi) and, in the "rD==rA==rB" self-referencing
+ * form, as a carry-to-mask trick: subfe rT,rX,rX = ~rX + rX + CA =
+ * -1 + CA, which is 0 when CA=1 (no overall borrow) or 0xFFFFFFFF
+ * when CA=0 (a borrow occurred) - independent of rX's actual value. */
+static inline uint32_t enc_subfe(int rD, int rA, int rB)
+{
+    return (31u << 26) | ((uint32_t)rD << 21) | ((uint32_t)rA << 16) | ((uint32_t)rB << 11) | (136u << 1);
+}
+
+/* xoris rA(dest), rS, UIMM -> rA = rS XOR (UIMM << 16). Used with
+ * UIMM=0x8000 to flip just bit 31 of a 32-bit high-word, which maps
+ * signed comparison range onto unsigned ordering (the standard
+ * "add/xor the sign bit" trick for building a signed compare out of
+ * an unsigned one). Same "dest is really rA field" layout as enc_or. */
+static inline uint32_t enc_xoris(int rA, int rS, uint16_t uimm)
+{
+    return (27u << 26) | ((uint32_t)rS << 21) | ((uint32_t)rA << 16) | uimm;
+}
+
+/* andi. rA(dest), rS, UIMM -> rA = rS AND UIMM (always records CR0,
+ * per the real PPC ISA - there is no non-dot "andi"). Used here only
+ * to mask a 0/0xFFFFFFFF carry-derived value down to 0/1; CR0 is not
+ * read by any code this PoC generates. */
+static inline uint32_t enc_andi_dot(int rA, int rS, uint16_t uimm)
+{
+    return (28u << 26) | ((uint32_t)rS << 21) | ((uint32_t)rA << 16) | uimm;
+}
+
 /* Scratch PPC GPRs used by generated code. r3 is the incoming context
  * pointer (ppc_dynarec_gpr128_t *gpr) per the PowerPC EABI calling
  * convention - we never touch r1 (stack ptr) or r2/r13 (TOC/small-
@@ -100,6 +149,44 @@ static inline uint32_t enc_blr(void)
 #define SCRATCH_B 5
 #define SCRATCH_C 6
 #define SCRATCH_D 7
+
+/* Shared core for SLT/SLTU/SLTI/SLTIU: given the LEFT operand's hi/lo
+ * pre-loaded into SCRATCH_C/SCRATCH_A and the RIGHT operand's (a real
+ * register for SLT/SLTU, or a synthetic sign-extended-immediate
+ * operand for SLTI/SLTIU) hi/lo pre-loaded into SCRATCH_D/SCRATCH_B,
+ * emits the multi-word subtract-with-borrow chain (optionally sign-
+ * flipping just the two high words first, for a SIGNED comparison)
+ * and leaves a clean 0/1 result ("(left < right) ? 1 : 0") in
+ * SCRATCH_A. Caller stores SCRATCH_A to REG_LO(dest) and a zero word
+ * to REG_HI(dest) - the result is always exactly 0 or 1, so zero-
+ * extension and sign-extension of the 64-bit result are identical
+ * (see the file note above enc_subfc). 4 PPC instructions for an
+ * unsigned compare, 6 for a signed one. */
+static void emit(ppc_codegen_ctx_t *ctx, uint32_t instr); /* forward decl - defined below, used here */
+
+static void emit_slt_core(ppc_codegen_ctx_t *ctx, int is_signed)
+{
+    if (is_signed) {
+        /* Flip just the sign bit (bit 31) of both high words: the
+         * standard trick that maps two's-complement 64-bit ordering
+         * onto unsigned 64-bit ordering, so the SAME unsigned borrow
+         * chain below works for a signed comparison too. */
+        emit(ctx, enc_xoris(SCRATCH_C, SCRATCH_C, 0x8000));
+        emit(ctx, enc_xoris(SCRATCH_D, SCRATCH_D, 0x8000));
+    }
+    /* left.lo - right.lo (subfc rD,rA,rB computes rD=rB-rA, so the
+     * value being subtracted goes in the rA slot: rA=right, rB=left);
+     * CA=1 iff left.lo >= right.lo unsigned (no borrow). */
+    emit(ctx, enc_subfc(SCRATCH_A, SCRATCH_B, SCRATCH_A));
+    /* Propagate the borrow into the high word: CA ends up 1 iff the
+     * full 64-bit left >= right unsigned (i.e. NOT(left < right)). */
+    emit(ctx, enc_subfe(SCRATCH_C, SCRATCH_D, SCRATCH_C));
+    /* Self-subtract trick: ~SCRATCH_A + SCRATCH_A + CA = -1 + CA.
+     * CA=1 (left>=right) -> 0x00000000. CA=0 (left<right) -> 0xFFFFFFFF. */
+    emit(ctx, enc_subfe(SCRATCH_A, SCRATCH_A, SCRATCH_A));
+    /* Mask down to a clean 0/1. */
+    emit(ctx, enc_andi_dot(SCRATCH_A, SCRATCH_A, 1));
+}
 
 /* Byte offset of MIPS register `r`'s ppc_dynarec_gpr128_t slot within
  * the context array (16 bytes/slot: 8-byte ud0 + 8-byte ud1 - see the
@@ -115,10 +202,12 @@ int ppc_dynarec_init(ppc_codegen_ctx_t *ctx, size_t max_instructions)
 {
     memset(ctx, 0, sizeof(*ctx));
 
-    /* Worst case is the 64-bit logical ops' (OR/AND/XOR/NOR) 8 PPC
-     * instructions per MIPS instruction (see ppc_dynarec_translate_one
-     * - ADDIU/ADDU/SUBU are cheaper at 5-6), plus one trailing blr. */
-    size_t words = max_instructions * 8 + 1;
+    /* Worst case is SLT/SLTI's 13 PPC instructions per MIPS instruction
+     * (4 setup loads/li's + 6 for the signed emit_slt_core chain + 3
+     * store/li/store - see ppc_dynarec_translate_one; SLTU/SLTIU are
+     * cheaper at 11, the 64-bit logical ops OR/AND/XOR/NOR at 8,
+     * ADDIU/ADDU/SUBU cheaper still at 5-6), plus one trailing blr. */
+    size_t words = max_instructions * 13 + 1;
     ctx->code = memalign(32, words * sizeof(uint32_t));
     if (!ctx->code)
         return -1;
@@ -143,7 +232,7 @@ static void emit(ppc_codegen_ctx_t *ctx, uint32_t instr)
 
 int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
 {
-    if (ctx->used_words + 8 > ctx->capacity_words)
+    if (ctx->used_words + 13 > ctx->capacity_words)
         return -1; /* out of buffer space */
 
     uint32_t op    = (mips_instr >> 26) & 0x3F;
@@ -221,6 +310,49 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
         emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_LO(rd)));
         emit(ctx, enc_srawi(SCRATCH_C, SCRATCH_A, 31));
         emit(ctx, enc_stw(SCRATCH_C, CTX_REG, REG_HI(rd)));
+        return 0;
+    }
+
+    if (op == 0x00 && (funct == 0x2A || funct == 0x2B)) {
+        /* MIPS: slt/sltu rd, rs, rt -> rd = (rs < rt) ? 1 : 0, using the
+         * FULL 64-bit value of both operands (signed for SLT, unsigned
+         * for SLTU) - see emit_slt_core above for the comparison
+         * method. The written-back result is always exactly 0 or 1, so
+         * unlike ADDIU/ADDU/SUBU there's no sign-vs-zero-extension
+         * distinction to make for the result: the high word is simply
+         * zero either way. Discard writes to $zero (rd==0). */
+        if (rd == 0)
+            return 0;
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs)));
+        emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_LO(rt)));
+        emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_HI(rs)));
+        emit(ctx, enc_lwz(SCRATCH_D, CTX_REG, REG_HI(rt)));
+        emit_slt_core(ctx, funct == 0x2A /* SLT is signed, SLTU is not */);
+        emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_LO(rd)));
+        emit(ctx, enc_addi(SCRATCH_B, 0, 0)); /* li SCRATCH_B, 0 */
+        emit(ctx, enc_stw(SCRATCH_B, CTX_REG, REG_HI(rd)));
+        return 0;
+    }
+
+    if (op == 0x0A || op == 0x0B) {
+        /* MIPS: slti/sltiu rt, rs, imm -> rt = (rs < imm) ? 1 : 0.
+         * `imm` is ALWAYS sign-extended to a full 64-bit value first -
+         * yes, even for the "unsigned" SLTIU: per the real MIPS64 ISA,
+         * only the COMPARISON itself is unsigned for SLTIU, the 16-bit
+         * immediate's sign-extension happens unconditionally. We build
+         * a synthetic "rt operand" (hi/lo pair) from imm the same way
+         * ADDIU's sign-extension works (li + srawi-by-31 fill word),
+         * then feed it through the same emit_slt_core as SLT/SLTU. */
+        if (rt == 0)
+            return 0;
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs)));
+        emit(ctx, enc_addi(SCRATCH_B, 0, (int16_t)imm)); /* li SCRATCH_B, imm (synthetic right.lo) */
+        emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_HI(rs)));
+        emit(ctx, enc_srawi(SCRATCH_D, SCRATCH_B, 31)); /* synthetic right.hi = sign fill of imm */
+        emit_slt_core(ctx, op == 0x0A /* SLTI is signed, SLTIU is not */);
+        emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_LO(rt)));
+        emit(ctx, enc_addi(SCRATCH_B, 0, 0)); /* li SCRATCH_B, 0 */
+        emit(ctx, enc_stw(SCRATCH_B, CTX_REG, REG_HI(rt)));
         return 0;
     }
 

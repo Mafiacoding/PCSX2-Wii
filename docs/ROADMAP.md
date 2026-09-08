@@ -11056,3 +11056,37 @@ disassembly only). Regression/Wii-build correctly skipped. Task #811,
 maximally narrowed: the sole remaining question re-converges with task
 #447 - why GT3 never attempts the CD-read dispatch within this window.
 See STATUS.md's Round 858 entry.
+
+## Round 859 (task #811 continuation, per user's Pfad A): found thread 1's
+real WaitSema(5) call site sits directly behind a SIF-bind call (confirming
+the user's hypothesis) - but found a real, unresolved discrepancy between
+checkpoint history and a fresh cold boot
+
+Corrected a stale-checkpoint methodology bug: `gt3_round825`'s thread-1
+`saved_pc` (`0x0101bb28`, cited in Round 856-858) predates the Round 826
+save-context fix and is stale. The post-826 checkpoint shows the true
+value (`0x0101bc24`, the shared WaitSema stub). Used `$ra` (not the
+shared stub address) to find thread 1's REAL call site: `0x0101E198`,
+downstream of a genuine SIF-bind call (`0x0101D7F8`->`0x0101D6C0`,
+`SIF_SID=0x80000009`) that - per full static disassembly with the
+observed live parameters (size=64, mode-flag=0) - must reach the real
+`sceSifSetDma` (syscall 119) call at `0x0101D7CC`, one of Round 829's
+original 4 GT3 call sites. This directly confirms the user's Pfad-A
+hypothesis: WaitSema(5) sits immediately behind a real SIF communication.
+
+However: closed a real gap in Round 857's trace (it only caught
+`sysnum==119`, never the interrupt-context sibling `sysnum==-119`) and
+re-ran a fresh single continuous cold boot to 520M instructions with both
+instrumented. Result: all 52 real `sceSifSetDma`-class dispatches still
+came only from the already-known, unrelated BIOS `rom0:OSDSYS` reload
+address - none from GT3's own `0x0101D7CC`, despite the post-826
+checkpoint's thread-1 state requiring that exact call to have succeeded
+by instruction 58,594,303. This is a genuine, unreconciled discrepancy
+between the checkpoint's history and a fresh boot's observed behavior -
+documented honestly rather than glossed over. No tracked-source fix;
+`R859_NEG119_TRACE` fully reverted. Regression/Wii-build correctly
+skipped. Task #811 next step: resolve the discrepancy (build a fresh,
+documented checkpoint chain under the new instrumentation) before
+drawing further conclusions from checkpoint-derived thread state, or
+before pursuing Pfad B (larger instruction budget). See STATUS.md's
+Round 859 entry.

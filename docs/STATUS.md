@@ -35937,3 +35937,43 @@ No source changes this round (pure diagnostic checkpoint-chaining with the
 existing, unmodified `system_run_interleaved`/`checkpoint_save`/
 `ee_hle_thread_get_*` APIs). Regression suite and Wii cross-build correctly
 skipped.
+
+## Round 862 (task #859): CORRECTION to Round 861's "resting-state drift" claim - OSDSYS module code IS periodically reached; it was a sampling-granularity artifact
+
+Round 861's diskless-boot memory-card experiment sampled EE PC only once
+per 10M-"done" chunk and concluded the boot "never leaves low kernel/
+exception addresses... an order of magnitude past where OSDSYS's module
+code has historically been reached." This round re-ran the same diskless
+PAL-BIOS boot with 10x finer sampling (1M-"done" chunks, new driver
+`/tmp/r862_pc_trace.c`) and bucketed every sampled PC into OSDSYS-module
+(0x00200000-0x00220000), low-address-idle (0x8000D000-0x80010000 /
+0x00100800-0x00100C00), or other.
+
+**Result:** OSDSYS's own module code IS reached, repeatedly, throughout
+the run - at total_instr~104M (pc=0x00200030), ~488M (pc=0x00200018),
+~872M (pc=0x0020001c), consistent with a periodic (frame/VBLANK-cadence)
+wake-run-sleep cycle: OSDSYS's thread runs briefly, does its per-frame
+work, then the EE core goes back to idling in kernel interrupt-dispatch
+code (the 0x8000Dxxx/0x00100Bxx addresses) until the next wake, matching
+the well-established "threads run briefly each frame then sleep" pattern
+from Rounds 703/717. Round 861's 10M-granularity samples simply never
+happened to land during one of these brief OSDSYS-module-code windows in
+its first ~960M instructions - a false negative from under-sampling, not
+a real behavioral regression.
+
+**Correction to Round 861:** the "resting-state drift since Round 594-683"
+claim is retracted. The diskless boot's control flow is consistent with
+historical characterization - OSDSYS module code executes on a periodic
+cadence as always. This means task #859's premise (that OSDSYS module
+code needs fixing to match current EE/IOP correctness fixes before the
+memory-card experiment is meaningful) does not apply as originally
+framed - the code path was already being exercised correctly.
+
+Given this correction, the memory-card experiment (Round 861) needs to be
+honestly re-run with fine-enough sampling to actually observe `+0x450`
+during/immediately-after an OSDSYS-module-code window, rather than only
+at coarse 10M boundaries that could miss a transient value change. See
+the immediately following entry for that re-test.
+
+No source changes this round. Regression suite and Wii cross-build
+correctly skipped (docs-only diagnostic correction).

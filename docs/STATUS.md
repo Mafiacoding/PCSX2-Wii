@@ -37119,3 +37119,91 @@ acceleration and catch any divergence these host-only checks can't see.
 Opcode coverage itself is still limited to the same 11 pure-ALU ops;
 shifts, LUI, memory ops (needing a new "call arbitrary C function from
 generated code" trampoline), and branches remain future rounds.
+
+### Round 887b (task #866/#868/#869 continuation): LUI opcode + a
+### methodological upgrade to host-native dynarec verification
+
+Direct continuation of Round 887's real wiring: added MIPS LUI (opcode
+0x0F) as the 12th JIT-accelerated opcode, and along the way extended
+the `#ifdef GEKKO` host-safety-gating pattern from `ee_jit.c` (Round
+887) to `ppc_dynarec.c` itself, which unlocked a stronger verification
+methodology than Round 886 used.
+
+**The opcode addition**: `ppc_dynarec.c` gained `enc_addis()` (the
+PPC750 `addis`/`lis` D-form encoder - same layout as the existing
+`enc_addi()`, opcode 15 instead of 14) and a new `op == 0x0F` dispatch
+case in `ppc_dynarec_translate_one()`. LUI's MIPS semantics
+(`gpr[rt] = sext32(uimm << 16)`, confirmed against `ee_core.c`'s own
+interpreter case at line 7732) map directly onto PPC's `lis rD, uimm`
+(`addis` with `rA=0`, which places the raw 16-bit immediate field
+verbatim into the upper halfword with the lower halfword zeroed) plus
+the same `stw`/`srawi`/`stw` 64-bit-sign-extend-and-store sequence
+already used for ADDIU. `enc_addis`'s encoding was verified against
+real devkitPPC assembler/disassembler output before use (`lis
+r4,0x1234` -> `0x3C801234`; `lis r5,-1` -> `0x3CA0FFFF`; `lis
+r6,0x7fff` -> `0x3CC07FFF`) per this project's standing
+verify-before-attributing-correctness rule. `ee_jit.c`'s
+`ee_jit_opcode_supported()` pre-filter and its header comment were
+updated to include op 0x0F, keeping the hand-synced allowlist correct.
+
+**The methodological upgrade**: while building a host-native
+verification harness for this addition, discovered that
+`ppc_dynarec.c` itself (not just `ee_jit.c`) had the same
+libogc-dependency problem Round 887 fixed in `ee_jit.c` - it
+unconditionally `#include <ogc/cache.h>`'d and unconditionally called
+`DCFlushRange`/`ICInvalidateRange` inside `ppc_dynarec_finalize()`,
+both devkitPPC/libogc-only. This is why `tests/run_test.sh` has
+excluded `ppc_dynarec.c` by name since Round 887 - it simply couldn't
+compile on host at all. Applying the same `#ifdef GEKKO` treatment
+(gate the include; gate the two cache-maintenance calls, replacing
+them with a `(void)bytes;` no-op comment on host explaining why no
+icache maintenance is needed/safe there) makes `ppc_dynarec.c` fully
+host-compilable without changing its Wii-target behavior at all.
+
+This matters because it unlocks a strictly stronger verification
+technique. Round 886's `r880_ppc_verify.c` verified PPC encodings by
+*reimplementing* PPC semantics in a synthetic interpreter and comparing
+against expected values - correct, but any bug shared between the real
+encoder and the reimplementation's mental model would go undetected.
+This round's `r887b_lui_verify.c` instead calls the REAL
+`ppc_dynarec_init()`/`ppc_dynarec_translate_one()`/`ppc_dynarec_free()`
+(now host-linkable) to get the actual generated PPC instruction words,
+and only then interprets those real bytes (never executes them - this
+is an x86_64 host) with a minimal big-endian-safe PPC subset simulator
+supporting exactly the instruction forms LUI's codegen emits
+(`addis`/`stw`/`srawi`/`blr`). This directly exercises the shipped
+encoder function, not a parallel reimplementation of it. Result: **8/8
+checks passed** - 7 varied `uimm` values (0x0000, 0x1234, 0x8000,
+0xFFFF, 0x7FFF, 0x0001, 0x8001) each cross-checked against
+`sext32(uimm<<16)`, plus a `$zero`-destination no-op check (rt==0
+correctly emits zero instructions). This is a reusable pattern for
+verifying all future dynarec additions on host, not just this one.
+
+**Verification**:
+- Host-native: both modified files (`ppc_dynarec.c`, `ee_jit.c`)
+  compile clean under `gcc -O2 -Wall -Wextra` (0 warnings) - this is
+  now true for `ppc_dynarec.c` too, a first since it was written.
+- `r887b_lui_verify.c`: **8/8 checks passed**, calling the real
+  `ppc_dynarec_translate_one()` (see methodology note above).
+- Full regression suite, chunked across multiple calls per this
+  project's established `/tmp/run_chunk.sh` pattern: **135/135 tests
+  pass, 0 failures**.
+- devkitPPC/libogc Wii cross-build (`make clean && make -j4`, real
+  target, `-DGEKKO -mrvl -mcpu=750`): clean, 0 warnings/errors,
+  produced fresh `pcsx2-wii.elf` (2,967,348 bytes) /`.dol` (527,712
+  bytes). Notably `ppc_dynarec.c` now compiles into the real Wii build
+  too (it always did logically, via `ee_jit.c`'s `#include`, but this
+  confirms the GEKKO-gating edits didn't break the real-target path).
+
+**Status**: LUI is now the 12th JIT-accelerated opcode (ADDIU, SLTI,
+SLTIU, ADDU, SUBU, AND, OR, XOR, NOR, SLT, SLTU, LUI). `tests/run_test.sh`
+still excludes `ppc_dynarec.c` by name from its live glob - now
+technically no longer strictly necessary for host compilation, but
+left in place since nothing calls into it from the host-gated
+`ee_jit.c` path and reconciling that exclusion is out of scope for
+this round; flagged for a future round if more `ppc_dynarec.c`-linking
+host harnesses get promoted into the permanent test suite. Same
+sandbox limitation as Round 887 applies: real native-PPC-execution
+correctness for LUI still can't be verified without Wii/Dolphin
+access - this round's harness verifies the generated *encoding*, not
+native execution.

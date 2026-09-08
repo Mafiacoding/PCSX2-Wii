@@ -31,12 +31,12 @@ static uint64_t g_jit_executed = 0;
 #ifdef GEKKO
 
 /* Whether `instr` is one of the MIPS opcodes ppc_dynarec_translate_one()
- * currently supports: ADDIU (op 0x09); SLTI/SLTIU (op 0x0A/0x0B);
- * SPECIAL (op 0x00) ADDU/SUBU/AND/OR/XOR/NOR/SLT/SLTU (funct 0x21/
- * 0x23-0x27/0x2A/0x2B). Kept in sync by hand with translate_one()'s
- * own dispatch - see that function's own comments for the
- * authoritative list. This is a cheap pre-filter so the (much more
- * expensive) cache lookup/compile path is never attempted for the
+ * currently supports: ADDIU (op 0x09); SLTI/SLTIU (op 0x0A/0x0B); LUI
+ * (op 0x0F, Round 887b); SPECIAL (op 0x00) ADDU/SUBU/AND/OR/XOR/NOR/
+ * SLT/SLTU (funct 0x21/0x23-0x27/0x2A/0x2B). Kept in sync by hand with
+ * translate_one()'s own dispatch - see that function's own comments
+ * for the authoritative list. This is a cheap pre-filter so the (much
+ * more expensive) cache lookup/compile path is never attempted for the
  * vast majority of real instructions ppc_dynarec.c can't handle yet
  * (branches, loads/stores, MMI, COP0/1/2, ...). */
 static int ee_jit_opcode_supported(uint32_t instr)
@@ -44,6 +44,7 @@ static int ee_jit_opcode_supported(uint32_t instr)
     uint32_t op = (instr >> 26) & 0x3Fu;
     if (op == 0x09u) return 1; /* ADDIU */
     if (op == 0x0Au || op == 0x0Bu) return 1; /* SLTI / SLTIU */
+    if (op == 0x0Fu) return 1; /* LUI */
     if (op == 0x00u) {
         uint32_t funct = instr & 0x3Fu;
         switch (funct) {

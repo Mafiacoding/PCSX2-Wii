@@ -8,7 +8,18 @@
 #include <malloc.h>
 #include <string.h>
 #include <stdio.h>
-#include <ogc/cache.h>
+#ifdef GEKKO
+#include <ogc/cache.h> /* Round 887b host-safety: only needed by finalize()'s
+                         * cache-maintenance calls below, which are themselves
+                         * only meaningful (and only compiled) on the real
+                         * Wii/devkitPPC target - see ee_jit.c's matching gate
+                         * for the full rationale. This keeps every other
+                         * function in this file (the encoders, init/free,
+                         * translate_one) host-portable, so host-native
+                         * verification harnesses can call the REAL
+                         * translate_one() directly instead of reimplementing
+                         * its logic. */
+#endif
 
 /* --- PPC instruction encoders (subset) --- */
 
@@ -26,6 +37,21 @@ static inline uint32_t enc_addi(int rD, int rA, int16_t simm)
 {
     /* rA == 0 gives "li rD, simm" per the PPC ISA definition */
     return (14u << 26) | ((uint32_t)rD << 21) | ((uint32_t)rA << 16) | (uint16_t)simm;
+}
+
+/* Round 887b (task #866/#868/#869 continuation): addis - same D-form
+ * layout as enc_addi above (opcode 15 instead of 14); rA == 0 gives
+ * "lis rD, simm" per the PPC ISA definition, which places the raw
+ * 16-bit immediate field directly into the upper halfword of rD with
+ * the lower halfword zeroed (concatenation, not a shift-of-a-sign-
+ * extended-value - the encoding doesn't care whether `simm` is "meant"
+ * as signed or unsigned, only its 16 raw bits matter here, which is
+ * exactly MIPS LUI's own semantics: gpr[rt] = sext32(uimm << 16)).
+ * Verified bit-for-bit against real devkitPPC: "lis r4,0x1234" ->
+ * 0x3C801234; "lis r5,-1" -> 0x3CA0FFFF; "lis r6,0x7fff" -> 0x3CC07FFF. */
+static inline uint32_t enc_addis(int rD, int rA, int16_t simm)
+{
+    return (15u << 26) | ((uint32_t)rD << 21) | ((uint32_t)rA << 16) | (uint16_t)simm;
 }
 
 static inline uint32_t enc_or(int rA, int rS, int rB)
@@ -263,6 +289,29 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
         return 0;
     }
 
+    if (op == 0x0F) {
+        /* MIPS: lui rt, uimm -> gpr[rt] = sign_extend_64((int32_t)(uimm
+         * << 16)). Same 32-bit-compute-then-sign-extend shape as
+         * ADDIU above, but the 32-bit result is produced directly by a
+         * single "lis" (addis with rA=0) instead of a load+add - see
+         * enc_addis's own comment for why the raw-immediate-field
+         * semantics line up exactly with MIPS's uimm<<16. Note MIPS
+         * treats the immediate as UNSIGNED here (`uimm`, not `imm`),
+         * unlike ADDIU's signed imm - but since enc_addis just places
+         * the raw 16 bits verbatim (no sign-extension happens in the
+         * encoding itself), casting to int16_t for the encoder call is
+         * purely a bit-pattern reinterpretation and produces the
+         * identical instruction either way. */
+        if (rt == 0)
+            return 0;
+        uint32_t uimm = mips_instr & 0xFFFFu;
+        emit(ctx, enc_addis(SCRATCH_A, 0, (int16_t)uimm));
+        emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_LO(rt)));
+        emit(ctx, enc_srawi(SCRATCH_B, SCRATCH_A, 31));
+        emit(ctx, enc_stw(SCRATCH_B, CTX_REG, REG_HI(rt)));
+        return 0;
+    }
+
     if (op == 0x00 && (funct == 0x25 || funct == 0x24 || funct == 0x26 || funct == 0x27)) {
         /* MIPS: or/and/xor/nor rd, rs, rt -> genuine full 64-bit
          * bitwise ops - unlike ADDU/SUBU below, MIPS logical ops
@@ -370,8 +419,17 @@ ppc_block_fn ppc_dynarec_finalize(ppc_codegen_ctx_t *ctx)
     emit(ctx, enc_blr());
 
     size_t bytes = ctx->used_words * sizeof(uint32_t);
+#ifdef GEKKO
     DCFlushRange(ctx->code, bytes);
     ICInvalidateRange(ctx->code, bytes);
+#else
+    /* Host-native builds: no real PPC750 icache to maintain, and (per
+     * ee_jit.c's host-safety gate) the returned function pointer will
+     * never actually be called here - only host-native verification
+     * harnesses that interpret ctx->code's bytes (never execute them)
+     * should ever reach this branch. */
+    (void)bytes;
+#endif
 
     return (ppc_block_fn)(void *)ctx->code;
 }

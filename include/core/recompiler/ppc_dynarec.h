@@ -391,6 +391,28 @@
  * tool's decode was incomplete). 93 opcodes now JIT-accelerated,
  * 21/21 checks passed. Next: CVT.W.S/CVT.S.W and the BC1/BC1L
  * branch-on-FP-condition family (Round 906b), closing out task #884.
+ *
+ * Round 906b (task #891) update: CVT.W.S (funct 0x24, float->int32,
+ * uses real hardware fctiwz - confirmed present on Gekko unlike fsqrt -
+ * spilled via a new stfd encoder since fctiwz has no direct FPR->GPR
+ * move), CVT.S.W (funct 0x20 under a new rs=0x14 sibling block,
+ * int32->float via the same call-trampoline pattern SQRT.S established,
+ * extended for the first time to a mixed int-arg/float-return
+ * signature since Gekko predates fcfid), and BC1F/BC1T/BC1FL/BC1TL (a
+ * new rs=0x08 sibling block, routed through the existing
+ * emit_branch_blend()/emit_branch_blend_likely() helpers unmodified)
+ * are now JIT-accelerated, closing out task #884 (Rounds 902-906b, COP1
+ * FPU JIT arc) entirely. The verify harness's first run (17/21) caught
+ * a REAL bug in CVT.W.S's blend polarity: the subfc/subfe "borrow-to-
+ * mask" idiom produces the OUT-of-range mask (E=0 when in-range, E=
+ * allOnes when out-of-range), but the original blend had normal_val
+ * masked by E and clamp_val by ~E - backwards, so every IN-range
+ * conversion returned the out-of-range clamp value instead. Fixed by
+ * swapping which mask each AND uses (2-line change, subfc/subfe
+ * computation itself untouched) - re-ran 21/21 clean. See docs/
+ * STATUS.md's Round 906b section for the full hex-trace derivation and
+ * worked example. 96 opcodes now JIT-accelerated. Task #884 CLOSED.
+ * Next: task #885, Round 907 - JIT VU0 macro-mode VADD/VSUB/VMUL.
  */
 
 typedef struct {

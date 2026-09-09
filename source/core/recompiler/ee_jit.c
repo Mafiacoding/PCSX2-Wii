@@ -225,15 +225,15 @@ static int ee_jit_opcode_supported(uint32_t instr)
         }
     }
     if (op == 0x11u) {
-        /* COP1 (FPU), new in Round 902, extended Round 903/904/905/906:
-         * like REGIMM above, `rs` selects the real sub-opcode, not a
-         * flat op-only dispatch - only the subset ppc_dynarec.c's
-         * op==0x11 block actually implements returns 1 here; everything
-         * else (CVT.W.S/CVT.S.W, plus the BC1 branch-on-condition
-         * family) falls through to the interpreter, matching
-         * translate_one()'s own `return -1` path inside this same
+        /* COP1 (FPU), new in Round 902, extended Round 903/904/905/906/
+         * 906b: like REGIMM above, `rs` selects the real sub-opcode, not
+         * a flat op-only dispatch - only the subset ppc_dynarec.c's
+         * op==0x11 block actually implements returns 1 here, matching
+         * translate_one()'s own `return -1` paths inside this same
          * op==0x11 block exactly - kept in sync by hand, same
-         * discipline as every entry above. */
+         * discipline as every entry above. As of Round 906b every COP1
+         * opcode this project's ee_core.c implements at all is
+         * JIT-covered - task #884 is closed. */
         uint32_t rs = (instr >> 21) & 0x1Fu;
         if (rs == 0x00u || rs == 0x02u || rs == 0x04u || rs == 0x06u)
             return 1; /* MFC1 / CFC1 / MTC1 / CTC1 */
@@ -257,6 +257,18 @@ static int ee_jit_opcode_supported(uint32_t instr)
                 return 1; /* MADDA.S / MSUBA.S (Round 906) */
             if (funct == 0x32u || funct == 0x34u || funct == 0x36u)
                 return 1; /* C.EQ.S / C.LT.S / C.LE.S (Round 906) */
+            if (funct == 0x24u)
+                return 1; /* CVT.W.S (Round 906b) */
+        }
+        if (rs == 0x14u) {
+            uint32_t funct = instr & 0x3Fu;
+            if (funct == 0x20u)
+                return 1; /* CVT.S.W (Round 906b) */
+        }
+        if (rs == 0x08u) {
+            uint32_t rt = (instr >> 16) & 0x1Fu;
+            if (rt == 0x00u || rt == 0x01u || rt == 0x02u || rt == 0x03u)
+                return 1; /* BC1F / BC1T / BC1FL / BC1TL (Round 906b) */
         }
         return 0;
     }

@@ -38847,3 +38847,90 @@ Status: 93 opcodes now JIT-accelerated. Only CVT.W.S/CVT.S.W and the
 BC1/BC1L branch-on-FP-condition family remain to close out task #884
 (Round 906b), after which task #885 (VU0 macro-mode, Rounds 907-913)
 begins.
+
+## Round 906b: CVT.W.S/CVT.S.W + BC1F/BC1T/BC1FL/BC1TL - closes task #884
+(task #891)
+
+Final increment of the Rounds 902-906b COP1 FPU JIT arc. Three new
+dispatch blocks in ppc_dynarec.c:
+
+CVT.W.S (funct=0x24 under rs=0x10, float->int32): re-verified against
+ee_core.c's real case 0x24 body - tests raw fpr[fs]'s exponent field
+(bits 30-23) against threshold 0x4E800000; in range, the result is a
+plain C `(int32_t)(float)` truncating cast; out of range, it saturates
+to INT32_MIN/INT32_MAX by sign. Uses real hardware `fctiwz` (PowerPC
+Book I base ISA, confirmed present on Gekko/Broadway, unlike fsqrt)
+rather than a call trampoline: fctiwz converts the double-promoted fs
+value to a 32-bit integer (round toward zero) in the LOW 32 bits of the
+destination FPR's doubleword (high 32 bits undefined per the ISA), so
+the result is spilled via a new `stfd` encoder and read back with a
+plain `lwz` at offset+4 - there's no direct FPR->GPR move instruction.
+fctiwz runs unconditionally, even on the discarded out-of-range branch,
+which is safe because FPSCR's VE bit is never touched by this dynarec
+(same "don't model FPU exception control" simplification used
+everywhere else in this file). Two new low-level encoders (`enc_lfd`,
+`enc_stfd`, `enc_fctiwz`) were empirically verified against real
+devkitPPC `powerpc-eabi-as`/`objdump` output before being written into
+the source (lfd 0,8(1) -> 0xC8010008; stfd 1,16(1) -> 0xD8210010;
+fctiwz 2,3 -> 0xFC40181E; fctiwz 0,0 -> 0xFC00001E - all matched).
+
+CVT.S.W (funct=0x20 under a new sibling rs=0x14 block, int32->float):
+Gekko/Broadway's PowerPC ISA generation predates `fcfid` (int->float
+hardware conversion, added in ISA v2.01/POWER4), so this uses the same
+C-function-call trampoline pattern SQRT.S/RSQRT.S established in Round
+905, extended for the first time to a MIXED signature - an INTEGER
+argument in r3, a FLOAT return in f1 (standard EABI assigns argument
+registers independently per type, so this needed no new save/restore
+convention beyond the established ctx-via-r15/LR-via-r14 pattern). The
+helper itself (`ee_jit_cvt_s_w_helper`, GEKKO-only #ifdef-guarded to
+avoid an unused-function warning on host builds) is a trivial
+`return (float)v;`.
+
+BC1F/BC1T/BC1FL/BC1TL (new sibling rs=0x08 block): branch on fcr31 bit
+0x00800000 (the flag C.EQ/LT/LE.S write). rt selects the sub-variant
+(0=BC1F,1=BC1T,2=BC1FL,3=BC1TL), matching PCSX2's tbl_COP1_BC1[32]
+convention. Condition mask computed branchlessly: `rlwinm(sh=8,mb=0,
+me=23)` moves fcr31 bit23 to the MSB, then `srawi(...,31)` replicates
+it into a real allOnes/allZeros mask - the shift-left shape was
+verified against real devkitPPC assembler output before use ("slwi
+4,3,8" -> "rlwinm r4,r3,8,0,23"). Routed through the SAME
+`emit_branch_blend()`/`emit_branch_blend_likely()` helpers every other
+branch in this file already uses (Round 895/896) - no new branch
+mechanism needed; BC1FL/BC1TL reuse the established Likely
+delay-slot-nullification semantics unmodified.
+
+New host-native harness r906b_cop1_cvt_bc1_verify.c (outputs scratch
+area, not tracked) extended the simulator with lbz/stb/add (opc
+34/38/opc31-xo266), mfspr/mtspr LR+CTR and bctrl (reused from Round
+893's LD/SD trampoline decode), and two brand-new decode forms: fctiwz
+(opc63 XO=15) and stfd (opc54, only the low word at d+4 matters for
+this round's use, matching the emitted code's own spill-then-read-back
+comment). First run: 17/21 passed, with all 4 CVT.W.S IN-RANGE cases
+failing while every out-of-range case passed - a real bug, not a
+harness artifact. Manual hex-trace of the subfc/subfe "borrow-to-mask"
+idiom confirmed it: `subfc(D,mag_exp,threshold)` sets CA=1 when
+mag_exp<=threshold (in-range), then `subfe(E,D,D)` computes -1+CA,
+which yields E=0 when CA=1 (in-range) and E=0xFFFFFFFF when CA=0
+(out-of-range) - i.e. E is the OUT-of-range mask, not the "le_mask"
+the original code's comment and blend assumed. The blend had
+normal_val masked by E and clamp_val by ~E - backwards, given E's real
+polarity. Fixed by swapping which mask each AND uses (normal_val &=
+~E, clamp_val &= E) - a 2-line change, no change to the subfc/subfe
+computation itself. Re-ran: 21/21 passed, 0 warnings under
+-fsanitize=address,undefined, ASAN_OPTIONS=detect_leaks=1 confirmed
+clean.
+
+Regression-checked against Rounds 893/894/895/896/897/898/900/902/903/
+904's own still-present harnesses (13/13, 17/17, 19/19, 35/35, 19/19,
+27/27, 25/25, 20/20, 12/12, 13/13) - no regressions. (Rounds 905/906's
+own harness files were already deleted per this project's scratch-area
+convention after those rounds shipped and committed; this round's fix
+is scoped entirely to the new CVT.W.S block, which cannot have touched
+their already-verified/committed dispatch code.)
+
+Wii build: pcsx2-wii.elf 3,203,236 bytes / .dol 543,328 bytes
+(+15,388 / +992 over Round 906), 0 warnings/errors (devkitPPC 8.1.0).
+
+Status: task #884 (JIT COP1 FPU opcodes, Rounds 902-906b) is now
+CLOSED. 96 opcodes total now JIT-accelerated. Next: task #885 (Round
+907: VU0 macro-mode VADD/VSUB/VMUL family, beyond the existing VADDq).

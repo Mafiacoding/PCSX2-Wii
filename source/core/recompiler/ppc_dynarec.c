@@ -518,6 +518,40 @@ static inline uint32_t enc_fdivs(int frD, int frA, int frB)
     return (59u << 26) | ((uint32_t)frD << 21) | ((uint32_t)frA << 16) | ((uint32_t)frB << 11) | (18u << 1);
 }
 
+/* Round 906b (task #891): lfd/stfd/fctiwz - needed for CVT.W.S, this
+ * dynarec's first opcode that does a genuine float->int CONVERSION
+ * (every prior FPU opcode stayed within float<->float, or moved raw
+ * 32-bit bit patterns without touching the FPU at all). fctiwz is part
+ * of the base PowerPC ISA (Book I) and IS present on Gekko/Broadway -
+ * unlike fsqrts/fsqrt (Round 905's finding), float/int conversion is
+ * not one of the operations Gekko's FPU omits. fctiwz converts the
+ * double-precision value in frB to a 32-bit integer using round-
+ * toward-zero, storing the result in the LOW-order 32 bits of frD (the
+ * high-order 32 bits are undefined per the ISA) - so the result has to
+ * be spilled to memory with stfd and read back as a plain 32-bit word,
+ * there's no direct FPR-to-GPR move instruction. lfd loads a raw
+ * double-precision value (used here to load fpr[fs], which lfs already
+ * auto-promotes single->double on load, exactly like every fs/ft load
+ * elsewhere in this file). All three encodings verified bit-for-bit
+ * against real devkitPPC (powerpc-eabi-as/-objdump): "lfd f0,8(r1)" ->
+ * 0xC8010008, "stfd f1,16(r1)" -> 0xD8210010, "fctiwz f2,f3" ->
+ * 0xFC40181E, "fctiwz f0,f0" -> 0xFC00001E - all reproduced exactly by
+ * the formulas below. */
+static inline uint32_t enc_lfd(int frD, int rA, int16_t d)
+{
+    return (50u << 26) | ((uint32_t)frD << 21) | ((uint32_t)rA << 16) | (uint16_t)d;
+}
+
+static inline uint32_t enc_stfd(int frS, int rA, int16_t d)
+{
+    return (54u << 26) | ((uint32_t)frS << 21) | ((uint32_t)rA << 16) | (uint16_t)d;
+}
+
+static inline uint32_t enc_fctiwz(int frD, int frB)
+{
+    return (63u << 26) | ((uint32_t)frD << 21) | ((uint32_t)frB << 11) | (15u << 1);
+}
+
 /* Round 894 (task #878): byte offsets of the three ee_state_t fields
  * J/JAL/JR/JALR need beyond the gpr[32]+hi+lo+pc/next_pc/sa_reg/cop0[32]
  * region this file's REG_HI/REG_LO addressing already covers - CTX_REG
@@ -688,6 +722,42 @@ extern float sqrtf(float x);
 #define ADDR_EE_SQRTF ((uint32_t)(uintptr_t)&sqrtf)
 #else
 #define ADDR_EE_SQRTF 0x00000109u
+#endif
+
+/* Round 906b (task #891): CVT.S.W (int32 -> float) needs a genuine
+ * int->float CONVERSION, and real PPC750/Gekko hardware has no
+ * instruction for that direction at all - fcfid ("floating convert
+ * from integer doubleword") wasn't added to the PowerPC ISA until
+ * v2.01 (first shipped in POWER4/PPC970), and Gekko/Broadway is a G3
+ * derivative predating that extension entirely (this is a documented
+ * ISA-generation fact, not something that needed empirical rediscovery
+ * the way SQRT.S's hardware-sqrt gap did). The traditional workaround
+ * on such chips is a fragile double-precision bit-manipulation trick
+ * (bias with a magic exponent, subtract back out) - deliberately NOT
+ * used here, since this dynarec already has a proven, safe pattern for
+ * exactly this situation (SQRT.S/RSQRT.S above): call a real C
+ * function through the established trampoline instead of hand-rolling
+ * float bit tricks. ee_jit_cvt_s_w_helper() below is a trivial one-line
+ * wrapper around the exact same `(float)(int32_t)x` cast ee_core.c's
+ * own interpreter uses for this opcode, so the JIT and interpreter are
+ * GUARANTEED to agree bit-for-bit (both go through the C compiler's own
+ * int->float conversion, not two independently-written implementations
+ * that could subtly disagree on rounding). Unlike SQRT.S's trampoline
+ * (float arg/return, both in f1), this one takes an INTEGER argument in
+ * r3 and returns a float in f1 - standard EABI convention assigns
+ * argument registers independently per type (integer args to r3-r10,
+ * float args to f1-f8), so this "mixed" signature needs no special
+ * handling beyond what SQRT.S's own trampoline already established for
+ * saving ctx (r15)/LR (r14) across the call. Sentinel 0x10A continues
+ * the existing 0x101-0x109 numbering. */
+#ifdef GEKKO
+static float ee_jit_cvt_s_w_helper(int32_t v)
+{
+    return (float)v;
+}
+#define ADDR_EE_CVT_S_W ((uint32_t)(uintptr_t)&ee_jit_cvt_s_w_helper)
+#else
+#define ADDR_EE_CVT_S_W 0x0000010Au
 #endif
 
 /* Scratch PPC GPRs used by generated code. r3 is the incoming context
@@ -2907,11 +2977,175 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
                 emit(ctx, enc_addi(1, 1, 16));
                 return 0;
             }
-            return -1; /* CVT.W.S/CVT.S.W and the BC1 branch family:
-                        * not yet JIT-compiled, fall back to the
-                        * interpreter (Round 906b). */
+            if (funct == 0x24) {
+                /* Round 906b (task #891): CVT.W.S (float -> int32).
+                 * Re-verified against ee_core.c's real case 0x24 body
+                 * (~lines 7989-7995): tests raw fpr[fs]'s exponent field
+                 * (bits 30-23, no fpu_double() clamp involved anywhere
+                 * in the real body - confirmed absent) against threshold
+                 * 0x4E800000; within range, the result is a plain C
+                 * `(int32_t)(float)` truncating cast (round toward
+                 * zero); out of range, the result saturates to
+                 * INT32_MIN/INT32_MAX by sign. Uses fctiwz (PowerPC
+                 * Book I base ISA, present on Gekko/Broadway - unlike
+                 * fsqrt, this direction of float<->int conversion was
+                 * never one of the omitted ops) instead of a call
+                 * trampoline: fctiwz converts the double-promoted value
+                 * in a source FPR to a 32-bit integer (round toward
+                 * zero) stored in the LOW 32 bits of the destination FPR
+                 * (high 32 bits undefined per the ISA), so the result
+                 * has to be spilled via stfd and read back as a plain
+                 * word - there's no direct FPR->GPR move instruction.
+                 * fctiwz runs UNCONDITIONALLY (even for the out-of-range
+                 * case, whose result the blend below discards) - this is
+                 * safe because FPSCR's VE (invalid-operation-exception-
+                 * enable) bit defaults to 0 and is never touched by this
+                 * dynarec, so an out-of-range or NaN input to fctiwz
+                 * just sets a sticky FPSCR flag (unused by this
+                 * emulator, like every other FPU exception-cause flag
+                 * documented as unmodeled elsewhere in this file) rather
+                 * than trapping - matches this whole file's existing
+                 * "don't model FPU exception control" simplification. */
+                emit(ctx, enc_addi(1, 1, -16));
+
+                emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_FPR(fs))); /* raw fs bits */
+
+                /* mag_exp = raw & 0x7F800000 (exponent field only) */
+                emit(ctx, enc_rlwinm(SCRATCH_B, SCRATCH_A, 0, 1, 8));
+
+                /* gt_mask = allOnes iff mag_exp > 0x4E800000 (OUT of range).
+                 * subfc(D,B,C) computes D=C-B with CA=1 iff C>=B (i.e. iff
+                 * threshold>=mag_exp, i.e. in-range); subfe(E,D,D) then
+                 * turns that CA into -1+CA (0 when CA=1/in-range, allOnes
+                 * when CA=0/out-of-range) - the standard "borrow-to-mask"
+                 * idiom, which yields the OUT-of-range mask, not le_mask
+                 * (re-verified by direct hex trace: mag_exp=0x3F800000
+                 * (in-range) -> CA=1 -> E=0; mag_exp=0x7F000000 (out-of-
+                 * range) -> CA=0 -> E=0xFFFFFFFF - confirmed against the
+                 * host-native harness too, see r906b_cop1_cvt_bc1_verify.c).
+                 * The blend below is written accordingly: normal_val gets
+                 * masked by ~E (in-range), clamp_val by E (out-of-range). */
+                emit_load_const32(ctx, SCRATCH_C, 0x4E800000u);
+                emit(ctx, enc_subfc(SCRATCH_D, SCRATCH_B, SCRATCH_C));
+                emit(ctx, enc_subfe(SCRATCH_E, SCRATCH_D, SCRATCH_D));
+
+                /* clamp_val = 0x7fffffff ^ signmask; signmask = srawi(raw,31) -
+                 * yields 0x7fffffff for fs>=0, 0x80000000 for fs<0 (since
+                 * 0x7fffffff ^ 0xFFFFFFFF == 0x80000000 exactly). */
+                emit(ctx, enc_srawi(SCRATCH_F, SCRATCH_A, 31));
+                emit_load_const32(ctx, SCRATCH_G, 0x7fffffffu);
+                emit(ctx, enc_xor(SCRATCH_G, SCRATCH_G, SCRATCH_F));
+
+                /* normal path: fctiwz on the double-promoted fs value */
+                emit(ctx, enc_lfs(0, CTX_REG, REG_FPR(fs))); /* f0 = fpr[fs] (single->double promote on load) */
+                emit(ctx, enc_fctiwz(1, 0));                 /* f1's low word = truncated int32 */
+                emit(ctx, enc_stfd(1, 1, 0));                /* spill 8 bytes at frame offset 0 */
+                emit(ctx, enc_lwz(SCRATCH_H, 1, 4));          /* SCRATCH_H = normal_val (low word) */
+
+                /* Blend: final = gt_mask(E) ? clamp_val : normal_val - i.e.
+                 * normal_val is masked by ~E (in-range, SCRATCH_D) and
+                 * clamp_val by E (out-of-range) directly. (Round 906b
+                 * follow-up fix: the original blend had normal_val masked
+                 * by E and clamp_val by ~D, which is backwards given E's
+                 * real polarity as derived above - caught by
+                 * r906b_cop1_cvt_bc1_verify.c's in-range test cases,
+                 * which failed 4/4 before this fix and pass after.) */
+                emit(ctx, enc_nor(SCRATCH_D, SCRATCH_E, SCRATCH_E)); /* notmask = in-range mask */
+                emit(ctx, enc_and(SCRATCH_H, SCRATCH_H, SCRATCH_D));
+                emit(ctx, enc_and(SCRATCH_G, SCRATCH_G, SCRATCH_E));
+                emit(ctx, enc_or(SCRATCH_H, SCRATCH_H, SCRATCH_G));
+                emit(ctx, enc_stw(SCRATCH_H, CTX_REG, REG_FPR(fd)));
+
+                emit(ctx, enc_addi(1, 1, 16));
+                return 0;
+            }
+            return -1; /* every other COP1.S funct: not yet JIT-compiled,
+                        * fall back to the interpreter. */
         }
-        return -1; /* CVT.W.S/CVT.S.W/BC1/etc: not yet JIT-compiled. */
+        if (rs == 0x14) {
+            /* Round 906b (task #891): COP1.W - only CVT.S.W (int32 ->
+             * float) is real here, matching ee_core.c's own
+             * `case 0x14:` body (~lines 8127-8135) which halts on any
+             * other funct. fd=sa, fs=rd (rt unused), same fd/fs
+             * convention COP1.S already uses. */
+            if (funct != 0x20)
+                return -1;
+            uint32_t fd = sa, fs = rd;
+
+            /* Round 906b (task #891): CVT.S.W (int32 -> float) needs a
+             * genuine int->float CONVERSION that real PPC750/Gekko
+             * hardware simply cannot do (fcfid postdates this chip's ISA
+             * generation - see ADDR_EE_CVT_S_W's own comment above for
+             * why). Calls the trivial C helper ee_jit_cvt_s_w_helper()
+             * through the same call-trampoline convention SQRT.S/RSQRT.S
+             * already established, but with an INTEGER argument in r3
+             * (not a float in f1) and a float RETURN in f1 - standard
+             * EABI assigns argument registers independently per type, so
+             * this "mixed" signature needs no new convention, just the
+             * same ctx-via-r15/LR-via-r14 save/restore across the call. */
+            emit(ctx, enc_addi(1, 1, -16));
+            emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_FPR(fs))); /* raw int32 bits = arg */
+            emit(ctx, enc_stw(SCRATCH_A, 1, 8));
+
+            emit(ctx, enc_stw(14, 1, 0)); /* save caller's r14 */
+            emit(ctx, enc_stw(15, 1, 4)); /* save caller's r15 */
+            emit(ctx, enc_or(15, CTX_REG, CTX_REG)); /* r15 = ctx (mr r15,r3) */
+            emit(ctx, enc_mflr(14));                 /* r14 = this block's real return address */
+            emit(ctx, enc_lwz(3, 1, 8));              /* r3 = int32 argument (overwrites ctx - saved in r15) */
+            emit_load_const32(ctx, 12, ADDR_EE_CVT_S_W);
+            emit(ctx, enc_mtctr(12));
+            emit(ctx, enc_bctrl());                  /* f1 = ee_jit_cvt_s_w_helper(r3) */
+            emit(ctx, enc_mtlr(14));                 /* restore this block's real return address */
+            emit(ctx, enc_or(CTX_REG, 15, 15));      /* restore ctx into r3 (mr r3,r15) */
+            emit(ctx, enc_lwz(14, 1, 0));             /* restore caller's r14 */
+            emit(ctx, enc_lwz(15, 1, 4));             /* restore caller's r15 */
+
+            emit(ctx, enc_stfs(1, 1, 8));             /* spill helper's f1 result */
+            emit(ctx, enc_lwz(SCRATCH_A, 1, 8));      /* SCRATCH_A = result bits */
+            emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_FPR(fd)));
+
+            emit(ctx, enc_addi(1, 1, 16));
+            return 0;
+        }
+        if (rs == 0x08) {
+            /* Round 906b (task #891): BC1F/BC1T/BC1FL/BC1TL - branch on
+             * the FP condition flag (fcr31 bit 0x00800000, set by
+             * C.EQ/LT/LE.S). Re-verified against ee_core.c's real
+             * case 0x08 body (~lines 8136-8186): rt selects the
+             * sub-variant (0=BC1F,1=BC1T,2=BC1FL,3=BC1TL), matching
+             * PCSX2's tbl_COP1_BC1[32] convention already cited there.
+             * The "likely" pair (BC1FL/BC1TL) uses the exact same
+             * nullify-delay-slot-on-not-taken semantics as every other
+             * likely branch already JIT'd in this file (BEQL/BNEL/etc,
+             * Round 896) - routed through the SAME emit_branch_blend_
+             * likely() helper, not a new mechanism.
+             *
+             * Condition mask is computed branchlessly: shifting fcr31
+             * left by 8 moves bit23 into the MSB (bit31), then srawi by
+             * 31 replicates that MSB across the whole word, producing a
+             * real allOnes/allZeros mask directly (not just a 0/1 bit,
+             * which emit_branch_blend()/emit_branch_blend_likely() both
+             * require) - this exact "slwi 8" shape (rlwinm sh=8,mb=0,
+             * me=23) was verified against real devkitPPC powerpc-eabi-
+             * as/objdump output ("slwi 4,3,8" -> "rlwinm r4,r3,8,0,23")
+             * before use here. */
+            if (rt == 0x00 || rt == 0x01 || rt == 0x02 || rt == 0x03) {
+                emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, FCR31_OFFSET));
+                emit(ctx, enc_rlwinm(SCRATCH_B, SCRATCH_A, 8, 0, 23)); /* bit23 -> bit31 (MSB) */
+                emit(ctx, enc_srawi(SCRATCH_E, SCRATCH_B, 31));        /* allOnes iff flag SET (BC1T cond) */
+                if (rt == 0x00 || rt == 0x02) /* BC1F / BC1FL want flag CLEAR */
+                    emit(ctx, enc_nor(SCRATCH_E, SCRATCH_E, SCRATCH_E));
+                if (rt == 0x00 || rt == 0x01)
+                    emit_branch_blend(ctx, 4 + (imm * 4));
+                else
+                    emit_branch_blend_likely(ctx, 4 + (imm * 4));
+                return 0;
+            }
+            return -1; /* no other COP1 BC sub-opcode is real - matches
+                        * ee_core.c's own halt() default case exactly. */
+        }
+        return -1; /* everything else under COP1 (op==0x11): not yet
+                     * JIT-compiled, fall back to the interpreter. */
     }
 
     if (op == 0x02) {

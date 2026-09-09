@@ -3466,6 +3466,216 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
                     emit(ctx, enc_stw(SCRATCH_H, CTX_REG, COP2_CTRL_OFF(18))); /* VI[18] = new clip */
                     return 0;
                 }
+                if (idx == 56 || idx == 58) {
+                    /* Round 909 (task #894): VDIV(56)/VRSQRT(58) - the
+                     * division/reciprocal-sqrt family that writes the Q
+                     * register (cop2_ctrl[22], already this project's
+                     * single source of truth for Q since the VMULq/
+                     * VADDq broadcast-row opcodes). Re-verified against
+                     * ee_core.c's real case body (~lines 8813-8851):
+                     * Fsf/Ftf are compile-time-constant 2-bit lane
+                     * selectors baked into destmask (destmask&3=Fsf,
+                     * (destmask>>2)&3=Ftf - the same split VCLIP's own
+                     * comment above documents), so which VF lane feeds
+                     * FS/FT is fixed at JIT-translate time, not a
+                     * runtime choice - unlike the float VALUES read from
+                     * those lanes, which are of course runtime data.
+                     * VU0 floats are never run through COP1's
+                     * fpu_double()/fpu_clamp32 machinery anywhere in
+                     * ee_core.c's real VU0 case bodies (confirmed absent
+                     * again here, matching every other VU0 arithmetic
+                     * opcode this file has JIT'd since Round 907) - so
+                     * this is simpler than COP1's DIV.S/RSQRT.S in that
+                     * regard, but the divide-by-zero test itself is
+                     * DIFFERENT from COP1's: `ftv == 0.0f` is a genuine
+                     * IEEE float equality check here (true only for the
+                     * exact 0x00000000/0x80000000 bit patterns), not
+                     * COP1's exponent-field/denormal-counts-as-zero
+                     * test - implemented as a sign-stripped magnitude
+                     * compare on the raw bits (rlwinm mb=1,me=31 then
+                     * the same subfc/subfe/nor allOnes-iff-zero idiom
+                     * this file already uses throughout). On a zero
+                     * divisor, VDIV always produces a signed FLT_MAX
+                     * whose sign is the XOR of both raw operands' sign
+                     * bits (0/0 and x/0 share this one formula - the
+                     * real distinction only affects an unmodeled status
+                     * flag), same "xor sign bits, OR with 0x7F7FFFFF"
+                     * blend DIV.S's own divide-by-zero path established
+                     * (~line 2512). VRSQRT's zero-divisor case branches
+                     * ONE level further on fsv (confirmed against lines
+                     * 8834-8841): fsv!=0 clamps to that identical
+                     * signed-FLT_MAX result, but fsv==0 (a genuine
+                     * 0/sqrt(0)) clamps to signed zero instead - and
+                     * since sign_diff is already exactly 0 or
+                     * 0x80000000 (nothing else), "signed zero with that
+                     * sign" is just sign_diff itself, needing no extra
+                     * OR. VRSQRT's normal path calls this project's real
+                     * sqrtf() trampoline (same ADDR_EE_SQRTF convention
+                     * Round 905's SQRT.S/RSQRT.S established, since real
+                     * PPC750/Gekko can't safely run fsqrts) BEFORE the
+                     * final blend, so the zero_mask/special_result must
+                     * be spilled to the stack across that call (r3-r12,
+                     * i.e. every SCRATCH_A-H register, are EABI volatile
+                     * and sqrtf() is free to clobber any of them - the
+                     * same reason RSQRT.S's own codegen above reloads
+                     * K1M1/K2M1 after its call). */
+                    uint32_t fsf_lane = destmask & 0x3u;
+                    uint32_t ftf_lane = (destmask >> 2) & 0x3u;
+                    if (idx == 56) {
+                        emit(ctx, enc_addi(1, 1, -16)); /* push 16-byte scratch frame */
+
+                        emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, VU0_VF_OFF(ft, ftf_lane))); /* raw FT[ftf_lane] (divisor) */
+                        emit(ctx, enc_lwz(SCRATCH_D, CTX_REG, VU0_VF_OFF(fs, fsf_lane))); /* raw FS[fsf_lane] (dividend) */
+
+                        /* zero_mask = allOnes iff (divisor & 0x7FFFFFFF) == 0 */
+                        emit(ctx, enc_rlwinm(SCRATCH_E, SCRATCH_C, 0, 1, 31));
+                        emit(ctx, enc_addi(SCRATCH_F, 0, 0)); /* real zero, "li" */
+                        emit(ctx, enc_subfc(SCRATCH_G, SCRATCH_E, SCRATCH_F));
+                        emit(ctx, enc_subfe(SCRATCH_G, SCRATCH_G, SCRATCH_G));
+                        emit(ctx, enc_nor(SCRATCH_G, SCRATCH_G, SCRATCH_G)); /* SCRATCH_G = zero_mask */
+
+                        /* special_result = ((divisor ^ dividend) & 0x80000000) | 0x7F7FFFFF */
+                        emit(ctx, enc_xor(SCRATCH_H, SCRATCH_C, SCRATCH_D));
+                        emit(ctx, enc_rlwinm(SCRATCH_H, SCRATCH_H, 0, 0, 0)); /* sign bit only */
+                        emit_load_const32(ctx, SCRATCH_A, 0x7F7FFFFFu);
+                        emit(ctx, enc_or(SCRATCH_H, SCRATCH_H, SCRATCH_A)); /* special_result */
+
+                        /* normal_result = fsv / ftv - raw fdivs, no clamp. */
+                        emit(ctx, enc_stw(SCRATCH_D, 1, 0));
+                        emit(ctx, enc_lfs(0, 1, 0)); /* f0 = fsv */
+                        emit(ctx, enc_stw(SCRATCH_C, 1, 0));
+                        emit(ctx, enc_lfs(1, 1, 0)); /* f1 = ftv */
+                        emit(ctx, enc_fdivs(2, 0, 1));
+                        emit(ctx, enc_stfs(2, 1, 0));
+                        emit(ctx, enc_lwz(SCRATCH_B, 1, 0)); /* normal_result bits */
+
+                        /* Blend: final = zero_mask ? special_result : normal_result */
+                        emit(ctx, enc_nor(SCRATCH_F, SCRATCH_G, SCRATCH_G)); /* notmask */
+                        emit(ctx, enc_and(SCRATCH_H, SCRATCH_H, SCRATCH_G));
+                        emit(ctx, enc_and(SCRATCH_B, SCRATCH_B, SCRATCH_F));
+                        emit(ctx, enc_or(SCRATCH_B, SCRATCH_B, SCRATCH_H));
+                        emit(ctx, enc_stw(SCRATCH_B, CTX_REG, COP2_CTRL_OFF(22))); /* Q = result */
+
+                        emit(ctx, enc_addi(1, 1, 16)); /* pop scratch frame */
+                    } else {
+                        emit(ctx, enc_addi(1, 1, -32)); /* push 32-byte scratch frame */
+
+                        emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, VU0_VF_OFF(ft, ftf_lane))); /* raw uft */
+                        emit(ctx, enc_lwz(SCRATCH_D, CTX_REG, VU0_VF_OFF(fs, fsf_lane))); /* raw ufs */
+                        emit(ctx, enc_stw(SCRATCH_D, 1, 24)); /* stash ufs across the sqrtf call */
+
+                        /* zero_mask = allOnes iff (uft & 0x7FFFFFFF) == 0 */
+                        emit(ctx, enc_rlwinm(SCRATCH_E, SCRATCH_C, 0, 1, 31));
+                        emit(ctx, enc_addi(SCRATCH_F, 0, 0));
+                        emit(ctx, enc_subfc(SCRATCH_G, SCRATCH_E, SCRATCH_F));
+                        emit(ctx, enc_subfe(SCRATCH_G, SCRATCH_G, SCRATCH_G));
+                        emit(ctx, enc_nor(SCRATCH_G, SCRATCH_G, SCRATCH_G)); /* zero_mask */
+                        emit(ctx, enc_stw(SCRATCH_G, 1, 4));
+
+                        /* sign_diff = (uft ^ ufs) & 0x80000000 */
+                        emit(ctx, enc_xor(SCRATCH_H, SCRATCH_C, SCRATCH_D));
+                        emit(ctx, enc_rlwinm(SCRATCH_H, SCRATCH_H, 0, 0, 0)); /* sign_diff */
+
+                        /* fsv_zero_mask = allOnes iff (ufs & 0x7FFFFFFF) == 0 */
+                        emit(ctx, enc_rlwinm(SCRATCH_A, SCRATCH_D, 0, 1, 31));
+                        emit(ctx, enc_addi(SCRATCH_B, 0, 0));
+                        emit(ctx, enc_subfc(SCRATCH_E, SCRATCH_A, SCRATCH_B));
+                        emit(ctx, enc_subfe(SCRATCH_E, SCRATCH_E, SCRATCH_E));
+                        emit(ctx, enc_nor(SCRATCH_E, SCRATCH_E, SCRATCH_E)); /* fsv_zero_mask */
+
+                        /* special_within_zero = fsv_zero_mask ? sign_diff
+                         *                        : (sign_diff | 0x7F7FFFFF) */
+                        emit_load_const32(ctx, SCRATCH_A, 0x7F7FFFFFu);
+                        emit(ctx, enc_or(SCRATCH_A, SCRATCH_H, SCRATCH_A)); /* special_a (fsv!=0) */
+                        emit(ctx, enc_nor(SCRATCH_B, SCRATCH_E, SCRATCH_E)); /* notmask of fsv_zero_mask */
+                        emit(ctx, enc_and(SCRATCH_F, SCRATCH_H, SCRATCH_E)); /* special_b(=sign_diff) & fsv_zero_mask */
+                        emit(ctx, enc_and(SCRATCH_A, SCRATCH_A, SCRATCH_B)); /* special_a & notmask */
+                        emit(ctx, enc_or(SCRATCH_A, SCRATCH_A, SCRATCH_F));  /* special_within_zero */
+                        emit(ctx, enc_stw(SCRATCH_A, 1, 8));
+
+                        /* temp = sqrtf(fabsf(ftv)) via trampoline */
+                        emit(ctx, enc_rlwinm(SCRATCH_C, SCRATCH_C, 0, 1, 31)); /* fabsf(uft) */
+                        emit(ctx, enc_stw(SCRATCH_C, 1, 12));
+                        emit(ctx, enc_lfs(1, 1, 12)); /* f1 = |ftv| - EABI float arg reg */
+
+                        emit(ctx, enc_stw(14, 1, 16)); /* save caller's r14 */
+                        emit(ctx, enc_stw(15, 1, 20)); /* save caller's r15 */
+                        emit(ctx, enc_or(15, CTX_REG, CTX_REG)); /* r15 = ctx */
+                        emit(ctx, enc_mflr(14));
+                        emit_load_const32(ctx, 12, ADDR_EE_SQRTF);
+                        emit(ctx, enc_mtctr(12));
+                        emit(ctx, enc_bctrl());                  /* f1 = sqrtf(f1) = temp */
+                        emit(ctx, enc_mtlr(14));
+                        emit(ctx, enc_or(CTX_REG, 15, 15));      /* restore ctx into r3 */
+                        emit(ctx, enc_lwz(14, 1, 16));
+                        emit(ctx, enc_lwz(15, 1, 20));
+
+                        /* normal_result = fsv / temp (f1 still holds sqrtf's result) */
+                        emit(ctx, enc_lwz(SCRATCH_C, 1, 24)); /* reload raw ufs */
+                        emit(ctx, enc_stw(SCRATCH_C, 1, 12));
+                        emit(ctx, enc_lfs(0, 1, 12)); /* f0 = fsv */
+                        emit(ctx, enc_fdivs(2, 0, 1));
+                        emit(ctx, enc_stfs(2, 1, 12));
+                        emit(ctx, enc_lwz(SCRATCH_B, 1, 12)); /* normal_result bits */
+
+                        /* Blend: final = zero_mask ? special_within_zero : normal_result */
+                        emit(ctx, enc_lwz(SCRATCH_D, 1, 4));  /* zero_mask */
+                        emit(ctx, enc_lwz(SCRATCH_E, 1, 8));  /* special_within_zero */
+                        emit(ctx, enc_nor(SCRATCH_F, SCRATCH_D, SCRATCH_D));
+                        emit(ctx, enc_and(SCRATCH_E, SCRATCH_E, SCRATCH_D));
+                        emit(ctx, enc_and(SCRATCH_B, SCRATCH_B, SCRATCH_F));
+                        emit(ctx, enc_or(SCRATCH_B, SCRATCH_B, SCRATCH_E));
+                        emit(ctx, enc_stw(SCRATCH_B, CTX_REG, COP2_CTRL_OFF(22))); /* Q = result */
+
+                        emit(ctx, enc_addi(1, 1, 32)); /* pop scratch frame */
+                    }
+                    return 0;
+                }
+                if (idx == 57) {
+                    /* Round 909 (task #894): VSQRT - Q = sqrtf(|FT[ftf_
+                     * lane]|), no FS operand and no destmask (matches
+                     * VABS's own real "no full destmask consulted"
+                     * convention, though for a different reason here:
+                     * this project's own comment above already noted
+                     * that in the disassembler, VSQRT prints only FT -
+                     * confirmed directly in ee_core.c's real case body,
+                     * ~lines 8818-8821). Unlike VDIV/VRSQRT above, VSQRT
+                     * has NO divide-by-zero-style special case at all -
+                     * sqrtf(|0|)=0 is already exactly the right answer,
+                     * nothing to substitute a fake infinity for - so
+                     * this is just an unconditional sqrtf() trampoline
+                     * call, the simplest of the three Round 909
+                     * opcodes. Same real sqrtf() trampoline convention
+                     * as VDIV/VRSQRT above and Round 905's SQRT.S/
+                     * RSQRT.S (real PPC750/Gekko can't safely run
+                     * fsqrts - see ADDR_EE_SQRTF's own comment). */
+                    uint32_t ftf_lane = (destmask >> 2) & 0x3u;
+                    emit(ctx, enc_addi(1, 1, -16)); /* push 16-byte scratch frame */
+
+                    emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, VU0_VF_OFF(ft, ftf_lane))); /* raw FT[ftf_lane] */
+                    emit(ctx, enc_rlwinm(SCRATCH_A, SCRATCH_A, 0, 1, 31)); /* fabsf: clear sign bit */
+                    emit(ctx, enc_stw(SCRATCH_A, 1, 0));
+                    emit(ctx, enc_lfs(1, 1, 0)); /* f1 = |FT[ftf_lane]| - EABI float arg reg */
+
+                    emit(ctx, enc_stw(14, 1, 8));  /* save caller's r14 */
+                    emit(ctx, enc_stw(15, 1, 12)); /* save caller's r15 */
+                    emit(ctx, enc_or(15, CTX_REG, CTX_REG)); /* r15 = ctx */
+                    emit(ctx, enc_mflr(14));
+                    emit_load_const32(ctx, 12, ADDR_EE_SQRTF);
+                    emit(ctx, enc_mtctr(12));
+                    emit(ctx, enc_bctrl());                  /* f1 = sqrtf(f1) */
+                    emit(ctx, enc_mtlr(14));
+                    emit(ctx, enc_or(CTX_REG, 15, 15));      /* restore ctx into r3 */
+                    emit(ctx, enc_lwz(14, 1, 8));
+                    emit(ctx, enc_lwz(15, 1, 12));
+
+                    emit(ctx, enc_stfs(1, 1, 0));
+                    emit(ctx, enc_lwz(SCRATCH_A, 1, 0));
+                    emit(ctx, enc_stw(SCRATCH_A, CTX_REG, COP2_CTRL_OFF(22))); /* Q = result */
+
+                    emit(ctx, enc_addi(1, 1, 16)); /* pop scratch frame */
+                    return 0;
+                }
                 return -1; /* every other SPECIAL2 sub-opcode: not yet
                              * JIT-compiled, fall back to the interpreter. */
             }

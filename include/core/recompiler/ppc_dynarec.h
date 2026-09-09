@@ -454,8 +454,44 @@
  * the CLIP flag register at a new COP2_CTRL_OFF(18) - the most
  * involved opcode this dynarec has JIT'd to date). 8 of the ~15-20
  * real VU0 macro-mode opcodes now JIT-accelerated. 28/28 checks
- * passed under -fsanitize=address,undefined, 0 leaks. Next: task
- * #894, Round 909 - JIT VU0 VDIV/VSQRT/VRSQRT (Q-register ops).
+ * passed under -fsanitize=address,undefined, 0 leaks.
+ *
+ * Round 909 (task #894) update: JIT VU0 VDIV(SPECIAL2 idx56)/
+ * VSQRT(idx57)/VRSQRT(idx58) - the division/reciprocal-sqrt family
+ * that writes the Q register (cop2_ctrl[22], new-this-round
+ * COP2_CTRL_OFF(22) alias of the offset VMULq/VADDq already read).
+ * Fsf/Ftf are compile-time-constant 2-bit lane selectors packed into
+ * destmask (destmask&3=Fsf, (destmask>>2)&3=Ftf), so - unlike the
+ * float VALUES these ops operate on - which VF lane feeds FS/FT is
+ * baked in at JIT-translate time, same as every other CO-format op
+ * this file handles. VU0's divide-by-zero test is a genuine IEEE
+ * `ftv==0.0f` equality (true only for the exact 0x00000000/
+ * 0x80000000 bit patterns), NOT COP1's exponent-field/denormal-
+ * counts-as-zero test - confirmed a denormal divisor takes VDIV's
+ * NORMAL path (real fdivs), unlike COP1's DIV.S. On a zero divisor,
+ * VDIV produces a signed FLT_MAX whose sign is the XOR of both raw
+ * operand sign bits (0/0 and x/0 share this one formula), the same
+ * "xor sign bits, OR with FMAX" blend DIV.S established, but with NO
+ * clamp anywhere (confirmed absent, matching every VU0 arithmetic
+ * opcode JIT'd since Round 907 - VU0 floats never go through COP1's
+ * fpu_double()/fpu_clamp32 machinery). VRSQRT's zero-divisor case
+ * branches one level further on fsv: fsv!=0 clamps to that same
+ * signed-FLT_MAX result, but fsv==0 (a genuine 0/sqrt(0)) clamps to
+ * signed zero instead - and since sign_diff is already exactly 0 or
+ * 0x80000000, "signed zero with that sign" is just sign_diff itself,
+ * no extra OR needed. VSQRT has NO special case at all (sqrtf(|0|)=0
+ * is already correct) - the simplest of the three. VRSQRT/VSQRT call
+ * the real sqrtf() trampoline Round 905's SQRT.S/RSQRT.S established
+ * (ADDR_EE_SQRTF - real PPC750/Gekko can't safely run fsqrts); VDIV
+ * needs no such call. New host-native harness
+ * r909_vu0_div_sqrt_rsqrt_verify.c extended the ppcsim simulator with
+ * LR/CTR pseudo-registers and mfspr/mtspr/bcctrl decode - the first
+ * harness in this project needing to intercept a real sqrtf() call
+ * from JIT'd VU0 code (SQRT.S/RSQRT.S's own Round 905 harness was
+ * deleted before this project's per-round cleanup convention was
+ * applied as consistently as it is now). 17/17 checks passed under
+ * -fsanitize=address,undefined, 0 leaks. Next: task #895, Round 910 -
+ * JIT VU0 VIADD/VISUB/VIAND/VIOR integer ops + VMOVE/VMR32.
  */
 
 typedef struct {

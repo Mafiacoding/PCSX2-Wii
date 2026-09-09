@@ -39191,3 +39191,89 @@ continues - 8 of the ~15-20 real VU0 macro-mode opcodes now JIT-
 accelerated (VADD/VSUB/VMUL/VMAX/VMINI/VOPMSUB/VABS/VCLIP), plus the
 pre-existing VADDq. Next: task #894 (Round 909: VU0 VDIV/VSQRT/
 VRSQRT, the Q-register special ops).
+
+## Round 909: JIT VU0 VDIV/VSQRT/VRSQRT - the Q-register special ops (task #894)
+
+Implemented the SPECIAL2 sub-opcode family that produces the Q
+register: VDIV (idx56), VSQRT (idx57), VRSQRT (idx58). Re-verified
+against ee_core.c's real case body (~lines 8813-8851, the same region
+Round 29's original interpreter implementation and this project's own
+VADDq/VMULq broadcast-row code already cite). All three share one
+important structural property with each other but NOT with the
+arithmetic-row/SPECIAL2 opcodes JIT'd so far: Fsf/Ftf are independent
+2-bit lane selectors packed into the instruction's destmask field
+(destmask&3=Fsf, (destmask>>2)&3=Ftf - confirmed against PCSX2's own
+DisR5900asm.cpp dest_fsf()/dest_ftf() macros), not a per-lane
+bitmask - and because both are literal bit-fields of the instruction
+encoding itself, they're still compile-time constants from this JIT's
+perspective, so lane selection needed zero new runtime logic; only
+the float VALUES read from those lanes are genuinely dynamic.
+
+VDIV: Q = FS[Fsf]/FT[Ftf], with the same real-hardware divide-by-zero
+substitution DIV.S already established (a signed FLT_MAX whose sign
+is the XOR of both raw operand sign bits - 0/0 and x/0 share this one
+formula, the real distinction only affecting an unmodeled status
+flag), reusing DIV.S's exact "xor sign bits, OR with 0x7F7FFFFF"
+blend. The zero-divisor TEST itself is different from DIV.S's though:
+VU0's `ftv == 0.0f` is a genuine IEEE float equality (true only for
+the exact 0x00000000/0x80000000 bit patterns), not COP1's exponent-
+field/denormal-counts-as-zero test - confirmed with a dedicated test
+case that a denormal divisor takes VDIV's NORMAL path (real fdivs),
+unlike DIV.S. And unlike DIV.S, there's no clamp anywhere in VDIV's
+real case body (confirmed absent) - consistent with every VU0
+arithmetic opcode JIT'd since Round 907 never running VU0 floats
+through COP1's fpu_double()/fpu_clamp32 machinery.
+
+VSQRT: Q = sqrtf(|FT[Ftf]|), no FS operand at all (confirmed - this
+project's own Round 905 comment on real hardware's VSQRT disassembly
+convention, "prints only FT", applies here too) and, more
+importantly, NO special case of any kind - sqrtf(|0|)=0 is already
+exactly the right answer, so unlike SQRT.S (which has a raw-exponent-
+zero fast path) this is just an unconditional call through the real
+sqrtf() trampoline. The simplest of the three opcodes.
+
+VRSQRT: Q = FS[Fsf]/sqrtf(|FT[Ftf]|). Its zero-divisor case branches
+one level further than VDIV's: fsv!=0 clamps to the identical signed-
+FLT_MAX result VDIV uses, but fsv==0 (a genuine 0/sqrt(0)) clamps to
+SIGNED ZERO instead - and because sign_diff is already exactly 0 or
+0x80000000 and nothing else, "signed zero with that sign" is simply
+sign_diff itself, needing no extra OR to synthesize. Calls the same
+real sqrtf() trampoline as VSQRT before the final blend, so - same as
+Round 905's RSQRT.S - the zero_mask/special_result values computed
+before the call have to be spilled to the stack across it (sqrtf() is
+free to clobber every SCRATCH_A-H register, all EABI-volatile).
+
+New host-native harness r909_vu0_div_sqrt_rsqrt_verify.c extends the
+r904-derived ppcsim simulator with LR/CTR pseudo-registers and
+mfspr(339)/mtspr(467)/bcctrl(op19,xo528) decode - the first harness
+in this project's tree that needs to intercept a real sqrtf() call
+made from JIT'd code (Round 905's own SQRT.S/RSQRT.S harness predates
+this project's current strict per-round scratch-file cleanup
+discipline and was deleted before it could be reused as a base). One
+subtlety caught before the harness ever produced a result: this
+project's own ADDR_EE_SQRTF macro is GEKKO-gated the OPPOSITE way
+from every other ADDR_EE_* helper - on host builds (GEKKO undefined,
+which is what this harness compiles as) it's just the placeholder
+sentinel 0x00000109u, not a real `&sqrtf` pointer (that only happens
+on the real GEKKO/Wii target) - an initial draft assumed the reverse
+and had to be corrected after the harness's first run aborted on an
+unrecognized bcctrl target. 17/17 checks passed under
+-fsanitize=address,undefined, 0 leaks (VDIV basic/negative/lane-
+selection/4 divide-by-zero-sign-combination cases/1 denormal-takes-
+normal-path regression case; VSQRT basic/negative/zero; VRSQRT basic/
+lane-selection/2 fsv!=0 divide-by-zero cases/2 fsv==0 signed-zero
+cases).
+
+Regression-checked against all 10 still-present prior harnesses
+(r893/894/895/896/897/898/900/902/903/904: 13/13, 17/17, 19/19,
+35/35, 19/19, 27/27, 25/25, 20/20, 12/12, 13/13) - no regressions.
+
+Wii build: pcsx2-wii.elf 3,246,420 bytes / .dol 546,272 bytes
+(+23,056 elf / +1,856 dol over Round 908), 0 warnings/errors
+(devkitPPC 8.1.0).
+
+Status: task #894 (Round 909) CLOSED. task #885 (COP2/VU0 umbrella)
+continues - 11 of the ~15-20 real VU0 macro-mode opcodes now JIT-
+accelerated (VADD/VSUB/VMUL/VMAX/VMINI/VOPMSUB/VABS/VCLIP/VDIV/VSQRT/
+VRSQRT), plus the pre-existing VADDq. Next: task #895 (Round 910: VU0
+VIADD/VISUB/VIAND/VIOR integer ops + VMOVE/VMR32).

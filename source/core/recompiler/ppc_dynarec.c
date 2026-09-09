@@ -156,6 +156,20 @@ static inline uint32_t enc_xoris(int rA, int rS, uint16_t uimm)
     return (27u << 26) | ((uint32_t)rS << 21) | ((uint32_t)rA << 16) | uimm;
 }
 
+/* Round 897 (task #881): xori rA(dest), rS, UIMM -> rA = rS XOR UIMM
+ * (zero-extended, no CR0 side effect - unlike andi., there IS a plain
+ * non-dot "xori"). Same D-form layout as ori/xoris above, opcode 26
+ * (one less than xoris's 27). Verified bit-for-bit against real
+ * devkitPPC: "xori r4,r5,0x1234" -> 0x68A41234, matching this formula
+ * exactly. Needed for MIPS's XORI, which - like ORI below - XORs a
+ * zero-extended 16-bit immediate into the LOW word only, leaving the
+ * high word untouched (XOR with a zero-extended immediate's implicit
+ * all-0 upper bits is a no-op on the high word). */
+static inline uint32_t enc_xori(int rA, int rS, uint16_t uimm)
+{
+    return (26u << 26) | ((uint32_t)rS << 21) | ((uint32_t)rA << 16) | uimm;
+}
+
 /* andi. rA(dest), rS, UIMM -> rA = rS AND UIMM (always records CR0,
  * per the real PPC ISA - there is no non-dot "andi"). Used here only
  * to mask a 0/0xFFFFFFFF carry-derived value down to 0/1; CR0 is not
@@ -835,14 +849,23 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
     int32_t  imm   = (int16_t)(mips_instr & 0xFFFF);
     uint32_t funct = mips_instr & 0x3F;
 
-    if (op == 0x09) {
-        /* MIPS: addiu rt, rs, imm -> gpr[rt] = sign_extend_64(
+    if (op == 0x08 || op == 0x09) {
+        /* MIPS: addi/addiu rt, rs, imm -> gpr[rt] = sign_extend_64(
          * (int32_t)(gpr[rs].lo32 + imm)). ADDIU is a 32-bit-result op:
          * unlike OR below, the result is computed in 32 bits and then
          * sign-extended into the full 64-bit register - it does NOT
          * just OR/copy the upper half through unchanged. Real
          * hardware always discards writes to $zero (rt==0), so skip
-         * emitting anything for that case rather than mutate gpr[0]. */
+         * emitting anything for that case rather than mutate gpr[0].
+         *
+         * Round 897 (task #881) update: ADDI (op 0x08) joins ADDIU here
+         * unchanged - real MIPS ADDI traps on signed 32-bit overflow,
+         * but this project's own interpreter (ee_core.c's ADDI/ADDIU
+         * case, see that file's own comment) deliberately does NOT
+         * implement that trap (documented simplification, matches the
+         * DADDI/DADDIU pair's identical choice one case below it) - so
+         * ADDI and ADDIU are byte-for-byte identical from this dynarec's
+         * perspective, same as they already are in the interpreter. */
         if (rt == 0)
             return 0;
         emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs)));
@@ -852,6 +875,54 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
          * all-0s or all-1s fill word, which IS the correct high half
          * of a 64-bit sign-extension of a 32-bit result. */
         emit(ctx, enc_srawi(SCRATCH_B, SCRATCH_A, 31));
+        emit(ctx, enc_stw(SCRATCH_B, CTX_REG, REG_HI(rt)));
+        return 0;
+    }
+
+    if (op == 0x0C || op == 0x0D || op == 0x0E) {
+        /* Round 897 (task #881): MIPS andi/ori/xori rt, rs, uimm ->
+         * genuine full 64-bit bitwise ops against a ZERO-extended
+         * (never sign-extended) 16-bit immediate - confirmed against
+         * ee_core.c's own case bodies: `GPR(rt) = GPR(rs) & (uint64_t)
+         * uimm` etc., where uimm is the raw unsigned 16-bit field. Same
+         * "no truncation, combine both halves independently" rule as
+         * the register-register AND/OR/XOR/NOR block above, but here
+         * the immediate's implicit upper 48 bits are always exactly
+         * zero, which lets the high-word combine collapse to something
+         * simpler than a general AND/OR/XOR of two registers:
+         *   ANDI: hi_result = hi_rs & 0            = always 0
+         *   ORI:  hi_result = hi_rs | 0            = hi_rs unchanged
+         *   XORI: hi_result = hi_rs ^ 0            = hi_rs unchanged
+         * ANDI additionally uses andi. directly on the loaded low word
+         * (Round 886's encoder, already zero-extends its UIMM exactly
+         * like real MIPS ANDI needs) rather than materializing uimm
+         * into a second register first - one instruction cheaper than
+         * ORI/XORI, which need enc_ori/enc_xori's rS-then-OR/XOR shape
+         * since there's no single-instruction PPC form that ORs/XORs a
+         * register directly against an immediate INTO A DIFFERENT
+         * register while also being usable as the low-word compute
+         * (ori/xori's rA=dest, rS=source, UIMM=immediate layout already
+         * IS that single instruction - andi. is the odd one out only
+         * because it also sets CR0, forcing the "." dot form). Discard
+         * writes to $zero (rt==0). */
+        if (rt == 0)
+            return 0;
+        uint32_t uimm = mips_instr & 0xFFFFu;
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs)));
+        if (op == 0x0C) { /* ANDI */
+            emit(ctx, enc_andi_dot(SCRATCH_A, SCRATCH_A, (uint16_t)uimm));
+            emit(ctx, enc_addi(SCRATCH_B, 0, 0)); /* li SCRATCH_B, 0 - hi always 0 */
+        } else {
+            emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_HI(rs)));
+            if (op == 0x0D) { /* ORI */
+                emit(ctx, enc_ori(SCRATCH_A, SCRATCH_A, (uint16_t)uimm));
+            } else { /* op == 0x0E: XORI */
+                emit(ctx, enc_xori(SCRATCH_A, SCRATCH_A, (uint16_t)uimm));
+            }
+            /* hi word (SCRATCH_B) already holds hi_rs unchanged - ORI/
+             * XORI with a zero-extended immediate never touches it. */
+        }
+        emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_LO(rt)));
         emit(ctx, enc_stw(SCRATCH_B, CTX_REG, REG_HI(rt)));
         return 0;
     }

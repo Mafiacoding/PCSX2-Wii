@@ -154,6 +154,28 @@
  * Round 895. This is the last round in the branches/jumps arc - every
  * base MIPS conditional/unconditional control-transfer opcode this
  * project's boot traces exercise is now JIT-compiled.
+ *
+ * Round 897 (task #881) update: ANDI/ORI/XORI/ADDI complete the base-ISA
+ * ALU-immediate family (SLTI/SLTIU/LUI were already covered earlier).
+ * ADDI simply joins ADDIU's existing dispatch condition unchanged - real
+ * MIPS ADDI traps on signed overflow where ADDIU doesn't, but this
+ * project's own interpreter deliberately never implements that trap
+ * (the same simplification DADDI/DADDIU make one level down), so the two
+ * opcodes are byte-for-byte identical here too. ANDI/ORI/XORI exploit a
+ * simplification unique to logical (not arithmetic) immediates: the
+ * 16-bit immediate is ZERO-extended, never sign-extended, which makes
+ * the high-word combine collapse to a constant instead of a real op -
+ * ANDI's high result is always exactly 0 (anything AND an implicit-zero
+ * upper half), ORI/XORI's high result is always the source's high word
+ * UNCHANGED (anything OR/XOR 0 is a no-op). A new enc_xori() D-form
+ * encoder (opcode 26) was added and verified bit-for-bit against real
+ * devkitPPC output; andi. (opcode 28, used internally since Round 886)
+ * and ori (opcode 24, since Round 891) already existed. See
+ * docs/STATUS.md's Round 897 section for the full verification writeup
+ * (19/19 checks, two test-harness-only bugs caught before shipping) and
+ * for what's left: the 64-bit-native DADD/DSUB/DSLL/DSRL/DSRA family
+ * (task #882, Round 898-899), which has no 32-bit-then-sign-extend
+ * shortcut available.
  */
 
 typedef struct {

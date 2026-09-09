@@ -123,17 +123,24 @@ static uint64_t g_jit_executed = 0;
  * emit_branch_blend() that additionally blends ee_state_t.pc itself on
  * the not-taken path, matching the real R5900's delay-slot-annulment
  * semantics for "likely" branches (see ppc_dynarec.c's PC_OFFSET and
- * emit_branch_blend_likely() comments). Kept in sync by hand with
- * translate_one()'s own dispatch - see that function's own comments
- * for the authoritative list. This is a cheap pre-filter so the (much
- * more expensive) cache lookup/compile path is never attempted for the
- * vast majority of real instructions ppc_dynarec.c can't handle yet
- * (branches, MMI, COP0/1/2, ...). */
+ * emit_branch_blend_likely() comments). ADDI (op 0x08, joins ADDIU
+ * unchanged - no overflow trap, matching ee_core.c's own documented
+ * simplification) and ANDI/ORI/XORI (op 0x0C-0x0E, zero-extended-
+ * immediate 64-bit bitwise ops), new in Round 897 - the remaining ALU
+ * immediates, closing out the base-ISA immediate-arithmetic/logical
+ * family (SLTI/SLTIU/LUI were already covered; DADDI/DADDIU's 64-bit
+ * family is scoped for a future round alongside DADD/DSUB/DSLL/DSRL/
+ * DSRA). Kept in sync by hand with translate_one()'s own dispatch - see
+ * that function's own comments for the authoritative list. This is a
+ * cheap pre-filter so the (much more expensive) cache lookup/compile
+ * path is never attempted for the vast majority of real instructions
+ * ppc_dynarec.c can't handle yet (branches, MMI, COP0/1/2, ...). */
 static int ee_jit_opcode_supported(uint32_t instr)
 {
     uint32_t op = (instr >> 26) & 0x3Fu;
-    if (op == 0x09u) return 1; /* ADDIU */
+    if (op == 0x08u || op == 0x09u) return 1; /* ADDI (Round 897) / ADDIU */
     if (op == 0x0Au || op == 0x0Bu) return 1; /* SLTI / SLTIU */
+    if (op == 0x0Cu || op == 0x0Du || op == 0x0Eu) return 1; /* ANDI / ORI / XORI (Round 897) */
     if (op == 0x0Fu) return 1; /* LUI */
     if (op == 0x20u || op == 0x24u) return 1; /* LB / LBU (Round 892) */
     if (op == 0x21u || op == 0x25u) return 1; /* LH / LHU (Round 892) */

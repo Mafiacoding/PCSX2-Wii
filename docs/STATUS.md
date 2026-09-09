@@ -38107,3 +38107,84 @@ closes out the branches/jumps arc that Round 894 opened. Next up (task
 pure register-to-register-shaped work with no new capability needed,
 a lower-risk round after two rounds of genuinely new control-flow
 machinery.
+
+## Round 897: ANDI/ORI/XORI/ADDI - the remaining base-ISA ALU immediates
+
+A deliberately lower-risk round after two rounds of genuinely new
+control-flow machinery (Round 895's branch-blend masking, Round 896's
+delay-slot annulment) - every opcode here reuses patterns this dynarec
+already established, closing out the base-ISA immediate-arithmetic/
+logical family (SLTI/SLTIU/LUI were already covered by earlier rounds).
+
+**ADDI (op 0x08)** simply joins ADDIU's existing dispatch condition
+unchanged. Real MIPS ADDI traps on signed 32-bit overflow where ADDIU
+doesn't, but `ee_core.c`'s own interpreter deliberately never implements
+that trap (the same documented simplification the DADDI/DADDIU pair
+makes one case below it) - so from this dynarec's perspective the two
+opcodes are byte-for-byte identical, exactly as they already are in the
+interpreter it's mirroring.
+
+**ANDI/ORI/XORI (op 0x0C-0x0E)** are genuine full-64-bit bitwise ops
+against a ZERO-extended (never sign-extended) 16-bit immediate - same
+"combine both halves independently, no truncation" rule as the existing
+register-register AND/OR/XOR/NOR block, but the immediate's implicit
+upper 48 bits being always exactly zero lets the high-word combine
+collapse to something cheaper than a general two-register op:
+ANDI's high result is always exactly 0 (anything AND 0); ORI/XORI's high
+result is always the source register's high word UNCHANGED (anything
+OR/XOR 0 is a no-op). ANDI uses Round 886's existing `andi.` encoder
+directly on the loaded low word (one instruction cheaper than ORI/XORI,
+which need a two-register-shaped op against a materialized immediate).
+A new `enc_xori` D-form encoder (opcode 26, same layout as `ori`/`xoris`)
+was needed - `ori`, `andi.`, and `xoris` already existed from earlier
+rounds but nothing needed a plain non-dot XOR-immediate before now -
+verified bit-for-bit against real devkitPPC: `xori r4,r5,0x1234` ->
+`0x68A41234`, matching the formula exactly.
+
+Every block here is short: ADDI is unchanged at ADDIU's existing 5-
+instruction shape; ANDI is 5 instructions (load, `andi.`, li-0, two
+stores); ORI/XORI are 5 instructions each (two loads, the logical op,
+two stores). All comfortably under the 40-instruction ceiling with no
+change needed.
+
+**Verification: `r897_alu_immediates_verify.c`**, same methodology as
+every prior round - real `ppc_dynarec_translate_one()` output,
+interpreted (never executed) by a PPC750-subset simulator extended this
+round with `andi.` (opcode 28 - used internally by this dynarec since
+Round 886 but never exercised by a verify harness's simulator before)
+and `xori` (opcode 26, new) decodes; `ori` (opcode 24) was already
+simulated since Round 891. 19/19 checks passed, covering: ADDI's
+positive/negative-result sign-extension (including a deliberately
+garbage-seeded high input word to positively confirm the result is a
+genuine recomputed sign-extension, not a passthrough) and `rt==0`
+discard; ANDI's always-zero high word and correct zero- (not sign-)
+extension of an immediate with bit 15 set; ORI/XORI's unchanged-high-
+word passthrough and same bit-15 zero-extension check, verifying
+`enc_xori`'s formula end-to-end through actual compiled output; and
+`rt==0` discards for all three logical ops. One test-harness-only bug
+was caught and fixed before this round's own results could be trusted:
+`get_gpr_lo(18) == 0xFFFFFFFFu ^ 0x0000F0F0u` silently parsed as
+`(get_gpr_lo(18) == 0xFFFFFFFFu) ^ 0x0000F0F0u` in C (`==` binds tighter
+than `^`), flagged by `-Wparentheses`, fixed by adding explicit
+parentheses - a reminder that even verification code needs the same
+scrutiny as the code it's checking. Re-verified clean under
+`-fsanitize=address,undefined`: 19/19, exit 0, 0 compiler warnings, no
+sanitizer diagnostics. Rounds 894/895/896's own harnesses (17/17, 19/19,
+35/35) were all re-run against the shared `ppc_dynarec.c` file to
+confirm no regression - all still pass at their original counts.
+
+**Wii build**: `pcsx2-wii.elf` 3,059,740 bytes / `.dol` 533,792 bytes
+(+1,728 bytes elf over Round 896; dol unchanged, likely alignment/
+padding absorbing the small addition), 0 warnings/errors (devkitPPC
+8.1.0).
+
+**Regression suite**: skipped again this round, same standing rationale
+as Rounds 892-896 (strictly-additive dispatch blocks reusing established
+patterns, nothing existing restructured).
+
+**Status**: 57 opcodes now JIT-accelerated (53 from Round 896 + ADDI/
+ANDI/ORI/XORI). The full base-ISA immediate-arithmetic/logical family is
+now JIT-compiled: ADDI/ADDIU/SLTI/SLTIU/ANDI/ORI/XORI/LUI. Next up (task
+#882, Round 898-899): the 64-bit DADD/DSUB/DSLL/DSRL/DSRA family - EE-
+specific 64-bit-native opcodes with no 32-bit-then-sign-extend shortcut
+available, a step up in complexity from this round's reuse-heavy work.

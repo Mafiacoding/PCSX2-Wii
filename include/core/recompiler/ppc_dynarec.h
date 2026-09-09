@@ -138,6 +138,22 @@
  * like every opcode before it. BLTZ/BGEZ (REGIMM) and the "likely"
  * variants of every conditional branch (which need delay-slot
  * annulment - a genuinely new capability) are left for a future round.
+ *
+ * Round 896 (task #880) update: BLTZ/BGEZ (REGIMM) and all six "likely"
+ * branches (BLTZL/BGEZL/BEQL/BNEL/BLEZL/BGTZL) complete the branches/
+ * jumps arc Round 894 opened. BLTZ/BGEZ were the trivial srawi-sign-bit
+ * extension Round 895 predicted; the "likely" variants needed the
+ * genuinely new capability Round 895 flagged - delay-slot annulment -
+ * implemented as a new emit_branch_blend_likely() helper that blends
+ * pc/next_pc/branch_pending together (this dynarec's first opcodes to
+ * write ee_state_t.pc directly) using the exact not-taken semantics
+ * grepped from this project's own ee_core.c interpreter: pc jumps
+ * straight to this_pc+8, skipping the delay slot entirely, rather than
+ * executing it. Every generated block is still a single straight-line
+ * PPC sequence with zero real branch instructions, unchanged since
+ * Round 895. This is the last round in the branches/jumps arc - every
+ * base MIPS conditional/unconditional control-transfer opcode this
+ * project's boot traces exercise is now JIT-compiled.
  */
 
 typedef struct {

@@ -37998,3 +37998,112 @@ current build's BIOS boot debug overlay actually running and advancing
 diagnostic slice cap, external confirmation that the emulator genuinely
 boots and executes sustained real code on a real PPC target, independent
 of this file's own host-native verification harnesses.
+
+## Round 896: BLTZ/BGEZ (REGIMM) + all six "likely" branches - delay-slot annulment, the last piece of branch/jump JIT coverage
+
+Closes out Round 895's two remaining gaps: BLTZ/BGEZ (the REGIMM pair
+Round 895 deferred as "a trivial extension of the srawi-sign-bit
+trick") and all six "likely" branches (BLTZL/BGEZL/BEQL/BNEL/BLEZL/
+BGTZL), which need a genuinely new capability - delay-slot annulment -
+that no prior round's opcodes required.
+
+**BLTZ/BGEZ**: exactly the trivial extension predicted. REGIMM's `rt`
+field (not `op` alone) selects the real sub-opcode - the first opcode
+in this dynarec where a flat `op`-keyed dispatch isn't enough, so
+`ee_jit_opcode_supported()` gained a nested switch on `rt` just for
+`op==0x01`. The condition itself reuses BLEZ/BGTZ's `srawi rA,hi,31`
+sign-bit-replication trick with no `<=0`/`>=0` zero-inclusion OR step
+needed (0 is not `<0`, so BLTZ's mask is just the sign bit; BGEZ is its
+complement).
+
+**The "likely" branches - real R5900 semantics, grepped from this
+project's own interpreter (`ee_core.c`) before writing a single line of
+codegen**: a regular branch always executes its delay slot; a Likely
+branch NULLIFIES (skips) it when not taken. `ee_core.c`'s own BRANCH_TO
+macro handles the taken case identically for both kinds (`next_pc =
+this_pc+4+disp`, `branch_pending=1`, `pc` untouched - the delay slot
+still executes normally on the way to the target). The not-taken case is
+where they diverge: a regular branch does nothing further (next_pc/pc
+already hold the correct fallthrough values `ee_step()` set before
+calling in); a Likely branch DIRECTLY OVERWRITES `pc = this_pc+8` and
+`next_pc = this_pc+12` - jumping straight past the delay-slot
+instruction instead of through it - while leaving `branch_pending`
+untouched (relying on the same "already 0" invariant every not-taken
+branch in this file depends on).
+
+**New capability: writing `ee_state_t.pc` directly.** Every branch/jump
+opcode before this round only ever wrote `next_pc`/`branch_pending`;
+annulment is the first case that needs `pc` itself touched, so a new
+`PC_OFFSET` (544, `_Static_assert`-checked in `ee_jit.c` against
+`offsetof(ee_state_t, pc)` exactly like every other offset constant this
+project relies on) joins `EXC_THIS_PC_OFFSET`/`NEXT_PC_OFFSET`/
+`BRANCH_PENDING_OFFSET`.
+
+**`emit_branch_blend_likely()`** - a new 22-PPC-instruction sibling of
+Round 895's `emit_branch_blend()` - takes a "taken" mask already computed
+into SCRATCH_E (identical mask-computation idioms to Round 895: XOR+is-
+zero for BEQL/BNEL, srawi sign-bit for BLTZL/BGEZL/BLEZL/BGTZL) and
+blends THREE fields instead of two: `pc` (old value on taken, `this_pc+8`
+on not-taken), `next_pc` (target on taken, `this_pc+12` on not-taken),
+and `branch_pending` (1 on taken, unchanged on not-taken - identical
+blend to the non-Likely helper). Same architecture as every helper
+before it: pure mask-and/or blending, zero real PPC branch instructions,
+every generated block stays a single straight-line sequence.
+
+**A self-caught buffer-overflow risk, found by hand-counting instruction
+totals BEFORE compiling or shipping anything** (continuing this
+project's pattern from Round 894's LINK zero-extension catch and Round
+895's UBSan catch): BNEL's real worst case is 11 mask-computation
+instructions + `emit_branch_blend_likely()`'s 22-instruction body = 33
+PPC instructions per MIPS instruction, exceeding the dynarec's previous
+32-instruction-per-block ceiling (`ppc_dynarec_init()`'s `words =
+max_instructions * 32 + 1` sizing, and the `ctx->used_words + 32 >
+ctx->capacity_words` guard in `ppc_dynarec_translate_one()`, both set in
+Round 890 based on DIV/DIVU's worst case). **Fixed** by raising both to
+40 (comfortable headroom over 33+1-for-blr), with an updated comment on
+each documenting BNEL as the new worst case. This was caught purely by
+disciplined arithmetic before any build/test run - never actually
+overflowed in practice, but would have corrupted adjacent heap memory
+the first time a real BNEL got JIT-compiled had it shipped unfixed.
+
+**Verification: `r896_likely_branches_verify.c`**, same methodology as
+every prior round - real `ppc_dynarec_translate_one()` output,
+interpreted (never executed) by the shared PPC750-subset simulator. No
+new simulator DECODES were needed (`emit_branch_blend_likely()` only
+uses opcodes the Round 895 simulator already handles); the harness
+itself gained `PC_OFFSET` read/write helpers since this is the first
+round that needs to inspect `pc` directly. 35/35 checks passed, covering:
+BLTZ/BGEZ taken and not-taken (confirming `pc` is left untouched by the
+*non*-Likely blend, i.e. regular REGIMM branches do NOT annul); BLTZL/
+BGEZL/BEQL/BNEL/BLEZL/BGTZL each taken (confirming the delay slot
+executes normally, `pc` stays at fallthrough+4) AND not-taken (confirming
+the critical annulment behavior: `pc` jumps to `this_pc+8`, `next_pc` to
+`this_pc+12`, `branch_pending` stays untouched) across the sign/zero/
+positive spectrum for the sign-based variants; and a dedicated check
+that BNEL's REAL compiled output is exactly 33 instructions (not just
+the hand-counted prose tally) and fits under the new 40-word ceiling with
+the trailing `blr` included. Re-verified clean under
+`-fsanitize=address,undefined`: 35/35, exit 0, no sanitizer diagnostics.
+Round 894's `r894_jumps_verify.c` (17/17) and Round 895's
+`r895_branches_verify.c` (19/19) were both re-run against the shared
+`ppc_dynarec.c`/`ee_jit.c` files to confirm no regression - both still
+pass at their original counts.
+
+**Wii build**: `pcsx2-wii.elf` 3,058,012 bytes / `.dol` 533,792 bytes
+(+14,328 / +1,120 bytes over Round 895, consistent with the added
+codegen), 0 warnings/errors (devkitPPC 8.1.0).
+
+**Regression suite**: skipped again this round, same standing rationale
+as Rounds 892-895 (strictly-additive dispatch blocks and one new helper,
+nothing existing restructured or reordered).
+
+**Status**: 53 opcodes now JIT-accelerated (47 from Round 895 +
+BLTZ/BGEZ/BLTZL/BGEZL/BEQL/BNEL/BLEZL/BGTZL). Every base MIPS
+conditional and unconditional branch/jump opcode this project's boot
+traces are known to exercise is now JIT-compiled: J/JAL/JR/JALR,
+BEQ/BNE/BLEZ/BGTZ/BLTZ/BGEZ, and all six Likely counterparts. This
+closes out the branches/jumps arc that Round 894 opened. Next up (task
+#881, Round 897): the remaining ALU immediates (ANDI/ORI/XORI/ADDI) -
+pure register-to-register-shaped work with no new capability needed,
+a lower-risk round after two rounds of genuinely new control-flow
+machinery.

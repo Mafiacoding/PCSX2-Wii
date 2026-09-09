@@ -55,6 +55,13 @@ _Static_assert(offsetof(ee_state_t, branch_pending) == 684,
                "ppc_dynarec.c's BRANCH_PENDING_OFFSET assumes branch_pending sits at this exact byte offset");
 _Static_assert(offsetof(ee_state_t, exc_this_pc) == 1456,
                "ppc_dynarec.c's EXC_THIS_PC_OFFSET assumes exc_this_pc sits at this exact byte offset");
+/* Round 896 (task #880): the "likely" branches (BLTZL/BGEZL/BEQL/BNEL/
+ * BLEZL/BGTZL) are this dynarec's first opcodes to WRITE ee_state_t.pc
+ * directly (every prior branch/jump opcode only ever wrote next_pc/
+ * branch_pending) - see ppc_dynarec.c's PC_OFFSET comment for why the
+ * not-taken/annulled case needs this. */
+_Static_assert(offsetof(ee_state_t, pc) == 544,
+               "ppc_dynarec.c's PC_OFFSET assumes pc sits at this exact byte offset");
 
 #define EE_JIT_CACHE_SLOTS 8192u /* power of two - see ee_jit_cache_lookup()/insert() */
 
@@ -106,9 +113,17 @@ static uint64_t g_jit_executed = 0;
  * branches, done WITHOUT any real PPC branch instruction (an all-0s/
  * all-1s "taken" mask blended into next_pc/branch_pending, the same
  * technique MOVZ/MOVN already used for conditional register writes -
- * see ppc_dynarec.c's emit_branch_blend() comment). BLTZ/BGEZ (REGIMM)
- * and the "likely" variants of every conditional branch are NOT
- * included this round - left for a future round. Kept in sync by hand with
+ * see ppc_dynarec.c's emit_branch_blend() comment). BLTZ/BGEZ (REGIMM,
+ * op 0x01, gated on rt==0x00/0x01 - REGIMM's rt field selects which of
+ * several unrelated sub-opcodes this really is, so unlike every opcode
+ * above it can't be pre-filtered on op alone) and the "likely" variants
+ * of every conditional branch (BLTZL/BGEZL via REGIMM rt==0x02/0x03,
+ * BEQL/BNEL op 0x14/0x15, BLEZL/BGTZL op 0x16/0x17), new in Round 896 -
+ * these reuse emit_branch_blend_likely(), a 22-instruction sibling of
+ * emit_branch_blend() that additionally blends ee_state_t.pc itself on
+ * the not-taken path, matching the real R5900's delay-slot-annulment
+ * semantics for "likely" branches (see ppc_dynarec.c's PC_OFFSET and
+ * emit_branch_blend_likely() comments). Kept in sync by hand with
  * translate_one()'s own dispatch - see that function's own comments
  * for the authoritative list. This is a cheap pre-filter so the (much
  * more expensive) cache lookup/compile path is never attempted for the
@@ -132,6 +147,23 @@ static int ee_jit_opcode_supported(uint32_t instr)
     if (op == 0x03u) return 1; /* JAL (Round 894) */
     if (op == 0x04u || op == 0x05u) return 1; /* BEQ / BNE (Round 895) */
     if (op == 0x06u || op == 0x07u) return 1; /* BLEZ / BGTZ (Round 895) */
+    if (op == 0x14u || op == 0x15u) return 1; /* BEQL / BNEL (Round 896) */
+    if (op == 0x16u || op == 0x17u) return 1; /* BLEZL / BGTZL (Round 896) */
+    if (op == 0x01u) {
+        /* REGIMM: rt selects the real sub-opcode, not a flat op-only
+         * dispatch like every other entry in this function - only
+         * BLTZ/BGEZ/BLTZL/BGEZL are implemented by ppc_dynarec.c
+         * (Round 896); every other REGIMM rt value (TGEI/TLTI/etc.)
+         * falls through to the interpreter, same as before this round. */
+        uint32_t rt = (instr >> 16) & 0x1Fu;
+        switch (rt) {
+        case 0x00: case 0x01: /* BLTZ / BGEZ */
+        case 0x02: case 0x03: /* BLTZL / BGEZL */
+            return 1;
+        default:
+            return 0;
+        }
+    }
     if (op == 0x00u) {
         uint32_t funct = instr & 0x3Fu;
         switch (funct) {

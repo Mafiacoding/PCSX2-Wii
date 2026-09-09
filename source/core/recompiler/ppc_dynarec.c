@@ -435,10 +435,24 @@ static inline uint32_t enc_rlwinm(int rA, int rS, int sh, int mb, int me)
  * ...) values in ee_jit.c, right next to the existing HI_IDX/LO_IDX
  * _Static_assert block - if ee_core.h's struct layout ever changes,
  * that fires a compile error instead of silently corrupting control
- * flow the next time J/JAL/JR/JALR gets JIT-compiled. */
+ * flow the next time J/JAL/JR/JALR gets JIT-compiled.
+ *
+ * Round 896 (task #880) update: PC_OFFSET (`pc`, 544) joins this list -
+ * the "likely" branch family (BEQL/BNEL/BLEZL/BGTZL/BLTZL/BGEZL) is the
+ * first opcode category that needs to write `pc` directly rather than
+ * only `next_pc`. Real MIPS II+ "likely" semantics NULLIFY the delay
+ * slot when the branch isn't taken - ee_core.c's own interpreter
+ * (search for "Likely" in ee_core.c) does this by directly overwriting
+ * BOTH `st->pc = fallthrough_pc + 4` (= this_pc + 8, skipping the delay
+ * slot instruction's normal fetch address entirely) AND `st->next_pc =
+ * fallthrough_pc + 8` (= this_pc + 12) on the not-taken path, WITHOUT
+ * going through BRANCH_TO()/branch_pending at all - see
+ * emit_branch_blend_likely()'s own comment for how this dynarec
+ * reproduces that exactly. */
 #define EXC_THIS_PC_OFFSET     ((int16_t)1456)
 #define NEXT_PC_OFFSET         ((int16_t)548)
 #define BRANCH_PENDING_OFFSET  ((int16_t)684)
+#define PC_OFFSET              ((int16_t)544)
 
 /* Round 891 (task #875): absolute addresses of the two real EE
  * memory-access entry points LW/SW need to call. Declared here with a
@@ -644,6 +658,61 @@ static void emit_branch_blend(ppc_codegen_ctx_t *ctx, int32_t disp)
     emit(ctx, enc_stb(SCRATCH_A, CTX_REG, BRANCH_PENDING_OFFSET));
 }
 
+/* Round 896 (task #880): the "Likely" counterpart of emit_branch_blend()
+ * above. Given a "taken" mask already computed into SCRATCH_E and this
+ * instruction's compile-time PC-relative displacement, reproduces
+ * ee_core.c's own Likely-branch semantics exactly:
+ *
+ *   taken:     next_pc = this_pc + disp; branch_pending = 1 (same as a
+ *              regular branch - the delay slot executes normally, then
+ *              control transfers to the target).
+ *   not taken: pc = this_pc + 8; next_pc = this_pc + 12; branch_pending
+ *              is left UNTOUCHED (not set to 0 explicitly - it's
+ *              already 0 coming in, same invariant every other not-
+ *              taken branch in this file relies on). This NULLIFIES the
+ *              delay slot: the instruction physically sitting at
+ *              this_pc+4 is skipped entirely rather than executed, by
+ *              jumping pc directly past it instead of through the
+ *              normal fallthrough+delay-slot path.
+ *
+ * Both pc and next_pc are computed via the same all-0s/all-1s mask
+ * blend as emit_branch_blend() - no real PPC branch instruction, no
+ * internal control flow, matching this whole file's architecture.
+ * branch_pending's blend is identical to the non-Likely helper's (write
+ * 1 when taken, otherwise re-store its own old value unchanged). */
+static void emit_branch_blend_likely(ppc_codegen_ctx_t *ctx, int32_t disp)
+{
+    emit(ctx, enc_lwz(SCRATCH_G, CTX_REG, EXC_THIS_PC_OFFSET)); /* this_pc */
+    emit(ctx, enc_addi(SCRATCH_H, SCRATCH_G, 8));  /* skip_pc = this_pc + 8 */
+    emit(ctx, enc_addi(SCRATCH_A, SCRATCH_G, 12)); /* skip_next_pc = this_pc + 12 */
+    emit_load_const32(ctx, SCRATCH_B, (uint32_t)disp);
+    emit(ctx, enc_add(SCRATCH_G, SCRATCH_G, SCRATCH_B)); /* SCRATCH_G = target = this_pc + disp */
+
+    emit(ctx, enc_nor(SCRATCH_F, SCRATCH_E, SCRATCH_E)); /* SCRATCH_F = notmask */
+
+    /* pc = (old_pc & mask) | (skip_pc & notmask) */
+    emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, PC_OFFSET)); /* old pc (== fallthrough_pc == this_pc+4) */
+    emit(ctx, enc_and(SCRATCH_B, SCRATCH_B, SCRATCH_E));
+    emit(ctx, enc_and(SCRATCH_H, SCRATCH_H, SCRATCH_F));
+    emit(ctx, enc_or(SCRATCH_B, SCRATCH_B, SCRATCH_H));
+    emit(ctx, enc_stw(SCRATCH_B, CTX_REG, PC_OFFSET));
+
+    /* next_pc = (target & mask) | (skip_next_pc & notmask) */
+    emit(ctx, enc_and(SCRATCH_G, SCRATCH_G, SCRATCH_E));
+    emit(ctx, enc_and(SCRATCH_A, SCRATCH_A, SCRATCH_F));
+    emit(ctx, enc_or(SCRATCH_G, SCRATCH_G, SCRATCH_A));
+    emit(ctx, enc_stw(SCRATCH_G, CTX_REG, NEXT_PC_OFFSET));
+
+    /* branch_pending = (1 & mask) | (old_bp & notmask) - identical blend
+     * to the non-Likely helper. */
+    emit(ctx, enc_lbz(SCRATCH_H, CTX_REG, BRANCH_PENDING_OFFSET));
+    emit(ctx, enc_addi(SCRATCH_A, 0, 1));
+    emit(ctx, enc_and(SCRATCH_A, SCRATCH_A, SCRATCH_E));
+    emit(ctx, enc_and(SCRATCH_H, SCRATCH_H, SCRATCH_F));
+    emit(ctx, enc_or(SCRATCH_A, SCRATCH_A, SCRATCH_H));
+    emit(ctx, enc_stb(SCRATCH_A, CTX_REG, BRANCH_PENDING_OFFSET));
+}
+
 /* Byte offset of MIPS register `r`'s ppc_dynarec_gpr128_t slot within
  * the context array (16 bytes/slot: 8-byte ud0 + 8-byte ud1 - see the
  * header's endianness note before touching these). REG_HI/REG_LO give
@@ -720,8 +789,17 @@ int ppc_dynarec_init(ppc_codegen_ctx_t *ctx, size_t max_instructions)
      * out at 24; BLEZ/BGTZ (8-9 setup instructions + the same 15-
      * instruction tail) top out at 24 as well. Both still comfortably
      * under DIV/DIVU's 32-instruction ceiling, so again no change to
-     * `words` was needed this round. */
-    size_t words = max_instructions * 32 + 1;
+     * `words` was needed this round.
+     *
+     * Round 896 (task #880) update: the "likely" branches (BLTZL/BGEZL/
+     * BEQL/BNEL/BLEZL/BGTZL) need emit_branch_blend_likely() instead of
+     * emit_branch_blend() - 22 instructions instead of 15, because the
+     * not-taken path has to blend THREE fields (pc/next_pc/branch_pending)
+     * instead of two. BNEL is the new worst case at 33 instructions total
+     * (11-instruction mask computation + the 22-instruction helper body),
+     * which EXCEEDS the previous 32-instruction ceiling. Bumped to 40 for
+     * headroom. */
+    size_t words = max_instructions * 40 + 1;
     ctx->code = memalign(32, words * sizeof(uint32_t));
     if (!ctx->code)
         return -1;
@@ -746,7 +824,7 @@ static void emit(ppc_codegen_ctx_t *ctx, uint32_t instr)
 
 int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
 {
-    if (ctx->used_words + 32 > ctx->capacity_words) /* Round 890: was 20, DIV/DIVU's 32-word worst case */
+    if (ctx->used_words + 40 > ctx->capacity_words) /* Round 896: was 32, BNEL's 33-word worst case (emit_branch_blend_likely) */
         return -1; /* out of buffer space */
 
     uint32_t op    = (mips_instr >> 26) & 0x3F;
@@ -1608,18 +1686,84 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
         return 0;
     }
 
-    /* Unsupported: REGIMM (BLTZ/BGEZ), "likely" branch variants, MMI,
-     * COP1/2, everything else. LB/LBU/LH/LHU/LW/LWU/SB/SH/SW/LD/SD (the
-     * full base-ISA integer load/store family), J/JAL/JR/JALR (the full
-     * set of UNCONDITIONAL control-transfer opcodes), and now
-     * BEQ/BNE/BLEZ/BGTZ (the four non-REGIMM conditional branches) are
-     * all handled above. BLTZ/BGEZ (op=0x01, REGIMM) reuse this round's
-     * srawi-sign-bit trick trivially, and the "likely" variants of every
-     * conditional branch (BEQL/BNEL/BLEZL/BGTZL/BLTZL/BGEZL) need delay-
-     * slot ANNULMENT on the not-taken path (a capability this dynarec
-     * doesn't have yet, since it's never needed to suppress the
-     * following instruction before) - both deliberately left for the
-     * next round rather than guessed at here. */
+    if (op == 0x01) {
+        /* MIPS REGIMM (op=0x01): the rt field selects the sub-opcode.
+         * Only BLTZ(0x00)/BGEZ(0x01)/BLTZL(0x02)/BGEZL(0x03) are handled
+         * this round; other REGIMM sub-opcodes (BLTZAL/BGEZAL/-ALL,
+         * TGEI/TLTI/etc. traps) fall through to the Unsupported return
+         * below untouched. */
+        if (rt == 0x00 || rt == 0x01) {
+            /* MIPS: bltz/bgez rs, offset -> if ((int64_t)GPR(rs) </>= 0)
+             * BRANCH_TO(...). Trivial extension of BLEZ/BGTZ's srawi
+             * trick above, but simpler: BLTZ tests ONLY the sign bit (no
+             * exactly-zero special case needed, since 0 is not < 0). */
+            emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_HI(rs)));
+            emit(ctx, enc_srawi(SCRATCH_E, SCRATCH_C, 31)); /* <0 mask */
+            if (rt == 0x01) /* BGEZ wants the opposite condition */
+                emit(ctx, enc_nor(SCRATCH_E, SCRATCH_E, SCRATCH_E));
+            emit_branch_blend(ctx, 4 + (imm * 4));
+            return 0;
+        }
+        if (rt == 0x02 || rt == 0x03) {
+            /* MIPS: bltzl/bgezl rs, offset - REGIMM's Likely pair. Same
+             * sign-bit mask as BLTZ/BGEZ, but routed through
+             * emit_branch_blend_likely() for delay-slot annulment. */
+            emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_HI(rs)));
+            emit(ctx, enc_srawi(SCRATCH_E, SCRATCH_C, 31));
+            if (rt == 0x03) /* BGEZL wants the opposite condition */
+                emit(ctx, enc_nor(SCRATCH_E, SCRATCH_E, SCRATCH_E));
+            emit_branch_blend_likely(ctx, 4 + (imm * 4));
+            return 0;
+        }
+        /* Other REGIMM sub-opcodes: fall through to Unsupported. */
+    }
+
+    if (op == 0x14 || op == 0x15) {
+        /* MIPS: beql/bnel rs, rt, offset - the Likely pair of BEQ/BNE
+         * above. Identical mask computation, routed through
+         * emit_branch_blend_likely() instead of emit_branch_blend() for
+         * delay-slot annulment on the not-taken path (see that helper's
+         * own comment for the exact ee_core.c semantics it reproduces). */
+        emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_HI(rs)));
+        emit(ctx, enc_lwz(SCRATCH_D, CTX_REG, REG_HI(rt)));
+        emit(ctx, enc_xor(SCRATCH_C, SCRATCH_C, SCRATCH_D));
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs)));
+        emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_LO(rt)));
+        emit(ctx, enc_xor(SCRATCH_A, SCRATCH_A, SCRATCH_B));
+        emit(ctx, enc_or(SCRATCH_A, SCRATCH_A, SCRATCH_C));
+        emit(ctx, enc_addi(SCRATCH_B, 0, 1));
+        emit(ctx, enc_subfc(SCRATCH_D, SCRATCH_B, SCRATCH_A));
+        emit(ctx, enc_subfe(SCRATCH_E, SCRATCH_B, SCRATCH_B));
+        if (op == 0x15) /* BNEL wants the opposite condition */
+            emit(ctx, enc_nor(SCRATCH_E, SCRATCH_E, SCRATCH_E));
+        emit_branch_blend_likely(ctx, 4 + (imm * 4));
+        return 0;
+    }
+
+    if (op == 0x16 || op == 0x17) {
+        /* MIPS: blezl/bgtzl rs, offset - the Likely pair of BLEZ/BGTZ
+         * above. Identical mask computation, routed through
+         * emit_branch_blend_likely(). */
+        emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_HI(rs)));
+        emit(ctx, enc_srawi(SCRATCH_E, SCRATCH_C, 31));
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs)));
+        emit(ctx, enc_or(SCRATCH_A, SCRATCH_A, SCRATCH_C));
+        emit(ctx, enc_addi(SCRATCH_B, 0, 1));
+        emit(ctx, enc_subfc(SCRATCH_D, SCRATCH_B, SCRATCH_A));
+        emit(ctx, enc_subfe(SCRATCH_D, SCRATCH_B, SCRATCH_B));
+        emit(ctx, enc_or(SCRATCH_E, SCRATCH_E, SCRATCH_D));
+        if (op == 0x17) /* BGTZL wants the opposite condition */
+            emit(ctx, enc_nor(SCRATCH_E, SCRATCH_E, SCRATCH_E));
+        emit_branch_blend_likely(ctx, 4 + (imm * 4));
+        return 0;
+    }
+
+    /* Unsupported: remaining REGIMM sub-opcodes (BLTZAL/BGEZAL/-ALL,
+     * trap instructions), MMI, COP1/2, everything else. Every base
+     * conditional/unconditional MIPS branch/jump opcode this project's
+     * boot traces are known to exercise is now handled: J/JAL/JR/JALR,
+     * BEQ/BNE/BLEZ/BGTZ/BLTZ/BGEZ, and their six "likely" counterparts
+     * (BEQL/BNEL/BLEZL/BGTZL/BLTZL/BGEZL). */
     return -1;
 }
 

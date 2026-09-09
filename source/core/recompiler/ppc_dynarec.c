@@ -3724,6 +3724,146 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
                     }
                     return 0;
                 }
+                if (idx >= 16 && idx <= 23) {
+                    /* Round 911 (task #896): VITOF0/4/12/15(idx16-19)/
+                     * VFTOI0/4/12/15(idx20-23) - fixed-point<->float
+                     * conversion, the last members of the unary/data-
+                     * movement cluster (idx 16-23/29/48/49) this file's
+                     * own comment documents; VABS(29)/VMOVE(48)/VMR32(49)
+                     * already JIT'd above (Rounds 908/910). Re-verified
+                     * against ee_core.c's real case body (~lines 8580-
+                     * 8628, itself ported bit-exact from PCSX2's
+                     * VUops.cpp intToFloat<Offset>/floatToInt<Offset>
+                     * templates): offset_n selects a power-of-two scale
+                     * factor baked directly into a float's raw exponent
+                     * bits (0x3F800000 -/+ (offset_n<<23) for VITOF/
+                     * VFTOI respectively), applied AFTER the int->float
+                     * conversion for VITOF but BEFORE the float->int
+                     * conversion for VFTOI. dest=FT, src=FS, fd unused,
+                     * guarded by ft==0 - same convention as the rest of
+                     * this cluster. destmask still selects which of the
+                     * 4 lanes participate (confirmed against ee_core.c's
+                     * own per-lane destmask loop at line 8596-8597,
+                     * unlike VABS/VCLIP's few special cases above).
+                     *
+                     * VITOF's core int->float step has no real PPC750/
+                     * Gekko FPU instruction at all (see ADDR_EE_CVT_S_W's
+                     * own comment, ~line 740) - reuses that EXACT SAME
+                     * real ee_jit_cvt_s_w_helper() trampoline CVT.S.W
+                     * (Round 906b) established, since it's a trivial
+                     * `(float)(int32_t)x` cast identical to what VITOF's
+                     * un-scaled core conversion needs; the offset scale
+                     * (if any) is then applied afterward with a plain
+                     * fmuls on the trampoline's f1 result - no value
+                     * needs to survive the call except what's already
+                     * naturally in f1 when it returns, so (unlike
+                     * VRSQRT's trampoline above) nothing needs to be
+                     * spilled to the stack across this particular call.
+                     *
+                     * VFTOI's core float->int step reuses fctiwz (PPC
+                     * Book I base ISA, present on Gekko - see CVT.W.S's
+                     * own comment, ~line 3031) plus an exponent-threshold
+                     * saturation blend in the SAME shape CVT.W.S (idx==24
+                     * funct dispatch, ~line 3022) already established
+                     * (same subfc/subfe borrow-to-mask idiom turning a
+                     * signed comparison into an unsigned one, same
+                     * clamp_val=0x7fffffff^signmask derivation) - but
+                     * NOT byte-for-byte identical, since VFTOI's real
+                     * threshold test is `>=0x4F000000` (ee_core.c line
+                     * 8619), a DIFFERENT constant AND a DIFFERENT
+                     * comparison operator than CVT.W.S's `>0x4E800000`
+                     * (confirmed by direct re-read of both real case
+                     * bodies - not assumed identical just because both
+                     * are "a float->int saturation gap"). To get a
+                     * `>=` test out of the same subfc/subfe idiom,
+                     * subfc(D,threshold,mag_exp) computes mag_exp-
+                     * threshold with CA=1 iff mag_exp>=threshold (the
+                     * exact polarity wanted), then subfe(E,D,D) turns
+                     * that CA into 0(CA=1)/allOnes(CA=0) - the OPPOSITE
+                     * of what's wanted (out-of-range should map to
+                     * allOnes) - so an explicit nor() flips it, unlike
+                     * CVT.W.S's subfc(D,mag_exp,threshold) ordering
+                     * which already comes out with the right polarity
+                     * for its own `>` test without an extra flip. */
+                    if (ft != 0) {
+                        int is_ftoi = (idx >= 20);
+                        uint32_t offset_n = (idx & 0x3u) == 0u ? 0u : (idx & 0x3u) == 1u ? 4u : (idx & 0x3u) == 2u ? 12u : 15u;
+                        for (int lane = 0; lane < 4; lane++) {
+                            if (!(destmask & (0x8u >> lane)))
+                                continue;
+                            emit(ctx, enc_addi(1, 1, -16)); /* push 16-byte scratch frame */
+                            if (!is_ftoi) {
+                                /* VITOF: int->float via trampoline, then optional scale */
+                                emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, VU0_VF_OFF(fs, (uint32_t)lane))); /* raw int32 */
+                                emit(ctx, enc_stw(SCRATCH_A, 1, 8));
+
+                                emit(ctx, enc_stw(14, 1, 0)); /* save caller's r14 */
+                                emit(ctx, enc_stw(15, 1, 4)); /* save caller's r15 */
+                                emit(ctx, enc_or(15, CTX_REG, CTX_REG)); /* r15 = ctx */
+                                emit(ctx, enc_mflr(14));
+                                emit(ctx, enc_lwz(3, 1, 8)); /* r3 = int32 argument */
+                                emit_load_const32(ctx, 12, ADDR_EE_CVT_S_W);
+                                emit(ctx, enc_mtctr(12));
+                                emit(ctx, enc_bctrl());                  /* f1 = (float)ival */
+                                emit(ctx, enc_mtlr(14));
+                                emit(ctx, enc_or(CTX_REG, 15, 15));      /* restore ctx into r3 */
+                                emit(ctx, enc_lwz(14, 1, 0));
+                                emit(ctx, enc_lwz(15, 1, 4));
+
+                                if (offset_n) {
+                                    uint32_t scale_bits = 0x3F800000u - (offset_n << 23);
+                                    emit_load_const32(ctx, SCRATCH_A, scale_bits);
+                                    emit(ctx, enc_stw(SCRATCH_A, 1, 8));
+                                    emit(ctx, enc_lfs(2, 1, 8));   /* f2 = scale */
+                                    emit(ctx, enc_fmuls(1, 1, 2)); /* f1 *= scale */
+                                }
+
+                                emit(ctx, enc_stfs(1, 1, 8));
+                                emit(ctx, enc_lwz(SCRATCH_A, 1, 8));
+                                emit(ctx, enc_stw(SCRATCH_A, CTX_REG, VU0_VF_OFF(ft, (uint32_t)lane)));
+                            } else {
+                                /* VFTOI: optional scale, then float->int via fctiwz + exponent-threshold saturation blend */
+                                emit(ctx, enc_lfs(0, CTX_REG, VU0_VF_OFF(fs, (uint32_t)lane))); /* f0 = fval */
+                                if (offset_n) {
+                                    uint32_t scale_bits = 0x3F800000u + (offset_n << 23);
+                                    emit_load_const32(ctx, SCRATCH_A, scale_bits);
+                                    emit(ctx, enc_stw(SCRATCH_A, 1, 8));
+                                    emit(ctx, enc_lfs(2, 1, 8));
+                                    emit(ctx, enc_fmuls(0, 0, 2)); /* f0 *= scale */
+                                }
+                                emit(ctx, enc_stfs(0, 1, 8));
+                                emit(ctx, enc_lwz(SCRATCH_A, 1, 8)); /* fbits (post-scale) */
+
+                                /* gt_mask(SCRATCH_E) = allOnes iff mag_exp >= 0x4F000000 (out of range) */
+                                emit(ctx, enc_rlwinm(SCRATCH_B, SCRATCH_A, 0, 1, 8)); /* mag_exp */
+                                emit_load_const32(ctx, SCRATCH_C, 0x4F000000u);
+                                emit(ctx, enc_subfc(SCRATCH_D, SCRATCH_C, SCRATCH_B)); /* D = mag_exp - threshold; CA=1 iff mag_exp>=threshold */
+                                emit(ctx, enc_subfe(SCRATCH_E, SCRATCH_D, SCRATCH_D)); /* CA=1->E=0; CA=0->E=allOnes */
+                                emit(ctx, enc_nor(SCRATCH_E, SCRATCH_E, SCRATCH_E));   /* flip: E = gt_mask */
+
+                                /* clamp_val = (fbits<0) ? 0x80000000 : 0x7fffffff */
+                                emit(ctx, enc_srawi(SCRATCH_F, SCRATCH_A, 31));
+                                emit_load_const32(ctx, SCRATCH_G, 0x7fffffffu);
+                                emit(ctx, enc_xor(SCRATCH_G, SCRATCH_G, SCRATCH_F));
+
+                                /* normal path: fctiwz on the (already scaled) value */
+                                emit(ctx, enc_lfs(0, 1, 8));         /* reload scaled/unscaled float */
+                                emit(ctx, enc_fctiwz(1, 0));
+                                emit(ctx, enc_stfd(1, 1, 0));
+                                emit(ctx, enc_lwz(SCRATCH_H, 1, 4));  /* normal_val (low word) */
+
+                                /* blend: final = gt_mask ? clamp_val : normal_val */
+                                emit(ctx, enc_nor(SCRATCH_D, SCRATCH_E, SCRATCH_E)); /* notmask (in-range) */
+                                emit(ctx, enc_and(SCRATCH_H, SCRATCH_H, SCRATCH_D));
+                                emit(ctx, enc_and(SCRATCH_G, SCRATCH_G, SCRATCH_E));
+                                emit(ctx, enc_or(SCRATCH_H, SCRATCH_H, SCRATCH_G));
+                                emit(ctx, enc_stw(SCRATCH_H, CTX_REG, VU0_VF_OFF(ft, (uint32_t)lane)));
+                            }
+                            emit(ctx, enc_addi(1, 1, 16)); /* pop scratch frame */
+                        }
+                    }
+                    return 0;
+                }
                 return -1; /* every other SPECIAL2 sub-opcode: not yet
                              * JIT-compiled, fall back to the interpreter. */
             }

@@ -510,8 +510,59 @@
  * destination write - required correctness for a self-rotate
  * (ft==fs), not just style, verified with a dedicated test case.
  * 15/15 checks passed under -fsanitize=address,undefined, 0 leaks.
- * Next: task #896, Round 911 - JIT VU0 VFTOI/VITOF conversions +
- * VCALLMS/VCALLMSR.
+ *
+ * Round 911 (task #896) update: JIT VU0 VITOF0/4/12/15 (SPECIAL2
+ * idx16-19)/VFTOI0/4/12/15 (idx20-23) - the fixed-point<->float
+ * conversion members of the unary/data-movement cluster (idx 16-23/29/
+ * 48/49), closing it out (VABS/VMOVE/VMR32 already JIT'd in Rounds
+ * 908/910). dest=FT, src=FS, fd unused, guarded by ft==0 - same
+ * convention as the rest of the cluster; destmask still selects which
+ * lanes participate (confirmed against ee_core.c's real per-lane loop,
+ * unlike VABS/VCLIP's special-cased few). offset_n (0/4/12/15,
+ * selected by the low 2 bits of funct) bakes a power-of-two scale
+ * directly into a float's raw exponent bits, applied AFTER the
+ * int->float conversion for VITOF but BEFORE the float->int conversion
+ * for VFTOI - ported bit-exact from ee_core.c's real intToFloat<Offset>/
+ * floatToInt<Offset> templates. VITOF's int->float step reuses the
+ * EXACT SAME ee_jit_cvt_s_w_helper() trampoline CVT.S.W (Round 906b)
+ * established (PPC750/Gekko has no int->float FPU instruction at all -
+ * see ADDR_EE_CVT_S_W's own comment), needing no stack-spill across the
+ * call since nothing but the trampoline's own f1 result is needed
+ * afterward. VFTOI's float->int step reuses fctiwz (Round 906b's
+ * CVT.W.S) plus an exponent-threshold saturation blend in the same
+ * shape - but NOT byte-for-byte identical: VFTOI's real threshold test
+ * is `>=0x4F000000` (confirmed by direct re-read of ee_core.c's actual
+ * case body), a different constant AND a different comparison operator
+ * than CVT.W.S's `>0x4E800000`, requiring an extra nor() flip on the
+ * subfc/subfe borrow-to-mask idiom to get the right polarity for a
+ * `>=` test instead of CVT.W.S's `>`.
+ *
+ * task #896's VCALLMS/VCALLMSR half was investigated and found
+ * out-of-scope this round: ee_core.c's own vu0_exec_micro()/
+ * vu0_exec_micro_continue() (VU0 micro-mode execution) exist as
+ * infrastructure but are never called from anywhere in the real COP2
+ * opcode dispatch (confirmed by grep - zero call sites outside their
+ * own definitions and each other's comments) - VCALLMS/VCALLMSR use a
+ * COP2 encoding form this project's interpreter has never wired up at
+ * all (distinct from both the rs<0x10 MFC2/CFC2/etc. dispatch and the
+ * rs>=0x10 CO-format vector dispatch this file already JITs). Per this
+ * project's own discipline (JIT mirrors a real, already-verified
+ * interpreter case body - never invents behavior the interpreter
+ * itself doesn't have), there is nothing correct to JIT here yet;
+ * wiring VCALLMS/VCALLMSR would require interpreter-side work first,
+ * out of scope for a JIT-only round. Deferred off the JIT closure path
+ * for task #885 entirely (not just to a later round) until the
+ * interpreter gains real VU0 micro-mode dispatch.
+ *
+ * New host-native harness r911_vu0_vitof_vftoi_verify.c extends
+ * r904's ppcsim base with fctiwz/stfd (opcode63/54, same forms Round
+ * 906b's now-deleted harness established) and mflr/mtlr/mtctr/a
+ * literal bctrl match (0x4E800421, checked directly alongside the
+ * existing blr literal - avoiding Round 909's opcode-19-dispatch
+ * collision entirely by not using a range dispatch for bctrl at all).
+ * 13/13 checks passed under -fsanitize=address,undefined, 0 leaks.
+ * Next: task #897, Round 912 - JIT VU0 CFC2/CTC2 control-register
+ * moves + QMFC2/QMTC2.
  */
 
 typedef struct {

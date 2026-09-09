@@ -39345,3 +39345,94 @@ accelerated (VADD/VSUB/VMUL/VMAX/VMINI/VOPMSUB/VABS/VCLIP/VDIV/VSQRT/
 VRSQRT/VMOVE/VMR32), plus VIADD/VISUB/VIAND/VIOR (VI-register scalar
 ALU) and the pre-existing VADDq. Next: task #896 (Round 911: VU0
 VFTOI/VITOF conversions + VCALLMS/VCALLMSR).
+
+## Round 911: JIT VU0 VFTOI/VITOF conversions (task #896)
+
+Closes out the idx=16-23/29/48/49 unary/data-movement cluster this
+project's own comment has tracked since Round 908 (VABS=29, VMOVE=48,
+VMR32=49 already JIT'd; this round adds VITOF0/4/12/15=idx16-19 and
+VFTOI0/4/12/15=idx20-23). Re-verified against ee_core.c's real case
+body (~lines 8580-8628, itself ported bit-exact from PCSX2's
+VUops.cpp intToFloat<Offset>/floatToInt<Offset> templates). Same
+dest=FT/src=FS/fd-unused/ft==0-guard convention as the rest of the
+cluster; destmask still selects participating lanes (confirmed
+against ee_core.c's own per-lane loop - unlike VABS/VCLIP's special-
+cased few, this is the ordinary case).
+
+offset_n (0/4/12/15, selected by funct's low 2 bits) bakes a power-
+of-two scale directly into a float's raw exponent bits
+(0x3F800000 -/+ (offset_n<<23) for VITOF/VFTOI respectively), applied
+AFTER the int->float conversion for VITOF but BEFORE the float->int
+conversion for VFTOI.
+
+VITOF's int->float core has no real PPC750/Gekko FPU instruction at
+all (fcfid postdates this chip's ISA generation - the same fact
+CVT.S.W's Round 906b comment already documents). Rather than re-derive
+a bit-trick workaround, this round reuses the EXACT SAME real
+ee_jit_cvt_s_w_helper() trampoline CVT.S.W established - a trivial
+`(float)(int32_t)x` cast, so the JIT and interpreter are guaranteed to
+agree bit-for-bit. Unlike VRSQRT's trampoline (Round 909), nothing
+needs to be spilled to the stack across this call: the offset scale
+(if any) is applied afterward with a plain fmuls directly on the
+trampoline's own f1 result.
+
+VFTOI's float->int core reuses fctiwz (Round 906b's CVT.W.S) plus an
+exponent-threshold saturation blend in the same overall shape - but
+NOT byte-for-byte identical to CVT.W.S's own blend, a distinction
+caught by direct re-read of both real case bodies rather than assumed:
+VFTOI's real threshold test is `(fbits&0x7F800000)>=0x4F000000`
+(ee_core.c line 8619), a DIFFERENT constant AND a DIFFERENT comparison
+operator (>=, not >) than CVT.W.S's `>0x4E800000`. Getting a `>=` test
+out of the same subfc/subfe borrow-to-mask idiom needs the polarity
+flipped with an extra nor() that CVT.W.S's own `>` test didn't need -
+verified by tracing through both CA=1/CA=0 cases by hand before
+committing to the encoding, not just copy-pasted from the CVT.W.S
+block.
+
+task #896 also named VCALLMS/VCALLMSR, investigated and found
+genuinely out of scope this round: grep confirms ee_core.c's own
+vu0_exec_micro()/vu0_exec_micro_continue() (real VU0 micro-mode
+execution infrastructure, added for MSCAL/MSCNT-class dispatch) have
+ZERO call sites anywhere in the file outside their own definitions and
+each other's comments - they're prepared but never wired into any real
+COP2 opcode dispatch. VCALLMS/VCALLMSR use a COP2 encoding form this
+project's interpreter has never implemented at all (distinct from both
+the rs<0x10 MFC2/CFC2/MTC2/CTC2/QMFC2/QMTC2 dispatch and the rs>=0x10
+CO-format vector dispatch this file already JITs extensively). This
+project's whole JIT methodology is to mirror an already-verified real
+interpreter case body - never to invent behavior the interpreter
+itself doesn't have - so there is nothing correct to JIT here yet.
+Deferred off the JIT closure path entirely (not just to a later round)
+until the interpreter itself gains real VU0 micro-mode dispatch, which
+is out of scope for a JIT-only round.
+
+New harness r911_vu0_vitof_vftoi_verify.c extends the r904 ppcsim base
+with fctiwz/stfd (opcode 63/54, the same forms Round 906b's own
+now-deleted harness established) and mflr/mtlr/mtctr (opcode 31,
+xo=339/467, disambiguated by the SPR sub-field) plus a literal bctrl
+match (0x4E800421) checked directly alongside the existing blr literal
+- deliberately avoiding any opcode-19 range dispatch for bctrl at all,
+sidestepping Round 909's own blr/bcctrl collision bug by construction
+rather than by ordering. 13/13 checks passed under
+-fsanitize=address,undefined, 0 leaks on the first run (int->float/
+float->int round-trips at all 4 offsets, truncation-toward-zero,
+positive/negative saturation clamps, ft==0 guard for both directions,
+partial-destmask lane selection with untouched-lane sentinels).
+
+Regression-checked against all 10 still-present prior harnesses
+(r893/894/895/896/897/898/900/902/903/904: 13/13, 17/17, 19/19,
+35/35, 19/19, 27/27, 25/25, 20/20, 12/12, 13/13) - no regressions, no
+compile warnings.
+
+Wii build: pcsx2-wii.elf 3,270,160 bytes / .dol 547,904 bytes
+(+15,600 elf / +960 dol over Round 910), 0 warnings/errors (devkitPPC
+8.1.0).
+
+Status: task #896 (Round 911) CLOSED - the idx=16-23/29/48/49 unary/
+data-movement cluster is now fully JIT'd; VCALLMS/VCALLMSR correctly
+deferred as an interpreter-side gap, not a JIT gap. task #885 (COP2/
+VU0 umbrella) continues - 15 of the ~15-20 real VU0 macro-mode opcodes
+now JIT-accelerated. Next: task #897 (Round 912: JIT VU0 CFC2/CTC2
+control-register moves + QMFC2/QMTC2 - both already fully implemented
+in the interpreter's rs<0x10 dispatch, so this is a pure JIT-coverage
+round with no interpreter-side investigation needed first).

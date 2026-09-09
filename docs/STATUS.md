@@ -37766,3 +37766,128 @@ all control flow - the natural next increment once resumed. Same
 sandbox limitation as every prior JIT round: real native-PPC-execution
 correctness still can't be verified without Wii hardware or Dolphin
 access here.
+
+## Round 894: J/JAL/JR/JALR - the full unconditional control-transfer family, and a real bug the verify harness caught before shipping
+
+Implements the four MIPS unconditional jump opcodes (J, JAL, JR, JALR)
+in the PPC dynarec - the natural next increment after Round 893 closed
+out the base-ISA load/store family, and the first opcodes in this
+dynarec that touch `ee_state_t` fields OTHER than the flat
+`gpr[32]+hi+lo` register array.
+
+**Why this fits the existing single-instruction-block model at all.**
+`ee_jit_try_execute_one()` is called from `ee_core.c`'s `ee_step()`
+*after* `this_pc`/`fallthrough_pc` bookkeeping has already happened but
+*before* the interpreter switch - critically, `st->exc_this_pc` (the
+CURRENT instruction's own address) is published before the JIT call,
+and `st->next_pc`/`st->branch_pending` are exactly the two fields the
+interpreter's own `BRANCH_TO()` macro writes to hand control flow back
+to `ee_step()`. Since `ppc_dynarec.c`'s context pointer (`CTX_REG`/r3)
+is `&st->gpr[0]`, which is *also* byte offset 0 of the whole
+`ee_state_t` struct (`gpr` is its first field - already asserted by
+Round 890's `_Static_assert`), any `ee_state_t` field is reachable from
+generated code as a plain `lwz`/`stw`/`stb` at its real offset. Three
+new offset constants do this: `EXC_THIS_PC_OFFSET` (1456),
+`NEXT_PC_OFFSET` (548), `BRANCH_PENDING_OFFSET` (684) - each pinned
+against `offsetof(ee_state_t, ...)` by three new `_Static_assert`s in
+`ee_jit.c`, right next to the existing HI_IDX/LO_IDX ones, so a future
+`ee_core.h` layout change fails the build instead of silently
+corrupting control flow.
+
+**Why this is still safe under the instruction-encoding-keyed cache.**
+J/JAL's absolute jump target depends on `(this_pc & 0xF0000000) |
+(index << 2)` - genuinely dependent on WHERE the instruction sits in
+memory, not just its raw encoding. The fix: `this_pc` is read from
+`EXC_THIS_PC_OFFSET` in the CONTEXT at every execution of the cached
+block, not baked into the generated code, while the 26-bit index field
+(which really is part of the encoding) is a compile-time constant
+materialized via the existing `emit_load_const32`. Two new PPC
+encoders needed: `enc_rlwinm` (M-form, used as `rA = rS & 0xF0000000`
+to extract this_pc's top 4 bits - `sh=0, mb=0, me=3`) and `enc_stb`
+(D-form byte store, since `branch_pending` is a `uint8_t` - a plain
+`stw` there would clobber 3 adjacent bytes). Both verified bit-for-bit
+against real devkitPPC (`powerpc-eabi-as`/`objdump`): `rlwinm
+r4,r5,0,0,3` -> `0x54A40006`, `stb r5,684(r3)` -> `0x98A302AC`.
+
+**JR/JALR need nothing new at all** - `JR`'s target is just
+`REG_LO(rs)` (same base-register-read shape LW/SW already use, no
+`this_pc` dependency whatsoever), and `JALR`'s target/link follow the
+same pattern with one added subtlety: `ee_core.c`'s own case body
+captures `tgt` into a local BEFORE conditionally writing `gpr[rd]`,
+specifically so `jalr rd, rs` with `rd==rs` still jumps to the OLD
+`rs` value, not the just-written link address. This block reproduces
+that by reading `REG_LO(rs)` into a scratch register FIRST and never
+touching it again - correct regardless of whether `rd==rs`, verified
+by a dedicated `rd==rs` test case.
+
+**A real correctness bug found and fixed before shipping.** The first
+draft of JAL/JALR's link-register write reused this dynarec's
+established "32-bit-result-then-`srawi`-sign-extend-into-hi" idiom
+(the same pattern ADDIU/ADDU/LUI/etc. all use). That is WRONG for
+LINK: `ee_core.c`'s own `LINK()` macro is `GPR(reg) = this_pc + 8;`,
+where `this_pc` is a plain `uint32_t` and `GPR(reg)` is the 64-bit
+`ud0` field - `this_pc + 8` is computed as a `uint32_t` (C's usual
+arithmetic conversions turn the `int` literal `8` into `unsigned`),
+and assigning a `uint32_t` into a `uint64_t` lvalue is a
+ZERO-extension in C, not a sign-extension. This is DIFFERENT from
+every other 32-bit-result opcode this dynarec has handled - all of
+which really do want sign-extension. Reusing the wrong idiom here
+would have silently produced `gpr[31].hi == 0xFFFFFFFF` (instead of
+the correct `0`) for any KSEG0 return address (`this_pc+8` with bit31
+set - i.e. almost any real EE kernel/BIOS code, which lives at
+`0x80000000+`), corrupting every `JAL`/`JALR $ra` return address in
+practice. Caught by `r894_jumps_verify.c`'s dedicated
+"`this_pc+8` has bit31 set, hi must still be exactly 0" check, which
+failed against the first draft and passed after switching the link
+write to a plain `li 0` + `stw` (matching every other `$zero`-style
+constant-hi-word pattern already used elsewhere in this file, e.g.
+SLTI's `li SCRATCH_B, 0`). Fixed in both the JAL and JALR dispatch
+blocks before this round's harness run, well before any commit.
+
+**`ee_jit_opcode_supported()` and `translate_one()` dispatch** updated
+for `op==0x02` (J), `op==0x03` (JAL), SPECIAL `funct==0x08` (JR),
+`funct==0x09` (JALR) - kept in sync by hand as always.
+
+**Verification: `r894_jumps_verify.c`**, a new host-native harness
+following the established methodology (call the REAL
+`ppc_dynarec_translate_one()`, interpret the generated PPC750 words in
+a purpose-built simulator, never execute them on x86_64). New simulator
+decodes: `rlwinm` (M-form, generic mask extraction) and `stb` (D-form
+byte store); reuses proven `addi`/`addis`/`ori`/`lwz`/`stw`/`or`/
+`srawi` decodes from prior rounds. 17/17 checks passed, including: J's
+target computation for both a plain KUSEG `this_pc` and a KSEG0
+`this_pc` with high bits set (proving the rlwinm-extracted top-4-bits
+really come from CONTEXT at runtime, not a baked-in constant); JAL's
+target + zero-extended link write, including the KSEG0-bit31-set case
+that caught the sign/zero-extension bug above; JR's low-32-bit-only
+target read; JALR with `rd!=0`, with `rd==rs` (the old-value-as-target
+hazard), and with `rd==0` (`$zero` write correctly discarded). Also
+re-verified clean under `-fsanitize=address,undefined` (0 leaks, exit
+0).
+
+**Wii build**: `pcsx2-wii.elf` 3,035,432 bytes / `.dol` 532,064 bytes,
+0 warnings/errors (devkitPPC 8.1.0).
+
+**Regression suite**: the user explicitly directed skipping the full
+135-test suite for this round ("skip full regression it will be fine"),
+extending the same direction given for Rounds 892/893 - noted here
+rather than silently omitted, per this project's transparency
+discipline. The dedicated 17-check `r894_jumps_verify.c` harness plus
+the clean Wii build are what stand in for it this round; this is a
+strictly-additive change (four new `if (op == ...)` dispatch blocks
+plus two new small encoders/offset constants, nothing existing was
+restructured) with the same risk profile as every prior JIT-expansion
+round.
+
+**Status**: 43 opcodes now JIT-accelerated (39 from Round 893 + J/JAL/
+JR/JALR). Every unconditional MIPS control-transfer opcode is now
+JIT-compiled end to end, on top of the complete base-ISA integer
+load/store family. The one remaining genuinely unopened category is
+conditional branches (BEQ/BNE/BLEZ/BGTZ/BLTZ/BGEZ and their -AL/-Likely
+variants) - these need a real 64-bit signed/equality compare emitted
+as PPC condition-register logic (`cmpw` on hi-words, then lo-words, or
+a sign-bit check for the `</>0` family), a codegen capability this
+file doesn't have yet - the natural next increment. Same sandbox
+limitation as every prior JIT round: real native-PPC-execution
+correctness still can't be verified without Wii hardware or Dolphin
+access here.

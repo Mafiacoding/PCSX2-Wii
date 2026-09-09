@@ -32,6 +32,30 @@ _Static_assert(offsetof(ee_state_t, hi) == sizeof(ee_reg128_t) * 32,
 _Static_assert(offsetof(ee_state_t, lo) == sizeof(ee_reg128_t) * 33,
                "ppc_dynarec.c's LO_IDX (33) assumes lo sits immediately after hi");
 
+/* Round 894 (task #878): J/JAL/JR/JALR are the first opcodes whose
+ * generated code touches ee_state_t fields OTHER than the flat
+ * gpr[32]+hi+lo register array - they need to read `exc_this_pc` (to
+ * compute J/JAL's absolute target at RUNTIME, since this dynarec's
+ * cache is keyed by instruction encoding, not address - see
+ * ppc_dynarec.c's EXC_THIS_PC_OFFSET comment) and write `next_pc`/
+ * `branch_pending` (to hand control-flow back to ee_step() exactly the
+ * way its own BRANCH_TO() macro does). This works because CTX_REG
+ * (r3) is `&st->gpr[0]`, which - per the _Static_assert above - is
+ * also byte offset 0 of the WHOLE ee_state_t struct, so any field is
+ * reachable as a plain lwz/stw/stb at its real offset. These three
+ * asserts pin those offsets against ee_core.h's actual layout at
+ * COMPILE TIME (on whichever target actually builds this file, host or
+ * GEKKO, so any host/PPC struct-padding difference would be caught
+ * here too) - if ee_core.h ever moves pc/next_pc/branch_pending/
+ * exc_this_pc, this fires a compile error instead of J/JAL/JR/JALR
+ * silently corrupting control flow the next time one gets JIT-compiled. */
+_Static_assert(offsetof(ee_state_t, next_pc) == 548,
+               "ppc_dynarec.c's NEXT_PC_OFFSET assumes next_pc sits at this exact byte offset");
+_Static_assert(offsetof(ee_state_t, branch_pending) == 684,
+               "ppc_dynarec.c's BRANCH_PENDING_OFFSET assumes branch_pending sits at this exact byte offset");
+_Static_assert(offsetof(ee_state_t, exc_this_pc) == 1456,
+               "ppc_dynarec.c's EXC_THIS_PC_OFFSET assumes exc_this_pc sits at this exact byte offset");
+
 #define EE_JIT_CACHE_SLOTS 8192u /* power of two - see ee_jit_cache_lookup()/insert() */
 
 typedef struct {
@@ -65,12 +89,22 @@ static uint64_t g_jit_executed = 0;
  * LB/LBU/LH/LHU/LWU/SB/SH (op 0x20/0x24/0x21/0x25/0x27/0x28/0x29),
  * new in Round 892 - the same call-emission mechanism extended to the
  * rest of the base-ISA byte/halfword/unsigned-word loads and stores;
- * and LD/SD (op 0x37/0x3F), new in Round 893 - the same mechanism one
+ * LD/SD (op 0x37/0x3F), new in Round 893 - the same mechanism one
  * more time, now handling a genuine 64-bit callee value via a PowerPC
  * EABI register PAIR (r3:r4 for LD's return, r5:r6 for SD's argument)
  * instead of a single 32-bit register (see ppc_dynarec.c's
- * ADDR_EE_MEM_READ64/WRITE64 comment). This completes the full
- * base-ISA integer load/store family. Kept in sync by hand with
+ * ADDR_EE_MEM_READ64/WRITE64 comment) - this completes the full
+ * base-ISA integer load/store family; and J/JAL (op 0x02/0x03) and
+ * JR/JALR (SPECIAL funct 0x08/0x09), new in Round 894 - the full set
+ * of unconditional control-transfer opcodes, this dynarec's first
+ * opcodes that touch ee_state_t fields other than the gpr/hi/lo
+ * register array (exc_this_pc/next_pc/branch_pending - see
+ * ppc_dynarec.c's EXC_THIS_PC_OFFSET/NEXT_PC_OFFSET/
+ * BRANCH_PENDING_OFFSET comment for why that's safe under this
+ * dynarec's instruction-encoding-keyed cache). Conditional branches
+ * (BEQ/BNE/etc.) are NOT included this round - they need a genuine
+ * 64-bit compare emitted as real PPC condition-register logic, a
+ * codegen capability this file doesn't have yet. Kept in sync by hand with
  * translate_one()'s own dispatch - see that function's own comments
  * for the authoritative list. This is a cheap pre-filter so the (much
  * more expensive) cache lookup/compile path is never attempted for the
@@ -90,12 +124,15 @@ static int ee_jit_opcode_supported(uint32_t instr)
     if (op == 0x2Bu) return 1; /* SW (Round 891) */
     if (op == 0x37u) return 1; /* LD (Round 893) */
     if (op == 0x3Fu) return 1; /* SD (Round 893) */
+    if (op == 0x02u) return 1; /* J (Round 894) */
+    if (op == 0x03u) return 1; /* JAL (Round 894) */
     if (op == 0x00u) {
         uint32_t funct = instr & 0x3Fu;
         switch (funct) {
         case 0x00: /* SLL (and the all-zero-word NOP encoding, harmlessly - see translate_one's rd==0 guard) */
         case 0x02: case 0x03: /* SRL / SRA */
         case 0x04: case 0x06: case 0x07: /* SLLV / SRLV / SRAV */
+        case 0x08: case 0x09: /* JR / JALR (Round 894) */
         case 0x0A: case 0x0B: /* MOVZ / MOVN */
         case 0x10: case 0x11: case 0x12: case 0x13: /* MFHI / MTHI / MFLO / MTLO */
         case 0x18: case 0x19: /* MULT / MULTU */

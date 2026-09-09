@@ -353,6 +353,75 @@ static inline uint32_t enc_extsh(int rA, int rS)
     return (31u << 26) | ((uint32_t)rS << 21) | ((uint32_t)rA << 16) | (922u << 1);
 }
 
+/* Round 894 (task #878): stb rS, d(rA) - same D-form layout as enc_stw
+ * (opcode 38 instead of 36), needed because branch_pending is a
+ * uint8_t field in ee_state_t - a plain enc_stw there would clobber
+ * the 3 adjacent bytes. Verified bit-for-bit against real devkitPPC:
+ * "stb r5,684(r3)" -> 0x98A302AC, reproduced exactly by the formula
+ * below. */
+static inline uint32_t enc_stb(int rS, int rA, int16_t d)
+{
+    return (38u << 26) | ((uint32_t)rS << 21) | ((uint32_t)rA << 16) | (uint16_t)d;
+}
+
+/* Round 894 (task #878): rlwinm rA, rS, SH, MB, ME (M-form) - rotate
+ * left rS by SH bits then mask to the contiguous bit range [MB, ME]
+ * (PPC bit numbering, MSB=0). Only used here as "rA = rS & 0xF0000000"
+ * (SH=0, MB=0, ME=3) to extract J/JAL's real-hardware "keep the top 4
+ * bits of the CURRENT instruction's own address" behavior - this_pc is
+ * read from context at runtime (not baked into the generated code), so
+ * the same cached block stays correct even though J/JAL's absolute
+ * target genuinely depends on WHERE the instruction sits in memory,
+ * not just its raw encoding (see the op==0x02 dispatch block's own
+ * comment for why this is still safe under this dynarec's instruction-
+ * encoding-keyed cache). Verified bit-for-bit against real devkitPPC:
+ * "rlwinm r4,r5,0,0,3" -> 0x54A40006, reproduced exactly by the
+ * formula below. */
+static inline uint32_t enc_rlwinm(int rA, int rS, int sh, int mb, int me)
+{
+    return (21u << 26) | ((uint32_t)rS << 21) | ((uint32_t)rA << 16) |
+           ((uint32_t)sh << 11) | ((uint32_t)mb << 6) | ((uint32_t)me << 1);
+}
+
+/* Round 894 (task #878): byte offsets of the three ee_state_t fields
+ * J/JAL/JR/JALR need beyond the gpr[32]+hi+lo+pc/next_pc/sa_reg/cop0[32]
+ * region this file's REG_HI/REG_LO addressing already covers - CTX_REG
+ * (r3) is exactly `&st->gpr[0]`, which is also byte offset 0 of the
+ * WHOLE ee_state_t struct (see ee_jit.c's _Static_assert on
+ * offsetof(ee_state_t, gpr) == 0), so any ee_state_t field is reachable
+ * from generated code as a plain lwz/stw/stb at its real offset - no
+ * new addressing mechanism needed, just new constants:
+ *
+ *   - EXC_THIS_PC_OFFSET: `exc_this_pc`, the CURRENT instruction's own
+ *     address, published by ee_step() before ee_jit_try_execute_one()
+ *     is ever called (see that call site's comment in ee_core.c). This
+ *     is what lets J/JAL/branch targets be computed correctly even
+ *     though this dynarec's cache is keyed by instruction ENCODING
+ *     (not address) - the immediate/index field bits are baked into
+ *     the generated code at compile time (safe: they're part of the
+ *     encoding), but this_pc itself is read from context at every
+ *     execution (safe: it varies correctly per call site even when the
+ *     same cached block runs for the same encoding at a different
+ *     address).
+ *   - NEXT_PC_OFFSET: `next_pc` - by the time this dynarec's code runs,
+ *     ee_step() has already set this to the correct NON-branch
+ *     fallthrough (this_pc+8); J/JAL/JR/JALR must overwrite it with the
+ *     real jump target, exactly like the interpreter's own BRANCH_TO()
+ *     macro does.
+ *   - BRANCH_PENDING_OFFSET: `branch_pending` (uint8_t) - must be set
+ *     to 1 for every one of these four opcodes (all unconditional,
+ *     always "taken"), marking that the NEXT instruction executes in a
+ *     branch-delay slot, exactly like BRANCH_TO()'s call sites do.
+ *
+ * These three raw offsets are asserted against real offsetof(ee_state_t,
+ * ...) values in ee_jit.c, right next to the existing HI_IDX/LO_IDX
+ * _Static_assert block - if ee_core.h's struct layout ever changes,
+ * that fires a compile error instead of silently corrupting control
+ * flow the next time J/JAL/JR/JALR gets JIT-compiled. */
+#define EXC_THIS_PC_OFFSET     ((int16_t)1456)
+#define NEXT_PC_OFFSET         ((int16_t)548)
+#define BRANCH_PENDING_OFFSET  ((int16_t)684)
+
 /* Round 891 (task #875): absolute addresses of the two real EE
  * memory-access entry points LW/SW need to call. Declared here with a
  * `void *` state-pointer parameter instead of pulling in
@@ -1298,11 +1367,121 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
         return 0;
     }
 
-    /* Unsupported: branches, MMI, COP1/2, everything else. LB/LBU/LH/
-     * LHU/LW/LWU/SB/SH/SW/LD/SD (the full base-ISA integer load/store
-     * family) are all handled above. Real coverage of what remains
-     * would require this switch to be the size of ee_core's
-     * interpreter (or larger, with scheduling). */
+    if (op == 0x02) {
+        /* MIPS: j target -> pc = (this_pc & 0xF0000000) |
+         * ((instr & 0x03FFFFFF) << 2); always taken, delay slot always
+         * executes, no link register write (that's JAL below). The
+         * top-4-bits-of-this_pc part is read from CONTEXT at runtime
+         * (see EXC_THIS_PC_OFFSET's comment for why that's required,
+         * not just a style choice, under this dynarec's encoding-keyed
+         * cache) while the low 26 bits of the target are a plain
+         * compile-time constant baked in via emit_load_const32 - they
+         * really are part of this instruction's own encoding, unlike
+         * this_pc itself. */
+        uint32_t target_low = (mips_instr & 0x03FFFFFFu) << 2;
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, EXC_THIS_PC_OFFSET));
+        emit(ctx, enc_rlwinm(SCRATCH_A, SCRATCH_A, 0, 0, 3)); /* &= 0xF0000000 */
+        emit_load_const32(ctx, SCRATCH_B, target_low);
+        emit(ctx, enc_or(SCRATCH_A, SCRATCH_A, SCRATCH_B));
+        emit(ctx, enc_stw(SCRATCH_A, CTX_REG, NEXT_PC_OFFSET));
+        emit(ctx, enc_addi(SCRATCH_B, 0, 1)); /* li SCRATCH_B, 1 */
+        emit(ctx, enc_stb(SCRATCH_B, CTX_REG, BRANCH_PENDING_OFFSET));
+        return 0;
+    }
+
+    if (op == 0x03) {
+        /* MIPS: jal target -> gpr[31] = this_pc + 8; pc = (this_pc &
+         * 0xF0000000) | ((instr & 0x03FFFFFF) << 2) - same target
+         * computation as J above, plus the LINK(31) write. IMPORTANT:
+         * ee_core.c's own LINK() macro is `GPR(reg) = this_pc + 8;`
+         * where this_pc is a plain uint32_t and GPR(reg) is the 64-bit
+         * `ud0` field - `this_pc + 8` is computed as a uint32_t (usual
+         * arithmetic conversions: the int literal 8 converts to
+         * unsigned), and assigning a uint32_t into a uint64_t lvalue is
+         * a ZERO-extension in C, not a sign-extension. This is
+         * DIFFERENT from every prior 32-bit-result opcode this dynarec
+         * has handled (ADDIU/ADDU/LUI/etc.), which all sign-extend
+         * their 32-bit result via srawi - LINK's result must instead
+         * get a plain 0 high word, matching the interpreter's own
+         * (zero-extending, not sign-extending) real behavior exactly.
+         * The link write is emitted FIRST (its own independent read of
+         * EXC_THIS_PC_OFFSET into SCRATCH_A, immediately consumed and
+         * stored before SCRATCH_A gets reused) so it can't be disturbed
+         * by whatever SCRATCH_A holds afterward for the target calc -
+         * simpler than trying to preserve a value across the two
+         * computations. */
+        uint32_t target_low = (mips_instr & 0x03FFFFFFu) << 2;
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, EXC_THIS_PC_OFFSET));
+        emit(ctx, enc_addi(SCRATCH_A, SCRATCH_A, 8));
+        emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_LO(31)));
+        emit(ctx, enc_addi(SCRATCH_B, 0, 0)); /* li SCRATCH_B, 0 (zero-extend, NOT sign-extend - see comment above) */
+        emit(ctx, enc_stw(SCRATCH_B, CTX_REG, REG_HI(31)));
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, EXC_THIS_PC_OFFSET));
+        emit(ctx, enc_rlwinm(SCRATCH_A, SCRATCH_A, 0, 0, 3)); /* &= 0xF0000000 */
+        emit_load_const32(ctx, SCRATCH_B, target_low);
+        emit(ctx, enc_or(SCRATCH_A, SCRATCH_A, SCRATCH_B));
+        emit(ctx, enc_stw(SCRATCH_A, CTX_REG, NEXT_PC_OFFSET));
+        emit(ctx, enc_addi(SCRATCH_B, 0, 1)); /* li SCRATCH_B, 1 */
+        emit(ctx, enc_stb(SCRATCH_B, CTX_REG, BRANCH_PENDING_OFFSET));
+        return 0;
+    }
+
+    if (op == 0x00 && funct == 0x08) {
+        /* MIPS: jr rs -> pc = (uint32_t)gpr[rs] - truncated to the low
+         * 32 bits, matching ee_core.c's own `(uint32_t)GPR(rs)` cast
+         * (real EE code addresses are always 32-bit even though GPRs
+         * are 64-bit). No link register write, always taken. Unlike
+         * J/JAL, the target here is a plain register value (REG_LO(rs))
+         * with no this_pc dependency at all - same shape as LW/SW's
+         * base-register read, nothing new needed. */
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs)));
+        emit(ctx, enc_stw(SCRATCH_A, CTX_REG, NEXT_PC_OFFSET));
+        emit(ctx, enc_addi(SCRATCH_B, 0, 1)); /* li SCRATCH_B, 1 */
+        emit(ctx, enc_stb(SCRATCH_B, CTX_REG, BRANCH_PENDING_OFFSET));
+        return 0;
+    }
+
+    if (op == 0x00 && funct == 0x09) {
+        /* MIPS: jalr rd, rs -> { uint32_t tgt = (uint32_t)gpr[rs]; if
+         * (rd) gpr[rd] = this_pc + 8; pc = tgt; } - ee_core.c's own
+         * case body captures tgt into a local BEFORE conditionally
+         * writing rd, specifically so "jalr rd, rs" with rd==rs still
+         * uses the OLD rs value as the jump target (not the just-
+         * written link address). This block preserves that ordering
+         * the same way: REG_LO(rs) is read into SCRATCH_A first and
+         * never touched again, so it's safe regardless of whether
+         * rd==rs. Real hardware discards writes to $zero (rd==0), same
+         * as every other dest-register op in this dynarec. Like JAL
+         * above, the link write is ZERO-extended (plain 0 high word),
+         * NOT sign-extended via srawi - see JAL's comment for why
+         * ee_core.c's own LINK() macro (`GPR(reg) = this_pc + 8;`,
+         * uint32_t assigned into a uint64_t) is a zero-extension, not
+         * a sign-extension, unlike every other 32-bit-result opcode
+         * this dynarec has handled so far. */
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs))); /* tgt, captured before any rd write */
+        if (rd != 0) {
+            emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, EXC_THIS_PC_OFFSET));
+            emit(ctx, enc_addi(SCRATCH_B, SCRATCH_B, 8));
+            emit(ctx, enc_stw(SCRATCH_B, CTX_REG, REG_LO(rd)));
+            emit(ctx, enc_addi(SCRATCH_C, 0, 0)); /* li SCRATCH_C, 0 (zero-extend, NOT sign-extend) */
+            emit(ctx, enc_stw(SCRATCH_C, CTX_REG, REG_HI(rd)));
+        }
+        emit(ctx, enc_stw(SCRATCH_A, CTX_REG, NEXT_PC_OFFSET));
+        emit(ctx, enc_addi(SCRATCH_B, 0, 1)); /* li SCRATCH_B, 1 */
+        emit(ctx, enc_stb(SCRATCH_B, CTX_REG, BRANCH_PENDING_OFFSET));
+        return 0;
+    }
+
+    /* Unsupported: conditional branches, MMI, COP1/2, everything else.
+     * LB/LBU/LH/LHU/LW/LWU/SB/SH/SW/LD/SD (the full base-ISA integer
+     * load/store family) plus J/JAL/JR/JALR (the full set of
+     * UNCONDITIONAL control-transfer opcodes) are all handled above.
+     * Conditional branches (BEQ/BNE/BLEZ/BGTZ/BLTZ/BGEZ/...) need a
+     * genuine 64-bit signed/equality compare emitted as real PPC
+     * condition-register logic (cmpw hi-words, then lo-words, or a
+     * sign-bit check for the </>0 family) - a new codegen capability
+     * this dynarec doesn't have yet - so they're deliberately left for
+     * a future round rather than guessed at here. */
     return -1;
 }
 

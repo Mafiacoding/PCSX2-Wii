@@ -98,6 +98,34 @@
  * round - their 64-bit value calling convention needs register-pair
  * argument/return handling this file hasn't built yet, left for a
  * future round.
+ *
+ * Round 893 (task #877) update: LD/SD complete the full base-ISA
+ * integer load/store family, using the PowerPC 32-bit EABI's register-
+ * PAIR convention for a genuine 64-bit callee value (r3:r4 hi:lo for
+ * ee_mem_read64's return, r5:r6 hi:lo for ee_mem_write64's argument) -
+ * see ppc_dynarec.c's ADDR_EE_MEM_READ64/WRITE64 comment.
+ *
+ * Round 894 (task #878) update: J/JAL/JR/JALR - the full set of
+ * unconditional control-transfer opcodes. These are this dynarec's
+ * FIRST opcodes that read/write ee_state_t fields other than the flat
+ * gpr[32]+hi+lo register array: `exc_this_pc` (to compute J/JAL's
+ * absolute jump target), and `next_pc`/`branch_pending` (to hand
+ * control flow back to ee_step() exactly the way its own BRANCH_TO()
+ * macro does). This works with zero new addressing mechanism because
+ * this file's context pointer (CTX_REG/r3) is `&st->gpr[0]`, which is
+ * ALSO byte offset 0 of the whole ee_state_t struct (gpr is its first
+ * field) - so any ee_state_t field is reachable as a plain lwz/stw/stb
+ * at its real offset; see ppc_dynarec.c's EXC_THIS_PC_OFFSET/
+ * NEXT_PC_OFFSET/BRANCH_PENDING_OFFSET comment for the full rationale,
+ * including why reading this_pc from CONTEXT at every execution (not
+ * baking it into the generated code) is what keeps J/JAL correct under
+ * this dynarec's instruction-encoding-keyed cache even though their
+ * absolute target genuinely depends on WHERE the instruction sits in
+ * memory. Conditional branches (BEQ/BNE/BLEZ/BGTZ/BLTZ/BGEZ/...) are
+ * NOT included this round - they need a real 64-bit signed/equality
+ * compare emitted as PPC condition-register logic, a codegen
+ * capability this file doesn't have yet, left for a
+ * future round.
  */
 
 typedef struct {

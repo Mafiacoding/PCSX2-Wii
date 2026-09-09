@@ -561,8 +561,40 @@
  * existing blr literal - avoiding Round 909's opcode-19-dispatch
  * collision entirely by not using a range dispatch for bctrl at all).
  * 13/13 checks passed under -fsanitize=address,undefined, 0 leaks.
- * Next: task #897, Round 912 - JIT VU0 CFC2/CTC2 control-register
- * moves + QMFC2/QMTC2.
+ *
+ * Round 912 (task #897) update: JIT the COP2 rs<0x10 scalar transfer
+ * family - MFC2(0x00)/QMFC2(0x01)/CFC2(0x02)/MTC2(0x04)/QMTC2(0x05)/
+ * CTC2(0x06) - re-verified against ee_core.c's real case body (lines
+ * 8221-8258). MFC2 and CFC2 are byte-for-byte identical interpreter
+ * bodies (`if (rt) GPR(rt) = sext32(vu0_vi_read(st, rd));`); so are
+ * MTC2 and CTC2 (`vu0_vi_write(st, rd, rt32);` - CTC2's real FBRST
+ * bit semantics are commented in ee_core.c but not modeled beyond
+ * plain storage there, so the JIT mirrors exactly that, nothing more).
+ * MFC2/CFC2 read COP2_CTRL_OFF(rd) (or emit a literal 0 when rd==0,
+ * resolved at JIT-compile time since rd is a constant field of the
+ * instruction) and sign-extend into the full 64-bit destination via
+ * the same srawi-by-31 fill-word idiom LW/ADDIU/ADDU/SLL already use.
+ * MTC2/CTC2 store REG_LO(rt) into COP2_CTRL_OFF(rd), guarded by the
+ * usual compile-time `if (rd != 0)` (vu0_vi_write's own discard-on-
+ * VI0). QMFC2/QMTC2 are 128-bit RAW BIT COPIES between GPR(rt) and
+ * VF[rd] - explicitly no float conversion, per ee_core.c's own
+ * comment - mapping VF.x/VF.z (low 32 halves) onto REG_LO/REG_LO1 and
+ * VF.y/VF.w (high 32 halves) onto REG_HI/REG_HI1 (the ud0/ud1 split
+ * Round 900's LQ/SQ established). QMFC2 needs no rd==0 special-case
+ * on the read side - VF00's array slot is itself kept correctly
+ * hardwired to (0,0,0,1.0) since writes to it are always discarded
+ * (ee_core.c line 3802's reset-time store), so a direct read is
+ * always safe, same as every other VF-reading op in this file. QMTC2
+ * does need the usual compile-time `if (rd != 0)` write guard.
+ *
+ * No new PPC750 instruction forms were needed this round - lwz/stw/
+ * li/srawi (all already established by LW/ADDIU/DIV.S and friends)
+ * cover the entire scalar-transfer family. New host-native harness
+ * r912_vu0_cfc2_ctc2_qmfc2_qmtc2_verify.c reuses r904's ppcsim base
+ * completely unmodified (zero new opcode decode added) - 15/15 checks
+ * passed under -fsanitize=address,undefined, 0 leaks.
+ * Next: task #898, Round 913 - JIT the remaining VU0 opcodes to close
+ * out task #885 (COP2/VU0 umbrella).
  */
 
 typedef struct {

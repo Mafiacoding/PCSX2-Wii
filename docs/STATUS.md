@@ -39436,3 +39436,112 @@ now JIT-accelerated. Next: task #897 (Round 912: JIT VU0 CFC2/CTC2
 control-register moves + QMFC2/QMTC2 - both already fully implemented
 in the interpreter's rs<0x10 dispatch, so this is a pure JIT-coverage
 round with no interpreter-side investigation needed first).
+
+## Round 912: JIT VU0 CFC2/CTC2/QMFC2/QMTC2 scalar transfers (task #897)
+
+Closed out the COP2 (op=0x12) `rs<0x10` scalar transfer family -
+MFC2(0x00)/QMFC2(0x01)/CFC2(0x02)/MTC2(0x04)/QMTC2(0x05)/CTC2(0x06) -
+in `source/core/recompiler/ppc_dynarec.c`, right alongside the already
+-JIT'd `rs>=0x10` CO-format vector family in the same `op==0x12`
+dispatch block. Re-verified against ee_core.c's real case body (lines
+8221-8258) before writing any codegen, per this project's established
+research-first discipline.
+
+Two exact interpreter-body duplications drove the codegen's own
+structure: MFC2(0x00) and CFC2(0x02) are byte-for-byte identical
+(`if (rt) GPR(rt) = sext32(vu0_vi_read(st, rd));`), and so are
+MTC2(0x04) and CTC2(0x06) (`vu0_vi_write(st, rd, rt32);`). CTC2's real
+FBRST (control register 28) semantics - bit 0x1=VU0 force-break,
+0x2=VU0 reset, 0x100=VU1 force-break, 0x200=VU1 reset - are documented
+in ee_core.c's own comment but explicitly NOT modeled beyond plain
+storage there (no VU0/VU1 execution state exists yet for those bits to
+act on), so the JIT mirrors exactly that "plain storage, nothing more"
+behavior rather than inventing side effects the interpreter itself
+doesn't have.
+
+MFC2/CFC2 codegen: `vu0_vi_read(rd)` is `(rd==0) ? 0 : cop2_ctrl[rd]`
+(ee_core.c lines 3034-3037). rd is a compile-time-constant field of
+the instruction's own encoding, so the rd==0 case is resolved at
+JIT-compile time (a literal `li 0` via `emit_load_const32`) rather
+than costing a runtime branch - the same "constant field, no runtime
+branch" treatment every reg==0 guard in this file has used since
+Round 908. `sext32()` then fills the full 64-bit destination GPR via
+the same srawi-by-31 fill-word idiom LW/ADDIU/ADDU/SLL already
+established (REG_HI = sign word, REG_LO = value word).
+
+MTC2/CTC2 codegen: `vu0_vi_write(rd, rt32)` discards writes to VI0
+(ee_core.c lines 3039-3043, `if (reg==0) return;`) - same compile-
+time-constant guard treatment. `rt32` is read from REG_LO(rt)
+unconditionally with no rt==0 guard, matching this file's own SW
+comment ("reading $zero as the value-to-store is always valid, and
+always 0") - GPR0's slot is always kept zero, so no special-casing is
+needed on the source side.
+
+QMFC2/QMTC2 codegen: 128-bit RAW BIT COPY between GPR(rt) and VF[rd] -
+explicitly NO float conversion, per ee_core.c's own comment on lines
+8224-8245. `GPR(rt).ud0 = VF.x | (VF.y<<32)`, `.ud1 = VF.z | (VF.w<<32)`,
+so VF.x/VF.z are the LOW 32-bit halves and VF.y/VF.w are the HIGH
+32-bit halves of ud0/ud1 respectively - mapping directly onto this
+file's existing REG_LO/REG_HI (ud0's low/high halves) and REG_LO1/
+REG_HI1 (ud1's low/high halves, established by Round 900's LQ/SQ).
+QMFC2 reads VU0_VF_OFF(rd,lane) directly with NO rd==0 special-casing
+needed - unlike every VF WRITE in this file, VF00's array slot itself
+is kept correctly hardwired to (0,0,0,1.0) (see ee_core.c line 3802's
+reset-time `st->vu0_vf[0][3] = 0x3F800000u`) precisely because writes
+to it are always discarded, so a direct read is always safe - the
+same assumption every VADD/VSUB/VMUL/etc read in this file already
+relies on. QMTC2 writes VU0_VF_OFF(rd,lane) and DOES need the
+compile-time rd==0 guard (vu0_vf_write_lane's own discard-on-reg-0),
+applied here exactly like every VF-writing round since Round 908.
+
+No new PPC750 instruction forms were needed this round - lwz/stw/li/
+srawi (all already established by LW/ADDIU/DIV.S and friends) cover
+the entire scalar-transfer family's codegen.
+
+New host-native harness `r912_vu0_cfc2_ctc2_qmfc2_qmtc2_verify.c`
+reuses r904_cop1_div_verify.c's ppcsim base COMPLETELY UNMODIFIED (no
+new opcode decode added at all - lwz/stw/addi(li)/addis/ori/srawi were
+all already there). 15 test cases cover: MFC2/CFC2 positive and
+sign-extending values, MFC2 rd==0 (VI0 hardwired-zero read regardless
+of underlying storage), MFC2/QMFC2 rt==0 no-ops (GPR0 slot left
+untouched), CFC2's byte-identical body to MFC2, MTC2/CTC2 plain
+32-bit stores, MTC2 rd==0 (write discarded, storage untouched), CTC2
+storing a real FBRST bit pattern (0x3 = VU0 force-break|reset) with
+no side effects modeled, CTC2 rt==0 storing a literal zero, QMFC2's
+128-bit raw bit copy (VF9 -> GPR16 across all 4 lanes with distinct
+per-lane values to catch any lane-order swap), QMFC2 reading VF0's
+real hardwired (0,0,0,1.0) pattern, QMTC2's 128-bit raw bit copy
+(GPR19 -> VF12), QMTC2 rd==0 (write discarded, VF00 storage
+untouched), and a QMTC2-then-QMFC2 round trip through a non-zero
+register reproducing the exact bit pattern end to end. Independent
+reference values were derived directly from ee_core.c's real
+vu0_vi_read/vu0_vi_write/vu0_vf_read_lane/vu0_vf_write_lane bodies
+(lines 3022-3043), not by re-running ppc_dynarec.c's own codegen
+logic. One test-harness-only bug was caught and fixed during this
+round: the CTC2 rt==0 test initially failed because g_test_mem is a
+flat scratch buffer shared across every test block in the harness (no
+real-hardware GPR0-hardwired-zero invariant enforced automatically),
+and an earlier MFC2 rt==0 test had deliberately left a 0x11111111
+sentinel sitting in that exact memory slot; fixed by explicitly
+re-zeroing GPR0's slot immediately before the CTC2 test that depends
+on it reading as 0 - a test-setup fix, not a codegen bug. 15/15
+checks passed under -fsanitize=address,undefined, 0 leaks.
+
+Regression-checked against all 10 still-present prior harnesses
+(r893/894/895/896/897/898/900/902/903/904: 13/13, 17/17, 19/19,
+35/35, 19/19, 27/27, 25/25, 20/20, 12/12, 13/13) - no regressions, no
+compile warnings.
+
+Wii build: pcsx2-wii.elf 3,280,988 bytes / .dol 548,448 bytes
+(+10,828 elf / +544 dol over Round 911), 0 warnings/errors (devkitPPC
+8.1.0).
+
+Status: task #897 (Round 912) CLOSED - MFC2/QMFC2/CFC2/MTC2/QMTC2/CTC2
+are now fully JIT'd. task #885 (COP2/VU0 umbrella) continues - 21 of
+the ~21-26 real VU0/COP2 opcodes now JIT-accelerated (15 CO-format
+vector/integer ops from Rounds 907-911, plus these 6 scalar
+transfers). Remaining gaps: the broadcast row (funct 0x00-0x1F),
+VMADD(0x29)/VMSUB(0x2D), VIADDI(0x32), and VCALLMS/VCALLMSR (still
+correctly deferred pending real interpreter-side VU0 micro-mode
+dispatch). Next: task #898 (Round 913: JIT the remaining VU0
+opcodes to close out task #885).

@@ -3912,8 +3912,113 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
                          * VMSUB(0x2D) / VIADDI(0x32) family: not yet
                          * JIT-compiled, fall back to the interpreter. */
         }
-        return -1; /* scalar MFC2/QMFC2/CFC2/MTC2/QMTC2/CTC2 family: not
-                     * yet JIT-compiled, fall back to the interpreter. */
+        /* Round 912 (task #897): the rs<0x10 scalar transfer family -
+         * MFC2(0x00)/QMFC2(0x01)/CFC2(0x02)/MTC2(0x04)/QMTC2(0x05)/
+         * CTC2(0x06) - re-verified against ee_core.c's real case body
+         * (lines 8221-8258). rt sits at bits 20-16, rd at bits 15-11 -
+         * the same field positions the CO-format's ft/fs already use,
+         * just under different names since this is the scalar-transfer
+         * form, not the vector-arithmetic form. Two exact interpreter-
+         * body duplications drive this codegen's own structure:
+         * MFC2(0x00) and CFC2(0x02) are BYTE-FOR-BYTE identical
+         * (`if (rt) GPR(rt) = sext32(vu0_vi_read(st, rd));`), and so are
+         * MTC2(0x04) and CTC2(0x06) (`vu0_vi_write(st, rd, rt32);`) -
+         * CTC2's real FBRST/control-register semantics (VU0/VU1 force-
+         * break and reset bits) are commented in ee_core.c but NOT
+         * modeled beyond plain storage there, so the JIT correctly
+         * mirrors that same "plain storage, nothing more" behavior
+         * rather than inventing FBRST side effects the interpreter
+         * itself doesn't have.
+         *
+         * MFC2/CFC2: vu0_vi_read(rd) is `(rd==0) ? 0 : cop2_ctrl[rd]`
+         * (ee_core.c line 3034-3037) - rd is a compile-time-constant
+         * field of this instruction's own encoding, so the rd==0 case
+         * is resolved at JIT-compile time (li 0) rather than costing a
+         * runtime branch; sext32() then fills the full 64-bit GPR via
+         * the same srawi-by-31 fill-word idiom LW/ADDIU/ADDU/SLL all
+         * already use elsewhere in this file (REG_HI=sign word,
+         * REG_LO=value word).
+         *
+         * MTC2/CTC2: vu0_vi_write(rd, rt32) discards writes to VI0
+         * (ee_core.c line 3039-3043, `if (reg==0) return;`) - same
+         * "compile-time-constant guard, no runtime branch" treatment
+         * every other VI/VF write in this file already uses (the Round
+         * 908 bugfix's own lesson). rt32 is read from REG_LO(rt)
+         * un-guarded - SW's own comment (this file, op==0x2B) already
+         * established that reading GPR0 as a value-to-store needs no
+         * guard, since the GPR0 slot is always kept zero.
+         *
+         * QMFC2/QMTC2: 128-bit raw bit copy between GPR(rt) and VF[rd],
+         * NO float conversion (ee_core.c lines 8224-8245, the comment there
+         * is explicit about this). GPR(rt).ud0 = VF.x | (VF.y<<32),
+         * GPR(rt).ud1 = VF.z | (VF.w<<32) - so VF.x/VF.z are the LOW
+         * 32-bit halves and VF.y/VF.w are the HIGH 32-bit halves of
+         * ud0/ud1 respectively, which maps directly onto this file's
+         * existing REG_LO/REG_HI (ud0's low/high halves) and
+         * REG_LO1/REG_HI1 (ud1's low/high halves, established by
+         * Round 900's LQ/SQ). QMFC2 reads VU0_VF_OFF(rd,lane) directly
+         * with NO rd==0 special-casing needed - unlike every VF WRITE
+         * in this file, VF00's array slot itself is kept correctly
+         * hardwired ((0,0,0,1.0), see ee_core.c line 3802's reset-time
+         * `st->vu0_vf[0][3] = 0x3F800000u`) precisely because writes to
+         * it are always discarded, so a direct read is always safe -
+         * the same assumption every VADD/VSUB/VMUL/etc read in this
+         * file already relies on. QMTC2 writes VU0_VF_OFF(rd,lane) and
+         * DOES need the compile-time rd==0 guard (vu0_vf_write_lane's
+         * own discard-on-reg-0), applied here exactly like every prior
+         * VF-writing round since Round 908. */
+        {
+            uint32_t rt = (mips_instr >> 16) & 0x1Fu;
+            uint32_t rd = (mips_instr >> 11) & 0x1Fu;
+            if (rs == 0x00u || rs == 0x02u) { /* MFC2 / CFC2 */
+                if (rt != 0) {
+                    if (rd == 0)
+                        emit_load_const32(ctx, SCRATCH_A, 0);
+                    else
+                        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, COP2_CTRL_OFF(rd)));
+                    emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_LO(rt)));
+                    emit(ctx, enc_srawi(SCRATCH_B, SCRATCH_A, 31)); /* sign fill */
+                    emit(ctx, enc_stw(SCRATCH_B, CTX_REG, REG_HI(rt)));
+                }
+                return 0;
+            }
+            if (rs == 0x04u || rs == 0x06u) { /* MTC2 / CTC2 */
+                if (rd != 0) { /* writes to VI0 are discarded on real hardware */
+                    emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rt))); /* rt32 */
+                    emit(ctx, enc_stw(SCRATCH_A, CTX_REG, COP2_CTRL_OFF(rd)));
+                }
+                return 0;
+            }
+            if (rs == 0x01u) { /* QMFC2 */
+                if (rt != 0) {
+                    emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, VU0_VF_OFF(rd, 0))); /* VF.x -> ud0 lo */
+                    emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_LO(rt)));
+                    emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, VU0_VF_OFF(rd, 1))); /* VF.y -> ud0 hi */
+                    emit(ctx, enc_stw(SCRATCH_B, CTX_REG, REG_HI(rt)));
+                    emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, VU0_VF_OFF(rd, 2))); /* VF.z -> ud1 lo */
+                    emit(ctx, enc_stw(SCRATCH_C, CTX_REG, REG_LO1(rt)));
+                    emit(ctx, enc_lwz(SCRATCH_D, CTX_REG, VU0_VF_OFF(rd, 3))); /* VF.w -> ud1 hi */
+                    emit(ctx, enc_stw(SCRATCH_D, CTX_REG, REG_HI1(rt)));
+                }
+                return 0;
+            }
+            if (rs == 0x05u) { /* QMTC2 */
+                if (rd != 0) { /* writes to VF00 are discarded on real hardware */
+                    emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rt))); /* ud0 lo -> VF.x */
+                    emit(ctx, enc_stw(SCRATCH_A, CTX_REG, VU0_VF_OFF(rd, 0)));
+                    emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_HI(rt))); /* ud0 hi -> VF.y */
+                    emit(ctx, enc_stw(SCRATCH_B, CTX_REG, VU0_VF_OFF(rd, 1)));
+                    emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_LO1(rt))); /* ud1 lo -> VF.z */
+                    emit(ctx, enc_stw(SCRATCH_C, CTX_REG, VU0_VF_OFF(rd, 2)));
+                    emit(ctx, enc_lwz(SCRATCH_D, CTX_REG, REG_HI1(rt))); /* ud1 hi -> VF.w */
+                    emit(ctx, enc_stw(SCRATCH_D, CTX_REG, VU0_VF_OFF(rd, 3)));
+                }
+                return 0;
+            }
+            return -1; /* rs==0x03 / rs==0x07-0x0F: no real sub-opcode -
+                         * matches ee_core.c's own halt() default case
+                         * exactly. */
+        }
     }
 
     if (op == 0x02) {

@@ -483,6 +483,19 @@ static inline uint32_t enc_fmuls(int frD, int frA, int frC)
     return (59u << 26) | ((uint32_t)frD << 21) | ((uint32_t)frA << 16) | ((uint32_t)frC << 6) | (25u << 1);
 }
 
+/* Round 908 (task #893): fsel frD,frA,frC,frB - "frD = (frA >= 0.0) ?
+ * frC : frB", opcode 63 (the double-precision-shaped A-form space,
+ * same family fdivs/fabs/etc live in - NOT opcode 59's single-precision
+ * space), xo=23. Used to build VU0 VMAX/VMINI's real IEEE compare-
+ * select without a branch: diff=a-b, then fsel(diff, pick_a, pick_b).
+ * Verified against real devkitPPC output before use: "fsel f1,f2,f3,f4"
+ * -> 0xFC2220EE, "fsel f2,f0,f1,f3" -> 0xFC40186E - both reproduced
+ * exactly by the formula below. */
+static inline uint32_t enc_fsel(int frD, int frA, int frC, int frB)
+{
+    return (63u << 26) | ((uint32_t)frD << 21) | ((uint32_t)frA << 16) | ((uint32_t)frB << 11) | ((uint32_t)frC << 6) | (23u << 1);
+}
+
 /* Round 906 (task #890): fcmpu/mfcr - this dynarec's first use of real
  * PPC750 CR-based comparison, needed for C.EQ.S/C.LT.S/C.LE.S. Real
  * hardware float compare (fcmpu) correctly handles the -0.0==+0.0 edge
@@ -1027,6 +1040,23 @@ static void emit_branch_blend_likely(ppc_codegen_ctx_t *ctx, int32_t disp)
  * 1728+31*16+12=2236, comfortably within lwz/stw/lfs/stfs's 16-bit
  * signed displacement range. */
 #define VU0_VF_OFF(reg, lane)  ((int16_t)(1728 + (reg) * 16 + (lane) * 4))
+
+/* Round 908 (task #893): byte offsets of ee_state_t's VU0 accumulator
+ * (vu0_acc[4], flat uint32_t array - NOT the same field as COP1's single-
+ * float ACC_OFFSET=1596 above, a totally different register on real
+ * hardware) and the VU0 control-register file (cop2_ctrl[32], which
+ * vu0_vi_read()/vu0_vi_write() in ee_core.c index directly by register
+ * number - VI0 is hardwired like MIPS r0, everything else including the
+ * CLIP flag register at index 18 is a plain slot). Both verified via
+ * offsetof() against the real ee_state_t struct (vu0_acc=10464,
+ * cop2_ctrl=1600) before use here, same discipline as every other
+ * offset macro in this file. VCLIP (Round 908) always reads/writes
+ * control register 18 - that's a fixed part of the opcode's own real
+ * semantics (REG_CLIP_FLAG in PCSX2's VU.h), not a field extracted from
+ * the instruction encoding, so no reg==0 runtime guard is ever needed
+ * for it (18 is a compile-time constant, never 0). */
+#define VU0_ACC_OFF(lane)      ((int16_t)(10464 + (lane) * 4))
+#define COP2_CTRL_OFF(idx)     ((int16_t)(1600 + (idx) * 4))
 
 /* Round 890 (task #874): HI/LO pseudo-register indices. The R5900 has
  * two dedicated 64-bit registers (HI, LO - used by MULT/MULTU/DIV/
@@ -3197,7 +3227,35 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
             uint32_t fs = (mips_instr >> 11) & 0x1Fu;
             uint32_t fd = (mips_instr >> 6) & 0x1Fu;
             uint32_t funct = mips_instr & 0x3Fu;
-            if (funct == 0x28u || funct == 0x2Au || funct == 0x2Cu) {
+            if (funct == 0x28u || funct == 0x2Au || funct == 0x2Cu ||
+                funct == 0x2Bu || funct == 0x2Fu) {
+                /* Round 908 (task #893) BUGFIX + extension: this loop
+                 * previously (Round 907, commit f796680) stored to
+                 * VU0_VF_OFF(fd,lane) unconditionally, unlike every
+                 * other real VF write in this file - vu0_vf_write_lane()
+                 * in ee_core.c silently discards writes to VF00 ("if
+                 * (reg == 0) return;", since VF00 is hardwired to
+                 * (0,0,0,1.0f) and any write would corrupt reads of it
+                 * elsewhere). fd is a compile-time-constant field of
+                 * THIS instruction's own encoding, so the guard costs
+                 * nothing at runtime - either the whole per-lane store
+                 * is emitted or it isn't. Caught during Round 908
+                 * research (re-deriving VABS/VOPMSUB's own reg==0
+                 * conventions surfaced the gap), fixed here before it
+                 * could compound into more opcodes copying the same
+                 * bug. VMAX(0x2B)/VMINI(0x2F) joined this same combined
+                 * per-lane loop this round too - confirmed against
+                 * ee_core.c's real case body (lines 8273-8307) that all
+                 * five of VADD/VMUL/VMAX/VSUB/VMINI share ONE combined
+                 * interpreter case, `FD[lane] = FS[lane] OP FT[lane]`,
+                 * and that VMAX/VMINI use a PLAIN ternary comparison
+                 * (`(a>b)?a:b`), NOT the sign-magnitude bit trick
+                 * COP1.S's MAX.S/MIN.S (Round 905) uses - this project's
+                 * own source comment there confirms that's deliberate.
+                 * Implemented via real PowerPC `fsel`: diff=fsubs(a,b),
+                 * then fsel picks a or b by diff's sign - functionally
+                 * identical to the ternary except at exact a==b, where
+                 * both branches already agree. */
                 for (int lane = 0; lane < 4; lane++) {
                     if (!(destmask & (0x8u >> lane)))
                         continue;
@@ -3207,15 +3265,213 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
                         emit(ctx, enc_fadds(2, 0, 1));      /* VADD: f2 = f0 + f1 */
                     else if (funct == 0x2Cu)
                         emit(ctx, enc_fsubs(2, 0, 1));      /* VSUB: f2 = f0 - f1 */
-                    else
+                    else if (funct == 0x2Au)
                         emit(ctx, enc_fmuls(2, 0, 1));      /* VMUL: f2 = f0 * f1 */
-                    emit(ctx, enc_stfs(2, CTX_REG, VU0_VF_OFF(fd, (uint32_t)lane))); /* FD[lane] = f2 */
+                    else {
+                        emit(ctx, enc_fsubs(3, 0, 1));      /* f3 = f0 - f1 (sign drives fsel) */
+                        if (funct == 0x2Bu)
+                            emit(ctx, enc_fsel(2, 3, 0, 1)); /* VMAX: f2 = (f0>=f1) ? f0 : f1 */
+                        else
+                            emit(ctx, enc_fsel(2, 3, 1, 0)); /* VMINI: f2 = (f0>=f1) ? f1 : f0 */
+                    }
+                    if (fd != 0) /* writes to VF00 are discarded on real hardware */
+                        emit(ctx, enc_stfs(2, CTX_REG, VU0_VF_OFF(fd, (uint32_t)lane))); /* FD[lane] = f2 */
                 }
                 return 0;
             }
-            return -1; /* broadcast row / VMAX / VMINI / VMADD / VMSUB /
-                         * VOPMSUB / memory-access family: not yet
-                         * JIT-compiled, fall back to the interpreter. */
+            if (funct == 0x2Eu) {
+                /* Round 908 (task #893): VOPMSUB - outer-product
+                 * multiply-subtract. Confirmed against ee_core.c's real
+                 * case body (lines 8409-8431, itself matching PCSX2's
+                 * VUops.cpp _vuOPMSUB) that this op ALWAYS writes
+                 * exactly xyz - there is no destmask field for it at
+                 * all on real hardware, unlike every other CO-format op
+                 * this file handles - so destmask is deliberately never
+                 * consulted here: FD.x=ACC.x-FS.y*FT.z,
+                 * FD.y=ACC.y-FS.z*FT.x, FD.z=ACC.z-FS.x*FT.y (the
+                 * cyclic y/z/x, z/x/y, x/y/z lane pairing is exactly
+                 * ee_core.c's own, not a guess). */
+                emit(ctx, enc_lfs(0, CTX_REG, VU0_VF_OFF(fs, 1))); /* f0 = FS.y */
+                emit(ctx, enc_lfs(1, CTX_REG, VU0_VF_OFF(ft, 2))); /* f1 = FT.z */
+                emit(ctx, enc_fmuls(2, 0, 1));                     /* f2 = FS.y * FT.z */
+                emit(ctx, enc_lfs(3, CTX_REG, VU0_ACC_OFF(0)));    /* f3 = ACC.x */
+                emit(ctx, enc_fsubs(4, 3, 2));                     /* f4 = ACC.x - FS.y*FT.z */
+                if (fd != 0)
+                    emit(ctx, enc_stfs(4, CTX_REG, VU0_VF_OFF(fd, 0))); /* FD.x */
+
+                emit(ctx, enc_lfs(0, CTX_REG, VU0_VF_OFF(fs, 2))); /* f0 = FS.z */
+                emit(ctx, enc_lfs(1, CTX_REG, VU0_VF_OFF(ft, 0))); /* f1 = FT.x */
+                emit(ctx, enc_fmuls(2, 0, 1));                     /* f2 = FS.z * FT.x */
+                emit(ctx, enc_lfs(3, CTX_REG, VU0_ACC_OFF(1)));    /* f3 = ACC.y */
+                emit(ctx, enc_fsubs(4, 3, 2));                     /* f4 = ACC.y - FS.z*FT.x */
+                if (fd != 0)
+                    emit(ctx, enc_stfs(4, CTX_REG, VU0_VF_OFF(fd, 1))); /* FD.y */
+
+                emit(ctx, enc_lfs(0, CTX_REG, VU0_VF_OFF(fs, 0))); /* f0 = FS.x */
+                emit(ctx, enc_lfs(1, CTX_REG, VU0_VF_OFF(ft, 1))); /* f1 = FT.y */
+                emit(ctx, enc_fmuls(2, 0, 1));                     /* f2 = FS.x * FT.y */
+                emit(ctx, enc_lfs(3, CTX_REG, VU0_ACC_OFF(2)));    /* f3 = ACC.z */
+                emit(ctx, enc_fsubs(4, 3, 2));                     /* f4 = ACC.z - FS.x*FT.y */
+                if (fd != 0)
+                    emit(ctx, enc_stfs(4, CTX_REG, VU0_VF_OFF(fd, 2))); /* FD.z */
+                return 0;
+            }
+            if ((funct & 0x3Cu) == 0x3Cu) {
+                /* Round 908 (task #893): SPECIAL2 sub-dispatch - real
+                 * sub-opcode index formula confirmed against ee_core.c's
+                 * own comment (matching PCSX2's R5900OpcodeTables.cpp):
+                 * idx = (instr&0x3) | ((instr>>4)&0x7C). Only VABS(29)
+                 * and VCLIP(31) are JIT'd this round - every other
+                 * SPECIAL2 sub-opcode (VITOF/VFTOI/VMOVE/VMR32/VLQI/
+                 * VSQI/VLQD/VSQD/VISWR/VRINIT/VRXOR/etc) falls back to
+                 * the interpreter below. */
+                uint32_t idx = (mips_instr & 0x3u) | ((mips_instr >> 4) & 0x7Cu);
+                if (idx == 29) {
+                    /* VABS: FT[lane] = FS[lane] & 0x7FFFFFFF (bit-level
+                     * abs, no float op at all) per destmask lane.
+                     * Confirmed against ee_core.c lines 8547-8556 that
+                     * the DESTINATION is the FT field and the SOURCE is
+                     * FS - the opposite of every arithmetic op above
+                     * (FD/FS/FT) - matching real disassembly convention
+                     * "vabs.xyzw FT, FS"; fd (bits 6-10) is unused here,
+                     * per real hardware. Guarded by ft==0 (writes to
+                     * VF00 discarded), same rule as every other VF
+                     * write. Plain integer load/mask/store (lwz/rlwinm/
+                     * stw, not lfs/fabs/stfs) since this is a raw
+                     * bitwise operation on the pattern, not IEEE
+                     * arithmetic - matching vu0_vf_read_lane/write_lane's
+                     * own uint32_t-typed interface exactly. */
+                    if (ft != 0) {
+                        for (int lane = 0; lane < 4; lane++) {
+                            if (!(destmask & (0x8u >> lane)))
+                                continue;
+                            emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, VU0_VF_OFF(fs, (uint32_t)lane)));
+                            emit(ctx, enc_rlwinm(SCRATCH_A, SCRATCH_A, 0, 1, 31)); /* clear bit0 (sign) */
+                            emit(ctx, enc_stw(SCRATCH_A, CTX_REG, VU0_VF_OFF(ft, (uint32_t)lane)));
+                        }
+                    }
+                    return 0;
+                }
+                if (idx == 31) {
+                    /* VCLIP: judges |FS.x|,|FS.y|,|FS.z| against |FT.w|
+                     * via SIGNED-INTEGER comparisons (not float, per
+                     * ee_core.c lines 8911-8952 / PCSX2's real _vuCLIP),
+                     * no Fsf/Ftf lane selector - xyz vs w is hardwired.
+                     * `value` is derived from FT.w with a denormal-
+                     * substitution rule, then 6 signed compares against
+                     * `value` shift 6 new judgment bits into the CLIP
+                     * flag register (this project's cop2_ctrl[18],
+                     * masked to its low 24 bits after each call - 4
+                     * calls' worth of judgment history, matching real
+                     * hardware). CLIP's index (18) is a fixed part of
+                     * this opcode's own real semantics, never a field
+                     * of the instruction encoding, so it needs no
+                     * reg==0 guard (18 is a compile-time constant,
+                     * never 0).
+                     *
+                     * Each `(int32_t)(fsc ^ mask) > value` signed
+                     * compare is turned into an UNSIGNED compare via
+                     * the standard sign-bit-flip trick (XOR bit31 on
+                     * both sides maps signed ordering onto unsigned
+                     * ordering) - and because mask is only ever 0 or
+                     * 0x80000000 here, XORing that trick's own
+                     * 0x80000000 into `mask` collapses algebraically:
+                     * the mask==0 compare needs (fsc^0x80000000) vs
+                     * value', and the mask==0x80000000 compare needs
+                     * fsc (UNCHANGED) vs value' - so only the raw lane
+                     * value and its sign-flipped twin are ever needed,
+                     * both against one precomputed value'=value^
+                     * 0x80000000. Each unsigned (a>b)?1:0 uses the same
+                     * subfc/subfe carry-to-mask idiom already
+                     * established for SLT/SLTU (Round 886) and COP1's
+                     * branch-condition masks, just on a single 32-bit
+                     * word (no hi-word propagation needed - these
+                     * aren't 64-bit R5900 GPRs). SCRATCH_A-H are all
+                     * pure scratch within this one opcode's codegen. */
+                    emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, VU0_VF_OFF(ft, 3))); /* SCRATCH_A = raw FT.w */
+                    /* value = (ftw & 0x7f800000) ? (ftw & 0x7fffffff) : 0x007fffff -
+                     * blended branchlessly via mask-and-OR (no real PPC
+                     * control flow), matching e.g. the DIV.S divzero_mask
+                     * idiom above (~line 2504) this file already
+                     * established: materialize a real zero into a
+                     * scratch register first via "li" (addi rD,0,imm -
+                     * PPC special-cases rA==0 in ADDI/ADDIS to mean a
+                     * literal 0, NOT a read of real register r0, which
+                     * has no such guarantee outside that one encoding),
+                     * then use THAT register as subfc/subfe's operand -
+                     * passing a bare immediate 0 into subfc/subfe
+                     * directly would silently read real r0's live
+                     * content instead, since subf-family instructions
+                     * don't get ADDI's rA==0 special case. */
+                    emit(ctx, enc_rlwinm(SCRATCH_C, SCRATCH_A, 0, 1, 31)); /* SCRATCH_C = ftw & 0x7fffffff (candidate value if exponent nonzero) */
+                    emit(ctx, enc_rlwinm(SCRATCH_B, SCRATCH_A, 0, 1, 8));  /* SCRATCH_B = ftw & 0x7f800000 (exponent field) */
+                    emit_load_const32(ctx, SCRATCH_D, 0x007FFFFFu);        /* SCRATCH_D = 0x007FFFFF (denormal-substitution constant) */
+                    emit(ctx, enc_addi(SCRATCH_F, 0, 0));                  /* SCRATCH_F = 0 (materialized zero, real "li") */
+                    emit(ctx, enc_subfc(SCRATCH_E, SCRATCH_B, SCRATCH_F)); /* SCRATCH_E = 0 - SCRATCH_B; CA=1 iff SCRATCH_B==0 */
+                    emit(ctx, enc_subfe(SCRATCH_E, SCRATCH_E, SCRATCH_E)); /* SCRATCH_E = CA-1: B==0 -> 0, B!=0 -> allOnes */
+                    emit(ctx, enc_and(SCRATCH_C, SCRATCH_C, SCRATCH_E));   /* SCRATCH_C = (B!=0) ? (ftw&0x7fffffff) : 0 */
+                    emit(ctx, enc_nor(SCRATCH_G, SCRATCH_E, SCRATCH_E));   /* SCRATCH_G = ~SCRATCH_E */
+                    emit(ctx, enc_and(SCRATCH_D, SCRATCH_D, SCRATCH_G));   /* SCRATCH_D = (B==0) ? 0x7FFFFF : 0 */
+                    emit(ctx, enc_or(SCRATCH_C, SCRATCH_C, SCRATCH_D));    /* SCRATCH_C = value (final) */
+                    emit(ctx, enc_xoris(SCRATCH_C, SCRATCH_C, 0x8000));    /* SCRATCH_C = value' = value ^ 0x80000000 */
+
+                    /* Fold 6 signed compares into 6 unsigned compares
+                     * against value' (SCRATCH_C), building `clip` in
+                     * SCRATCH_H, then shift the whole VI[18] history
+                     * left by 6 and OR the new bits in, masked to 24
+                     * bits, exactly matching ee_core.c's own
+                     * clip=(clip<<6|bits)&0xFFFFFF. */
+                    emit(ctx, enc_lwz(SCRATCH_H, CTX_REG, COP2_CTRL_OFF(18))); /* SCRATCH_H = old clip (VI[18]) */
+                    /* (old_clip << 6) & 0xFFFFFF: rotate left 6, then mask
+                     * to PPC bits 8-25 (normal bits 6-23) - this excludes
+                     * BOTH the bottom 6 bits (where the rotate would have
+                     * wrapped clip's own top 6 bits back in, which a true
+                     * shift-left must zero-fill instead) AND the top 8
+                     * bits (bits 24-31, cleared by the real &0xFFFFFF),
+                     * leaving exactly clip's original bits 0-17 re-
+                     * positioned at bits 6-23 - bit-for-bit what
+                     * ee_core.c's "(clip<<6)&0xFFFFFF" computes, verified
+                     * by hand against the same rlwinm-as-slwi calibration
+                     * this file's own BC1 code (SH=8,MB=0,ME=23 == slwi
+                     * by 8) already established: extending that pattern,
+                     * a plain slwi-by-6 alone would be MB=0,ME=25; the
+                     * extra &0xFFFFFF narrows MB from 0 to 8. */
+                    emit(ctx, enc_rlwinm(SCRATCH_H, SCRATCH_H, 6, 8, 25));
+
+                    for (int comp = 0; comp < 3; comp++) {
+                        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, VU0_VF_OFF(fs, (uint32_t)comp))); /* SCRATCH_A = raw fsc (comp: 0=x,1=y,2=z) */
+                        emit(ctx, enc_xoris(SCRATCH_B, SCRATCH_A, 0x8000)); /* SCRATCH_B = fsc ^ 0x80000000 */
+                        /* bit_lo (mask==0 test, i.e. fsc>value): unsigned compare (SCRATCH_B >u SCRATCH_C) */
+                        emit(ctx, enc_subfc(SCRATCH_D, SCRATCH_B, SCRATCH_C));
+                        emit(ctx, enc_subfe(SCRATCH_D, SCRATCH_D, SCRATCH_D));
+                        emit(ctx, enc_andi_dot(SCRATCH_D, SCRATCH_D, 1)); /* SCRATCH_D = (fsc>value)?1:0 */
+                        /* bit_hi (mask==0x80000000 test, i.e. (fsc^0x80000000)>value): unsigned compare (SCRATCH_A >u SCRATCH_C) */
+                        emit(ctx, enc_subfc(SCRATCH_E, SCRATCH_A, SCRATCH_C));
+                        emit(ctx, enc_subfe(SCRATCH_E, SCRATCH_E, SCRATCH_E));
+                        emit(ctx, enc_andi_dot(SCRATCH_E, SCRATCH_E, 1)); /* SCRATCH_E = ((fsc^0x80000000)>value)?1:0 */
+                        /* Place this component's two result bits at their
+                         * real clip-register slot: x->bits0-1, y->bits2-3,
+                         * z->bits4-5 (matching ee_core.c's 0x01/0x02,
+                         * 0x04/0x08, 0x10/0x20 literals exactly). Both D
+                         * and E hold a clean 0 or 1 (single bit at normal
+                         * position 0) going in, so rotating left by a
+                         * small constant with an identity mask (MB=0,
+                         * ME=31) just relocates that one bit - there is no
+                         * other set bit to wrap into contamination. */
+                        emit(ctx, enc_rlwinm(SCRATCH_D, SCRATCH_D, (uint32_t)(comp * 2), 0, 31));     /* bit_lo -> bit(2*comp) */
+                        emit(ctx, enc_rlwinm(SCRATCH_E, SCRATCH_E, (uint32_t)(comp * 2 + 1), 0, 31)); /* bit_hi -> bit(2*comp+1) */
+                        emit(ctx, enc_or(SCRATCH_H, SCRATCH_H, SCRATCH_D));
+                        emit(ctx, enc_or(SCRATCH_H, SCRATCH_H, SCRATCH_E));
+                    }
+                    emit(ctx, enc_stw(SCRATCH_H, CTX_REG, COP2_CTRL_OFF(18))); /* VI[18] = new clip */
+                    return 0;
+                }
+                return -1; /* every other SPECIAL2 sub-opcode: not yet
+                             * JIT-compiled, fall back to the interpreter. */
+            }
+            return -1; /* broadcast row (funct 0x00-0x1F) / VMADD(0x29) /
+                         * VMSUB(0x2D) family: not yet JIT-compiled, fall
+                         * back to the interpreter. */
         }
         return -1; /* scalar MFC2/QMFC2/CFC2/MTC2/QMTC2/CTC2 family: not
                      * yet JIT-compiled, fall back to the interpreter. */

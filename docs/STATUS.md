@@ -39028,3 +39028,166 @@ Status: task #892 (Round 907) CLOSED. task #885 (COP2/VU0 umbrella)
 remains in progress - 3 of the ~15-20 real VU0 macro-mode opcodes now
 JIT-accelerated (VADD/VSUB/VMUL). Next: task #893 (Round 908: VU0
 VMAX/VMINI/VOPMSUB/VABS/VCLIP).
+
+## Round 908: JIT VU0 VMAX/VMINI/VOPMSUB/VABS/VCLIP + Round 907 bugfix (task #893)
+
+Two parts this round: a real correctness bugfix to already-shipped
+Round 907 code, found during Round 908's own semantics research
+(before any new code was written), and five new VU0 opcodes.
+
+**Bugfix**: Round 907's VADD/VSUB/VMUL per-lane loop stored to
+`VU0_VF_OFF(fd, lane)` via `enc_stfs` unconditionally, with no guard
+for `fd==0`. Real hardware (and this project's own interpreter,
+`vu0_vf_write_lane()`) silently discards every write to VF00 - it's
+hardwired to `(0,0,0,1.0f)`, reset once and never touched again, and
+`vu0_vf_read_lane()`'s `reg==0` short-circuit means the interpreter
+never even looks at the underlying array for register 0. But the
+JIT's raw `stfs` bypasses that short-circuit entirely: if `fd==0` were
+ever hit, the JIT would silently corrupt the hardwired constant for
+every subsequent JIT-compiled read of register 0. Caught by re-
+deriving VABS/VOPMSUB's own `reg==0` conventions from ee_core.c for
+this round and noticing Round 907's block never applied the same
+rule - not by any test, and not a crash; a genuine "reads current
+tree with fresh eyes" catch. Fixed with a compile-time `if (fd != 0)`
+guard around the store (fd is a field of the instruction's own
+encoding, known at JIT-translate time, so the guard costs nothing at
+runtime - either the store is emitted or it isn't). The same guard
+was applied to every new op this round that writes VF (VMAX/VMINI/
+VOPMSUB's fd, VABS's ft).
+
+**VMAX(funct=0x2B)/VMINI(funct=0x2F)**: confirmed against ee_core.c's
+real case body (lines 8273-8307) that VADD/VMUL/VMAX/VSUB/VMINI are
+handled in ONE combined interpreter case, `FD[lane] = FS[lane] OP
+FT[lane]` per active destmask lane - and that VMAX/VMINI use a PLAIN
+IEEE ternary (`(a>b)?a:b` / `(a<b)?a:b`), NOT the sign-magnitude bit
+trick COP1.S's MAX.S/MIN.S (Round 905) uses for the equivalent
+scalar ops; this project's own source comment there confirms that's
+deliberate ("consistent with this project not modeling any NaN/
+signed-zero edge cases anywhere else in its float datapath either").
+Implemented via a new PowerPC encoder, `enc_fsel` (opcode 63, xo=23:
+`frD = (frA>=0.0) ? frC : frB`), verified bit-for-bit against real
+devkitPPC output before use (`fsel f1,f2,f3,f4` -> `0xFC2220EE`,
+`fsel f2,f0,f1,3` -> `0xFC40186E`, both reproduced exactly by the
+formula). Codegen per lane: `diff=fsubs(a,b)`, then VMAX=
+`fsel(diff,a,b)`, VMINI=`fsel(diff,b,a)` - functionally identical to
+the real ternary except at exact equality, where both branches
+already agree, so there's no divergence.
+
+**VOPMSUB(funct=0x2E)**: outer-product multiply-subtract, confirmed
+against ee_core.c lines 8409-8431 (matching PCSX2's own VUops.cpp
+`_vuOPMSUB`) that this op ALWAYS writes exactly xyz - there is no
+destmask field for it at all on real hardware (no W variant exists),
+so destmask is deliberately never consulted in the JIT codegen
+either: `FD.x=ACC.x-FS.y*FT.z`, `FD.y=ACC.y-FS.z*FT.x`,
+`FD.z=ACC.z-FS.x*FT.y`. Reads the VU0 accumulator via a new
+`VU0_ACC_OFF(lane)` macro (byte offset 10464 + lane*4, verified via
+offsetof() against the real `ee_state_t.vu0_acc[4]` - a completely
+different field from COP1's existing single-float `ACC_OFFSET`=1596,
+despite the similar name).
+
+**VABS(SPECIAL2 idx=29)**: confirmed against ee_core.c lines
+8547-8556 that the DESTINATION is the FT field and the SOURCE is FS -
+the opposite of every arithmetic op above (FD/FS/FT) - matching real
+disassembly convention `"vabs.xyzw FT, FS"`; fd (bits 6-10) is
+unused/ignored, per real hardware. `FT[lane] = FS[lane] & 0x7FFFFFFF`
+per destmask lane, guarded by `ft==0`. Implemented as plain integer
+load/mask/store (`lwz`/`rlwinm`/`stw`, reusing the exact
+`rlwinm sh=0,mb=1,me=31` "clear the MSB" idiom this file's SLT/DSUB
+machinery already established), not `lfs`/`fabs`/`stfs`, since this is
+a raw bitwise operation on the pattern, not IEEE arithmetic - matching
+`vu0_vf_read_lane`/`vu0_vf_write_lane`'s own `uint32_t`-typed interface
+exactly.
+
+**VCLIP(SPECIAL2 idx=31)**: the most involved opcode this dynarec has
+JIT'd to date. Confirmed against ee_core.c lines 8911-8952 that it
+judges `|FS.x|,|FS.y|,|FS.z|` against `|FT.w|` via SIGNED-INTEGER
+comparisons (not float), no Fsf/Ftf lane selector (xyz vs w is
+hardwired), derives a threshold `value` from FT.w with a denormal-
+substitution rule (`value = (ftw&0x7f800000) ? (ftw&0x7fffffff) :
+0x007fffff`), then does 6 signed comparisons against `value`, shifting
+6 new judgment bits into the CLIP flag register (this project's
+`cop2_ctrl[18]`, reused via a new `COP2_CTRL_OFF(idx)` macro - byte
+offset 1600+idx*4, verified via offsetof()) each call, masked to its
+low 24 bits (4 calls' worth of sliding history, matching real
+hardware). CLIP's index (18) is a fixed part of the opcode's own real
+semantics, never a field of the instruction encoding, so - unlike
+every VF-writing op above - it needs no `reg==0` runtime guard (18 is
+a compile-time constant, never 0).
+
+Each `(int32_t)(fsc^mask) > value` signed compare (mask is always 0
+or 0x80000000) is turned into an unsigned compare via the standard
+sign-bit-flip trick (XOR bit31 on both operands maps signed ordering
+onto unsigned ordering); algebraically folding that trick's own XOR
+into the two possible `mask` values collapses the 6 compares down to
+exactly 2 distinct operands (`fsc` and `fsc^0x80000000`) tested
+against one precomputed `value'=value^0x80000000` per component -
+so only 2 unsigned compares per component (6 total), not 2 signed
+compares each requiring their own sign-flip (12 operations). Each
+unsigned `(a>b)?1:0` reuses the exact subfc/subfe carry-to-mask idiom
+this file already established for SLT/SLTU (Round 886) and COP1's
+branch-condition masks, on a single 32-bit word (no hi-word
+propagation needed - these aren't 64-bit R5900 GPRs, just raw 32-bit
+float bit patterns). The `value` derivation itself reuses the exact
+"materialize a real zero via `li` before feeding it to subfc/subfe"
+idiom this file's own DIV.S divzero_mask code established (~line
+2504) - passing a bare immediate 0 directly into subfc/subfe would
+silently read real PowerPC register r0's live content instead, since
+subf-family instructions (unlike ADDI/ADDIS) don't get a special-
+cased "rA==0 means literal 0" rule.
+
+The `(old_clip<<6)&0xFFFFFF` history-shift is a single `rlwinm`
+(SH=6, MB=8, ME=25 in PPC bit-numbering) - extending this file's
+existing `rlwinm-as-slwi` calibration (SH=8,MB=0,ME=23 == "shift
+left 8", established for BC1's branch-blend mask): a plain shift-left
+by 6 alone would need MB=0,ME=25, and the extra `&0xFFFFFF` narrows
+MB from 0 to 8, simultaneously discarding both the low-6-bit rotate-
+wrap garbage a real shift-left must zero-fill AND the top-8-bit
+history beyond the 24-bit window, in one instruction.
+
+**Verification**: built a new host-native harness,
+`r908_vu0_max_mini_opmsub_abs_clip_verify.c`, extending the r904-
+style ppcsim simulator core with `fsel` (opcode 63) and `andi.`
+(opcode 28) decode (the only two new PPC750 forms this round's
+codegen introduces). Independent reference models
+(`vmax_ref`/`vmini_ref`/`vabs_ref`/`vclip_ref`) transcribed directly
+from ee_core.c's real case bodies, not from ppc_dynarec.c's own
+logic. 28 test cases: VMAX/VMINI single-lane (positive and negative
+operands), the exact-equality edge case for both (fsel's one
+behavioral difference from a naive ternary, confirmed to still agree),
+full XYZW multi-lane VMAX, three Round-907-class `fd==0`-discard
+regression checks (VADD/VMAX/VMINI, each pre-seeding VF00 with a
+sentinel bit pattern and confirming it survives untouched), VOPMSUB
+basic cyclic-formula correctness, a VOPMSUB destmask-has-no-effect
+check (destmask=0 still writes all 3 lanes, matching real hardware's
+total absence of a destmask field for this op), a VOPMSUB `fd==0`
+regression check, VABS basic + multi-lane (including a signed-zero
+case) + a `ft==0` regression check, four VCLIP cases (all-inside/
+zero bits, every-component-out-of-range, a mixed pattern, and the
+denormal-FT.w substitution rule) each cross-checked against
+`vclip_ref()` rather than hand-derived hex constants (an earlier draft
+of this same harness had two hand-arithmetic bugs in its own
+self-check literals, caught and fixed by computing the true values
+with a disposable host-side program instead of trusting mental
+arithmetic - the `vclip_ref()`-based comparison itself was correct
+throughout; only the redundant literal sanity-checks needed
+correcting), a 4-call VCLIP sliding-history-window check confirming
+the 24-bit mask survives repeated calls, and 4 decline-path checks
+(VMADD/VMSUB functs and two SPECIAL2 idx values still correctly fall
+back to the interpreter). 28/28 passed clean under
+`-fsanitize=address,undefined`, `ASAN_OPTIONS=detect_leaks=1`
+confirmed 0 leaks.
+
+Regression-checked against all 10 still-present prior harnesses
+(r893/894/895/896/897/898/900/902/903/904: 13/13, 17/17, 19/19,
+35/35, 19/19, 27/27, 25/25, 20/20, 12/12, 13/13) - no regressions.
+
+Wii build: pcsx2-wii.elf 3,223,364 bytes / .dol 544,416 bytes
+(+16,336 elf / +1,120 dol over Round 907, reasonable growth for 5 new
+opcodes including the most involved one this dynarec has JIT'd to
+date), 0 warnings/errors (devkitPPC 8.1.0).
+
+Status: task #893 (Round 908) CLOSED. task #885 (COP2/VU0 umbrella)
+continues - 8 of the ~15-20 real VU0 macro-mode opcodes now JIT-
+accelerated (VADD/VSUB/VMUL/VMAX/VMINI/VOPMSUB/VABS/VCLIP), plus the
+pre-existing VADDq. Next: task #894 (Round 909: VU0 VDIV/VSQRT/
+VRSQRT, the Q-register special ops).

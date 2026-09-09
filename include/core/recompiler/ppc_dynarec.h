@@ -430,6 +430,32 @@
  * row, VMAX/VMINI, and VMADD/VMSUB (ACC-operand) are deliberately
  * left to Round 908 (task #893) onward. 31/31 checks passed under
  * -fsanitize=address,undefined, 0 leaks.
+ *
+ * Round 908 (task #893) update: fixed a real bug in Round 907's own
+ * shipped code (found during this round's semantics research, not by
+ * a test) - the VADD/VSUB/VMUL loop stored to VU0_VF_OFF(fd,lane)
+ * unconditionally, never discarding writes to VF00 (fd==0) the way
+ * vu0_vf_write_lane() and every other VF write in this file must.
+ * Fixed with a compile-time `if (fd != 0)` guard (fd is known at
+ * translate time, zero runtime cost). That same combined per-lane
+ * loop now also handles VMAX(funct=0x2B)/VMINI(funct=0x2F) - a PLAIN
+ * ternary per ee_core.c's real combined case body, NOT COP1 MAX.S/
+ * MIN.S's sign-magnitude trick - via a new `enc_fsel` encoder (opcode
+ * 63, xo=23, verified bit-for-bit against real devkitPPC output):
+ * diff=fsubs(a,b), then fsel(diff,pick_a,pick_b). New VOPMSUB
+ * (funct=0x2E) block: fixed xyz-only (no destmask field on real
+ * hardware at all), reads the VU0 accumulator via a new
+ * VU0_ACC_OFF(lane) macro (offset 10464, distinct from COP1's
+ * ACC_OFFSET=1596). New SPECIAL2 sub-dispatch
+ * ((funct&0x3C)==0x3C, idx=(instr&0x3)|((instr>>4)&0x7C)) handles
+ * VABS(idx=29: dest=FT not FD, plain lwz/rlwinm/stw bitwise-AND,
+ * ft==0 guard) and VCLIP(idx=31: 6 signed comparisons folded into 6
+ * unsigned subfc/subfe compares via the sign-bit-flip trick, updating
+ * the CLIP flag register at a new COP2_CTRL_OFF(18) - the most
+ * involved opcode this dynarec has JIT'd to date). 8 of the ~15-20
+ * real VU0 macro-mode opcodes now JIT-accelerated. 28/28 checks
+ * passed under -fsanitize=address,undefined, 0 leaks. Next: task
+ * #894, Round 909 - JIT VU0 VDIV/VSQRT/VRSQRT (Q-register ops).
  */
 
 typedef struct {

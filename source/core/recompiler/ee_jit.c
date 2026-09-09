@@ -62,16 +62,20 @@ static uint64_t g_jit_executed = 0;
  * (ee_mem_read32/ee_mem_write32) rather than just moving bits between
  * the context array and PPC registers (see ppc_dynarec.c's
  * ADDR_EE_MEM_READ32/WRITE32 comment for the call-emission mechanism);
- * and LB/LBU/LH/LHU/LWU/SB/SH (op 0x20/0x24/0x21/0x25/0x27/0x28/0x29),
+ * LB/LBU/LH/LHU/LWU/SB/SH (op 0x20/0x24/0x21/0x25/0x27/0x28/0x29),
  * new in Round 892 - the same call-emission mechanism extended to the
- * rest of the base-ISA byte/halfword/unsigned-word loads and stores
- * (LD/SD still unsupported - see ppc_dynarec.c's translate_one() final
- * comment for why). Kept in sync by hand with translate_one()'s own
- * dispatch - see that function's own comments for the authoritative
- * list. This is a cheap pre-filter so the (much more expensive) cache
- * lookup/compile path is never attempted for the vast majority of real
- * instructions ppc_dynarec.c can't handle yet (branches, LD/SD, MMI,
- * COP0/1/2, ...). */
+ * rest of the base-ISA byte/halfword/unsigned-word loads and stores;
+ * and LD/SD (op 0x37/0x3F), new in Round 893 - the same mechanism one
+ * more time, now handling a genuine 64-bit callee value via a PowerPC
+ * EABI register PAIR (r3:r4 for LD's return, r5:r6 for SD's argument)
+ * instead of a single 32-bit register (see ppc_dynarec.c's
+ * ADDR_EE_MEM_READ64/WRITE64 comment). This completes the full
+ * base-ISA integer load/store family. Kept in sync by hand with
+ * translate_one()'s own dispatch - see that function's own comments
+ * for the authoritative list. This is a cheap pre-filter so the (much
+ * more expensive) cache lookup/compile path is never attempted for the
+ * vast majority of real instructions ppc_dynarec.c can't handle yet
+ * (branches, MMI, COP0/1/2, ...). */
 static int ee_jit_opcode_supported(uint32_t instr)
 {
     uint32_t op = (instr >> 26) & 0x3Fu;
@@ -84,6 +88,8 @@ static int ee_jit_opcode_supported(uint32_t instr)
     if (op == 0x27u) return 1; /* LWU (Round 892) */
     if (op == 0x28u || op == 0x29u) return 1; /* SB / SH (Round 892) */
     if (op == 0x2Bu) return 1; /* SW (Round 891) */
+    if (op == 0x37u) return 1; /* LD (Round 893) */
+    if (op == 0x3Fu) return 1; /* SD (Round 893) */
     if (op == 0x00u) {
         uint32_t funct = instr & 0x3Fu;
         switch (funct) {

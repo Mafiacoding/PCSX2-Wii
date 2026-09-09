@@ -421,6 +421,32 @@ extern void     ee_mem_write16(void *st, uint32_t addr, uint16_t val);
 #define ADDR_EE_MEM_WRITE16 0x00000106u
 #endif
 
+/* Round 893 (task #877): LD/SD - the first opcodes whose CALLEE
+ * itself deals in a genuine 64-bit value, rather than this dynarec
+ * having to synthesize one from two 32-bit calls. Per the PowerPC
+ * 32-bit EABI, a `uint64_t` return value comes back split across a
+ * register PAIR - r3 holding the high 32 bits, r4 the low 32 bits
+ * (the same "high word in the lower-numbered register" convention
+ * this file's own REG_HI/REG_LO context-slot layout already uses,
+ * which is what makes LD's dispatch block below simpler than LW's:
+ * no sign-extension step is needed at all, just two stores straight
+ * from r3/r4 into REG_HI(rt)/REG_LO(rt)). A `uint64_t` PARAMETER
+ * follows the mirror-image rule: it occupies an aligned register
+ * pair, and since `ee_mem_write64(ee_state_t*, uint32_t, uint64_t)`'s
+ * first two (32-bit-sized) parameters consume exactly 2 argument
+ * words before `val`, the pair falls on r5:r6 with no padding
+ * register needed (word-count 2 is already even) - r5 = val's high
+ * 32 bits, r6 = val's low 32 bits. */
+#ifdef GEKKO
+extern uint64_t ee_mem_read64(void *st, uint32_t addr);
+extern void     ee_mem_write64(void *st, uint32_t addr, uint64_t val);
+#define ADDR_EE_MEM_READ64  ((uint32_t)(uintptr_t)&ee_mem_read64)
+#define ADDR_EE_MEM_WRITE64 ((uint32_t)(uintptr_t)&ee_mem_write64)
+#else
+#define ADDR_EE_MEM_READ64  0x00000107u
+#define ADDR_EE_MEM_WRITE64 0x00000108u
+#endif
+
 /* Scratch PPC GPRs used by generated code. r3 is the incoming context
  * pointer (ppc_dynarec_gpr128_t *gpr) per the PowerPC EABI calling
  * convention - we never touch r1 (stack ptr) or r2/r13 (TOC/small-
@@ -555,7 +581,13 @@ int ppc_dynarec_init(ppc_codegen_ctx_t *ctx, size_t max_instructions)
      * instruction (extsb/extsh/andi.) on top of LW's shape, for a worst
      * case of 19; LWU matches LW's shape exactly (18); SB/SH match SW's
      * shape exactly (13). All still comfortably under DIV/DIVU's
-     * 32-instruction ceiling, so again no change to `words` was needed. */
+     * 32-instruction ceiling, so again no change to `words` was needed.
+     *
+     * Round 893 (task #877) update: LD is actually CHEAPER than LW at
+     * 17 instructions (no sign-extension step needed - see
+     * ADDR_EE_MEM_READ64's comment); SD is 14 (one more than SW, for
+     * the extra high-word load of its 64-bit value). Both still well
+     * under the 32-instruction ceiling. */
     size_t words = max_instructions * 32 + 1;
     ctx->code = memalign(32, words * sizeof(uint32_t));
     if (!ctx->code)
@@ -1209,10 +1241,66 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
         return 0;
     }
 
-    /* Unsupported: branches, loads/stores other than LB/LBU/LH/LHU/
-     * LW/LWU/SB/SH/SW above (LD/SD still unsupported - their 64-bit
-     * value calling convention needs register-pair handling this file
-     * hasn't built yet), MMI, COP1/2, everything else. Real coverage
+    if (op == 0x37) {
+        /* MIPS: ld rt, imm(rs) -> gpr[rt] = ee_mem_read64(st,
+         * rs32+imm) - a plain 64-bit copy, no sign/zero-extension of
+         * any kind (unlike every load this dynarec has handled so
+         * far). Same read-always-happens-even-when-rt==0 rule as
+         * LW/LB/LH (ee_core.c's own `if (rt) GPR(rt) = ...; else
+         * ee_mem_read64(...);` case body). See
+         * ADDR_EE_MEM_READ64's comment above for the r3:r4 hi:lo
+         * return-value convention this block relies on - it's what
+         * lets the post-call code be just two stores with no srawi/
+         * extsb/extsh/andi. widening step at all. */
+        emit(ctx, enc_addi(1, 1, -32));
+        emit(ctx, enc_stw(14, 1, 8));
+        emit(ctx, enc_stw(15, 1, 12));
+        emit(ctx, enc_or(15, 3, 3));
+        emit(ctx, enc_mflr(14));
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs)));
+        emit(ctx, enc_addi(SCRATCH_A, SCRATCH_A, (int16_t)imm));
+        emit_load_const32(ctx, 12, ADDR_EE_MEM_READ64);
+        emit(ctx, enc_mtctr(12));
+        emit(ctx, enc_bctrl());                       /* r3:r4 = ee_mem_read64(ctx, addr), hi:lo */
+        emit(ctx, enc_mtlr(14));
+        if (rt != 0) {
+            emit(ctx, enc_stw(3, 15, REG_HI(rt)));
+            emit(ctx, enc_stw(4, 15, REG_LO(rt)));
+        }
+        emit(ctx, enc_lwz(14, 1, 8));
+        emit(ctx, enc_lwz(15, 1, 12));
+        emit(ctx, enc_addi(1, 1, 32));
+        return 0;
+    }
+
+    if (op == 0x3F) {
+        /* MIPS: sd rt, imm(rs) -> ee_mem_write64(st, rs32+imm,
+         * gpr[rt]) - no rt==0 guard in ee_core.c's own case body
+         * (reading $zero as the value-to-store is always valid, and
+         * always 0), same as SW/SB/SH. The 64-bit value is loaded
+         * into r5:r6 (hi:lo) BEFORE r4 is overwritten with the
+         * computed address - same "load the value first, finalize the
+         * address into SCRATCH_A/r4 last" ordering SW already uses,
+         * just with an extra register for the value's high word. */
+        emit(ctx, enc_addi(1, 1, -32));
+        emit(ctx, enc_stw(14, 1, 8));
+        emit(ctx, enc_mflr(14));
+        emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_HI(rt))); /* r5 = val hi (arg3 hi) */
+        emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_LO(rt))); /* r6 = val lo (arg3 lo) */
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs))); /* rs32 */
+        emit(ctx, enc_addi(SCRATCH_A, SCRATCH_A, (int16_t)imm)); /* r4 = addr (arg2) */
+        emit_load_const32(ctx, 12, ADDR_EE_MEM_WRITE64);
+        emit(ctx, enc_mtctr(12));
+        emit(ctx, enc_bctrl());                       /* ee_mem_write64(ctx, addr, val) */
+        emit(ctx, enc_mtlr(14));
+        emit(ctx, enc_lwz(14, 1, 8));
+        emit(ctx, enc_addi(1, 1, 32));
+        return 0;
+    }
+
+    /* Unsupported: branches, MMI, COP1/2, everything else. LB/LBU/LH/
+     * LHU/LW/LWU/SB/SH/SW/LD/SD (the full base-ISA integer load/store
+     * family) are all handled above. Real coverage of what remains
      * would require this switch to be the size of ee_core's
      * interpreter (or larger, with scheduling). */
     return -1;

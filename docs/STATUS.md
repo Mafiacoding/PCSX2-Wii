@@ -37691,3 +37691,78 @@ Branches/jumps remain the other unopened category. Same sandbox
 limitation as every prior JIT round: real native-PPC-execution
 correctness still can't be verified without Wii hardware or Dolphin
 access here.
+
+## Round 893: LD/SD - closing the base-ISA load/store family with a 64-bit GPR-pair calling convention
+
+Closes the deferred item Round 892 flagged. `ee_mem_read64`/
+`ee_mem_write64` are the first callees this dynarec reaches whose
+VALUE (not just their address argument) is a genuine 64-bit quantity,
+which the PowerPC 32-bit EABI represents as an aligned register PAIR
+rather than a single register - new calling-convention ground this
+file hadn't covered in Rounds 891/892 (where every value in play,
+loaded or stored, fit in one 32-bit register).
+
+**The convention, and why it makes LD simpler than LW**: a `uint64_t`
+return value comes back split as r3(hi):r4(lo) - the same "high word
+in the lower-numbered slot" rule this file's own `REG_HI`/`REG_LO`
+context-slot layout already uses (`REG_HI` at slot+0, `REG_LO` at
+slot+4). That alignment means LD's post-call code is just two stores
+straight from r3/r4 into `REG_HI(rt)`/`REG_LO(rt)` - no `srawi`/
+`extsb`/`extsh`/`andi.` widening step at all, since a 64-bit load has
+nothing to extend. LD's dispatch block ends up 17 instructions,
+actually one FEWER than LW's 18. A `uint64_t` PARAMETER follows the
+mirror rule: `ee_mem_write64(ee_state_t*, uint32_t, uint64_t)`'s first
+two 32-bit-sized parameters consume exactly 2 argument words before
+`val`, so the pair falls on r5:r6 (hi:lo) with no alignment padding
+needed. SD loads `REG_HI(rt)`/`REG_LO(rt)` into r5/r6 before
+finalizing the address into r4 - same "load the value first" ordering
+SW/SD's siblings already use - for 14 instructions total, one more
+than SW's 13 (the extra high-word load).
+
+**Two new sentinel constants** on host builds - `ADDR_EE_MEM_READ64`
+(0x107), `ADDR_EE_MEM_WRITE64` (0x108) - same GEKKO-vs-host
+dual-definition scheme as every prior memory-op round.
+
+**Verification**: `r893_ld_sd_verify.c`, same host-native call-the-
+real-`ppc_dynarec_translate_one()`-and-interpret-the-bytes methodology
+as every prior round. The simulator needed no new PPC instruction
+forms this round (LD/SD reuse Round 891's `mflr`/`mtlr`/`mtctr`/
+`bctrl` unchanged) - only a widened `bctrl` dispatch that assembles/
+disassembles the r3:r4 and r5:r6 register pairs into a real
+`uint64_t` for its two new sentinel targets. 13 checks: LD round-trips
+an arbitrary (non-trivially-extendable-looking) 64-bit pattern,
+checked hi and lo separately (2), plus register/stack preservation
+(3); LD reproduces an all-1s 64-bit pattern exactly, proving no
+accidental sign-extension logic leaks in from this file's other load
+opcodes (1); LD with a nonzero base+immediate address computation (1);
+LD-to-`$zero` register-write skip (1); SD basic store plus register/
+stack preservation (3); SD from `$zero` stores exactly 0 (1); SD
+followed by LD round-trips the exact 64-bit value through two
+independently compiled blocks (1). **Result: 13/13 checks passed.**
+
+- Host-native: `ppc_dynarec.c` and `ee_jit.c` both compile clean under
+  `gcc -O2 -Wall -Wextra` (0 warnings).
+- `r893_ld_sd_verify.c`: **13/13 checks passed**.
+- devkitPPC/libogc Wii cross-build (`make clean && make -j4`, real
+  target): clean, 0 warnings/errors, fresh `pcsx2-wii.elf`
+  (3,029,040 bytes) / `.dol` (531,616 bytes).
+- Full 135-test regression suite: not re-run this round (already
+  skipped once this session at the user's explicit direction for
+  Round 892's identical-shape change; LD/SD are pure additions to the
+  same dispatch function using an already-verified call mechanism, and
+  the dedicated 13-check harness plus a clean Wii build cover this
+  round's actual new code).
+
+**Status**: 39 opcodes now JIT-accelerated (the 37 from Round 892 plus
+LD, SD). The full base-ISA MIPS-I/MIPS-III integer load/store family
+is now JIT-compiled end to end: LB/LBU/LH/LHU/LW/LWU/LD (all loads)
+and SB/SH/SW/SD (all stores), sharing one call-emission trampoline
+mechanism built in Round 891 and proven to generalize cleanly across
+every width and both signedness conventions, plus now a genuine 64-bit
+GPR-pair calling convention. Branches/jumps remain the one genuinely
+unopened category in this dynarec: real block-level translation with
+correct delay-slot semantics, or continued interpreter fallback for
+all control flow - the natural next increment once resumed. Same
+sandbox limitation as every prior JIT round: real native-PPC-execution
+correctness still can't be verified without Wii hardware or Dolphin
+access here.

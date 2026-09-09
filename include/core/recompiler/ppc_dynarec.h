@@ -329,6 +329,45 @@
  * hardware-NaN shortcut - all passed on the first run). Next: SQRT.S/
  * RSQRT.S/MAX.S/MIN.S, then the MADD-family/comparison-family
  * (Round 906), CVT.W.S/CVT.S.W, and the BC1 branch family (Round 906b).
+ *
+ * Round 905 (task #889) update: SQRT.S/RSQRT.S (funct 0x04/0x16) and
+ * MAX.S/MIN.S (funct 0x28/0x29) are now JIT-accelerated. Before writing
+ * any code, resolved a real hardware-safety question EMPIRICALLY (the
+ * fetched IBM Gekko manual PDF's extracted text had zero hits for
+ * "fsqrt", so documentation alone didn't answer it): does real PPC750/
+ * Gekko silicon safely support fsqrts/fsqrt? devkitPPC's own GCC
+ * (-mcpu=750 -mhard-float) compiles `sqrtf(x)` as a tail-call `b sqrtf`,
+ * never an inlined hardware sqrt, and the real linked libm.a's
+ * __ieee754_sqrtf is ~100+ instructions of pure software bit-twiddling
+ * with zero use of any hardware sqrt opcode - decisive evidence this
+ * dynarec must NOT emit fsqrts/fsqrt directly. Added ADDR_EE_SQRTF
+ * (sentinel 0x109 on host, the real sqrtf symbol's address on GEKKO)
+ * alongside the existing ADDR_EE_MEM_READ32-style dual-address macros,
+ * and SQRT.S/RSQRT.S call the real linked sqrtf() through a
+ * C-function-call trampoline - same LR-via-r14/ctx-via-r15 convention
+ * as LW/SW's Round 891 trampoline, but with the argument/return in f1
+ * (EABI float arg/return register) instead of r3/r4. Notable finding
+ * specific to this trampoline style: SCRATCH_A/SCRATCH_B do NOT survive
+ * the call (r3-r12 are all EABI volatile) and must be reloaded via
+ * emit_load_const32 afterward if needed again - the first time a call
+ * in this dynarec has silently invalidated scratch state that survived
+ * every non-calling opcode's usage pattern. SQRT.S's source is `ft`
+ * (fs unused, a genuine real-hardware/PCSX2 quirk), has a signed-zero
+ * special case for zero-exponent ft and NO output clamp; a notable
+ * real-hardware behavior specifically test-cased: sqrt of a NEGATIVE ft
+ * returns sqrt(|ft|), not NaN. RSQRT.S shares SQRT.S's denominator
+ * computation but its special-case sign comes from ft ALONE (no xor
+ * with fs, unlike DIV.S) and it DOES apply the standard overflow/
+ * underflow output clamp. MAX.S/MIN.S do a bit-level signed-int
+ * max/min on raw register contents with NO clamping anywhere (verified
+ * absent from the real case bodies) - implemented via the same signed-
+ * compare subfc/subfe-borrow-to-mask idiom emit_slt_core already uses,
+ * just on single 32-bit words instead of a 64-bit hi/lo pair. See
+ * docs/STATUS.md's Round 905 section for the full verification writeup
+ * (20/20 checks, all passed on the first run). Next: the MADD/MSUB/
+ * ADDA/SUBA/MULA family and C.cond.S comparisons (Round 906), then
+ * CVT.W.S/CVT.S.W and the BC1 branch family (Round 906b) to close out
+ * task #884.
  */
 
 typedef struct {

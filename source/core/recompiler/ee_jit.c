@@ -225,15 +225,15 @@ static int ee_jit_opcode_supported(uint32_t instr)
         }
     }
     if (op == 0x11u) {
-        /* COP1 (FPU), new in Round 902, extended Round 903/904: like
+        /* COP1 (FPU), new in Round 902, extended Round 903/904/905: like
          * REGIMM above, `rs` selects the real sub-opcode, not a flat
          * op-only dispatch - only the subset ppc_dynarec.c's op==0x11
          * block actually implements returns 1 here; everything else
-         * (SQRT.S/RSQRT.S/MAX.S/MIN.S/the MADD family/comparisons, plus
-         * CVT.W.S/CVT.S.W and the BC1 branch-on-condition family) falls
-         * through to the interpreter, matching translate_one()'s own
-         * `return -1` paths inside this same op==0x11 block exactly -
-         * kept in sync by hand, same discipline as every entry above. */
+         * (the MADD family/C.cond.S comparisons, plus CVT.W.S/CVT.S.W
+         * and the BC1 branch-on-condition family) falls through to the
+         * interpreter, matching translate_one()'s own `return -1` paths
+         * inside this same op==0x11 block exactly - kept in sync by
+         * hand, same discipline as every entry above. */
         uint32_t rs = (instr >> 21) & 0x1Fu;
         if (rs == 0x00u || rs == 0x02u || rs == 0x04u || rs == 0x06u)
             return 1; /* MFC1 / CFC1 / MTC1 / CTC1 */
@@ -245,6 +245,10 @@ static int ee_jit_opcode_supported(uint32_t instr)
                 return 1; /* ADD.S / SUB.S / MUL.S (Round 903) */
             if (funct == 0x03u)
                 return 1; /* DIV.S (Round 904) */
+            if (funct == 0x04u || funct == 0x16u)
+                return 1; /* SQRT.S / RSQRT.S (Round 905) */
+            if (funct == 0x28u || funct == 0x29u)
+                return 1; /* MAX.S / MIN.S (Round 905) */
         }
         return 0;
     }

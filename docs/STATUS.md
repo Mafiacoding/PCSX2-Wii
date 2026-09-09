@@ -38634,3 +38634,128 @@ Status: 80 opcodes now JIT-accelerated. Next up (task #884
 continuation, Round 905+): SQRT.S/RSQRT.S/MAX.S/MIN.S, then the
 MADD-family/comparison family (Round 906), CVT.W.S/CVT.S.W, and the
 BC1 branch-on-FP-condition family (Round 906b).
+
+## Round 905: COP1.S SQRT.S/RSQRT.S/MAX.S/MIN.S - hardware-sqrt safety finding
+
+Before writing any code this round, resolved a real hardware-safety
+question first: can this dynarec emit PPC750 fsqrts/fsqrt directly for
+SQRT.S/RSQRT.S, the way it emits fadds/fsubs/fmuls/fdivs for the other
+COP1.S arithmetic opcodes? Classic PowerPC treats floating-point square
+root as an OPTIONAL instruction category, not guaranteed present on
+every implementation - and the fetched IBM Gekko User's Manual PDF's
+extracted text had zero hits for "fsqrt", so the primary-source route
+came up empty. Resolved empirically instead: `powerpc-eabi-gcc
+-mcpu=750 -mhard-float -O2 -S` compiling `float f(float x){return
+sqrtf(x);}` emits a plain tail-call `b sqrtf`, not an inlined fsqrts -
+devkitPPC's own backend for this exact target doesn't trust hardware
+sqrt enough to inline it. Disassembling the real linked libm.a's
+`__ieee754_sqrtf` (extracted via `powerpc-eabi-ar x`) confirms why: it's
+~100+ instructions of pure software bit-twiddling digit extraction,
+with zero use of fsqrts/fsqrt/frsqrte anywhere in its body. That's
+decisive: this dynarec must NOT emit hardware sqrt instructions for
+SQRT.S/RSQRT.S - it must call the real linked sqrtf() through a
+C-function-call trampoline instead, the same design LW/SW established
+in Round 891 for calling ee_mem_read32/write32, just with a float
+argument/return in f1 (the EABI's first float arg/return register)
+instead of an integer argument/return in r3/r4.
+
+Added `ADDR_EE_SQRTF` alongside the existing ADDR_EE_MEM_READ32-style
+GEKKO-vs-host dual-address macros: the real linked `sqrtf` symbol's
+address on GEKKO builds, sentinel `0x00000109` (next free value after
+the existing 0x101-0x108 range) on host-native verify builds. Unlike
+LW/SW's trampoline, this call doesn't take ctx as an argument at all -
+but per the PowerPC EABI, r3-r12 are ALL caller-saved/volatile across
+any call, so CTX_REG (r3) still has to be saved into r15 before the
+call and restored after, same LR-via-r14/ctx-via-r15 convention as
+LW/SW, just because a plain float call still can't be trusted not to
+clobber r3 - not because the call takes ctx as a parameter.
+
+**SQRT.S** (funct 0x04): re-read ee_core.c's real case body directly
+rather than assumed from DIV.S: the source operand is `ft` (the `rt`
+field), NOT `fs` - `fs`/`rd` are unused, a genuine real-hardware/PCSX2
+quirk carried over exactly. Raw ft's exponent field is tested for zero
+(denormal counts as zero) BEFORE any clamp - on a hit the result is
+simply ft's own sign bit (signed zero), skipping sqrtf entirely. The
+real case body's two nonzero-exponent branches (one for ft negative,
+one for ft non-negative) are mathematically identical - both reduce to
+`sqrtf(fabsf(fpu_double(ft)))` - so this dynarec computes that single
+expression unconditionally and blends it against the signed-zero
+special case, same branchless-blend structure Round 904's DIV.S
+established. A genuine real-hardware quirk worth calling out
+explicitly: sqrt of a NEGATIVE ft does NOT produce NaN - it produces
+sqrt(|ft|), per the real case body's own fabsf() call - verified and
+specifically test-cased, not assumed from IEEE convention. No output
+clamp is applied afterward (confirmed absent from the real case body) -
+sqrtf() of a clamped, non-negative, bounded-magnitude input can't
+overflow float32 range.
+
+**RSQRT.S** (funct 0x16, fd = fs / sqrt(ft)): same raw-ft-exponent-zero
+special case as SQRT.S, but the special result differs in two ways from
+DIV.S's divide-by-zero case, both re-verified directly from source
+rather than assumed by analogy: it's `(ft_sign)|FMAX` with NO xor
+against fs's sign, and (unlike SQRT.S) there IS a standard
+overflow-then-underflow output clamp on the normal path. The
+denominator computation - `sqrtf(fabsf(fpu_double(ft)))` - is
+byte-for-byte the same expression SQRT.S's own normal path computes
+(reused, not re-derived). IMPORTANT implementation detail specific to
+this opcode: SCRATCH_A/SCRATCH_B (the clamp routine's K1M1/K2M1
+constants) do NOT survive the sqrtf() call - the EABI makes r3-r12 all
+volatile, sqrtf() is free to clobber any of them - so they're reloaded
+via emit_load_const32 a second time after the call, immediately before
+the fs-clamp and the output clamp that both need them. This is the
+first opcode in this dynarec where a call can silently invalidate
+scratch state that survived every previous opcode's usage pattern -
+documented explicitly in the code so future call-trampoline opcodes
+don't get bitten by the same assumption.
+
+**MAX.S/MIN.S** (funct 0x28/0x29): re-verified against ee_core.c's real
+bodies - `fp_max(fpr[fs], fpr[ft])` / `fp_min(...)`, a bit-level
+SIGNED-32-bit-int max/min on the RAW register contents (ported from
+PCSX2's FPU.cpp), with NO fpu_double() input clamp and NO output clamp
+anywhere in either real case body - confirmed by re-reading, not
+assumed by analogy with every other COP1.S arithmetic opcode shipped so
+far (all of which clamp somewhere). fp_max/fp_min both special-case
+"both operands negative" to invert which raw signed comparison they
+use, so no IEEE-monotonic-bit-pattern shortcut is available - this
+needs a genuine signed compare. Implemented as two branchless masks
+(less_mask/greater_mask, allOnes iff sa<sb / sa>sb) via the same
+sign-flip-then-subfc/subfe-borrow-to-mask idiom emit_slt_core already
+uses for its signed SLT path (just on a single 32-bit word here, not a
+64-bit hi/lo pair), plus a bothneg_mask from srawi-by-31 on each raw
+operand. MAX.S and MIN.S share this entire computation, differing only
+in which pick (min or max of the raw signed ints) goes into the
+bothneg-case slot vs the default-case slot - one shared code block, not
+two near-duplicates. No FPRs or stack frame touched at all - pure GPR
+bitwise ops on raw register contents.
+
+New host-native harness r905_cop1_sqrt_max_verify.c (outputs scratch
+area, not tracked in this repo), extending Round 904's simulator with
+mflr/mtlr/mtctr (opc31 mtspr/mfspr) and bctrl (opc19 XO=528 LK=1) -
+the same forms Round 891's LW/SW harness established - recognizing the
+new SENTINEL_SQRTF (0x109) and calling the real host libm sqrtf() on
+the simulated f1 register (there's no "test double" needed here since
+real host sqrtf() IS the correct behavior to model). 20 test cases:
+SQRT.S basic/negative-operand-quirk/+0.0/-0.0/denormal-special-case/
+larger-value/no-output-clamp (7), RSQRT.S basic/negative-ft/the two
+special-case-sign-source-divergence-from-DIV.S proofs (fs negative with
+ft's special case giving a POSITIVE result, and vice versa)/overflow/
+underflow (6), MAX.S/MIN.S basic/both-negative-special-branch/
+mixed-signs/NaN-Infinity-pass-through-unclamped/equal-values (7). All
+20/20 passed on the first run, clean under -fsanitize=address,undefined
+- cross-checked against independently-written reference models
+(sqrt_ref/rsqrt_ref/fp_max_ref/fp_min_ref, derived straight from
+ee_core.c's documented case bodies, not by re-running ppc_dynarec.c's
+own emit code).
+
+Regression-checked against Rounds 893/894/895/896/897/898/900/902/903/
+904's own harnesses (13/13, 17/17, 19/19, 35/35, 19/19, 27/27, 25/25,
+20/20, 12/12, 13/13) - no regressions.
+
+Wii build: pcsx2-wii.elf 3,163,676 bytes / .dol 540,384 bytes
+(+30,604 / +1,696 over Round 904), 0 warnings/errors (devkitPPC 8.1.0).
+
+Status: 83 opcodes now JIT-accelerated (funct 0x04/0x16/0x28/0x29
+added to the COP1.S subset). Next up (task #884 continuation, Round
+906): the MADD/MSUB/ADDA/SUBA/MULA family and C.cond.S comparisons,
+then CVT.W.S/CVT.S.W and the BC1 branch-on-FP-condition family
+(Round 906b) to close out task #884.

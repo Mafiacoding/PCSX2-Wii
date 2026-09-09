@@ -635,6 +635,31 @@ extern void     ee_mem_write64(void *st, uint32_t addr, uint64_t val);
 #define ADDR_EE_MEM_WRITE64 0x00000108u
 #endif
 
+/* Round 905 (task #889): same GEKKO-vs-host dual-address scheme as
+ * ADDR_EE_MEM_READ32/etc above, but for the first call trampoline in
+ * this file that DOESN'T target one of this project's own ee_mem_*
+ * functions - it targets the real linked libm sqrtf(). Empirically
+ * verified this round (not from documentation - the fetched IBM Gekko
+ * manual PDF's extracted text had zero hits for "fsqrt") that emitting
+ * PPC750 fsqrts/fsqrt directly would be unsafe: devkitPPC's own GCC
+ * refuses to inline hardware sqrt for -mcpu=750 (compiling
+ * `sqrtf(x)` emits a tail-call `b sqrtf`, not an fsqrts instruction),
+ * and the real linked libm.a's __ieee754_sqrtf is a from-scratch
+ * software bit-twiddling algorithm with zero use of any hardware sqrt
+ * opcode anywhere in its body. So SQRT.S/RSQRT.S below call the real
+ * library sqrtf() through this trampoline instead of emitting fsqrts,
+ * mirroring the ee_mem_* call convention but with a float argument/
+ * return in f1 (the EABI's first float arg/return register) rather
+ * than integer registers - see the SQRT.S dispatch block for the
+ * call-site details. Sentinel 0x109 continues the existing 0x101-0x108
+ * numbering (next free value). */
+#ifdef GEKKO
+extern float sqrtf(float x);
+#define ADDR_EE_SQRTF ((uint32_t)(uintptr_t)&sqrtf)
+#else
+#define ADDR_EE_SQRTF 0x00000109u
+#endif
+
 /* Scratch PPC GPRs used by generated code. r3 is the incoming context
  * pointer (ppc_dynarec_gpr128_t *gpr) per the PowerPC EABI calling
  * convention - we never touch r1 (stack ptr) or r2/r13 (TOC/small-
@@ -2377,9 +2402,289 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
                 emit(ctx, enc_addi(1, 1, 32)); /* pop scratch frame */
                 return 0;
             }
-            return -1; /* SQRT.S/RSQRT.S/MAX.S/MIN.S/ADDA.S/etc: not
-                        * yet JIT-compiled, fall back to the interpreter
-                        * (later round in this arc). */
+            if (funct == 0x04) {
+                /* Round 905 (task #889): SQRT.S. Re-verified against
+                 * ee_core.c's real SQRT.S body (case 0x04, ~line 7996):
+                 * the source operand is `ft` (COP1.S's `rt` field) -
+                 * fs/rd are UNUSED, a documented real-hardware/PCSX2
+                 * quirk carried over exactly, not a copy typo (SQRT.S
+                 * computes sqrt(ft); fs plays no part). Raw ft's
+                 * exponent field is tested for zero (denormal counts as
+                 * zero, matching fpu_double()'s own zero_mask trigger)
+                 * BEFORE any clamp: on a hit the result is simply ft's
+                 * own sign bit (signed zero), skipping sqrtf entirely.
+                 * The two nonzero-exponent branches in ee_core.c (one
+                 * for ft negative, one for ft non-negative) are
+                 * mathematically identical - both reduce to
+                 * `sqrtf(fabsf(fpu_double(ft)))` - so this dynarec
+                 * computes that single expression unconditionally for
+                 * the normal path and blends it against the signed-zero
+                 * special case, same branchless-blend structure as
+                 * DIV.S. No output clamp is applied afterward (verified
+                 * absent from the real case body) - sqrtf() of a
+                 * clamped, non-negative, non-huge input can't overflow
+                 * float32 range, so none is needed.
+                 *
+                 * Real PPC750/Gekko hardware does not safely support
+                 * fsqrts/fsqrt (see ADDR_EE_SQRTF's own comment above
+                 * for the empirical GCC/libm-disassembly evidence this
+                 * round found) - this calls the real linked sqrtf()
+                 * through a C-function-call trampoline instead of
+                 * emitting a hardware sqrt instruction. Unlike the
+                 * LW/SW trampolines (which pass ctx as an integer arg in
+                 * r3 and get an integer result back in r3), this call's
+                 * argument and return value are both a single float in
+                 * f1 (the EABI's first float arg/return register) -
+                 * CTX_REG itself (r3) carries no argument here, but per
+                 * the EABI r3-r12 are ALL still caller-saved/volatile
+                 * across the call (sqrtf is free to use any of them as
+                 * scratch), so CTX_REG must be saved into r15
+                 * (non-volatile) before the call and restored after -
+                 * same LR-via-r14/ctx-via-r15 convention as LW/SW's own
+                 * trampoline, just applied here because a plain float
+                 * call still can't be trusted not to clobber r3, not
+                 * because this call takes ctx as an argument. */
+                emit(ctx, enc_addi(1, 1, -32)); /* push 32-byte scratch frame */
+
+                emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_FPR(rt))); /* raw ft (source, NOT fs) */
+                emit(ctx, enc_stw(SCRATCH_C, 1, 0));
+
+                emit_load_const32(ctx, SCRATCH_A, 0x007FFFFFu); /* K1M1 */
+                emit_load_const32(ctx, SCRATCH_B, 0x7F7FFFFFu); /* K2M1 */
+
+                /* iszero_mask = allOnes iff (ft & 0x7F800000) == 0 */
+                emit(ctx, enc_rlwinm(SCRATCH_E, SCRATCH_C, 0, 1, 8));
+                emit(ctx, enc_addi(SCRATCH_F, 0, 0));
+                emit(ctx, enc_subfc(SCRATCH_G, SCRATCH_E, SCRATCH_F));
+                emit(ctx, enc_subfe(SCRATCH_G, SCRATCH_G, SCRATCH_G));
+                emit(ctx, enc_nor(SCRATCH_G, SCRATCH_G, SCRATCH_G));   /* G = iszero_mask */
+                emit(ctx, enc_stw(SCRATCH_G, 1, 4));
+
+                /* special_result = ft_raw & 0x80000000 (signed zero) */
+                emit(ctx, enc_rlwinm(SCRATCH_H, SCRATCH_C, 0, 0, 0));
+                emit(ctx, enc_stw(SCRATCH_H, 1, 8));
+
+                /* Normal path operand: fabsf(fpu_double(ft)) - clamp then clear sign */
+                emit(ctx, enc_lwz(SCRATCH_C, 1, 0)); /* reload raw ft */
+                emit_fpu_clamp32(ctx);
+                emit(ctx, enc_rlwinm(SCRATCH_C, SCRATCH_C, 0, 1, 31)); /* fabsf: clear sign bit */
+                emit(ctx, enc_stw(SCRATCH_C, 1, 12));
+                emit(ctx, enc_lfs(1, 1, 12)); /* f1 = fabsf(fpu_double(ft)) - EABI float arg reg */
+
+                emit(ctx, enc_stw(14, 1, 16)); /* save caller's r14 */
+                emit(ctx, enc_stw(15, 1, 20)); /* save caller's r15 */
+                emit(ctx, enc_or(15, CTX_REG, CTX_REG)); /* r15 = ctx (mr r15,r3) */
+                emit(ctx, enc_mflr(14));                 /* r14 = this block's real return address */
+                emit_load_const32(ctx, 12, ADDR_EE_SQRTF);
+                emit(ctx, enc_mtctr(12));
+                emit(ctx, enc_bctrl());                  /* f1 = sqrtf(f1) */
+                emit(ctx, enc_mtlr(14));                 /* restore this block's real return address */
+                emit(ctx, enc_or(CTX_REG, 15, 15));      /* restore ctx into r3 (mr r3,r15) - r3 is
+                                                           * volatile, sqrtf() may have clobbered it */
+                emit(ctx, enc_lwz(14, 1, 16));           /* restore caller's r14 */
+                emit(ctx, enc_lwz(15, 1, 20));           /* restore caller's r15 */
+
+                emit(ctx, enc_stfs(1, 1, 12));           /* spill sqrtf's f1 result */
+                emit(ctx, enc_lwz(SCRATCH_C, 1, 12));    /* SCRATCH_C = normal-path result bits */
+
+                /* Blend: final = iszero_mask ? special_result : normal_result */
+                emit(ctx, enc_lwz(SCRATCH_D, 1, 4));  /* iszero_mask */
+                emit(ctx, enc_lwz(SCRATCH_E, 1, 8));  /* special_result */
+                emit(ctx, enc_nor(SCRATCH_F, SCRATCH_D, SCRATCH_D));
+                emit(ctx, enc_and(SCRATCH_E, SCRATCH_E, SCRATCH_D));
+                emit(ctx, enc_and(SCRATCH_C, SCRATCH_C, SCRATCH_F));
+                emit(ctx, enc_or(SCRATCH_C, SCRATCH_C, SCRATCH_E));
+                emit(ctx, enc_stw(SCRATCH_C, CTX_REG, REG_FPR(fd)));
+
+                emit(ctx, enc_addi(1, 1, 32)); /* pop scratch frame */
+                return 0;
+            }
+            if (funct == 0x16) {
+                /* Round 905 (task #889): RSQRT.S = fs / sqrt(ft).
+                 * Re-verified against ee_core.c's real RSQRT.S body
+                 * (case 0x16, ~line 8018): same raw-ft-exponent-zero
+                 * special case as SQRT.S (denormal counts as zero), but
+                 * the special result differs in TWO ways from DIV.S's
+                 * divide-by-zero case: it's (ft_sign)|FMAX with NO XOR
+                 * against fs's sign (verified directly from source -
+                 * easy to get wrong by pattern-matching DIV.S's XOR
+                 * instead of re-reading), and there's no distinct
+                 * "0/0-class" wrinkle to prove here since only ft's
+                 * exponent is ever tested. The two nonzero-exponent
+                 * branches again reduce to one shared expression for
+                 * the denominator - denom = sqrtf(fabsf(fpu_double(ft))),
+                 * byte-for-byte the same computation SQRT.S's own
+                 * normal path makes (reused here, not re-derived) - then
+                 * the normal-path result is fpu_double(fs) / denom, WITH
+                 * the standard overflow-then-underflow output clamp
+                 * applied afterward (SQRT.S has none, this opcode does -
+                 * confirmed present in both non-zero-exponent branches
+                 * of the real case body).
+                 *
+                 * Same sqrtf() call-trampoline convention as SQRT.S (ctx
+                 * saved into r15/LR into r14 across the call, restored
+                 * after - see that block's own comment for why).
+                 * IMPORTANT: SCRATCH_A/SCRATCH_B (K1M1/K2M1) do NOT
+                 * survive the call - r3-r12 are all EABI volatile,
+                 * sqrtf() is free to clobber any of them - so they're
+                 * reloaded via emit_load_const32 a second time after the
+                 * call, immediately before the fs-clamp and (later) the
+                 * output clamp that both need them. Uses a 32-byte frame
+                 * like SQRT.S, with one extra slot to stash the sqrtf()
+                 * result (denom) across the post-call fs-clamp/lfs
+                 * sequence before the final fdivs. */
+                emit(ctx, enc_addi(1, 1, -32)); /* push 32-byte scratch frame */
+
+                emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_FPR(rt))); /* raw ft */
+                emit(ctx, enc_stw(SCRATCH_C, 1, 0));
+
+                emit_load_const32(ctx, SCRATCH_A, 0x007FFFFFu); /* K1M1 */
+                emit_load_const32(ctx, SCRATCH_B, 0x7F7FFFFFu); /* K2M1 == FPU_POS_FMAX */
+
+                /* iszero_mask = allOnes iff (ft & 0x7F800000) == 0 */
+                emit(ctx, enc_rlwinm(SCRATCH_E, SCRATCH_C, 0, 1, 8));
+                emit(ctx, enc_addi(SCRATCH_F, 0, 0));
+                emit(ctx, enc_subfc(SCRATCH_G, SCRATCH_E, SCRATCH_F));
+                emit(ctx, enc_subfe(SCRATCH_G, SCRATCH_G, SCRATCH_G));
+                emit(ctx, enc_nor(SCRATCH_G, SCRATCH_G, SCRATCH_G));   /* G = iszero_mask */
+                emit(ctx, enc_stw(SCRATCH_G, 1, 4));
+
+                /* special_result = (ft_sign) | FMAX - NO xor with fs, unlike DIV.S */
+                emit(ctx, enc_rlwinm(SCRATCH_H, SCRATCH_C, 0, 0, 0)); /* ft sign bit only */
+                emit(ctx, enc_or(SCRATCH_H, SCRATCH_H, SCRATCH_B));   /* | K2M1(=FMAX) */
+                emit(ctx, enc_stw(SCRATCH_H, 1, 8));
+
+                /* denom operand: fabsf(fpu_double(ft)) - identical to SQRT.S's normal path */
+                emit(ctx, enc_lwz(SCRATCH_C, 1, 0)); /* reload raw ft */
+                emit_fpu_clamp32(ctx);
+                emit(ctx, enc_rlwinm(SCRATCH_C, SCRATCH_C, 0, 1, 31)); /* fabsf */
+                emit(ctx, enc_stw(SCRATCH_C, 1, 12));
+                emit(ctx, enc_lfs(1, 1, 12)); /* f1 = fabsf(fpu_double(ft)) */
+
+                emit(ctx, enc_stw(14, 1, 16)); /* save caller's r14 */
+                emit(ctx, enc_stw(15, 1, 20)); /* save caller's r15 */
+                emit(ctx, enc_or(15, CTX_REG, CTX_REG));
+                emit(ctx, enc_mflr(14));
+                emit_load_const32(ctx, 12, ADDR_EE_SQRTF);
+                emit(ctx, enc_mtctr(12));
+                emit(ctx, enc_bctrl());                  /* f1 = sqrtf(f1) = denom */
+                emit(ctx, enc_mtlr(14));
+                emit(ctx, enc_or(CTX_REG, 15, 15));      /* restore ctx into r3 */
+                emit(ctx, enc_lwz(14, 1, 16));
+                emit(ctx, enc_lwz(15, 1, 20));
+
+                emit(ctx, enc_stfs(1, 1, 24));           /* spill denom to its own slot */
+
+                /* Reload K1M1/K2M1 - clobbered by the call, needed again below */
+                emit_load_const32(ctx, SCRATCH_A, 0x007FFFFFu);
+                emit_load_const32(ctx, SCRATCH_B, 0x7F7FFFFFu);
+
+                emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_FPR(fs))); /* raw fs (dividend) */
+                emit_fpu_clamp32(ctx);
+                emit(ctx, enc_stw(SCRATCH_C, 1, 12));
+                emit(ctx, enc_lfs(0, 1, 12)); /* f0 = clamped fs */
+                emit(ctx, enc_lfs(1, 1, 24)); /* f1 = denom */
+
+                emit(ctx, enc_fdivs(2, 0, 1));           /* f2 = fs / denom */
+                emit(ctx, enc_stfs(2, 1, 12));
+                emit(ctx, enc_lwz(SCRATCH_C, 1, 12));
+                emit_fpu_clamp32(ctx); /* overflow-then-underflow output clamp */
+
+                /* Blend: final = iszero_mask ? special_result : normal_result */
+                emit(ctx, enc_lwz(SCRATCH_D, 1, 4));  /* iszero_mask */
+                emit(ctx, enc_lwz(SCRATCH_E, 1, 8));  /* special_result */
+                emit(ctx, enc_nor(SCRATCH_F, SCRATCH_D, SCRATCH_D));
+                emit(ctx, enc_and(SCRATCH_E, SCRATCH_E, SCRATCH_D));
+                emit(ctx, enc_and(SCRATCH_C, SCRATCH_C, SCRATCH_F));
+                emit(ctx, enc_or(SCRATCH_C, SCRATCH_C, SCRATCH_E));
+                emit(ctx, enc_stw(SCRATCH_C, CTX_REG, REG_FPR(fd)));
+
+                emit(ctx, enc_addi(1, 1, 32)); /* pop scratch frame */
+                return 0;
+            }
+            if (funct == 0x28 || funct == 0x29) {
+                /* Round 905 (task #889): MAX.S/MIN.S. Re-verified
+                 * against ee_core.c's real bodies (case 0x28/0x29,
+                 * ~line 8038): `fpr[fd] = fp_max(fpr[fs], fpr[ft])` /
+                 * `fp_min(...)` - a bit-level SIGNED-32-bit-int max/min
+                 * on the RAW register contents, ported straight from
+                 * PCSX2's FPU.cpp, with NO fpu_double() input clamp and
+                 * NO output clamp anywhere in either real case body
+                 * (unlike every other COP1.S arithmetic opcode this
+                 * dynarec has shipped so far) - confirmed by re-reading,
+                 * not assumed by analogy. fp_max/fp_min both special-
+                 * case "both operands negative" (sa<0 && sb<0) to invert
+                 * which raw signed-int comparison they use - this is NOT
+                 * a plain IEEE-monotonic bit-pattern trick (that only
+                 * holds when both values share the same sign or one is
+                 * non-negative), so no shortcut is available: this
+                 * needs a genuine signed compare, not just a select on
+                 * the sign bits.
+                 *
+                 * Computed as two independent branchless masks - less_mask
+                 * (allOnes iff sa<sb) and greater_mask (allOnes iff
+                 * sa>sb) - via the exact same sign-flip + subfc/subfe
+                 * borrow-to-mask idiom emit_slt_core uses for its signed
+                 * SLT path (just on a single 32-bit word here, not a
+                 * 64-bit hi/lo pair, since fp_max/fp_min operate on
+                 * plain 32-bit ints), plus a bothneg_mask from the two
+                 * operands' sign bits via srawi-by-31 (the same
+                 * fill-word idiom LW/ADDIU/etc use for sign-extension).
+                 * MAX.S and MIN.S share this entire mask/pick computation
+                 * - they only differ in which pick (min or max of the
+                 * raw signed ints) gets used for the bothneg case vs the
+                 * default case, so both funct values are handled in one
+                 * block with a plain C-level (compile-time) branch for
+                 * that last step, not two near-duplicate blocks. No FPRs
+                 * or stack frame are touched at all - pure GPR bitwise
+                 * ops on the raw register contents. */
+                emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_FPR(fs))); /* a = fpr[fs] raw */
+                emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_FPR(rt)));  /* b = fpr[ft] raw (ft=rt) */
+
+                emit(ctx, enc_srawi(SCRATCH_F, SCRATCH_A, 31)); /* signA: allOnes iff a<0 */
+                emit(ctx, enc_srawi(SCRATCH_G, SCRATCH_B, 31)); /* signB: allOnes iff b<0 */
+                emit(ctx, enc_and(SCRATCH_C, SCRATCH_F, SCRATCH_G)); /* C = bothneg_mask */
+
+                emit(ctx, enc_xoris(SCRATCH_F, SCRATCH_A, 0x8000)); /* flippedA */
+                emit(ctx, enc_xoris(SCRATCH_G, SCRATCH_B, 0x8000)); /* flippedB */
+
+                emit(ctx, enc_subfc(SCRATCH_H, SCRATCH_G, SCRATCH_F)); /* H=flippedA-flippedB */
+                emit(ctx, enc_subfe(SCRATCH_D, SCRATCH_H, SCRATCH_H)); /* D = less_mask (sa<sb) */
+
+                emit(ctx, enc_subfc(SCRATCH_H, SCRATCH_F, SCRATCH_G)); /* H=flippedB-flippedA */
+                emit(ctx, enc_subfe(SCRATCH_E, SCRATCH_H, SCRATCH_H)); /* E = greater_mask (sa>sb) */
+
+                /* pick_min = D? a : b -> F */
+                emit(ctx, enc_nor(SCRATCH_H, SCRATCH_D, SCRATCH_D));
+                emit(ctx, enc_and(SCRATCH_F, SCRATCH_A, SCRATCH_D));
+                emit(ctx, enc_and(SCRATCH_H, SCRATCH_B, SCRATCH_H));
+                emit(ctx, enc_or(SCRATCH_F, SCRATCH_F, SCRATCH_H));    /* F = pick_min */
+
+                /* pick_max = E? a : b -> G */
+                emit(ctx, enc_nor(SCRATCH_H, SCRATCH_E, SCRATCH_E));
+                emit(ctx, enc_and(SCRATCH_G, SCRATCH_A, SCRATCH_E));
+                emit(ctx, enc_and(SCRATCH_H, SCRATCH_B, SCRATCH_H));
+                emit(ctx, enc_or(SCRATCH_G, SCRATCH_G, SCRATCH_H));    /* G = pick_max */
+
+                if (funct == 0x28) {
+                    /* MAX.S: bothneg -> pick_min(F), else -> pick_max(G) */
+                    emit(ctx, enc_nor(SCRATCH_H, SCRATCH_C, SCRATCH_C));
+                    emit(ctx, enc_and(SCRATCH_F, SCRATCH_F, SCRATCH_C));
+                    emit(ctx, enc_and(SCRATCH_G, SCRATCH_G, SCRATCH_H));
+                    emit(ctx, enc_or(SCRATCH_F, SCRATCH_F, SCRATCH_G));
+                } else {
+                    /* MIN.S: bothneg -> pick_max(G), else -> pick_min(F) */
+                    emit(ctx, enc_nor(SCRATCH_H, SCRATCH_C, SCRATCH_C));
+                    emit(ctx, enc_and(SCRATCH_G, SCRATCH_G, SCRATCH_C));
+                    emit(ctx, enc_and(SCRATCH_F, SCRATCH_F, SCRATCH_H));
+                    emit(ctx, enc_or(SCRATCH_F, SCRATCH_F, SCRATCH_G));
+                }
+                emit(ctx, enc_stw(SCRATCH_F, CTX_REG, REG_FPR(fd)));
+                return 0;
+            }
+            return -1; /* the MADD/MSUB/ADDA.S family + C.cond.S
+                        * comparisons: not yet JIT-compiled, fall back to
+                        * the interpreter (later round in this arc). */
         }
         return -1; /* CVT.W.S/CVT.S.W/BC1/etc: not yet JIT-compiled. */
     }

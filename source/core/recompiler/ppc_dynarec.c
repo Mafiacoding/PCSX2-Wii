@@ -762,6 +762,15 @@ static void emit_branch_blend_likely(ppc_codegen_ctx_t *ctx, int32_t disp)
 #define REG_SLOT(r)  ((int16_t)((r) * 16))
 #define REG_HI(r)    ((int16_t)(REG_SLOT(r) + 0))
 #define REG_LO(r)    ((int16_t)(REG_SLOT(r) + 4))
+/* Round 900 (task #883): REG_HI1/REG_LO1 give the offsets of ud1's two
+ * 32-bit halves (bytes 8-11/12-15 of the 16-byte slot) - the upper 64
+ * bits of the EE's real 128-bit GPRs, matching ee_core.c's own
+ * GPR1(x)==st->gpr[x].ud1 macro. Only LQ/SQ (this round) touch ud1;
+ * every opcode before this round only ever reads/writes ud0 via REG_HI/
+ * REG_LO. Same big-endian "high word at the lower address" convention
+ * as REG_HI/REG_LO - see this header's own endianness note. */
+#define REG_HI1(r)   ((int16_t)(REG_SLOT(r) + 8))
+#define REG_LO1(r)   ((int16_t)(REG_SLOT(r) + 12))
 
 /* Round 890 (task #874): HI/LO pseudo-register indices. The R5900 has
  * two dedicated 64-bit registers (HI, LO - used by MULT/MULTU/DIV/
@@ -1709,6 +1718,281 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
         emit(ctx, enc_bctrl());                       /* ee_mem_write64(ctx, addr, val) */
         emit(ctx, enc_mtlr(14));
         emit(ctx, enc_lwz(14, 1, 8));
+        emit(ctx, enc_addi(1, 1, 32));
+        return 0;
+    }
+
+    if (op == 0x22 || op == 0x26) {
+        /* Round 900 (task #883): lwl/lwr rt, imm(rs) - the unaligned-word
+         * load pair. Both read ONE aligned 32-bit word at (rs32+imm)&~3
+         * and merge PART of it (selected by the low 2 bits of the real,
+         * unaligned address) into rt, leaving the other part of rt's
+         * existing value untouched - LWL fills rt's high-order bytes
+         * from the read word's low-order bytes, LWR does the mirror
+         * image. ee_core.c's own LWL_MASK/LWL_SHIFT/LWR_MASK/LWR_SHIFT
+         * lookup tables (indexed by the runtime 2-bit `shift = addr&3`)
+         * are NOT reproduced as tables here - every entry collapses to a
+         * simple formula of `shift`, computed with plain register
+         * arithmetic instead:
+         *   LWL_SHIFT[shift] = 24 - 8*shift   (array: 24,16,8,0)
+         *   LWL_MASK[shift]  = 0xFFFFFFFF >> (8*shift+8) (array: 0xffffff,0xffff,0xff,0)
+         *   LWR_SHIFT[shift] = 8*shift               (array: 0,8,16,24)
+         *   LWR_MASK[shift]  = ~(0xFFFFFFFF >> LWR_SHIFT[shift]) (array: 0,0xff000000,0xffff0000,0xffffff00)
+         * (each verified against ee_core.c's literal table contents
+         * before writing any codegen). The shift==3 (LWL) / shift==0
+         * (LWR-mask) edge cases divide by "shift 32", which is exactly
+         * where real PPC750 slw/srw's own ">=32 -> zero" hardware rule
+         * (already relied on by DSLL/DSRL/DSRA, Round 898) does the
+         * right thing with no special-case branch needed.
+         *
+         * Values needed AFTER the ee_mem_read32() call (shift, rt32,
+         * the two shift amounts) are NOT trusted to survive the call in
+         * a volatile scratch register (r4-r11 are caller-saved/volatile
+         * per the PowerPC EABI - a real callee is free to clobber them)
+         * - instead everything except the call's own arguments is
+         * RECOMPUTED from context (via r15, the non-volatile saved ctx
+         * pointer) after bctrl returns, same conservative discipline
+         * LW/LB/LH already established. */
+        int is_lwl = (op == 0x22);
+        emit(ctx, enc_addi(1, 1, -32));
+        emit(ctx, enc_stw(14, 1, 8));
+        emit(ctx, enc_stw(15, 1, 12));
+        emit(ctx, enc_or(15, 3, 3));
+        emit(ctx, enc_mflr(14));
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs)));
+        emit(ctx, enc_addi(SCRATCH_A, SCRATCH_A, (int16_t)imm)); /* unaligned addr */
+        emit(ctx, enc_rlwinm(SCRATCH_A, SCRATCH_A, 0, 0, 29));   /* aligned addr (r4, arg2) */
+        emit_load_const32(ctx, 12, ADDR_EE_MEM_READ32);
+        emit(ctx, enc_mtctr(12));
+        emit(ctx, enc_bctrl());                       /* r3 = mem (aligned word) */
+        emit(ctx, enc_mtlr(14));
+
+        if (rt != 0) {
+            /* post-call: recompute addr/shift fresh from ctx (r15) */
+            emit(ctx, enc_lwz(SCRATCH_A, 15, REG_LO(rs)));
+            emit(ctx, enc_addi(SCRATCH_A, SCRATCH_A, (int16_t)imm)); /* unaligned addr */
+            emit(ctx, enc_andi_dot(SCRATCH_D, SCRATCH_A, 3));         /* D = shift (0..3) */
+            emit(ctx, enc_addi(SCRATCH_E, 0, 3));
+            emit(ctx, enc_slw(SCRATCH_E, SCRATCH_D, SCRATCH_E));      /* E = shift8 = shift<<3 */
+
+            if (is_lwl) {
+                emit(ctx, enc_addi(SCRATCH_F, 0, 24));
+                emit(ctx, enc_subf(SCRATCH_F, SCRATCH_E, SCRATCH_F));   /* F = 24-shift8 = LWL_SHIFT */
+                emit(ctx, enc_slw(SCRATCH_G, 3, SCRATCH_F));            /* G = mem << LWL_SHIFT */
+                emit(ctx, enc_addi(SCRATCH_H, 0, 8));
+                emit(ctx, enc_add(SCRATCH_E, SCRATCH_E, SCRATCH_H));    /* E = shift8+8 = mask_shift */
+                emit(ctx, enc_addi(SCRATCH_H, 0, -1));
+                emit(ctx, enc_srw(SCRATCH_H, SCRATCH_H, SCRATCH_E));    /* H = LWL_MASK = 0xFFFFFFFF>>mask_shift */
+                emit(ctx, enc_lwz(SCRATCH_C, 15, REG_LO(rt)));          /* C = rt32 */
+                emit(ctx, enc_and(SCRATCH_C, SCRATCH_C, SCRATCH_H));    /* rt32 & mask */
+                emit(ctx, enc_or(SCRATCH_C, SCRATCH_C, SCRATCH_G));     /* result = (rt32&mask)|(mem<<shift) */
+                emit(ctx, enc_stw(SCRATCH_C, 15, REG_LO(rt)));
+                emit(ctx, enc_srawi(SCRATCH_A, SCRATCH_C, 31));         /* LWL always full-sign-extends */
+                emit(ctx, enc_stw(SCRATCH_A, 15, REG_HI(rt)));
+            } else { /* LWR */
+                emit(ctx, enc_srw(SCRATCH_G, 3, SCRATCH_E));            /* G = mem >> LWR_SHIFT(=shift8) */
+                emit(ctx, enc_addi(SCRATCH_H, 0, -1));
+                emit(ctx, enc_srw(SCRATCH_H, SCRATCH_H, SCRATCH_E));    /* 0xFFFFFFFF>>LWR_SHIFT */
+                emit(ctx, enc_nor(SCRATCH_H, SCRATCH_H, SCRATCH_H));    /* H = LWR_MASK = ~that */
+                emit(ctx, enc_lwz(SCRATCH_C, 15, REG_LO(rt)));          /* C = rt32 */
+                emit(ctx, enc_and(SCRATCH_C, SCRATCH_C, SCRATCH_H));    /* rt32 & mask */
+                emit(ctx, enc_or(SCRATCH_C, SCRATCH_C, SCRATCH_G));     /* result = (rt32&mask)|(mem>>shift) */
+                emit(ctx, enc_stw(SCRATCH_C, 15, REG_LO(rt)));
+                /* shift==0: full sign-extend (like LW). shift!=0: leave
+                 * rt's existing hi word untouched. Blend via the
+                 * standard is-zero-mask idiom (subfc/subfe self-
+                 * subtract trick, same one BEQ/BLEZ already use). */
+                emit(ctx, enc_addi(SCRATCH_A, 0, 1));
+                emit(ctx, enc_subfc(SCRATCH_B, SCRATCH_A, SCRATCH_D));  /* CA = (shift != 0) */
+                emit(ctx, enc_subfe(SCRATCH_B, SCRATCH_A, SCRATCH_A));  /* B = iszero_mask */
+                emit(ctx, enc_srawi(SCRATCH_G, SCRATCH_C, 31));         /* sign-fill candidate */
+                emit(ctx, enc_lwz(SCRATCH_H, 15, REG_HI(rt)));          /* preserve candidate (old hi) */
+                emit(ctx, enc_and(SCRATCH_G, SCRATCH_G, SCRATCH_B));    /* sign_fill & iszero_mask */
+                emit(ctx, enc_nor(SCRATCH_B, SCRATCH_B, SCRATCH_B));    /* notmask */
+                emit(ctx, enc_and(SCRATCH_H, SCRATCH_H, SCRATCH_B));    /* old_hi & notmask */
+                emit(ctx, enc_or(SCRATCH_G, SCRATCH_G, SCRATCH_H));
+                emit(ctx, enc_stw(SCRATCH_G, 15, REG_HI(rt)));
+            }
+        }
+        emit(ctx, enc_lwz(14, 1, 8));
+        emit(ctx, enc_lwz(15, 1, 12));
+        emit(ctx, enc_addi(1, 1, 32));
+        return 0;
+    }
+
+    if (op == 0x2A || op == 0x2E) {
+        /* Round 900 (task #883): swl/swr rt, imm(rs) - the unaligned-
+         * word store pair, and the store-side mirror of LWL/LWR above.
+         * Real hardware genuinely performs a READ of the existing
+         * aligned word, merges in the bytes selected from rt, and
+         * WRITES the merged word back - two real ee_mem_read32/write32
+         * calls in one generated block (this dynarec's first opcode
+         * that calls a real C function twice), each with its own
+         * register-preservation discipline since either call is free to
+         * clobber r4-r11. SWL_MASK/SWL_SHIFT and SWR_MASK/SWR_SHIFT
+         * collapse to the SAME formulas as LWL/LWR's masks above (SWL's
+         * mask is a LEFT shift of 0xFFFFFFFF instead of LWL's right
+         * shift - see the inline comments below for the exact mapping),
+         * verified against ee_core.c's literal tables before writing
+         * any codegen. */
+        int is_swl = (op == 0x2A);
+        emit(ctx, enc_addi(1, 1, -32));
+        emit(ctx, enc_stw(14, 1, 8));
+        emit(ctx, enc_stw(15, 1, 12));
+        emit(ctx, enc_or(15, 3, 3));
+        emit(ctx, enc_mflr(14));
+
+        /* --- call #1: read the existing aligned word --- */
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs)));
+        emit(ctx, enc_addi(SCRATCH_A, SCRATCH_A, (int16_t)imm));
+        emit(ctx, enc_rlwinm(SCRATCH_A, SCRATCH_A, 0, 0, 29)); /* aligned addr (r4) */
+        emit_load_const32(ctx, 12, ADDR_EE_MEM_READ32);
+        emit(ctx, enc_mtctr(12));
+        emit(ctx, enc_bctrl());                       /* r3 = old mem word */
+        emit(ctx, enc_mtlr(14));
+
+        /* --- post-call: recompute addr/shift, derive the merged value.
+         * SCRATCH_A(r4) ends this section holding the UNALIGNED addr
+         * (aligned again right before call #2, in place - already r4,
+         * the exact arg2 register, so no extra move is needed);
+         * SCRATCH_B(r5) ends up holding the merged value - also already
+         * the exact arg3-low register SD's convention uses, so no extra
+         * move is needed there either. */
+        emit(ctx, enc_or(SCRATCH_C, 3, 3));            /* C = old mem (save before r3 gets reused) */
+        emit(ctx, enc_lwz(SCRATCH_A, 15, REG_LO(rs)));
+        emit(ctx, enc_addi(SCRATCH_A, SCRATCH_A, (int16_t)imm)); /* unaligned addr -> A (r4) */
+        emit(ctx, enc_andi_dot(SCRATCH_D, SCRATCH_A, 3));         /* D = shift */
+        emit(ctx, enc_addi(SCRATCH_E, 0, 3));
+        emit(ctx, enc_slw(SCRATCH_E, SCRATCH_D, SCRATCH_E));      /* E = shift8 */
+        emit(ctx, enc_lwz(SCRATCH_G, 15, REG_LO(rt)));            /* G = rt32 */
+
+        if (is_swl) {
+            emit(ctx, enc_addi(SCRATCH_F, 0, 24));
+            emit(ctx, enc_subf(SCRATCH_F, SCRATCH_E, SCRATCH_F));    /* F = 24-shift8 = SWL_SHIFT */
+            emit(ctx, enc_srw(SCRATCH_B, SCRATCH_G, SCRATCH_F));     /* B(r5) = rt32 >> SWL_SHIFT */
+            emit(ctx, enc_addi(SCRATCH_H, 0, 8));
+            emit(ctx, enc_add(SCRATCH_E, SCRATCH_E, SCRATCH_H));     /* E = mask_shift = shift8+8 */
+            emit(ctx, enc_addi(SCRATCH_H, 0, -1));
+            emit(ctx, enc_slw(SCRATCH_H, SCRATCH_H, SCRATCH_E));     /* H = SWL_MASK = 0xFFFFFFFF<<mask_shift */
+        } else { /* SWR */
+            emit(ctx, enc_slw(SCRATCH_B, SCRATCH_G, SCRATCH_E));     /* B(r5) = rt32 << SWR_SHIFT(=shift8) */
+            emit(ctx, enc_addi(SCRATCH_F, 0, 32));
+            emit(ctx, enc_subf(SCRATCH_F, SCRATCH_E, SCRATCH_F));    /* F = 32-shift8 (NOT shift8 itself -
+                                                                        * SWR_MASK[shift] = 0xFFFFFFFF>>(32-shift8),
+                                                                        * a different formula from LWR_MASK's
+                                                                        * 0xFFFFFFFF>>shift8 term - verified against
+                                                                        * ee_core.c's real SWR_MASK table
+                                                                        * {0,0xff,0xffff,0xffffff} this round after
+                                                                        * a host-native harness caught the original
+                                                                        * (wrong) shift8-only formula. */
+            emit(ctx, enc_addi(SCRATCH_H, 0, -1));
+            emit(ctx, enc_srw(SCRATCH_H, SCRATCH_H, SCRATCH_F));     /* H = SWR_MASK = 0xFFFFFFFF>>(32-shift8) */
+        }
+        emit(ctx, enc_and(SCRATCH_C, SCRATCH_C, SCRATCH_H));   /* old_mem & mask */
+        emit(ctx, enc_or(SCRATCH_B, SCRATCH_B, SCRATCH_C));    /* B(r5) = merged value */
+
+        /* --- call #2: write the merged word back --- */
+        emit(ctx, enc_rlwinm(SCRATCH_A, SCRATCH_A, 0, 0, 29)); /* A(r4) = aligned addr, in place */
+        emit(ctx, enc_or(3, 15, 15));                          /* r3 = ctx */
+        emit_load_const32(ctx, 12, ADDR_EE_MEM_WRITE32);
+        emit(ctx, enc_mtctr(12));
+        emit(ctx, enc_bctrl());                       /* ee_mem_write32(ctx, aligned, merged) */
+        emit(ctx, enc_mtlr(14));
+
+        emit(ctx, enc_lwz(14, 1, 8));
+        emit(ctx, enc_lwz(15, 1, 12));
+        emit(ctx, enc_addi(1, 1, 32));
+        return 0;
+    }
+
+    if (op == 0x1E) {
+        /* Round 900 (task #883): lq rt, imm(rs) - 128-bit load. Address
+         * is masked to 16-byte alignment (real hardware ignores the low
+         * 4 bits rather than faulting, unlike LW/LD - ee_core.c's own
+         * `(rs32 + imm) & ~0xFu`). Matches ee_core.c's real PCSX2-ported
+         * behavior of skipping the read ENTIRELY when rt==$0 (unlike
+         * every other load in this dynarec, which still performs the
+         * read for its memory side effects even when the destination is
+         * discarded) - declining outright for rt==0 reproduces that
+         * exactly, consistent with every rd==0/rt==0 guard elsewhere in
+         * this file. This is this dynarec's first opcode that needs TWO
+         * ee_mem_read64() calls in one block (one for ud0/GPR(rt), one
+         * for ud1/GPR1(rt) - see REG_HI1/REG_LO1's own comment) - r15
+         * (saved ctx) is restored into r3 before the second call, since
+         * the first call's bctrl clobbers r3 with its own return value. */
+        if (rt == 0)
+            return 0;
+        emit(ctx, enc_addi(1, 1, -32));
+        emit(ctx, enc_stw(14, 1, 8));
+        emit(ctx, enc_stw(15, 1, 12));
+        emit(ctx, enc_or(15, 3, 3));
+        emit(ctx, enc_mflr(14));
+
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs)));
+        emit(ctx, enc_addi(SCRATCH_A, SCRATCH_A, (int16_t)imm));
+        emit(ctx, enc_rlwinm(SCRATCH_A, SCRATCH_A, 0, 0, 27)); /* &= ~0xF (aligned addr, r4) */
+        emit_load_const32(ctx, 12, ADDR_EE_MEM_READ64);
+        emit(ctx, enc_mtctr(12));
+        emit(ctx, enc_bctrl());                       /* r3:r4 = GPR(rt).hi:lo (ud0) */
+        emit(ctx, enc_mtlr(14));
+        emit(ctx, enc_stw(3, 15, REG_HI(rt)));
+        emit(ctx, enc_stw(4, 15, REG_LO(rt)));
+
+        emit(ctx, enc_or(3, 15, 15));                  /* r3 = ctx again for call #2 */
+        emit(ctx, enc_lwz(SCRATCH_A, 15, REG_LO(rs)));
+        emit(ctx, enc_addi(SCRATCH_A, SCRATCH_A, (int16_t)imm));
+        emit(ctx, enc_rlwinm(SCRATCH_A, SCRATCH_A, 0, 0, 27));
+        emit(ctx, enc_addi(SCRATCH_A, SCRATCH_A, 8));   /* aligned+8 (r4) */
+        emit_load_const32(ctx, 12, ADDR_EE_MEM_READ64);
+        emit(ctx, enc_mtctr(12));
+        emit(ctx, enc_bctrl());                       /* r3:r4 = GPR1(rt).hi:lo (ud1) */
+        emit(ctx, enc_mtlr(14));
+        emit(ctx, enc_stw(3, 15, REG_HI1(rt)));
+        emit(ctx, enc_stw(4, 15, REG_LO1(rt)));
+
+        emit(ctx, enc_lwz(14, 1, 8));
+        emit(ctx, enc_lwz(15, 1, 12));
+        emit(ctx, enc_addi(1, 1, 32));
+        return 0;
+    }
+
+    if (op == 0x1F) {
+        /* Round 900 (task #883): sq rt, imm(rs) - 128-bit store, the
+         * mirror of LQ above. Same 16-byte alignment masking. Always
+         * writes both halves, including when rt==$0 (whose value is
+         * always zero) - matches ee_core.c exactly, no rt==0 guard
+         * needed (unlike LQ). Two ee_mem_write64() calls, same
+         * r15-restore-into-r3 discipline as LQ's two reads. */
+        emit(ctx, enc_addi(1, 1, -32));
+        emit(ctx, enc_stw(14, 1, 8));
+        emit(ctx, enc_stw(15, 1, 12));
+        emit(ctx, enc_or(15, 3, 3));
+        emit(ctx, enc_mflr(14));
+
+        emit(ctx, enc_lwz(SCRATCH_B, 15, REG_HI(rt)));  /* val (ud0) hi -> r5 */
+        emit(ctx, enc_lwz(SCRATCH_C, 15, REG_LO(rt)));  /* val (ud0) lo -> r6 */
+        emit(ctx, enc_lwz(SCRATCH_A, 15, REG_LO(rs)));
+        emit(ctx, enc_addi(SCRATCH_A, SCRATCH_A, (int16_t)imm));
+        emit(ctx, enc_rlwinm(SCRATCH_A, SCRATCH_A, 0, 0, 27)); /* aligned addr (r4) */
+        emit_load_const32(ctx, 12, ADDR_EE_MEM_WRITE64);
+        emit(ctx, enc_mtctr(12));
+        emit(ctx, enc_bctrl());                       /* ee_mem_write64(ctx, aligned, GPR(rt)) */
+        emit(ctx, enc_mtlr(14));
+
+        emit(ctx, enc_or(3, 15, 15));                  /* r3 = ctx again */
+        emit(ctx, enc_lwz(SCRATCH_B, 15, REG_HI1(rt))); /* val (ud1) hi -> r5 */
+        emit(ctx, enc_lwz(SCRATCH_C, 15, REG_LO1(rt))); /* val (ud1) lo -> r6 */
+        emit(ctx, enc_lwz(SCRATCH_A, 15, REG_LO(rs)));
+        emit(ctx, enc_addi(SCRATCH_A, SCRATCH_A, (int16_t)imm));
+        emit(ctx, enc_rlwinm(SCRATCH_A, SCRATCH_A, 0, 0, 27));
+        emit(ctx, enc_addi(SCRATCH_A, SCRATCH_A, 8));   /* aligned+8 (r4) */
+        emit_load_const32(ctx, 12, ADDR_EE_MEM_WRITE64);
+        emit(ctx, enc_mtctr(12));
+        emit(ctx, enc_bctrl());                       /* ee_mem_write64(ctx, aligned+8, GPR1(rt)) */
+        emit(ctx, enc_mtlr(14));
+
+        emit(ctx, enc_lwz(14, 1, 8));
+        emit(ctx, enc_lwz(15, 1, 12));
         emit(ctx, enc_addi(1, 1, 32));
         return 0;
     }

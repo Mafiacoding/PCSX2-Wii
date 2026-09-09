@@ -38296,3 +38296,109 @@ nothing existing restructured).
 **Status**: 63 opcodes now JIT-accelerated (57 from Round 897 + DADD/
 DADDU/DSUB/DSUBU/DSLL/DSRL/DSRA). Next up (task #883, Round 900-901):
 the EE-specific unaligned/128-bit loads - LWL/LWR/SWL/SWR/LQ/SQ.
+
+## Round 900: LWL/LWR/SWL/SWR/LQ/SQ - the unaligned/128-bit load-store family
+
+Task #883. Six more opcodes JIT-accelerated: LWL/LWR (0x22/0x26),
+SWL/SWR (0x2A/0x2E), and LQ/SQ (0x1E/0x1F). This is the largest single
+increment of the whole JIT effort so far by instruction count per block
+(up to 39 real PPC750 instructions for one MIPS opcode) and the first to
+require calling a real C function TWICE inside one compiled block.
+
+**The table-to-formula collapse.** ee_core.c implements LWL/LWR/SWL/SWR
+with 4-entry `static const` lookup tables indexed by the runtime value
+`shift = addr & 3` (not known at JIT-compile time, unlike DSLL/DSRL/
+DSRA's `sa`, which IS a compile-time immediate). Rather than reproduce
+these as actual tables in generated code (which would need a real
+memory load from a constant pool, plus bounds-safe indexing), every
+table was checked against its real literal contents in ee_core.c and
+found to collapse to a simple formula of `shift`:
+
+- `LWL_SHIFT[shift] = 24 - 8*shift` (24,16,8,0)
+- `LWL_MASK[shift] = 0xFFFFFFFF >> (8*shift+8)` (0xffffff,0xffff,0xff,0)
+- `LWR_SHIFT[shift] = 8*shift` (0,8,16,24)
+- `LWR_MASK[shift] = ~(0xFFFFFFFF >> LWR_SHIFT[shift])` (0,0xff000000,0xffff0000,0xffffff00)
+- `SWL_SHIFT[shift] = 24 - 8*shift` (same formula as LWL_SHIFT - both tables are literally identical: {24,16,8,0})
+- `SWL_MASK[shift] = 0xFFFFFFFF << (8*shift+8)` (0xffffff00,0xffff0000,0xff000000,0)
+- `SWR_SHIFT[shift] = 8*shift` (same formula as LWR_SHIFT: {0,8,16,24})
+- `SWR_MASK[shift] = 0xFFFFFFFF >> (32-8*shift)` (0,0xff,0xffff,0xffffff)
+
+Every formula's shift-32-or-more edge case (LWL/SWL at shift=3, LWR-mask
+at shift=0, SWR at shift=0) relies on the same real-hardware rule Round
+898 leaned on for DSLL/DSRL/DSRA's `sa==0` case: PPC750's `slw`/`srw`
+treat a shift count of 32 or more as "result is zero", so no special-case
+branch is needed - the formula just naturally produces 0 (or, for LWL's
+sign-extend, the correct full-replace behavior) at the boundary.
+
+**The SWR_MASK bug the harness caught.** The initial hand-derived design
+note incorrectly claimed `SWR_MASK[shift] = 0xFFFFFFFF >> shift8`, on the
+mistaken assumption that it reused "the same value as part of LWR's
+computation" (LWR_MASK does contain a `0xFFFFFFFF >> shift8` sub-term,
+but SWR_MASK is a genuinely different formula - `0xFFFFFFFF >>
+(32-shift8)`). The codegen faithfully implemented the wrong formula, and
+a dedicated host-native test (SWR at shift=0, expecting a full aligned-
+word store) caught the discrepancy immediately: with the buggy formula,
+SWR_MASK[0] evaluated to `0xFFFFFFFF>>0 = 0xFFFFFFFF` instead of the
+correct `0` (since `0xFFFFFFFF>>32` hits the hardware's `>=32` zero
+rule), corrupting every SWR store. Fixed by computing `32-shift8`
+explicitly (`li 32; subf`) before the final `srw`, adding 2 PPC
+instructions to that one branch (35 -> 37 words for the SWR path,
+comfortably under the 40-word single-opcode ceiling).
+
+**Two calls per block - a new register-preservation requirement.** SWL/
+SWR need a real read-modify-write: `ee_mem_read32()` to fetch the
+existing aligned word, then `ee_mem_write32()` to store the merged
+result. LQ/SQ need two `ee_mem_read64()`/`ee_mem_write64()` calls each -
+one for the EE 128-bit register's low 64 bits (`ud0`, via the existing
+REG_HI()/REG_LO() macros) and one for the high 64 bits (`ud1`, via new
+REG_HI1()/REG_LO1() macros added this round at `REG_SLOT(r)+8`/`+12`).
+These are this dynarec's first opcodes to call a real C function twice
+in one generated block. Since r4-r11 (SCRATCH_A-H) are volatile/caller-
+saved under the PowerPC EABI, nothing computed before a `bctrl` can be
+trusted to survive it - the discipline applied throughout is: after each
+call returns, recompute every needed value (address, shift, register
+contents) fresh from context via r15 (the non-volatile saved ctx
+pointer), never reuse a pre-call scratch register's contents post-call.
+
+**LQ's rt==0 special case.** ee_core.c skips the read entirely when
+rt==$0 for LQ (unlike every other load in this dynarec, which still
+performs the read for its memory side effects even when the destination
+is discarded) - the codegen reproduces this exactly with an early
+`if (rt == 0) return 0;` before any instructions are emitted. SQ has no
+such guard and always writes both halves (its value is always exactly
+zero when rt==$0), matching ee_core.c's real unconditional write.
+
+**Verification.** New host-native harness
+(`r900_unaligned_lqsq_verify.c`), same call-the-real-translate_one-then-
+interpret-the-output methodology as every prior round, simulator
+extended with `rlwinm`, `andi.`, `subf`, `nor`, and 32-bit
+SENTINEL_READ32/WRITE32 `bctrl` dispatch (alongside the existing 64-bit
+sentinels from Round 893's LD/SD harness) plus the real-hardware-rule
+`slw`/`srw` reused from Round 898's harness. 25 checks covering LWL/LWR
+at multiple shift offsets (including the always-sign-extend vs.
+preserve-hi-word LWR blend), SWL/SWR at multiple shift offsets verified
+against the underlying memory buffer, LQ's full 128-bit round-trip plus
+unaligned-address masking plus rt==0 skip-the-read, and SQ's full
+128-bit round-trip plus unaligned masking plus always-writes-even-at-
+rt==0. First run found 4 failures: the SWR_MASK codegen bug described
+above (1 real bug), an SWL test whose expected value was computed in the
+wrong byte position (my own error, not the codegen's), an SWR shift=3
+test with the same mirror-image mistake, and an SQ rt==0 test that
+false-failed because an earlier LWR test had left nonzero junk in the
+simulated GPR(0) context slot (this harness's simulated register file
+does not auto-enforce "$0 reads as 0" the way real hardware does - the
+test needed an explicit re-zero). After fixing the one real bug and the
+three test bugs: 25/25, clean under `-fsanitize=address,undefined`, exit
+0, no compiler warnings, no sanitizer diagnostics.
+
+Regression-checked Rounds 894/895/896/897/898/893's own harnesses (17/
+17, 19/19, 35/35, 19/19, 27/27, 13/13) against this round's modified
+`ppc_dynarec.c` - all still pass at their original counts.
+
+**Wii build**: `pcsx2-wii.elf` 3,104,096 bytes / `.dol` 536,672 bytes
+(+38,696 bytes elf / +2,496 bytes dol over Round 898), 0 warnings/errors
+(devkitPPC 8.1.0).
+
+**Status**: 69 opcodes now JIT-accelerated (63 from Round 898 + LWL/LWR/
+SWL/SWR/LQ/SQ). Next up (task #884, Round 902-906): JIT COP1 FPU
+opcodes (single-precision).

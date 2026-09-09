@@ -196,6 +196,44 @@
  * verification writeup (27/27 checks, first attempt, no bugs). Next:
  * the EE-specific unaligned/128-bit loads - LWL/LWR/SWL/SWR/LQ/SQ (task
  * #883, Round 900-901).
+ *
+ * Round 900 (task #883) update: LWL/LWR/SWL/SWR (opcodes 0x22/0x26/
+ * 0x2A/0x2E) and LQ/SQ (opcodes 0x1E/0x1F) are now JIT-accelerated.
+ * ee_core.c's own LWL_MASK/LWL_SHIFT/LWR_MASK/LWR_SHIFT/SWL_MASK/
+ * SWR_MASK 4-entry lookup tables (indexed by the runtime 2-bit
+ * `shift = addr&3`) are NOT reproduced as tables in generated code -
+ * every entry collapses to a formula of `shift`, computed with plain
+ * register arithmetic instead (see the inline comments at each
+ * dispatch block in ppc_dynarec.c for the exact per-opcode formulas).
+ * The shift==3 (LWL/SWL) and shift==0 (LWR mask, SWR shift/mask) edge
+ * cases divide by "shift 32", which real PPC750 slw/srw's own
+ * ">=32 -> zero" hardware rule (Round 898's DSLL/DSRL/DSRA reliance,
+ * reused here for a RUNTIME rather than compile-time shift amount)
+ * handles with no special-case branch. SWL/SWR/LQ/SQ are this
+ * dynarec's first opcodes to call a real C function TWICE in one
+ * compiled block (SWL/SWR: read-merge-write via ee_mem_read32 then
+ * ee_mem_write32; LQ/SQ: two ee_mem_read64/ee_mem_write64 calls, one
+ * per 64-bit half of the EE's 128-bit register) - this requires never
+ * trusting a volatile scratch register (r4-r11, caller-saved per the
+ * PowerPC EABI) to survive a `bctrl` call; every value needed after a
+ * call is instead recomputed from context via r15 (the non-volatile
+ * saved ctx pointer) once the call returns. New REG_HI1()/REG_LO1()
+ * macros address the EE 128-bit register's upper 64 bits (`ud1`,
+ * bytes 8-15 of each 16-byte slot) for LQ/SQ, alongside the existing
+ * REG_HI()/REG_LO() pair for `ud0`. LQ matches ee_core.c's real
+ * behavior of skipping the read ENTIRELY when rt==$0 (unlike every
+ * other load in this dynarec, which still performs the read for its
+ * memory side effects); SQ has no such guard and always writes both
+ * halves, matching ee_core.c exactly. A host-native verification
+ * harness caught two genuine bugs before this shipped: SWR's mask
+ * formula was originally coded as `0xFFFFFFFF>>shift8` (copied
+ * incorrectly from LWR_MASK's structurally similar but NOT identical
+ * term) instead of the correct `0xFFFFFFFF>>(32-shift8)` - fixed by
+ * computing `32-shift8` explicitly before the shift. See docs/
+ * STATUS.md's Round 900 section for the full verification writeup
+ * (25/25 checks, after fixing that mask bug plus a couple of test-
+ * harness bugs of its own). Next: JIT COP1 FPU opcodes (task #884,
+ * Round 902-906).
  */
 
 typedef struct {

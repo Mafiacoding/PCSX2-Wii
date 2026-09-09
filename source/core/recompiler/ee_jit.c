@@ -142,7 +142,19 @@ static uint64_t g_jit_executed = 0;
  * 888's existing slw/srw/sraw encoders, no new ones needed) for DSLL/
  * DSRL/DSRA - see ppc_dynarec.c's own comments on both dispatch blocks
  * for the full derivation. DSLL32/DSRL32/DSRA32 (the sa+32 range) are
- * NOT included this round, left for a future increment. Kept in sync by hand with translate_one()'s own dispatch - see
+ * NOT included this round, left for a future increment.
+ *
+ * LWL/LWR/SWL/SWR (op 0x22/0x26/0x2A/0x2E) and LQ/SQ (op 0x1E/0x1F),
+ * new in Round 900 - the EE-specific unaligned-word and 128-bit load/
+ * store family. LWL/LWR/SWL/SWR reproduce ee_core.c's per-shift lookup
+ * tables as runtime register arithmetic instead of literal tables (see
+ * ppc_dynarec.c's own dispatch-block comment for the exact formulas);
+ * SWL/SWR are this dynarec's first opcodes that call a real C function
+ * TWICE in one block (read-merge-write); LQ/SQ are its first that call
+ * ee_mem_read64/write64 twice in one block, to cover the EE's real
+ * 128-bit register width (a new REG_HI1/REG_LO1 addressing pair reaches
+ * the upper 64 bits, `ud1`, that every earlier opcode left completely
+ * alone). Kept in sync by hand with translate_one()'s own dispatch - see
  * that function's own comments for the authoritative list. This is a
  * cheap pre-filter so the (much more expensive) cache lookup/compile
  * path is never attempted for the vast majority of real instructions
@@ -154,6 +166,9 @@ static int ee_jit_opcode_supported(uint32_t instr)
     if (op == 0x0Au || op == 0x0Bu) return 1; /* SLTI / SLTIU */
     if (op == 0x0Cu || op == 0x0Du || op == 0x0Eu) return 1; /* ANDI / ORI / XORI (Round 897) */
     if (op == 0x0Fu) return 1; /* LUI */
+    if (op == 0x1Eu || op == 0x1Fu) return 1; /* LQ / SQ (Round 900) */
+    if (op == 0x22u || op == 0x26u) return 1; /* LWL / LWR (Round 900) */
+    if (op == 0x2Au || op == 0x2Eu) return 1; /* SWL / SWR (Round 900) */
     if (op == 0x20u || op == 0x24u) return 1; /* LB / LBU (Round 892) */
     if (op == 0x21u || op == 0x25u) return 1; /* LH / LHU (Round 892) */
     if (op == 0x23u) return 1; /* LW (Round 891) */

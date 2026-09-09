@@ -972,9 +972,12 @@ int ppc_dynarec_init(ppc_codegen_ctx_t *ctx, size_t max_instructions)
      * instructions (2x 15-instruction emit_fpu_clamp32() calls for the
      * operands + a 3rd for the result, plus the stack-frame/spill/fill
      * plumbing around them - see that dispatch block's own comment).
-     * Bumped to 80 for headroom (DIV.S, the next opcode in this arc,
-     * will need a few more for its divide-by-zero special case). */
-    size_t words = max_instructions * 80 + 1;
+     * Round 904: bumped to 128 - DIV.S's divide-by-zero special case
+     * (mask/blend on top of the same 3x emit_fpu_clamp32 pattern) comes
+     * to 81 words, and the MADD/MSUB ACC-register family (Round 906) is
+     * expected to need a comparable amount, so this jumps straight to
+     * 128 rather than another narrow bump. */
+    size_t words = max_instructions * 128 + 1;
     ctx->code = memalign(32, words * sizeof(uint32_t));
     if (!ctx->code)
         return -1;
@@ -999,7 +1002,7 @@ static void emit(ppc_codegen_ctx_t *ctx, uint32_t instr)
 
 int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
 {
-    if (ctx->used_words + 80 > ctx->capacity_words) /* Round 903: was 40, ADD.S/SUB.S/MUL.S's ~61-word worst case (2x input clamp + result clamp) */
+    if (ctx->used_words + 128 > ctx->capacity_words) /* Round 904: was 80, DIV.S's ~81-word worst case (Round 903 was 61) */
         return -1; /* out of buffer space */
 
     uint32_t op    = (mips_instr >> 26) & 0x3F;
@@ -2280,7 +2283,101 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
                 emit(ctx, enc_addi(1, 1, 16)); /* pop scratch frame */
                 return 0;
             }
-            return -1; /* DIV.S/SQRT.S/RSQRT.S/MAX.S/MIN.S/ADDA.S/etc: not
+            if (funct == 0x03) {
+                /* Round 904 (task #884): DIV.S. Re-verified against
+                 * ee_core.c's real DIV.S body (case 0x03, ~line 7973)
+                 * before implementing: unlike ADD.S/SUB.S/MUL.S, the
+                 * divide-by-zero condition is tested on the RAW
+                 * divisor bits BEFORE any fpu_double() clamp - "if
+                 * ((divisor & 0x7F800000) == 0)" (denormal counts as
+                 * zero too, matching fpu_double()'s own zero_mask
+                 * trigger exactly) - producing a signed +/-Fmax result
+                 * whose sign is the XOR of the RAW (unclamped) operand
+                 * signs, entirely bypassing the real division. This
+                 * can't be reproduced by just letting a real PPC750
+                 * fdivs run on the clamped operands and feeding the
+                 * IEEE Infinity/NaN result through emit_fpu_clamp32():
+                 * that shortcut gives the right answer whenever the
+                 * dividend is nonzero (IEEE division's sign-of-
+                 * infinity rule already matches the XOR formula), but
+                 * is WRONG for the 0/0-class case (both operands
+                 * denormal-or-zero) - real PPC hardware's 0/0 produces
+                 * a canonical NaN with an implementation-defined sign
+                 * bit (typically always positive), not sign=XOR(dividend,
+                 * divisor) - so the two paths would disagree on, e.g.,
+                 * (-0.0)/(+0.0). Handled instead as an explicit
+                 * branchless blend: compute the "would-be" divide-by-
+                 * zero result from the RAW operands, compute a mask
+                 * for whether the raw divisor's exponent field is
+                 * zero, ALSO run the normal clamp->fdivs->clamp path
+                 * unconditionally (its result is simply discarded when
+                 * the mask fires), then mask-blend the two - preserving
+                 * this file's "every compiled block is a straight-line
+                 * run" invariant. Uses the already-encoded-but-unused
+                 * enc_fdivs from Round 903. Reuses SCRATCH_B for both
+                 * K2M1 (the clamp routine's overflow threshold, needed
+                 * later) and FPU_POS_FMAX in the divide-by-zero
+                 * result - they're bit-identical (0x7F7FFFFF), so
+                 * loading it once and using it for both roles is exact,
+                 * not a coincidental shortcut. Uses a private 32-byte
+                 * stack frame (double the 16 bytes ADD.S/SUB.S/MUL.S
+                 * push, since this opcode needs to stash the raw
+                 * dividend/divisor plus the divide-by-zero mask/result
+                 * alongside the existing GPR<->FPR transfer slot). */
+                emit(ctx, enc_addi(1, 1, -32)); /* push 32-byte scratch frame */
+
+                emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_FPR(fs))); /* raw dividend */
+                emit(ctx, enc_stw(SCRATCH_C, 1, 0));
+                emit(ctx, enc_lwz(SCRATCH_D, CTX_REG, REG_FPR(rt))); /* raw divisor (ft=rt) */
+                emit(ctx, enc_stw(SCRATCH_D, 1, 4));
+
+                emit_load_const32(ctx, SCRATCH_A, 0x007FFFFFu); /* K1M1 */
+                emit_load_const32(ctx, SCRATCH_B, 0x7F7FFFFFu); /* K2M1 == FPU_POS_FMAX */
+
+                /* divzero_mask = allOnes iff (divisor & 0x7F800000) == 0 */
+                emit(ctx, enc_rlwinm(SCRATCH_E, SCRATCH_D, 0, 1, 8)); /* E = divisor exponent field */
+                emit(ctx, enc_addi(SCRATCH_F, 0, 0));                 /* F = 0 */
+                emit(ctx, enc_subfc(SCRATCH_G, SCRATCH_E, SCRATCH_F)); /* G=0-E, CA=1 iff E==0 */
+                emit(ctx, enc_subfe(SCRATCH_G, SCRATCH_G, SCRATCH_G)); /* G=allOnes iff E!=0, else 0 */
+                emit(ctx, enc_nor(SCRATCH_G, SCRATCH_G, SCRATCH_G));   /* flip: G=divzero_mask */
+                emit(ctx, enc_stw(SCRATCH_G, 1, 12));
+
+                /* zero_div_result = ((divisor ^ dividend) & 0x80000000) | FMAX */
+                emit(ctx, enc_xor(SCRATCH_H, SCRATCH_D, SCRATCH_C));
+                emit(ctx, enc_rlwinm(SCRATCH_H, SCRATCH_H, 0, 0, 0)); /* sign bit only */
+                emit(ctx, enc_or(SCRATCH_H, SCRATCH_H, SCRATCH_B));   /* | K2M1(=FMAX) */
+                emit(ctx, enc_stw(SCRATCH_H, 1, 16));
+
+                /* Normal path: clamp both operands, real fdivs, clamp result -
+                 * A/B still hold K1M1/K2M1 untouched by the mask/sign work above. */
+                emit(ctx, enc_lwz(SCRATCH_C, 1, 0)); /* reload raw dividend */
+                emit_fpu_clamp32(ctx);
+                emit(ctx, enc_stw(SCRATCH_C, 1, 8));
+                emit(ctx, enc_lfs(0, 1, 8)); /* f0 = clamped dividend */
+
+                emit(ctx, enc_lwz(SCRATCH_C, 1, 4)); /* reload raw divisor */
+                emit_fpu_clamp32(ctx);
+                emit(ctx, enc_stw(SCRATCH_C, 1, 8));
+                emit(ctx, enc_lfs(1, 1, 8)); /* f1 = clamped divisor */
+
+                emit(ctx, enc_fdivs(2, 0, 1));
+                emit(ctx, enc_stfs(2, 1, 8));
+                emit(ctx, enc_lwz(SCRATCH_C, 1, 8));
+                emit_fpu_clamp32(ctx); /* SCRATCH_C = clamped normal-path result */
+
+                /* Blend: final = divzero_mask ? zero_div_result : normal_result */
+                emit(ctx, enc_lwz(SCRATCH_D, 1, 12)); /* divzero_mask */
+                emit(ctx, enc_lwz(SCRATCH_E, 1, 16)); /* zero_div_result */
+                emit(ctx, enc_nor(SCRATCH_F, SCRATCH_D, SCRATCH_D)); /* notmask */
+                emit(ctx, enc_and(SCRATCH_E, SCRATCH_E, SCRATCH_D));
+                emit(ctx, enc_and(SCRATCH_C, SCRATCH_C, SCRATCH_F));
+                emit(ctx, enc_or(SCRATCH_C, SCRATCH_C, SCRATCH_E));
+                emit(ctx, enc_stw(SCRATCH_C, CTX_REG, REG_FPR(fd)));
+
+                emit(ctx, enc_addi(1, 1, 32)); /* pop scratch frame */
+                return 0;
+            }
+            return -1; /* SQRT.S/RSQRT.S/MAX.S/MIN.S/ADDA.S/etc: not
                         * yet JIT-compiled, fall back to the interpreter
                         * (later round in this arc). */
         }

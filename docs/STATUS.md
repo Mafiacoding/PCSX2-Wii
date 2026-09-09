@@ -38562,8 +38562,75 @@ bytes (+10,300 bytes elf / +608 bytes dol over Round 902), 0
 warnings/errors (devkitPPC 8.1.0).
 
 **Status**: 79 opcodes now JIT-accelerated (76 from Round 902 +
-ADD.S/SUB.S/MUL.S). Next up (task #884 continuation, Round 904+):
-DIV.S (needs a divide-by-zero special case - PCSX2's DIV.S has its own
-distinct handling for a zero denominator, bypassing the normal float
-divide), then SQRT.S/RSQRT.S/MAX.S/MIN.S/the MADD-family/comparison
-family, CVT.W.S/CVT.S.W, and the BC1 branch-on-FP-condition family.
+ADD.S/SUB.S/MUL.S).
+
+## Round 904: COP1.S DIV.S - divide-by-zero special case
+
+DIV.S (funct 0x03) is the fourth real-arithmetic COP1.S opcode. Its
+interesting part isn't the arithmetic - real PPC750 fdivs (the encoder
+added but unused in Round 903) handles that - it's ee_core.c's real
+divide-by-zero special case, re-read directly from source before
+implementing (case 0x03, ~line 7973) rather than trusted from memory:
+the RAW divisor's exponent field is tested for zero (denormal counts
+as zero too) BEFORE any fpu_double() clamp, and on a hit the result is
+a signed Fmax whose sign is the XOR of the RAW (unclamped) operand
+signs - entirely bypassing the real division.
+
+That special case can't be reproduced as a shortcut ("just let real
+fdivs run on the clamped operands and feed its Infinity/NaN result
+through the existing overflow clamp"). The shortcut agrees with the
+explicit XOR formula whenever the dividend is nonzero (IEEE division's
+sign-of-infinity rule already matches), but disagrees on the 0/0-class
+case: real PPC750 hardware's 0.0f/0.0f produces a canonical NaN with
+an implementation-defined (effectively always-positive) sign bit, not
+sign=XOR(dividend,divisor) - so e.g. -0.0/+0.0 would come out positive
+under the shortcut instead of the correct negative. Implemented
+instead as an explicit branchless blend: compute the "would-be"
+divide-by-zero result from the raw operands (via a subfc/subfe
+"iszero" mask on the divisor's exponent field, same carry-to-mask
+idiom as emit_fpu_clamp32 itself), also run the normal clamp->fdivs->
+clamp path unconditionally (its result is simply discarded when the
+mask fires), then mask-blend the two - preserving this file's "every
+compiled block is a straight-line run" invariant. SCRATCH_B is loaded
+once with 0x7F7FFFFF and does double duty as both K2M1 (the clamp
+routine's overflow threshold) and FPU_POS_FMAX in the divide-by-zero
+result, since they're bit-identical - not a coincidental shortcut,
+just avoiding a redundant load.
+
+Comes to ~81 PPC750 instructions (new record for this dynarec - Round
+903's ADD.S/SUB.S/MUL.S were ~61), needing a 32-byte private stack
+frame (double Round 903's 16 bytes) to stash the raw dividend/divisor
+plus the divide-by-zero mask/result alongside the existing GPR<->FPR
+transfer slot. Bumped the per-block buffer-capacity constant from 80
+to 128 words (both the allocation formula and the runtime capacity
+guard) - jumping straight to 128 rather than another narrow bump,
+since the upcoming MADD/MSUB ACC-register family (Round 906) is
+expected to need a comparable amount.
+
+New host-native harness r904_cop1_div_verify.c (outputs scratch area,
+not tracked in this repo), extending Round 903's simulator with an
+fdivs decode (opcode 59, xo5=18). 13 test cases: basic division,
+non-integer result, negative operand, divide-by-zero in all 4 sign
+combinations (+/+, -/+, +/-, -/-), a denormal (nonzero-mantissa, not
+just exact-zero) divisor also triggering the special case, the
+critical 0/0-class pair (-0.0/+0.0 and +0.0/+0.0) that specifically
+distinguishes this implementation from the naive hardware-NaN
+shortcut described above, overflow clamping, underflow clamping, and
+NaN-pattern-dividend input clamping combined with output overflow
+clamping in one case. All 13/13 passed on the first run, clean under
+-fsanitize=address,undefined - cross-checked against an independently
+-written reference model (fpu_div_ref(), derived straight from
+ee_core.c's documented case body, not by re-running
+ppc_dynarec.c's own emit code).
+
+Regression-checked against Rounds 893/894/895/896/897/898/900/902/903's
+own harnesses (13/13, 17/17, 19/19, 35/35, 19/19, 27/27, 25/25, 20/20,
+12/12) - no regressions.
+
+Wii build: pcsx2-wii.elf 3,133,072 bytes / .dol 538,688 bytes
+(+9,176 / +576 over Round 903), 0 warnings/errors (devkitPPC 8.1.0).
+
+Status: 80 opcodes now JIT-accelerated. Next up (task #884
+continuation, Round 905+): SQRT.S/RSQRT.S/MAX.S/MIN.S, then the
+MADD-family/comparison family (Round 906), CVT.W.S/CVT.S.W, and the
+BC1 branch-on-FP-condition family (Round 906b).

@@ -296,10 +296,39 @@
  * arithmetic, negative operands, overflow-to-Fmax clamping in both
  * signs, underflow-to-signed-zero clamping, denormal/infinity/NaN
  * input clamping, and exact-zero passthrough - all passed on the first
- * run, clean under -fsanitize=address,undefined). Next: DIV.S (needs a
- * divide-by-zero special case), then SQRT.S/RSQRT.S/MAX.S/MIN.S/the
- * MADD-family/comparison-family, CVT.W.S/CVT.S.W, and the BC1 branch
- * family (remaining Round 904-906 budget for task #884).
+ * run, clean under -fsanitize=address,undefined).
+ *
+ * Round 904 (task #884) update: DIV.S (funct 0x03) is now JIT-
+ * accelerated, using the enc_fdivs encoder added-but-unused in Round
+ * 903. Re-verified against ee_core.c's real DIV.S case body (not
+ * trusted from memory) before implementing: the divide-by-zero special
+ * case tests the RAW divisor's exponent field (denormal counts as zero
+ * too) BEFORE any fpu_double() clamp, returning a signed Fmax whose
+ * sign is the XOR of the RAW operand signs - entirely bypassing the
+ * real division. This can't be reproduced as a shortcut ("let real
+ * fdivs run on the clamped operands, feed its Infinity/NaN result
+ * through the existing overflow clamp"): that shortcut agrees with the
+ * XOR formula whenever the dividend is nonzero, but disagrees on the
+ * 0/0-class case, since real PPC750 hardware's 0.0f/0.0f gives a
+ * canonical NaN with an implementation-defined (effectively always-
+ * positive) sign bit, not sign=XOR(dividend,divisor). Implemented as
+ * an explicit branchless blend instead: a subfc/subfe "iszero" mask on
+ * the divisor's exponent field selects between the explicit divide-by-
+ * zero result and the normal clamp->fdivs->clamp path (which still
+ * runs unconditionally either way, its result just discarded when the
+ * mask fires) - preserving the straight-line-block invariant. Comes to
+ * ~81 PPC750 instructions (new record, was ~61 for Round 903), needing
+ * a 32-byte private stack frame (double Round 903's 16 bytes) to stash
+ * the raw operands and the divide-by-zero mask/result. Bumped the
+ * per-block buffer-capacity constant from 80 to 128 words, jumping
+ * ahead of the immediate need since the MADD/MSUB ACC-register family
+ * (Round 906) is expected to need a comparable amount. See docs/
+ * STATUS.md's Round 904 section for the full verification writeup
+ * (13/13 checks, including the critical -0.0/+0.0 case that
+ * specifically distinguishes this implementation from the naive
+ * hardware-NaN shortcut - all passed on the first run). Next: SQRT.S/
+ * RSQRT.S/MAX.S/MIN.S, then the MADD-family/comparison-family
+ * (Round 906), CVT.W.S/CVT.S.W, and the BC1 branch family (Round 906b).
  */
 
 typedef struct {

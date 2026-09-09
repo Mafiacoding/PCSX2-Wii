@@ -126,6 +126,18 @@
  * compare emitted as PPC condition-register logic, a codegen
  * capability this file doesn't have yet, left for a
  * future round.
+ *
+ * Round 895 (task #879) update: BEQ/BNE/BLEZ/BGTZ - four of the six
+ * non-REGIMM conditional branches. Contrary to Round 894's own
+ * prediction above, these do NOT need real PPC condition-register
+ * branch logic - they reuse the all-0s/all-1s "taken" mask technique
+ * MOVZ/MOVN (Round 889) and SLT/SLTU (Round 886) already established
+ * for conditional writes, applied here to next_pc/branch_pending via a
+ * new shared helper, emit_branch_blend(). Every generated block stays a
+ * single straight-line run with zero internal control flow, exactly
+ * like every opcode before it. BLTZ/BGEZ (REGIMM) and the "likely"
+ * variants of every conditional branch (which need delay-slot
+ * annulment - a genuinely new capability) are left for a future round.
  */
 
 typedef struct {

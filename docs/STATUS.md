@@ -37891,3 +37891,110 @@ file doesn't have yet - the natural next increment. Same sandbox
 limitation as every prior JIT round: real native-PPC-execution
 correctness still can't be verified without Wii hardware or Dolphin
 access here.
+
+## Round 895: BEQ/BNE/BLEZ/BGTZ - conditional branches, done WITHOUT any real PPC branch instruction
+
+Adds four of the six non-REGIMM MIPS conditional branches to the PPC
+dynarec (BEQ, BNE, BLEZ, BGTZ) - the single biggest lever for JIT
+usefulness identified in Round 894's own writeup, since without
+conditional branches the JIT can only ever accelerate straight-line
+runs between them, which in real EE code is almost nothing.
+
+**The key design decision: no real PPC branch instruction is emitted at
+all.** Round 894's own header comment predicted this would need "real
+PPC condition-register logic" (`cmpw`/`bc`), but on closer look this
+dynarec already has a proven alternative it's used since Round 889
+(MOVZ/MOVN) and Round 886 (SLT/SLTU): compute an all-0s/all-1s "taken"
+mask arithmetically (no branch), then blend the conditional write using
+that mask. A new shared helper, `emit_branch_blend(ctx, disp)`, takes a
+mask already computed into SCRATCH_E and this instruction's compile-time
+PC-relative displacement, reads `this_pc` from `EXC_THIS_PC_OFFSET` at
+runtime (same safety argument as J/JAL: the displacement is a real part
+of the encoding and safe to bake in, but `this_pc` itself must come from
+context since it depends on where the cached block happens to run), and
+blends the result into `next_pc`/`branch_pending`. On the not-taken path
+this is a harmless self-store of the SAME values `ee_step()` already
+placed there before calling in - not a no-op instruction sequence, but a
+no-op RESULT, exactly like MOVZ/MOVN unconditionally re-store rd's own
+old value when their condition doesn't hold. Every generated block stays
+a single straight-line run with zero internal control flow, preserving
+this whole file's existing architecture untouched.
+
+**Mask computation, reusing already-proven idioms:**
+BEQ/BNE XOR rs/rt's hi and lo words together (0 iff equal) and feed the
+combined diff through the same subfc/subfe "is-zero" trick MOVZ/MOVN
+already use for their rtOr check - `eq_mask` for BEQ, `nor(eq_mask)` for
+BNE. BLEZ/BGTZ go a different, cheaper route: a 64-bit two's-complement
+value's sign is exactly its hi word's own sign bit, so `srawi rA, hi, 31`
+replicates that bit across all 32 bits in ONE instruction - a direct
+"value < 0" mask with no compare needed at all. `<=0` ORs in the
+exactly-zero case (via the same is-zero idiom) since a value of precisely
+0 has its sign bit clear and wouldn't otherwise be caught; BGTZ takes the
+complement (`nor`) of BLEZ's mask.
+
+**One new PPC encoding, verified against real devkitPPC before use**:
+`enc_lbz` (D-form byte load, opcode 34 - same shape as the already-
+verified `enc_stb`, just a different opcode number) - needed because
+`emit_branch_blend` must read the CURRENT `branch_pending` byte to
+preserve it unchanged on the not-taken path, the first time this dynarec
+has ever needed to READ that field (every prior opcode - J/JAL/JR/JALR -
+only ever wrote it, since they're all unconditionally "taken"). Verified
+bit-for-bit against real devkitPPC (`powerpc-eabi-as`/`objdump`): `lbz
+r5,684(r3)` -> `0x88A302AC`, exactly matching the formula (and lining up
+neatly with `enc_stb`'s own already-verified `0x98A302AC` - the two
+opcodes differ by exactly the 34-vs-38 bit pattern in the top byte).
+
+**A genuine correctness bug caught by this round's own UBSan pass,
+before shipping**: the branch displacement is computed as `4 + (imm *
+4)` where `imm` is the sign-extended 16-bit offset field - the first
+draft wrote this as `imm << 2`, which is undefined behavior in C when
+`imm` is negative (left-shifting a negative signed value). UBSan's
+`-fsanitize=undefined` flagged it immediately on the very first
+negative-offset test case. Fixed by switching to multiplication
+(`imm * 4`), which is well-defined for any 16-bit-derived value with no
+overflow risk. This is the kind of bug that would have silently worked
+on most real compilers' default codegen (two's-complement left shift
+"just working" in practice) while remaining technically undefined and
+liable to break under future compiler optimizations - exactly why this
+project runs every new dynarec increment through UBSan before calling it
+done, not just ASan.
+
+**Verification: `r895_branches_verify.c`**, following the established
+methodology (real `translate_one()` output, interpreted - never
+executed - by a PPC750 subset simulator extended this round with
+subfc/subfe carry-flag tracking, xor/and/nor, add, and lbz decodes).
+19/19 checks passed, covering: BEQ/BNE taken and not-taken (including a
+"not taken" case that positively confirms next_pc/branch_pending are
+left at caller-supplied SENTINEL values, not just "some" unchanged
+value); BLEZ/BGTZ across the full sign/zero/positive spectrum (rs<0,
+rs==0 exactly, rs>0); and a negative-offset BNE case (the one that
+caught the shift-UB bug above). Re-verified clean under
+`-fsanitize=address,undefined` after the fix: 19/19, exit 0, no
+sanitizer diagnostics. Round 894's own `r894_jumps_verify.c` harness was
+also re-run against the shared `ppc_dynarec.c` file to confirm no
+regression: still 17/17.
+
+**Wii build**: `pcsx2-wii.elf` 3,043,684 bytes / `.dol` 532,672 bytes, 0
+warnings/errors (devkitPPC 8.1.0).
+
+**Regression suite**: skipped again this round, consistent with the
+strictly-additive risk profile of every JIT-expansion round since
+Round 892 (two new dispatch blocks plus one small new encoder/helper,
+nothing existing restructured) - not per a fresh user instruction this
+round, but the same standing rationale documented for Rounds 892-894.
+
+**Status**: 47 opcodes now JIT-accelerated (43 from Round 894 +
+BEQ/BNE/BLEZ/BGTZ). Four of six non-REGIMM conditional branches are now
+JIT-compiled. Remaining gap: BLTZ/BGEZ (REGIMM, trivial extension of
+this round's srawi-sign-bit trick) and the "likely" variants of every
+conditional branch (which need delay-slot ANNULMENT on the not-taken
+path - a genuinely new capability, since every opcode so far always lets
+the following instruction execute) - both scoped for Round 896. Same
+sandbox limitation as ever: real native-PPC-execution correctness still
+can't be verified without Wii hardware or Dolphin access here - though
+this session did get a live Dolphin screenshot this round showing the
+current build's BIOS boot debug overlay actually running and advancing
+(EE ~44.8M instructions executed, IOP ~4.98M) before hitting a
+diagnostic slice cap, external confirmation that the emulator genuinely
+boots and executes sustained real code on a real PPC target, independent
+of this file's own host-native verification harnesses.

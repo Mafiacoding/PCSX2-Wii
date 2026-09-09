@@ -101,10 +101,14 @@ static uint64_t g_jit_executed = 0;
  * register array (exc_this_pc/next_pc/branch_pending - see
  * ppc_dynarec.c's EXC_THIS_PC_OFFSET/NEXT_PC_OFFSET/
  * BRANCH_PENDING_OFFSET comment for why that's safe under this
- * dynarec's instruction-encoding-keyed cache). Conditional branches
- * (BEQ/BNE/etc.) are NOT included this round - they need a genuine
- * 64-bit compare emitted as real PPC condition-register logic, a
- * codegen capability this file doesn't have yet. Kept in sync by hand with
+ * dynarec's instruction-encoding-keyed cache). BEQ/BNE/BLEZ/BGTZ (op
+ * 0x04-0x07), new in Round 895 - four of the six non-REGIMM conditional
+ * branches, done WITHOUT any real PPC branch instruction (an all-0s/
+ * all-1s "taken" mask blended into next_pc/branch_pending, the same
+ * technique MOVZ/MOVN already used for conditional register writes -
+ * see ppc_dynarec.c's emit_branch_blend() comment). BLTZ/BGEZ (REGIMM)
+ * and the "likely" variants of every conditional branch are NOT
+ * included this round - left for a future round. Kept in sync by hand with
  * translate_one()'s own dispatch - see that function's own comments
  * for the authoritative list. This is a cheap pre-filter so the (much
  * more expensive) cache lookup/compile path is never attempted for the
@@ -126,6 +130,8 @@ static int ee_jit_opcode_supported(uint32_t instr)
     if (op == 0x3Fu) return 1; /* SD (Round 893) */
     if (op == 0x02u) return 1; /* J (Round 894) */
     if (op == 0x03u) return 1; /* JAL (Round 894) */
+    if (op == 0x04u || op == 0x05u) return 1; /* BEQ / BNE (Round 895) */
+    if (op == 0x06u || op == 0x07u) return 1; /* BLEZ / BGTZ (Round 895) */
     if (op == 0x00u) {
         uint32_t funct = instr & 0x3Fu;
         switch (funct) {

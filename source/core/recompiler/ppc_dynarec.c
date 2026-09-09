@@ -364,6 +364,24 @@ static inline uint32_t enc_stb(int rS, int rA, int16_t d)
     return (38u << 26) | ((uint32_t)rS << 21) | ((uint32_t)rA << 16) | (uint16_t)d;
 }
 
+/* Round 895 (task #879): lbz rD, d(rA) - same D-form layout as enc_lwz,
+ * opcode 34 (the standard PowerPC load-family numbering: 32=lwz,
+ * 34=lbz, 36=stw, 38=stb - enc_lwz/enc_stb above already use the other
+ * two). Needed because the conditional-branch blend technique below
+ * reads the CURRENT `branch_pending` byte (to preserve it unchanged on
+ * the not-taken path) - every opcode before this round only ever WROTE
+ * branch_pending unconditionally (J/JAL/JR/JALR are always "taken", so
+ * they never needed to read the old value). Verified bit-for-bit
+ * against real devkitPPC (powerpc-eabi-as/-objdump): "lbz r5,684(r3)"
+ * -> 0x88A302AC (identical to enc_stb's own verified "stb r5,684(r3)"
+ * -> 0x98A302AC encoding, except opcode 34 vs 38 - 0x88 vs 0x98 in the
+ * top byte is exactly that 4-bit opcode difference shifted into place),
+ * reproduced exactly by the formula below. */
+static inline uint32_t enc_lbz(int rD, int rA, int16_t d)
+{
+    return (34u << 26) | ((uint32_t)rD << 21) | ((uint32_t)rA << 16) | (uint16_t)d;
+}
+
 /* Round 894 (task #878): rlwinm rA, rS, SH, MB, ME (M-form) - rotate
  * left rS by SH bits then mask to the contiguous bit range [MB, ME]
  * (PPC bit numbering, MSB=0). Only used here as "rA = rS & 0xF0000000"
@@ -587,6 +605,45 @@ static void emit_load_const32(ppc_codegen_ctx_t *ctx, int reg, uint32_t val)
     emit(ctx, enc_ori(reg, reg, (uint16_t)(val & 0xFFFFu)));
 }
 
+/* Round 895 (task #879): given a "taken" mask already computed into
+ * SCRATCH_E (0xFFFFFFFF if the branch condition holds, else 0x00000000)
+ * and this instruction's compile-time PC-relative displacement (4 +
+ * the sign-extended 16-bit offset field * 4 - this is NOT address-
+ * dependent, unlike this_pc itself, so it's safe to bake in directly
+ * via emit_load_const32, same as J/JAL's low-26-bits-of-target above),
+ * computes the branch target from EXC_THIS_PC_OFFSET at runtime and
+ * blends it into NEXT_PC_OFFSET/BRANCH_PENDING_OFFSET using the same
+ * all-0s/all-1s-mask technique MOVZ/MOVN already use above for
+ * conditional register writes - no real PPC branch instruction is
+ * emitted, so every generated block stays a single straight-line run
+ * with no internal control flow, consistent with this whole file's
+ * existing style. On the not-taken path this harmlessly re-stores
+ * next_pc/branch_pending's OWN existing values (already the correct
+ * fallthrough, per ee_step()'s pre-JIT-call bookkeeping - see
+ * NEXT_PC_OFFSET's comment) - a self-store with no effect, exactly
+ * mirroring how MOVZ/MOVN unconditionally re-store rd's own old value
+ * when their condition doesn't hold. */
+static void emit_branch_blend(ppc_codegen_ctx_t *ctx, int32_t disp)
+{
+    emit(ctx, enc_lwz(SCRATCH_G, CTX_REG, EXC_THIS_PC_OFFSET));
+    emit_load_const32(ctx, SCRATCH_A, (uint32_t)disp);
+    emit(ctx, enc_add(SCRATCH_G, SCRATCH_G, SCRATCH_A)); /* SCRATCH_G = target */
+
+    emit(ctx, enc_nor(SCRATCH_F, SCRATCH_E, SCRATCH_E)); /* SCRATCH_F = notmask */
+    emit(ctx, enc_lwz(SCRATCH_H, CTX_REG, NEXT_PC_OFFSET)); /* old next_pc */
+    emit(ctx, enc_and(SCRATCH_G, SCRATCH_G, SCRATCH_E));   /* target & mask */
+    emit(ctx, enc_and(SCRATCH_H, SCRATCH_H, SCRATCH_F));   /* old & notmask */
+    emit(ctx, enc_or(SCRATCH_G, SCRATCH_G, SCRATCH_H));
+    emit(ctx, enc_stw(SCRATCH_G, CTX_REG, NEXT_PC_OFFSET));
+
+    emit(ctx, enc_lbz(SCRATCH_H, CTX_REG, BRANCH_PENDING_OFFSET)); /* old bp byte */
+    emit(ctx, enc_addi(SCRATCH_A, 0, 1));                 /* li SCRATCH_A, 1 */
+    emit(ctx, enc_and(SCRATCH_A, SCRATCH_A, SCRATCH_E));  /* 1 & mask */
+    emit(ctx, enc_and(SCRATCH_H, SCRATCH_H, SCRATCH_F));  /* old_bp & notmask */
+    emit(ctx, enc_or(SCRATCH_A, SCRATCH_A, SCRATCH_H));
+    emit(ctx, enc_stb(SCRATCH_A, CTX_REG, BRANCH_PENDING_OFFSET));
+}
+
 /* Byte offset of MIPS register `r`'s ppc_dynarec_gpr128_t slot within
  * the context array (16 bytes/slot: 8-byte ud0 + 8-byte ud1 - see the
  * header's endianness note before touching these). REG_HI/REG_LO give
@@ -656,7 +713,14 @@ int ppc_dynarec_init(ppc_codegen_ctx_t *ctx, size_t max_instructions)
      * 17 instructions (no sign-extension step needed - see
      * ADDR_EE_MEM_READ64's comment); SD is 14 (one more than SW, for
      * the extra high-word load of its 64-bit value). Both still well
-     * under the 32-instruction ceiling. */
+     * under the 32-instruction ceiling.
+     *
+     * Round 895 (task #879) update: BEQ/BNE (8-9 setup instructions,
+     * shared with emit_branch_blend's fixed 15-instruction tail) top
+     * out at 24; BLEZ/BGTZ (8-9 setup instructions + the same 15-
+     * instruction tail) top out at 24 as well. Both still comfortably
+     * under DIV/DIVU's 32-instruction ceiling, so again no change to
+     * `words` was needed this round. */
     size_t words = max_instructions * 32 + 1;
     ctx->code = memalign(32, words * sizeof(uint32_t));
     if (!ctx->code)
@@ -1472,16 +1536,90 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
         return 0;
     }
 
-    /* Unsupported: conditional branches, MMI, COP1/2, everything else.
-     * LB/LBU/LH/LHU/LW/LWU/SB/SH/SW/LD/SD (the full base-ISA integer
-     * load/store family) plus J/JAL/JR/JALR (the full set of
-     * UNCONDITIONAL control-transfer opcodes) are all handled above.
-     * Conditional branches (BEQ/BNE/BLEZ/BGTZ/BLTZ/BGEZ/...) need a
-     * genuine 64-bit signed/equality compare emitted as real PPC
-     * condition-register logic (cmpw hi-words, then lo-words, or a
-     * sign-bit check for the </>0 family) - a new codegen capability
-     * this dynarec doesn't have yet - so they're deliberately left for
-     * a future round rather than guessed at here. */
+    if (op == 0x04 || op == 0x05) {
+        /* MIPS: beq/bne rs, rt, offset -> if (GPR(rs) ==/!= GPR(rt))
+         * BRANCH_TO(this_pc + 4 + (sext16(offset) << 2)); delay slot
+         * always executes regardless of whether the branch is taken
+         * (ee_step()'s own dispatch handles that the same way it does
+         * for J/JAL above - this dynarec only needs to get THIS
+         * instruction's next_pc/branch_pending right).
+         *
+         * This is this dynarec's FIRST conditional opcode, and it's
+         * done WITHOUT any real PPC branch instruction: compute an
+         * all-0s/all-1s "taken" mask using the exact same technique
+         * MOVZ/MOVN already use above for conditional register writes
+         * (see that block's rtOr-is-zero check), then hand the mask to
+         * emit_branch_blend() to conditionally overwrite next_pc/
+         * branch_pending. Every generated block stays a single
+         * straight-line run with no internal control flow, matching
+         * this whole file's existing style. */
+        emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_HI(rs)));
+        emit(ctx, enc_lwz(SCRATCH_D, CTX_REG, REG_HI(rt)));
+        emit(ctx, enc_xor(SCRATCH_C, SCRATCH_C, SCRATCH_D)); /* hi diff */
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs)));
+        emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_LO(rt)));
+        emit(ctx, enc_xor(SCRATCH_A, SCRATCH_A, SCRATCH_B)); /* lo diff */
+        emit(ctx, enc_or(SCRATCH_A, SCRATCH_A, SCRATCH_C));  /* combined diff, 0 iff equal */
+        emit(ctx, enc_addi(SCRATCH_B, 0, 1));                       /* li SCRATCH_B, 1 */
+        emit(ctx, enc_subfc(SCRATCH_D, SCRATCH_B, SCRATCH_A));      /* D=throwaway, CA=(diff!=0) */
+        emit(ctx, enc_subfe(SCRATCH_E, SCRATCH_B, SCRATCH_B));      /* SCRATCH_E = eq_mask: all-ones iff diff==0 */
+        if (op == 0x05) /* BNE wants the opposite condition */
+            emit(ctx, enc_nor(SCRATCH_E, SCRATCH_E, SCRATCH_E));
+        /* imm is already a sign-extended int32_t; left-shifting a
+         * possibly-negative signed value is undefined behavior in C
+         * (caught by UBSan during this round's own verification run),
+         * so the *4 is done via multiplication instead - well-defined
+         * for any 16-bit-derived imm, no overflow risk. */
+        emit_branch_blend(ctx, 4 + (imm * 4));
+        return 0;
+    }
+
+    if (op == 0x06 || op == 0x07) {
+        /* MIPS: blez/bgtz rs, offset -> if ((int64_t)GPR(rs) </>= 0)
+         * BRANCH_TO(this_pc + 4 + (sext16(offset) << 2)). rt is a
+         * reserved field (encoded as 0) and ignored here, matching real
+         * hardware and this project's own interpreter.
+         *
+         * A 64-bit two's-complement value's sign is exactly its hi
+         * word's own sign bit (bit63 of the value == bit31 of hi), so
+         * "srawi rA, hi, 31" replicates that sign bit across all 32
+         * bits in ONE instruction - a direct "value < 0" mask with no
+         * subfc/subfe compare needed at all (unlike BEQ/BNE above).
+         * <=0 additionally needs the exactly-zero case ORed in (whose
+         * sign bit is 0, so it's not already covered by the sign-bit
+         * mask) via the same OR-then-subfc/subfe "is-zero" idiom used
+         * by BEQ/BNE and MOVZ/MOVN above. */
+        emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_HI(rs)));
+        emit(ctx, enc_srawi(SCRATCH_E, SCRATCH_C, 31)); /* sign mask: all-ones iff rs<0 */
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs)));
+        emit(ctx, enc_or(SCRATCH_A, SCRATCH_A, SCRATCH_C));   /* hi|lo, nonzero iff rs!=0 */
+        emit(ctx, enc_addi(SCRATCH_B, 0, 1));                 /* li SCRATCH_B, 1 */
+        emit(ctx, enc_subfc(SCRATCH_D, SCRATCH_B, SCRATCH_A));
+        emit(ctx, enc_subfe(SCRATCH_D, SCRATCH_B, SCRATCH_B)); /* SCRATCH_D = is_zero_mask */
+        emit(ctx, enc_or(SCRATCH_E, SCRATCH_E, SCRATCH_D));    /* SCRATCH_E = ble_mask (rs<=0) */
+        if (op == 0x07) /* BGTZ wants the opposite condition (rs>0) */
+            emit(ctx, enc_nor(SCRATCH_E, SCRATCH_E, SCRATCH_E));
+        /* imm is already a sign-extended int32_t; left-shifting a
+         * possibly-negative signed value is undefined behavior in C
+         * (caught by UBSan during this round's own verification run),
+         * so the *4 is done via multiplication instead - well-defined
+         * for any 16-bit-derived imm, no overflow risk. */
+        emit_branch_blend(ctx, 4 + (imm * 4));
+        return 0;
+    }
+
+    /* Unsupported: REGIMM (BLTZ/BGEZ), "likely" branch variants, MMI,
+     * COP1/2, everything else. LB/LBU/LH/LHU/LW/LWU/SB/SH/SW/LD/SD (the
+     * full base-ISA integer load/store family), J/JAL/JR/JALR (the full
+     * set of UNCONDITIONAL control-transfer opcodes), and now
+     * BEQ/BNE/BLEZ/BGTZ (the four non-REGIMM conditional branches) are
+     * all handled above. BLTZ/BGEZ (op=0x01, REGIMM) reuse this round's
+     * srawi-sign-bit trick trivially, and the "likely" variants of every
+     * conditional branch (BEQL/BNEL/BLEZL/BGTZL/BLTZL/BGEZL) need delay-
+     * slot ANNULMENT on the not-taken path (a capability this dynarec
+     * doesn't have yet, since it's never needed to suppress the
+     * following instruction before) - both deliberately left for the
+     * next round rather than guessed at here. */
     return -1;
 }
 

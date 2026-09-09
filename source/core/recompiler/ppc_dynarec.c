@@ -3676,12 +3676,101 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
                     emit(ctx, enc_addi(1, 1, 16)); /* pop scratch frame */
                     return 0;
                 }
+                if (idx == 48) {
+                    /* Round 910 (task #895): VMOVE - FT[lane] = FS[lane],
+                     * plain per-lane copy, confirmed against ee_core.c
+                     * lines ~8557-8563. Same "dest=FT, src=FS, fd field
+                     * unused" convention as VABS/VCLIP (idx 29/31,
+                     * Round 908) and the whole idx=16-23/48/49 unary/
+                     * data-movement cluster this project's own comment
+                     * documents. Guarded by ft==0 (writes to VF00
+                     * discarded), matching that shared cluster guard
+                     * exactly. Plain integer copy (lwz/stw, not lfs/
+                     * stfs) since this is a raw bit-pattern move, not
+                     * IEEE arithmetic - no computation needed at all. */
+                    if (ft != 0) {
+                        for (int lane = 0; lane < 4; lane++) {
+                            if (!(destmask & (0x8u >> lane)))
+                                continue;
+                            emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, VU0_VF_OFF(fs, (uint32_t)lane)));
+                            emit(ctx, enc_stw(SCRATCH_A, CTX_REG, VU0_VF_OFF(ft, (uint32_t)lane)));
+                        }
+                    }
+                    return 0;
+                }
+                if (idx == 49) {
+                    /* Round 910 (task #895): VMR32 - 32-bit lane rotate:
+                     * FT.x=FS.y, FT.y=FS.z, FT.z=FS.w, FT.w=FS.x.
+                     * Confirmed against ee_core.c lines ~8564-8579
+                     * (itself ported from PCSX2's _vuMR32). All four
+                     * source lanes are read into scratch registers FIRST
+                     * before any destination write, exactly matching
+                     * ee_core.c's own temp-variable ordering - this is
+                     * NOT a style choice, it's required correctness: a
+                     * VMR32-to-self (ft==fs) must still rotate correctly,
+                     * which an in-place lane-by-lane read/write would
+                     * corrupt (e.g. writing FT.x=FS.y before FS.y itself
+                     * has been read for the FT.y=FS.z step, if ft==fs).
+                     * ft==0 guard shared with VMOVE above. */
+                    if (ft != 0) {
+                        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, VU0_VF_OFF(fs, 0))); /* tx = FS.x */
+                        emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, VU0_VF_OFF(fs, 1))); /* ty = FS.y */
+                        emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, VU0_VF_OFF(fs, 2))); /* tz = FS.z */
+                        emit(ctx, enc_lwz(SCRATCH_D, CTX_REG, VU0_VF_OFF(fs, 3))); /* tw = FS.w */
+                        if (destmask & 0x8u) emit(ctx, enc_stw(SCRATCH_B, CTX_REG, VU0_VF_OFF(ft, 0))); /* FT.x = ty */
+                        if (destmask & 0x4u) emit(ctx, enc_stw(SCRATCH_C, CTX_REG, VU0_VF_OFF(ft, 1))); /* FT.y = tz */
+                        if (destmask & 0x2u) emit(ctx, enc_stw(SCRATCH_D, CTX_REG, VU0_VF_OFF(ft, 2))); /* FT.z = tw */
+                        if (destmask & 0x1u) emit(ctx, enc_stw(SCRATCH_A, CTX_REG, VU0_VF_OFF(ft, 3))); /* FT.w = tx */
+                    }
+                    return 0;
+                }
                 return -1; /* every other SPECIAL2 sub-opcode: not yet
                              * JIT-compiled, fall back to the interpreter. */
             }
+            if (funct == 0x30u || funct == 0x31u || funct == 0x34u || funct == 0x35u) {
+                /* Round 910 (task #895): VIADD/VISUB/VIAND/VIOR - plain
+                 * integer ALU on VI registers, VI[fd] = VI[fs] op
+                 * VI[ft]. Confirmed against ee_core.c lines ~8982-9009
+                 * (its own comment there notes these were found in a
+                 * real BIOS "clear every VU0 register" init routine).
+                 * Unlike every other CO-format op this file JITs,
+                 * destmask/lane looping is irrelevant here - this is a
+                 * plain SCALAR VI-register op, no VF/lane involvement at
+                 * all. VI registers live in the same cop2_ctrl array
+                 * VDIV/VCLIP's Q/CLIP already use (COP2_CTRL_OFF), and
+                 * VI0 is hardwired to 0 exactly like VF00 - real
+                 * vu0_vi_write() silently discards writes to reg 0
+                 * ("if (reg==0) return"), so this dynarec's direct store
+                 * needs the same `if (fd != 0)` guard every VF-writing
+                 * op here already carries (the Round 908 bugfix's own
+                 * lesson, applied correctly from the start this round).
+                 * Real VI registers are 16-bit, so VIADD/VISUB results
+                 * are masked to 16 bits (rlwinm mb=16,me=31, the
+                 * standard "clear top 16 bits" idiom - SH=0 so it's a
+                 * pure AND, no rotation); VIAND/VIOR need no extra mask
+                 * since AND/OR of two already-16-bit-clean values stays
+                 * 16-bit-clean, matching ee_core.c's own comment on this
+                 * exact point. */
+                emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, COP2_CTRL_OFF(fs))); /* a = VI[fs] */
+                emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, COP2_CTRL_OFF(ft))); /* b = VI[ft] */
+                if (funct == 0x30u) {
+                    emit(ctx, enc_add(SCRATCH_C, SCRATCH_A, SCRATCH_B));    /* VIADD: a + b */
+                    emit(ctx, enc_rlwinm(SCRATCH_C, SCRATCH_C, 0, 16, 31)); /* & 0xFFFF */
+                } else if (funct == 0x31u) {
+                    emit(ctx, enc_subfc(SCRATCH_C, SCRATCH_B, SCRATCH_A));  /* VISUB: a - b (subfc computes rB-rA) */
+                    emit(ctx, enc_rlwinm(SCRATCH_C, SCRATCH_C, 0, 16, 31)); /* & 0xFFFF */
+                } else if (funct == 0x34u) {
+                    emit(ctx, enc_and(SCRATCH_C, SCRATCH_A, SCRATCH_B));   /* VIAND: a & b, already 16-bit clean */
+                } else {
+                    emit(ctx, enc_or(SCRATCH_C, SCRATCH_A, SCRATCH_B));    /* VIOR: a | b, already 16-bit clean */
+                }
+                if (fd != 0) /* writes to VI0 are discarded on real hardware */
+                    emit(ctx, enc_stw(SCRATCH_C, CTX_REG, COP2_CTRL_OFF(fd)));
+                return 0;
+            }
             return -1; /* broadcast row (funct 0x00-0x1F) / VMADD(0x29) /
-                         * VMSUB(0x2D) family: not yet JIT-compiled, fall
-                         * back to the interpreter. */
+                         * VMSUB(0x2D) / VIADDI(0x32) family: not yet
+                         * JIT-compiled, fall back to the interpreter. */
         }
         return -1; /* scalar MFC2/QMFC2/CFC2/MTC2/QMTC2/CTC2 family: not
                      * yet JIT-compiled, fall back to the interpreter. */

@@ -39277,3 +39277,71 @@ continues - 11 of the ~15-20 real VU0 macro-mode opcodes now JIT-
 accelerated (VADD/VSUB/VMUL/VMAX/VMINI/VOPMSUB/VABS/VCLIP/VDIV/VSQRT/
 VRSQRT), plus the pre-existing VADDq. Next: task #895 (Round 910: VU0
 VIADD/VISUB/VIAND/VIOR integer ops + VMOVE/VMR32).
+
+## Round 910: JIT VU0 VIADD/VISUB/VIAND/VIOR + VMOVE/VMR32 (task #895)
+
+Implemented two unrelated small op families in one round since both
+were scoped together in the task roadmap. Re-verified against
+ee_core.c's real case bodies (~lines 8557-8579 for VMOVE/VMR32,
+~lines 8982-9009 for the VI-register ALU family).
+
+VIADD/VISUB/VIAND/VIOR (funct 0x30/0x31/0x34/0x35): plain scalar
+integer ALU on VI registers, VI[fd] = VI[fs] op VI[ft]. Unlike every
+CO-format op JIT'd since Round 907, there's no VF/lane/destmask
+involvement at all - this is a pure GPR-style op operating on the
+same cop2_ctrl array that already holds Q(22)/CLIP(18)/R(20). ee_core.c's
+own comment notes these were found in a real BIOS "clear every VU0
+register" init routine (viadd viN,vi00,vi00 clears VI0-15, mirroring
+the VSUB.xyzw self-subtract sequence that clears VF0-31). VI0 is
+hardwired to 0 exactly like VF00 is - real vu0_vi_write() silently
+discards writes to reg 0 - so this dynarec's direct store to
+COP2_CTRL_OFF(fd) needed the same `if (fd != 0)` guard every VF-
+writing op here already carries. This was applied correctly from the
+start this round: Round 908's own fd==0 bug (a real shipped-then-
+caught mistake, not hypothetical) is exactly the failure mode this
+guard prevents, and this round's implementation was written with that
+lesson already in mind rather than needing a second bugfix round.
+VIADD/VISUB mask their result to 16 bits (rlwinm mb=16,me=31, the
+standard "clear top 16 bits" AND-only idiom - SH=0 so no rotation
+happens, just a mask); VIAND/VIOR need no extra mask since AND/OR of
+two already-16-bit-clean operands stays 16-bit-clean, matching
+ee_core.c's own comment on this exact point.
+
+VMOVE(SPECIAL2 idx48)/VMR32(idx49): join the idx=16-23/29 unary/data-
+movement cluster VABS already established in Round 908 - dest=FT,
+src=FS (the opposite of the arithmetic row's FD/FS/FT), fd field
+unused, guarded by ft==0. VMOVE is a plain per-lane bit-pattern copy
+(lwz/stw, no float op needed - there's nothing to compute). VMR32 is
+a 32-bit lane rotate (FT.x=FS.y, FT.y=FS.z, FT.z=FS.w, FT.w=FS.x) -
+all four source lanes are read into scratch registers BEFORE any
+destination write, exactly mirroring ee_core.c's own temp-variable
+ordering. This isn't a style choice: a VMR32-to-self (ft==fs) must
+still rotate correctly, which an in-place lane-by-lane read/write
+would corrupt (writing FT.x=FS.y before FS.y itself has been read for
+the FT.y=FS.z step, if ft==fs) - verified with a dedicated self-
+rotate test case in the harness, not just asserted in a comment.
+
+New harness r910_vu0_viops_vmove_vmr32_verify.c extends the r904
+ppcsim with a plain `add` decode (opcode 31, xo=266) - the only new
+PPC instruction form this round's codegen needs (lwz/stw/rlwinm/and/
+or/subfc were already present). 15/15 checks passed under
+-fsanitize=address,undefined, 0 leaks (VIADD/VISUB/VIAND/VIOR basic +
+VIADD 16-bit-wraparound + VISUB 16-bit-underflow-wrap + 2 fd==0
+regression cases; VMOVE basic/partial-destmask/ft==0 regression;
+VMR32 basic-rotate/self-rotate-aliasing/partial-destmask/ft==0
+regression).
+
+Regression-checked against all 10 still-present prior harnesses
+(r893/894/895/896/897/898/900/902/903/904: 13/13, 17/17, 19/19,
+35/35, 19/19, 27/27, 25/25, 20/20, 12/12, 13/13) - no regressions.
+
+Wii build: pcsx2-wii.elf 3,254,560 bytes / .dol 546,944 bytes
+(+8,140 elf / +672 dol over Round 909), 0 warnings/errors (devkitPPC
+8.1.0).
+
+Status: task #895 (Round 910) CLOSED. task #885 (COP2/VU0 umbrella)
+continues - 13 of the ~15-20 real VU0 macro-mode opcodes now JIT-
+accelerated (VADD/VSUB/VMUL/VMAX/VMINI/VOPMSUB/VABS/VCLIP/VDIV/VSQRT/
+VRSQRT/VMOVE/VMR32), plus VIADD/VISUB/VIAND/VIOR (VI-register scalar
+ALU) and the pre-existing VADDq. Next: task #896 (Round 911: VU0
+VFTOI/VITOF conversions + VCALLMS/VCALLMSR).

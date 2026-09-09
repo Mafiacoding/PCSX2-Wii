@@ -490,8 +490,28 @@
  * from JIT'd VU0 code (SQRT.S/RSQRT.S's own Round 905 harness was
  * deleted before this project's per-round cleanup convention was
  * applied as consistently as it is now). 17/17 checks passed under
- * -fsanitize=address,undefined, 0 leaks. Next: task #895, Round 910 -
- * JIT VU0 VIADD/VISUB/VIAND/VIOR integer ops + VMOVE/VMR32.
+ * -fsanitize=address,undefined, 0 leaks.
+ *
+ * Round 910 (task #895) update: JIT VU0 VIADD/VISUB/VIAND/VIOR (funct
+ * 0x30/0x31/0x34/0x35 - plain scalar VI[fd]=VI[fs] op VI[ft] integer
+ * ALU, no VF/lane/destmask involvement at all, unlike every CO-format
+ * op above) + VMOVE(SPECIAL2 idx48)/VMR32(idx49) (VF lane copy/
+ * rotate, joining the idx=16-23/29 unary/data-movement cluster VABS
+ * already established in Round 908 - dest=FT, src=FS, fd field
+ * unused). VI registers live in the same cop2_ctrl array VDIV/VCLIP's
+ * Q/CLIP already use (COP2_CTRL_OFF); VI0 is hardwired to 0 exactly
+ * like VF00, so VIADD/VISUB/VIAND/VIOR's direct store needs the same
+ * `if (fd != 0)` guard every VF-writing op here carries - applied
+ * correctly from the start this round, learning Round 908's own
+ * lesson rather than repeating its bug. VIADD/VISUB mask their result
+ * to 16 bits (real VI registers are 16-bit); VIAND/VIOR need no mask
+ * since AND/OR of already-16-bit-clean operands stays clean. VMR32
+ * reads all 4 source lanes into scratch registers before any
+ * destination write - required correctness for a self-rotate
+ * (ft==fs), not just style, verified with a dedicated test case.
+ * 15/15 checks passed under -fsanitize=address,undefined, 0 leaks.
+ * Next: task #896, Round 911 - JIT VU0 VFTOI/VITOF conversions +
+ * VCALLMS/VCALLMSR.
  */
 
 typedef struct {

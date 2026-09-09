@@ -130,7 +130,19 @@ static uint64_t g_jit_executed = 0;
  * immediates, closing out the base-ISA immediate-arithmetic/logical
  * family (SLTI/SLTIU/LUI were already covered; DADDI/DADDIU's 64-bit
  * family is scoped for a future round alongside DADD/DSUB/DSLL/DSRL/
- * DSRA). Kept in sync by hand with translate_one()'s own dispatch - see
+ * DSRA). DADD/DADDU/DSUB/DSUBU (funct 0x2C-0x2F) and DSLL/DSRL/DSRA
+ * (funct 0x38/0x3A/0x3B), new in Round 898 - the first genuinely
+ * 64-bit-native register-register opcodes this dynarec compiles (no
+ * 32-bit-compute-then-sign-extend shortcut available, unlike ADDU/SUBU/
+ * SLL/SRL/SRA above): synthesized from 32-bit PPC750 primitives via the
+ * standard multi-word add-with-carry/subtract-with-borrow idiom (new
+ * addc/adde encoders, paired with the existing subfc/subfe from Round
+ * 886) for DADD/DSUB, and a "shift each half, OR in the bits that
+ * crossed the hi/lo boundary from the other half" idiom (reusing Round
+ * 888's existing slw/srw/sraw encoders, no new ones needed) for DSLL/
+ * DSRL/DSRA - see ppc_dynarec.c's own comments on both dispatch blocks
+ * for the full derivation. DSLL32/DSRL32/DSRA32 (the sa+32 range) are
+ * NOT included this round, left for a future increment. Kept in sync by hand with translate_one()'s own dispatch - see
  * that function's own comments for the authoritative list. This is a
  * cheap pre-filter so the (much more expensive) cache lookup/compile
  * path is never attempted for the vast majority of real instructions
@@ -185,6 +197,8 @@ static int ee_jit_opcode_supported(uint32_t instr)
         case 0x21: case 0x23: /* ADDU / SUBU */
         case 0x24: case 0x25: case 0x26: case 0x27: /* AND / OR / XOR / NOR */
         case 0x2A: case 0x2B: /* SLT / SLTU */
+        case 0x2C: case 0x2D: case 0x2E: case 0x2F: /* DADD / DADDU / DSUB / DSUBU (Round 898) */
+        case 0x38: case 0x3A: case 0x3B: /* DSLL / DSRL / DSRA (Round 898) */
             return 1;
         default:
             return 0;

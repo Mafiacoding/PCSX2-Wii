@@ -176,6 +176,26 @@
  * for what's left: the 64-bit-native DADD/DSUB/DSLL/DSRL/DSRA family
  * (task #882, Round 898-899), which has no 32-bit-then-sign-extend
  * shortcut available.
+ *
+ * Round 898 (task #882) update: DADD/DADDU/DSUB/DSUBU (funct 0x2C-0x2F)
+ * and DSLL/DSRL/DSRA (funct 0x38/0x3A/0x3B) are this dynarec's FIRST
+ * genuinely 64-bit-native register-register/shift opcodes - every prior
+ * ALU opcode got away with a 32-bit-compute-then-sign-extend shortcut
+ * that doesn't apply here. DADD/DSUB synthesize a real 64-bit add/
+ * subtract from two 32-bit PPC750 halves via the standard add-with-
+ * carry/subtract-with-borrow chain (new addc/adde encoders for the add
+ * side, verified against real devkitPPC; DSUB reuses Round 886's
+ * existing subfc/subfe unchanged). DSLL/DSRL/DSRA shift each half by sa
+ * and OR in the bits that cross the hi/lo boundary from the other half
+ * (shifted by the complementary 32-sa amount) - reusing Round 888's
+ * existing slw/srw/sraw encoders with no new ones needed; the sa==0
+ * edge case needs no special-casing at all because real PPC750 hardware
+ * already treats a >=32 shift count as "result is zero/all-sign-bits",
+ * which is exactly what a zero-amount boundary-crossing term needs. See
+ * docs/STATUS.md's Round 898 section for the full derivation and
+ * verification writeup (27/27 checks, first attempt, no bugs). Next:
+ * the EE-specific unaligned/128-bit loads - LWL/LWR/SWL/SWR/LQ/SQ (task
+ * #883, Round 900-901).
  */
 
 typedef struct {

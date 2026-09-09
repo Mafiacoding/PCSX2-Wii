@@ -170,6 +170,32 @@ static inline uint32_t enc_xori(int rA, int rS, uint16_t uimm)
     return (26u << 26) | ((uint32_t)rS << 21) | ((uint32_t)rA << 16) | uimm;
 }
 
+/* Round 898 (task #882) additions: addc/adde - the add-side counterparts
+ * of subfc/subfe above, needed to synthesize a genuine 64-bit DADD/DADDU
+ * out of two 32-bit halves (PPC750 has no native 64-bit add, same
+ * constraint that made subfc/subfe necessary for SLT/SLTU/DSUB). addc
+ * rD,rA,rB -> rD = rA + rB, sets XER.CA = 1 iff the unsigned 32-bit add
+ * overflowed (a carry OUT of bit 0). adde rD,rA,rB -> rD = rA + rB +
+ * CA_in, and updates CA with the new carry - chaining addc(lo halves)
+ * into adde(hi halves) is the standard multi-word add idiom, the direct
+ * mirror of subfc/subfe's multi-word subtract idiom already in use here.
+ * Both encodings verified bit-for-bit against real devkitPPC
+ * (powerpc-eabi-as/-objdump): "addc r4,r5,r6" -> 0x7C853014, "adde
+ * r4,r5,r6" -> 0x7C853114 - reproduced exactly by the formulas below
+ * (XO=10 for addc, XO=138 for adde - the well-known PPC ISA constants,
+ * each exactly 2 more than their subf-family counterpart: subfc=8/
+ * addc=10, subfe=136/adde=138, matching the pattern subfc/subfe already
+ * established in this file). */
+static inline uint32_t enc_addc(int rD, int rA, int rB)
+{
+    return (31u << 26) | ((uint32_t)rD << 21) | ((uint32_t)rA << 16) | ((uint32_t)rB << 11) | (10u << 1);
+}
+
+static inline uint32_t enc_adde(int rD, int rA, int rB)
+{
+    return (31u << 26) | ((uint32_t)rD << 21) | ((uint32_t)rA << 16) | ((uint32_t)rB << 11) | (138u << 1);
+}
+
 /* andi. rA(dest), rS, UIMM -> rA = rS AND UIMM (always records CR0,
  * per the real PPC ISA - there is no non-dot "andi"). Used here only
  * to mask a 0/0xFFFFFFFF carry-derived value down to 0/1; CR0 is not
@@ -1000,6 +1026,45 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
         return 0;
     }
 
+    if (op == 0x00 && (funct == 0x2C || funct == 0x2D || funct == 0x2E || funct == 0x2F)) {
+        /* Round 898 (task #882): dadd/daddu/dsub/dsubu rd, rs, rt -> a
+         * genuine FULL 64-bit add/subtract, no 32-bit-then-sign-extend
+         * shortcut available here (unlike ADDU/SUBU above) - this is the
+         * EE's native 64-bit register width, so the result must be
+         * computed across both hi/lo halves with carry/borrow correctly
+         * propagated between them, using the standard multi-word
+         * add-with-carry / subtract-with-borrow idiom (same technique
+         * SLT/SLTU (Round 886) already established for 64-bit COMPARE -
+         * this is the same idiom applied to actual arithmetic results).
+         * Real MIPS DADD/DSUB trap on signed 64-bit overflow where
+         * DADDU/DSUBU don't, but - exactly like ADDI/ADDIU (Round 897)
+         * and ADDU/SUBU above - this project's own interpreter
+         * deliberately never implements that trap (see ee_core.c's own
+         * comment at its DADD/DADDU case), so all four funct codes here
+         * share one dispatch block with zero behavioral difference. */
+        if (rd == 0)
+            return 0;
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs)));
+        emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_LO(rt)));
+        emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_HI(rs)));
+        emit(ctx, enc_lwz(SCRATCH_D, CTX_REG, REG_HI(rt)));
+        if (funct == 0x2C || funct == 0x2D) { /* DADD / DADDU */
+            emit(ctx, enc_addc(SCRATCH_A, SCRATCH_A, SCRATCH_B)); /* lo = rs.lo+rt.lo, sets CA */
+            emit(ctx, enc_adde(SCRATCH_C, SCRATCH_C, SCRATCH_D)); /* hi = rs.hi+rt.hi+CA */
+        } else { /* funct == 0x2E || 0x2F: DSUB / DSUBU. subfc/subfe
+                  * compute rB-rA (PPC's reversed operand order, same
+                  * convention already used by SUBU/emit_slt_core above);
+                  * we want rs-rt, so rA=SCRATCH_B/D (rt), rB=SCRATCH_A/C
+                  * (rs), chaining subfc's borrow (CA) into subfe for the
+                  * high half. */
+            emit(ctx, enc_subfc(SCRATCH_A, SCRATCH_B, SCRATCH_A)); /* lo = rs.lo-rt.lo, sets CA (borrow) */
+            emit(ctx, enc_subfe(SCRATCH_C, SCRATCH_D, SCRATCH_C)); /* hi = rs.hi-rt.hi-(1-CA) */
+        }
+        emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_LO(rd)));
+        emit(ctx, enc_stw(SCRATCH_C, CTX_REG, REG_HI(rd)));
+        return 0;
+    }
+
     if (op == 0x00 && (funct == 0x2A || funct == 0x2B)) {
         /* MIPS: slt/sltu rd, rs, rt -> rd = (rs < rt) ? 1 : 0, using the
          * FULL 64-bit value of both operands (signed for SLT, unsigned
@@ -1070,6 +1135,74 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
         emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_LO(rd)));
         emit(ctx, enc_srawi(SCRATCH_C, SCRATCH_A, 31));
         emit(ctx, enc_stw(SCRATCH_C, CTX_REG, REG_HI(rd)));
+        return 0;
+    }
+
+    if (op == 0x00 && (funct == 0x38 || funct == 0x3A || funct == 0x3B)) {
+        /* Round 898 (task #882): dsll/dsrl/dsra rd, rt, sa -> a genuine
+         * FULL 64-bit shift by the literal 5-bit sa field (0-31; the
+         * sa+32 range is DSLL32/DSRL32/DSRA32, three separate funct
+         * codes NOT covered this round - see the STATUS.md writeup for
+         * why they're deferred). PPC750 has no 64-bit shift instruction,
+         * so this is synthesized from two 32-bit halves using the
+         * standard "double-precision shift" idiom: bits that cross the
+         * hi/lo boundary are reconstructed by shifting the OTHER half by
+         * the complementary amount (32-sa) and OR-ing it in - e.g. for a
+         * left shift, dsll's new hi word gets (rt.hi << sa) from its own
+         * bits PLUS (rt.lo >> (32-sa)), the bits that "spilled over" from
+         * the low word. sa and 32-sa are both compile-time constants
+         * (sa is a literal instruction field), materialized once via
+         * `li` and fed to the same slw/srw/sraw variable-shift encoders
+         * Round 888's SLL/SRL/SRA family already established (so no new
+         * PPC encoders are needed this round, only new dispatch logic).
+         *
+         * The sa==0 edge case needs no special-casing: it materializes
+         * 32-sa == 32, and the real PowerPC ISA defines slw/srw/sraw
+         * with a shift-COUNT register whose value is 32 or greater as
+         * "result is all-zero" (or all-sign-bits for sraw) regardless of
+         * the count's low 5 bits - checked bit 26 of the count operand,
+         * which 32 sets. That's exactly the semantics an sa==0 shift
+         * needs: zero bits should cross the hi/lo boundary at all, and
+         * "shift by 32" naturally produces exactly that zero contribution
+         * with no extra branch or conditional logic (verified explicitly
+         * by this round's host-native harness, see docs/STATUS.md).
+         *
+         * The "spilled bits" combine (rt.lo>>32-sa for DSLL; rt.hi<<32-sa
+         * for DSRL/DSRA's low word) is ALWAYS a logical (unsigned) shift
+         * even for DSRA - those are genuine data bits crossing the word
+         * boundary, not sign-extension fill; only DSRA's own high-word
+         * shift (of rt.hi, which occupies the vacated most-significant
+         * bits) needs to be arithmetic (sraw) to reproduce MIPS64's
+         * sign-preserving right shift. rd==0 is a true no-op, declined
+         * like every other opcode above. */
+        if (rd == 0)
+            return 0;
+        {
+            int32_t m = 32 - (int32_t)sa; /* complementary shift amount; 32 when sa==0 */
+            emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_HI(rt)));
+            emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_LO(rt)));
+            emit(ctx, enc_addi(SCRATCH_C, 0, (int16_t)sa)); /* li SCRATCH_C, sa */
+            emit(ctx, enc_addi(SCRATCH_D, 0, (int16_t)m));  /* li SCRATCH_D, 32-sa */
+            if (funct == 0x38) { /* DSLL */
+                emit(ctx, enc_slw(SCRATCH_E, SCRATCH_B, SCRATCH_C)); /* new_lo = rt.lo << sa */
+                emit(ctx, enc_slw(SCRATCH_F, SCRATCH_A, SCRATCH_C)); /* hi_part1 = rt.hi << sa */
+                emit(ctx, enc_srw(SCRATCH_A, SCRATCH_B, SCRATCH_D)); /* hi_part2 = rt.lo >> (32-sa) */
+                emit(ctx, enc_or(SCRATCH_F, SCRATCH_F, SCRATCH_A));  /* new_hi = hi_part1 | hi_part2 */
+                emit(ctx, enc_stw(SCRATCH_E, CTX_REG, REG_LO(rd)));
+                emit(ctx, enc_stw(SCRATCH_F, CTX_REG, REG_HI(rd)));
+            } else { /* funct == 0x3A || 0x3B: DSRL / DSRA */
+                if (funct == 0x3A) {
+                    emit(ctx, enc_srw(SCRATCH_E, SCRATCH_A, SCRATCH_C));  /* new_hi = rt.hi >> sa (logical) */
+                } else {
+                    emit(ctx, enc_sraw(SCRATCH_E, SCRATCH_A, SCRATCH_C)); /* new_hi = rt.hi >> sa (arithmetic) */
+                }
+                emit(ctx, enc_srw(SCRATCH_F, SCRATCH_B, SCRATCH_C)); /* lo_part1 = rt.lo >> sa */
+                emit(ctx, enc_slw(SCRATCH_B, SCRATCH_A, SCRATCH_D)); /* lo_part2 = rt.hi << (32-sa) */
+                emit(ctx, enc_or(SCRATCH_F, SCRATCH_F, SCRATCH_B));  /* new_lo = lo_part1 | lo_part2 */
+                emit(ctx, enc_stw(SCRATCH_F, CTX_REG, REG_LO(rd)));
+                emit(ctx, enc_stw(SCRATCH_E, CTX_REG, REG_HI(rd)));
+            }
+        }
         return 0;
     }
 

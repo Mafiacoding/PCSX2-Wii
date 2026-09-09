@@ -38188,3 +38188,111 @@ now JIT-compiled: ADDI/ADDIU/SLTI/SLTIU/ANDI/ORI/XORI/LUI. Next up (task
 #882, Round 898-899): the 64-bit DADD/DSUB/DSLL/DSRL/DSRA family - EE-
 specific 64-bit-native opcodes with no 32-bit-then-sign-extend shortcut
 available, a step up in complexity from this round's reuse-heavy work.
+
+## Round 898: DADD/DADDU/DSUB/DSUBU + DSLL/DSRL/DSRA - the first genuinely 64-bit-native opcodes
+
+Every register-register/immediate opcode this dynarec has compiled so
+far (ADDU/SUBU, SLL/SRL/SRA, ADDI/ADDIU) shares one shortcut: MIPS64
+defines the RESULT as a 32-bit computation that's then sign-extended
+into the full 64-bit register, so this dynarec could always get away
+with reading/writing only the LOW word and deriving the high word with
+a single `srawi ...,31` fill. DADD/DADDU/DSUB/DSUBU and DSLL/DSRL/DSRA
+have no such shortcut - they're the EE's native 64-bit-wide arithmetic
+and shift family, so the full hi:lo pair has to be computed as one
+genuine 64-bit operation with bits correctly crossing the word boundary.
+PPC750 has no 64-bit registers or 64-bit ALU ops, so both families are
+synthesized from pairs of 32-bit PPC750 instructions using standard
+multi-word idioms.
+
+**DADD/DADDU (funct 0x2C/0x2D) and DSUB/DSUBU (funct 0x2E/0x2F)** use
+the classic add-with-carry / subtract-with-borrow chain: compute the low
+words first with an instruction that captures the carry/borrow into
+XER.CA, then compute the high words with a second instruction that
+consumes that CA. DSUB/DSUBU reuse Round 886's existing `subfc`/`subfe`
+encoders unchanged (the same idiom SLT/SLTU already established for
+64-bit compare, just applied to a genuine subtraction result instead of
+a throwaway one). DADD/DADDU needed two new encoders this round -
+`addc`/`adde` - the add-side mirror of subfc/subfe, verified bit-for-bit
+against real devkitPPC before use, same discipline as every prior
+round's new encoder: `addc r4,r5,r6` -> `0x7C853014`, `adde r4,r5,r6` ->
+`0x7C853114`, matching XO=10/138 exactly (the well-known PPC ISA
+constants, each precisely 2 more than their subf-family counterpart -
+subfc=8/addc=10, subfe=136/adde=138 - mirroring the pattern subfc/subfe
+already established here). Real MIPS DADD/DSUB trap on signed 64-bit
+overflow where DADDU/DSUBU don't, but - exactly like ADDI/ADDIU (Round
+897) and ADDU/SUBU before it - this project's own interpreter
+deliberately never implements that trap (grepped from `ee_core.c`'s own
+comment at its DADD/DADDU case before writing any codegen), so all four
+funct codes share one 8-instruction dispatch block with zero behavioral
+difference between the trapping and non-trapping variant.
+
+**DSLL/DSRL/DSRA (funct 0x38/0x3A/0x3B)** shift the sa-bit-encoded
+literal amount (0-31; the sa+32 range is DSLL32/DSRL32/DSRA32, three
+separate funct codes deliberately NOT covered this round) across the
+full 64-bit value using a "shift each half by the same amount, then OR
+in the bits that crossed the hi/lo boundary from the OTHER half, shifted
+by the complementary amount" idiom - e.g. DSLL's new high word is
+`(hi<<sa) | (lo>>(32-sa))`, reusing Round 888's existing `slw`/`srw`/
+`sraw` variable-shift encoders unchanged (no new PPC encoders needed for
+either shift family this round). The cross-word "spilled bits" combine
+is ALWAYS a logical shift, even for DSRA - those are genuine data bits
+crossing the word boundary, not sign-extension fill; only DSRA's own
+high-word shift (of the bits that occupy the vacated most-significant
+position) needs to be arithmetic to reproduce MIPS64's sign-preserving
+right shift, so DSRA's dispatch differs from DSRL's by exactly one
+instruction (`sraw` instead of `srw` for the high half; the low-word
+combine is byte-for-byte identical between the two).
+
+The `sa==0` edge case - which naturally materializes a complementary
+shift amount of 32 - needed no special-casing at all: the real PowerPC
+ISA defines `slw`/`srw`/`sraw` with a shift-count register of 32 or more
+as "result is all-zero" (or all-sign-bits for `sraw`), checked via bit
+26 of the count operand, independent of its low 5 bits. That's exactly
+the semantics a zero-amount shift's "boundary-crossing" term needs (zero
+bits should ever cross the boundary), so relying on real PPC750 hardware
+behavior instead of writing a branch for it keeps every generated block
+a single straight-line sequence, unchanged since Round 895. This was
+verified explicitly this round, not just asserted - see below.
+
+**Verification: `r898_dadd_dsub_dshift_verify.c`**, same methodology as
+every prior round - real `ppc_dynarec_translate_one()` output,
+interpreted (never executed) by a PPC750-subset simulator extended this
+round with `addc`/`adde` (new, with a genuine XER.CA carry flag modeled
+in the simulator state) and `slw`/`srw`/`sraw` reimplemented with the
+REAL "count>=32 -> zero/sign-fill" hardware rule instead of a naive
+"count & 0x1F" - this is the exact mechanism the `sa==0` no-special-case
+claim above depends on, so the simulator had to model it precisely
+rather than approximate it. 27/27 checks passed on the first attempt
+(no bugs caught this round), covering: DADD's basic add and its
+carry-MUST-propagate-into-hi case (0xFFFFFFFF+1 wrapping lo to 0 and
+incrementing hi by exactly the carry, proving this is a genuine 64-bit
+add and not two independent 32-bit adds); DADDU's identical behavior on
+a signed-overflow-shaped input; DSUB's basic subtract and its
+borrow-MUST-propagate-into-hi case (0x1_00000000 - 1); DSUBU's identical
+behavior; DSLL's basic cross-word left shift and its `sa==0` identity
+check (the dedicated test for the hardware-rule reliance described
+above); DSRL's basic cross-word right shift and its `sa==0` identity
+check; DSRA's sign-preserving high-word shift on a negative input
+(0x80000000_00000000 >> 4 arithmetic = 0xF8000000_00000000, confirming
+the high word is NOT the logical 0x08000000) paired with a positive-
+input case confirming DSRA matches DSRL exactly when there's no sign bit
+to preserve; and `rd==0` discard for every one of the eight opcodes.
+Re-verified clean under `-fsanitize=address,undefined`: 27/27, exit 0, 0
+compiler warnings, no sanitizer diagnostics. Rounds 894/895/896/897's
+own harnesses (17/17, 19/19, 35/35, 19/19) were all re-run against the
+shared `ppc_dynarec.c` file to confirm no regression - all still pass at
+their original counts.
+
+**Wii build**: `pcsx2-wii.elf` 3,065,400 bytes / `.dol` 534,176 bytes
+(+5,660 bytes elf / +384 bytes dol over Round 897), 0 warnings/errors
+(devkitPPC 8.1.0).
+
+**Regression suite**: skipped again this round, same standing rationale
+as Rounds 892-897 (strictly-additive dispatch blocks reusing established
+patterns - even the two new encoders (`addc`/`adde`) follow the exact
+same verified-against-devkitPPC discipline every prior new encoder used,
+nothing existing restructured).
+
+**Status**: 63 opcodes now JIT-accelerated (57 from Round 897 + DADD/
+DADDU/DSUB/DSUBU/DSLL/DSRL/DSRA). Next up (task #883, Round 900-901):
+the EE-specific unaligned/128-bit loads - LWL/LWR/SWL/SWR/LQ/SQ.

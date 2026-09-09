@@ -326,6 +326,33 @@ static inline uint32_t enc_bctrl(void)
     return (19u << 26) | (20u << 21) | (528u << 1) | 1u;
 }
 
+/* Round 892 (task #876): extsb/extsh - X-form sign-extend instructions
+ * (same "dest is really rA field, rS at bits6-10 is source, no rB"
+ * layout as enc_and/enc_or/enc_xor/enc_nor above, just with an unused
+ * rB field instead of a real one). Used to turn LB/LH's freshly-loaded
+ * byte/halfword (sitting in the low 8/16 bits of r3 after the
+ * ee_mem_read8/16 call, with the upper bits of r3 left unspecified by
+ * the PowerPC EABI's sub-word-return-value rules - the ABI only
+ * guarantees the CALLEE's own use of the value is correct, not that
+ * unused high bits of the caller-visible register are zero) into a
+ * properly sign-extended 32-bit value BEFORE this file's usual "store
+ * 32-bit result, then srawi by 31 for the 64-bit sign-extension fill
+ * word" idiom (already used by ADDIU/ADDU/SUBU/LW/etc.) is applied -
+ * that idiom assumes its input is already a correct 32-bit value,
+ * which extsb/extsh is what produces from a byte/halfword. Verified
+ * bit-for-bit against real devkitPPC (powerpc-eabi-as/-objdump):
+ * "extsb r4,r5" -> 0x7CA40774, "extsh r4,r5" -> 0x7CA40734 - both
+ * reproduced exactly by the formulas below. */
+static inline uint32_t enc_extsb(int rA, int rS)
+{
+    return (31u << 26) | ((uint32_t)rS << 21) | ((uint32_t)rA << 16) | (954u << 1);
+}
+
+static inline uint32_t enc_extsh(int rA, int rS)
+{
+    return (31u << 26) | ((uint32_t)rS << 21) | ((uint32_t)rA << 16) | (922u << 1);
+}
+
 /* Round 891 (task #875): absolute addresses of the two real EE
  * memory-access entry points LW/SW need to call. Declared here with a
  * `void *` state-pointer parameter instead of pulling in
@@ -362,6 +389,36 @@ extern void     ee_mem_write32(void *st, uint32_t addr, uint32_t val);
 #else
 #define ADDR_EE_MEM_READ32  0x00000101u
 #define ADDR_EE_MEM_WRITE32 0x00000102u
+#endif
+
+/* Round 892 (task #876): same GEKKO-vs-host dual-address scheme as
+ * ADDR_EE_MEM_READ32/WRITE32 immediately above, extended to the
+ * byte/halfword memory-access entry points LB/LBU/LH/LHU/SB/SH need.
+ * LWU deliberately has NO separate address here - ee_core.c's own LWU
+ * case body (op 0x27) calls the exact same ee_mem_read32() LW already
+ * uses (see that case's own comment in ee_core.c); LWU and LW only
+ * differ in what they do with the 32-bit result afterward (zero- vs
+ * sign-extend into the 64-bit destination), never in which C function
+ * gets called - so LWU's dispatch block below reuses
+ * ADDR_EE_MEM_READ32 directly. Sentinel values 0x103-0x106 are chosen
+ * to be distinct from 0x101/0x102 (already claimed by READ32/WRITE32)
+ * and from each other; a host verify harness's simulator matches
+ * these exactly against CTR right before a simulated bctrl, same
+ * mechanism as Round 891. */
+#ifdef GEKKO
+extern uint8_t  ee_mem_read8(void *st, uint32_t addr);
+extern uint16_t ee_mem_read16(void *st, uint32_t addr);
+extern void     ee_mem_write8(void *st, uint32_t addr, uint8_t val);
+extern void     ee_mem_write16(void *st, uint32_t addr, uint16_t val);
+#define ADDR_EE_MEM_READ8   ((uint32_t)(uintptr_t)&ee_mem_read8)
+#define ADDR_EE_MEM_READ16  ((uint32_t)(uintptr_t)&ee_mem_read16)
+#define ADDR_EE_MEM_WRITE8  ((uint32_t)(uintptr_t)&ee_mem_write8)
+#define ADDR_EE_MEM_WRITE16 ((uint32_t)(uintptr_t)&ee_mem_write16)
+#else
+#define ADDR_EE_MEM_READ8   0x00000103u
+#define ADDR_EE_MEM_READ16  0x00000104u
+#define ADDR_EE_MEM_WRITE8  0x00000105u
+#define ADDR_EE_MEM_WRITE16 0x00000106u
 #endif
 
 /* Scratch PPC GPRs used by generated code. r3 is the incoming context
@@ -492,7 +549,13 @@ int ppc_dynarec_init(ppc_codegen_ctx_t *ctx, size_t max_instructions)
      * sequence around that. LW's worst case (rt!=0) is 18 instructions,
      * SW's fixed case is 13 - both still comfortably under DIV/DIVU's
      * 32-instruction ceiling above, so no change to `words` was needed
-     * this round. */
+     * this round.
+     *
+     * Round 892 (task #876) update: LB/LBU/LH/LHU add one widening
+     * instruction (extsb/extsh/andi.) on top of LW's shape, for a worst
+     * case of 19; LWU matches LW's shape exactly (18); SB/SH match SW's
+     * shape exactly (13). All still comfortably under DIV/DIVU's
+     * 32-instruction ceiling, so again no change to `words` was needed. */
     size_t words = max_instructions * 32 + 1;
     ctx->code = memalign(32, words * sizeof(uint32_t));
     if (!ctx->code)
@@ -1008,10 +1071,150 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
         return 0;
     }
 
-    /* Unsupported: branches, loads/stores (other than LW/SW above), MMI,
-     * COP1/2, everything else. Real coverage would require this switch
-     * to be the size of ee_core's interpreter (or larger, with
-     * scheduling). */
+    if (op == 0x20 || op == 0x24) {
+        /* MIPS: lb/lbu rt, imm(rs). Both call ee_mem_read8() - real
+         * ee_core.c's case 0x20/0x24 bodies are identical except for
+         * how the loaded byte is widened afterward (sign- vs zero-
+         * extend), same split as LW/LWU below. Same read-always-
+         * happens-even-when-rt==0 rule as LW (see that block's own
+         * comment for the full register-preservation walkthrough this
+         * reuses verbatim - CTX_REG/r15/r14/stack-frame discipline is
+         * identical here, just a different callee address and an
+         * extra widening step before the store-back). */
+        int is_signed = (op == 0x20);
+        emit(ctx, enc_addi(1, 1, -32));
+        emit(ctx, enc_stw(14, 1, 8));
+        emit(ctx, enc_stw(15, 1, 12));
+        emit(ctx, enc_or(15, 3, 3));
+        emit(ctx, enc_mflr(14));
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs)));
+        emit(ctx, enc_addi(SCRATCH_A, SCRATCH_A, (int16_t)imm));
+        emit_load_const32(ctx, 12, ADDR_EE_MEM_READ8);
+        emit(ctx, enc_mtctr(12));
+        emit(ctx, enc_bctrl());                       /* r3 = ee_mem_read8(ctx, addr) */
+        emit(ctx, enc_mtlr(14));
+        if (is_signed) {
+            /* LB: turn the loaded byte (low 8 bits of r3, upper bits
+             * unspecified by the ABI - see enc_extsb's own comment)
+             * into a properly sign-extended 32-bit value first. */
+            emit(ctx, enc_extsb(3, 3));
+        } else {
+            /* LBU: zero-extend by masking to just the low byte -
+             * andi. clears the upper 24 bits unconditionally, which is
+             * exactly what "zero-extend" means here (and leaves bit31
+             * clear, so the srawi-by-31 fill word below correctly
+             * comes out 0 too - the 64-bit HIGH half of a zero-
+             * extended value is always 0). */
+            emit(ctx, enc_andi_dot(3, 3, 0x00FF));
+        }
+        if (rt != 0) {
+            emit(ctx, enc_stw(3, 15, REG_LO(rt)));
+            emit(ctx, enc_srawi(SCRATCH_A, 3, 31));
+            emit(ctx, enc_stw(SCRATCH_A, 15, REG_HI(rt)));
+        }
+        emit(ctx, enc_lwz(14, 1, 8));
+        emit(ctx, enc_lwz(15, 1, 12));
+        emit(ctx, enc_addi(1, 1, 32));
+        return 0;
+    }
+
+    if (op == 0x21 || op == 0x25) {
+        /* MIPS: lh/lhu rt, imm(rs) - identical shape to LB/LBU above,
+         * just calling ee_mem_read16() and using extsh/a 16-bit mask
+         * instead of extsb/an 8-bit mask for the widening step. */
+        int is_signed = (op == 0x21);
+        emit(ctx, enc_addi(1, 1, -32));
+        emit(ctx, enc_stw(14, 1, 8));
+        emit(ctx, enc_stw(15, 1, 12));
+        emit(ctx, enc_or(15, 3, 3));
+        emit(ctx, enc_mflr(14));
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs)));
+        emit(ctx, enc_addi(SCRATCH_A, SCRATCH_A, (int16_t)imm));
+        emit_load_const32(ctx, 12, ADDR_EE_MEM_READ16);
+        emit(ctx, enc_mtctr(12));
+        emit(ctx, enc_bctrl());                       /* r3 = ee_mem_read16(ctx, addr) */
+        emit(ctx, enc_mtlr(14));
+        if (is_signed) {
+            emit(ctx, enc_extsh(3, 3));
+        } else {
+            emit(ctx, enc_andi_dot(3, 3, 0xFFFF));
+        }
+        if (rt != 0) {
+            emit(ctx, enc_stw(3, 15, REG_LO(rt)));
+            emit(ctx, enc_srawi(SCRATCH_A, 3, 31));
+            emit(ctx, enc_stw(SCRATCH_A, 15, REG_HI(rt)));
+        }
+        emit(ctx, enc_lwz(14, 1, 8));
+        emit(ctx, enc_lwz(15, 1, 12));
+        emit(ctx, enc_addi(1, 1, 32));
+        return 0;
+    }
+
+    if (op == 0x27) {
+        /* MIPS: lwu rt, imm(rs) -> gpr[rt] = zero_extend_64(
+         * ee_mem_read32(st, rs32+imm)). Calls the exact same
+         * ee_mem_read32() as LW above (see ADDR_EE_MEM_READ32's own
+         * comment) - the only difference from LW is that the 64-bit
+         * destination's high half is always 0 here (zero-extend)
+         * instead of a sign-extension fill word, so this block skips
+         * the srawi entirely and just stores a literal 0 (materialized
+         * via `addi r,0,0`, the standard PPC "li" idiom) to REG_HI. */
+        emit(ctx, enc_addi(1, 1, -32));
+        emit(ctx, enc_stw(14, 1, 8));
+        emit(ctx, enc_stw(15, 1, 12));
+        emit(ctx, enc_or(15, 3, 3));
+        emit(ctx, enc_mflr(14));
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs)));
+        emit(ctx, enc_addi(SCRATCH_A, SCRATCH_A, (int16_t)imm));
+        emit_load_const32(ctx, 12, ADDR_EE_MEM_READ32);
+        emit(ctx, enc_mtctr(12));
+        emit(ctx, enc_bctrl());                       /* r3 = ee_mem_read32(ctx, addr) */
+        emit(ctx, enc_mtlr(14));
+        if (rt != 0) {
+            emit(ctx, enc_stw(3, 15, REG_LO(rt)));
+            emit(ctx, enc_addi(SCRATCH_A, 0, 0));      /* li SCRATCH_A, 0 */
+            emit(ctx, enc_stw(SCRATCH_A, 15, REG_HI(rt)));
+        }
+        emit(ctx, enc_lwz(14, 1, 8));
+        emit(ctx, enc_lwz(15, 1, 12));
+        emit(ctx, enc_addi(1, 1, 32));
+        return 0;
+    }
+
+    if (op == 0x28 || op == 0x29) {
+        /* MIPS: sb/sh rt, imm(rs) -> ee_mem_write8/16(st, rs32+imm,
+         * (uintN_t)gpr[rt]). Same shape as SW above (no rt==0 guard in
+         * ee_core.c's own case bodies - reading $zero as the value-to-
+         * store is always valid, and always 0) - the low 8/16 bits of
+         * REG_LO(rt) are passed to the callee exactly as loaded, with
+         * no explicit masking needed on this side: per the PowerPC
+         * EABI, a sub-word parameter type is the CALLEE's
+         * responsibility to narrow (the caller need not clear the
+         * argument register's upper bits), same reasoning as this
+         * round's LB/LH return-value comment but mirrored for
+         * arguments instead of return values. */
+        uint32_t addr_const = (op == 0x28) ? ADDR_EE_MEM_WRITE8 : ADDR_EE_MEM_WRITE16;
+        emit(ctx, enc_addi(1, 1, -32));
+        emit(ctx, enc_stw(14, 1, 8));
+        emit(ctx, enc_mflr(14));
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs)));
+        emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_LO(rt)));
+        emit(ctx, enc_addi(SCRATCH_A, SCRATCH_A, (int16_t)imm));
+        emit_load_const32(ctx, 12, addr_const);
+        emit(ctx, enc_mtctr(12));
+        emit(ctx, enc_bctrl());                       /* ee_mem_write8/16(ctx, addr, val) */
+        emit(ctx, enc_mtlr(14));
+        emit(ctx, enc_lwz(14, 1, 8));
+        emit(ctx, enc_addi(1, 1, 32));
+        return 0;
+    }
+
+    /* Unsupported: branches, loads/stores other than LB/LBU/LH/LHU/
+     * LW/LWU/SB/SH/SW above (LD/SD still unsupported - their 64-bit
+     * value calling convention needs register-pair handling this file
+     * hasn't built yet), MMI, COP1/2, everything else. Real coverage
+     * would require this switch to be the size of ee_core's
+     * interpreter (or larger, with scheduling). */
     return -1;
 }
 

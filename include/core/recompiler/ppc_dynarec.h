@@ -88,6 +88,16 @@
  * absolute address is obtained (differently on GEKKO vs. host-native
  * verification builds) and its LW/SW dispatch blocks' comments for the
  * full register-preservation walkthrough.
+ *
+ * Round 892 (task #876) update: LB/LBU/LH/LHU/LWU/SB/SH extend Round
+ * 891's call-emission mechanism to the rest of the base-ISA byte/
+ * halfword/unsigned-word loads and stores - same stack frame and call
+ * sequence, just different callees (ee_mem_read8/16, ee_mem_write8/16)
+ * and, for the loads, an extra sign/zero-extend step (extsb/extsh/
+ * andi.) before the usual store-back. LD/SD are NOT included this
+ * round - their 64-bit value calling convention needs register-pair
+ * argument/return handling this file hasn't built yet, left for a
+ * future round.
  */
 
 typedef struct {

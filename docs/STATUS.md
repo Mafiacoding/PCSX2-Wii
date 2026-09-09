@@ -37584,3 +37584,110 @@ delay-slot semantics, or continued interpreter fallback for all
 control flow. Same sandbox limitation as every prior JIT round: real
 native-PPC-execution correctness still can't be verified without Wii
 hardware or Dolphin access here.
+
+## Round 892: LB/LBU/LH/LHU/LWU/SB/SH - trampoline extended to the rest of the base-ISA byte/halfword/unsigned-word loads and stores
+
+Directly closes out the "straightforward application" prediction Round
+891 made about the remaining load/store family. No new architectural
+mechanism this round - every one of these seven opcodes reuses Round
+891's exact stack-frame/call-sequence template verbatim, just pointed
+at a different real C function and, for the loads, given one extra
+widening instruction before the usual store-back.
+
+**Two new PPC750 encodings**: `extsb`/`extsh` (X-form sign-extend
+byte/halfword - same "dest is really rA field, no rB" layout as
+`enc_and`/`enc_or`/`enc_xor`/`enc_nor`). Verified bit-for-bit against
+real devkitPPC: `extsb r4,r5` -> `0x7CA40774`, `extsh r4,r5` ->
+`0x7CA40734`.
+
+**Why extsb/extsh are needed at all**: `ee_mem_read8`/`ee_mem_read16`
+return `uint8_t`/`uint16_t`, and the PowerPC EABI's sub-word-return-
+value rule only guarantees the CALLEE narrows its own use of the
+value correctly - it does not guarantee the unused high bits of the
+caller-visible r3 are zeroed. LB/LH therefore run `extsb`/`extsh` on
+r3 immediately after the call, before applying the same "store 32-bit
+result, then `srawi` by 31 for the 64-bit sign-extension fill word"
+idiom every prior sign-extending opcode (ADDIU, LW, ...) already uses.
+LBU/LHU use `andi.` (already available since Round 886) as an
+explicit zero-extending mask instead - the mask guarantees bit31 is
+clear, so the same trailing `srawi`-by-31 correctly yields an all-0s
+hi word for free, no separate "store literal 0" step needed.
+
+**LWU is the one instruction here that adds no new call target at
+all**: `ee_core.c`'s own LWU case body calls the exact same
+`ee_mem_read32()` LW already uses - the two opcodes only differ in
+what happens to the 32-bit result afterward (LW sign-extends via
+`srawi`; LWU always zero-extends by storing a literal 0, materialized
+via the standard `addi r,0,0` "li" idiom, to the hi word). So LWU's
+dispatch block is byte-for-byte LW's block with that one substitution,
+and needed zero new sentinel addresses.
+
+**Four new sentinel constants** on host builds - `ADDR_EE_MEM_READ8`
+(0x103), `ADDR_EE_MEM_READ16` (0x104), `ADDR_EE_MEM_WRITE8` (0x105),
+`ADDR_EE_MEM_WRITE16` (0x106) - alongside Round 891's 0x101/0x102,
+same GEKKO-vs-host dual-definition scheme (real
+`(uint32_t)(uintptr_t)&fn` on Wii, small fixed constants a verify
+harness's simulator matches against CTR on host).
+
+**SB/SH pass their argument with zero extra masking**, mirroring the
+same EABI reasoning in reverse: `ee_mem_write8`/`write16` take
+`uint8_t`/`uint16_t` parameters, and a sub-word ARGUMENT is the
+CALLEE's responsibility to narrow, not the caller's - so SB/SH just
+load `REG_LO(rt)` into r5 exactly like SW already does for its
+`uint32_t` argument, with no masking instruction needed on this side
+at all.
+
+**Buffer budget**: LB/LBU/LH/LHU's worst case (rt!=0) is 19
+instructions (LW's 18 plus one widening instruction); LWU matches
+LW's 18 exactly; SB/SH match SW's 13 exactly. All comfortably under
+DIV/DIVU's existing 32-instruction ceiling, so (as with Round 891) no
+change to the per-instruction word-budget formula was needed.
+
+**Verification**: `r892_bhw_verify.c`, same host-native call-the-real-
+`ppc_dynarec_translate_one()`-and-interpret-the-bytes methodology as
+every prior round, with the embedded PPC750 simulator extended to
+handle `extsb`/`extsh`/`andi.` plus the four new sentinel call
+targets (reusing Round 891's `mflr`/`mtlr`/`mtctr`/`bctrl`/`ori`
+support unchanged). 29 checks: LB positive-value sign-extension (2)
+plus register/stack preservation (3); LB negative-value sign-extension
+into both lo and hi words (2); LBU zero-extension of the same negative
+bit pattern, proving it diverges correctly from LB's result on
+identical input (2); LB-to-`$zero` register-write skip (1); LH
+positive-value sign-extension (2) plus r14 preservation (1); LH
+negative-value sign-extension (2); LHU zero-extension of the same
+value (2); LH nonzero base+immediate address computation (1); LWU full
+32-bit value with zero-extended hi word, explicitly contrasted against
+what LW would have produced for the identical bit pattern (2), plus
+r14/r15 preservation (2); SB basic store with only the low byte
+landing (1) plus r14/stack preservation (2); SB from `$zero` (1); SH
+basic store with only the low halfword landing (1) plus r14
+preservation (1); SB followed by LBU round-trip through two
+independently compiled blocks (1). **Result: 29/29 checks passed.**
+
+- Host-native: `ppc_dynarec.c` and `ee_jit.c` both compile clean under
+  `gcc -O2 -Wall -Wextra` (0 warnings).
+- `r892_bhw_verify.c`: **29/29 checks passed**.
+- devkitPPC/libogc Wii cross-build (`make clean && make -j4`, real
+  target): clean, 0 warnings/errors, fresh `pcsx2-wii.elf`
+  (3,020,712 bytes) / `.dol` (531,136 bytes).
+- Full 135-test regression suite: skipped this round at the user's
+  explicit direction ("skip the regression its fine") - noted here
+  rather than silently omitted, since every other round in this
+  project's history has run it. No source outside
+  ppc_dynarec.c/ee_jit.c changed, and the dedicated 29-check host
+  harness plus a clean Wii build cover this round's actual new code.
+
+**Status**: 37 opcodes now JIT-accelerated (the 30 from Round 891 plus
+LB, LBU, LH, LHU, LWU, SB, SH). The full base-ISA integer load/store
+family is now covered except LD/SD, which are deliberately deferred -
+their value is a genuine 64-bit quantity, and PowerPC's EABI passes/
+returns 64-bit integers in an aligned GPR PAIR rather than a single
+register (e.g. `ee_mem_read64`'s `uint64_t` return comes back as
+r3:r4 high:low, and `ee_mem_write64`'s `uint64_t` parameter needs an
+aligned pair too), which is genuinely new register-allocation
+machinery this file hasn't built yet - unlike this round's seven
+opcodes, which were pure repetition of an already-solved pattern.
+Branches/jumps remain the other unopened category. Same sandbox
+limitation as every prior JIT round: real native-PPC-execution
+correctness still can't be verified without Wii hardware or Dolphin
+access here.

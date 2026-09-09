@@ -57,16 +57,20 @@ static uint64_t g_jit_executed = 0;
  * 0x0A/0x0B, Round 889); MFHI/MTHI/MFLO/MTLO (funct 0x10-0x13) and
  * MULT/MULTU/DIV/DIVU (funct 0x18/0x19/0x1A/0x1B), added in Round 890
  * now that HI/LO have somewhere real to live (see HI_IDX/LO_IDX in
- * ppc_dynarec.c); and LW/SW (op 0x23/0x2B), new in Round 891 - this
+ * ppc_dynarec.c); LW/SW (op 0x23/0x2B), new in Round 891 - this
  * dynarec's first opcodes that call a real C function
  * (ee_mem_read32/ee_mem_write32) rather than just moving bits between
  * the context array and PPC registers (see ppc_dynarec.c's
- * ADDR_EE_MEM_READ32/WRITE32 comment for the call-emission mechanism).
- * Kept in sync by hand with translate_one()'s own dispatch - see that
- * function's own comments for the authoritative list. This is a cheap
- * pre-filter so the (much more expensive) cache lookup/compile path is
- * never attempted for the vast majority of real instructions
- * ppc_dynarec.c can't handle yet (branches, other loads/stores, MMI,
+ * ADDR_EE_MEM_READ32/WRITE32 comment for the call-emission mechanism);
+ * and LB/LBU/LH/LHU/LWU/SB/SH (op 0x20/0x24/0x21/0x25/0x27/0x28/0x29),
+ * new in Round 892 - the same call-emission mechanism extended to the
+ * rest of the base-ISA byte/halfword/unsigned-word loads and stores
+ * (LD/SD still unsupported - see ppc_dynarec.c's translate_one() final
+ * comment for why). Kept in sync by hand with translate_one()'s own
+ * dispatch - see that function's own comments for the authoritative
+ * list. This is a cheap pre-filter so the (much more expensive) cache
+ * lookup/compile path is never attempted for the vast majority of real
+ * instructions ppc_dynarec.c can't handle yet (branches, LD/SD, MMI,
  * COP0/1/2, ...). */
 static int ee_jit_opcode_supported(uint32_t instr)
 {
@@ -74,7 +78,11 @@ static int ee_jit_opcode_supported(uint32_t instr)
     if (op == 0x09u) return 1; /* ADDIU */
     if (op == 0x0Au || op == 0x0Bu) return 1; /* SLTI / SLTIU */
     if (op == 0x0Fu) return 1; /* LUI */
+    if (op == 0x20u || op == 0x24u) return 1; /* LB / LBU (Round 892) */
+    if (op == 0x21u || op == 0x25u) return 1; /* LH / LHU (Round 892) */
     if (op == 0x23u) return 1; /* LW (Round 891) */
+    if (op == 0x27u) return 1; /* LWU (Round 892) */
+    if (op == 0x28u || op == 0x29u) return 1; /* SB / SH (Round 892) */
     if (op == 0x2Bu) return 1; /* SW (Round 891) */
     if (op == 0x00u) {
         uint32_t funct = instr & 0x3Fu;

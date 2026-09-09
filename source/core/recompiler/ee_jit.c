@@ -63,6 +63,15 @@ _Static_assert(offsetof(ee_state_t, exc_this_pc) == 1456,
 _Static_assert(offsetof(ee_state_t, pc) == 544,
                "ppc_dynarec.c's PC_OFFSET assumes pc sits at this exact byte offset");
 
+/* Round 902 (task #884): MFC1/CFC1/MTC1/CTC1/MOV.S/ABS.S/NEG.S are this
+ * dynarec's first opcodes to touch ee_state_t's COP1 (FPU) fields. */
+_Static_assert(offsetof(ee_state_t, fpr) == 1464,
+               "ppc_dynarec.c's REG_FPR() assumes fpr[0] sits at this exact byte offset");
+_Static_assert(offsetof(ee_state_t, fcr31) == 1592,
+               "ppc_dynarec.c's FCR31_OFFSET assumes fcr31 sits at this exact byte offset");
+_Static_assert(offsetof(ee_state_t, acc) == 1596,
+               "ppc_dynarec.c's ACC_OFFSET assumes acc sits at this exact byte offset");
+
 #define EE_JIT_CACHE_SLOTS 8192u /* power of two - see ee_jit_cache_lookup()/insert() */
 
 typedef struct {
@@ -154,11 +163,28 @@ static uint64_t g_jit_executed = 0;
  * ee_mem_read64/write64 twice in one block, to cover the EE's real
  * 128-bit register width (a new REG_HI1/REG_LO1 addressing pair reaches
  * the upper 64 bits, `ud1`, that every earlier opcode left completely
- * alone). Kept in sync by hand with translate_one()'s own dispatch - see
+ * alone).
+ *
+ * COP1/FPU data-movement and bit-level opcodes (op 0x11, `rs` selecting
+ * MFC1/CFC1/MTC1/CTC1, or `rs`==0x10/COP1.S with `funct` selecting ABS.S/
+ * MOV.S/NEG.S), new in Round 902 - deliberately scoped to exclude any
+ * opcode needing real floating-point arithmetic (ADD.S/SUB.S/MUL.S/
+ * DIV.S/SQRT.S/etc, plus CVT.W.S/CVT.S.W and the BC1 branch family),
+ * which need genuine PPC750 FPU instructions and PCSX2's own overflow/
+ * underflow clamping ported faithfully - saved for a later round in this
+ * arc. Every opcode here operates on FPR/GPR/FCR31 raw 32-bit bit
+ * patterns with plain integer loads/stores/logical ops, matching
+ * ee_core.c's own case bodies exactly - no float hardware touched at
+ * all. New REG_FPR()/FCR31_OFFSET/ACC_OFFSET addressing constants reach
+ * ee_state_t's COP1 fields the same "any field is a plain lwz/stw at its
+ * real offset from &gpr[0]" way as every other *_OFFSET constant.
+ *
+ * Kept in sync by hand with translate_one()'s own dispatch - see
  * that function's own comments for the authoritative list. This is a
  * cheap pre-filter so the (much more expensive) cache lookup/compile
  * path is never attempted for the vast majority of real instructions
- * ppc_dynarec.c can't handle yet (branches, MMI, COP0/1/2, ...). */
+ * ppc_dynarec.c can't handle yet (branches, MMI, COP0/2, FPU arithmetic,
+ * ...). */
 static int ee_jit_opcode_supported(uint32_t instr)
 {
     uint32_t op = (instr >> 26) & 0x3Fu;
@@ -197,6 +223,26 @@ static int ee_jit_opcode_supported(uint32_t instr)
         default:
             return 0;
         }
+    }
+    if (op == 0x11u) {
+        /* COP1 (FPU), new in Round 902: like REGIMM above, `rs` selects
+         * the real sub-opcode, not a flat op-only dispatch - only the
+         * data-movement/bit-level subset ppc_dynarec.c's op==0x11 block
+         * actually implements returns 1 here; everything else (the real
+         * arithmetic family - ADD.S/SUB.S/MUL.S/DIV.S/SQRT.S/etc, plus
+         * CVT.W.S/CVT.S.W and the BC1 branch-on-condition family) falls
+         * through to the interpreter, matching translate_one()'s own
+         * `return -1` paths inside this same op==0x11 block exactly -
+         * kept in sync by hand, same discipline as every entry above. */
+        uint32_t rs = (instr >> 21) & 0x1Fu;
+        if (rs == 0x00u || rs == 0x02u || rs == 0x04u || rs == 0x06u)
+            return 1; /* MFC1 / CFC1 / MTC1 / CTC1 */
+        if (rs == 0x10u) {
+            uint32_t funct = instr & 0x3Fu;
+            if (funct == 0x05u || funct == 0x06u || funct == 0x07u)
+                return 1; /* ABS.S / MOV.S / NEG.S */
+        }
+        return 0;
     }
     if (op == 0x00u) {
         uint32_t funct = instr & 0x3Fu;

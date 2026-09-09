@@ -38402,3 +38402,86 @@ Regression-checked Rounds 894/895/896/897/898/893's own harnesses (17/
 **Status**: 69 opcodes now JIT-accelerated (63 from Round 898 + LWL/LWR/
 SWL/SWR/LQ/SQ). Next up (task #884, Round 902-906): JIT COP1 FPU
 opcodes (single-precision).
+
+## Round 902: COP1 (FPU) data-movement and bit-level opcodes
+
+Task #884, first slice of the FPU JIT arc. Seven opcodes JIT-
+accelerated: MFC1/CFC1/MTC1/CTC1 (op 0x11, sub-selected by `rs`) and
+MOV.S/ABS.S/NEG.S (op 0x11, `rs`==0x10/COP1.S, sub-selected by `funct`).
+
+**Deliberately scoped to exclude real floating-point arithmetic.**
+ADD.S/SUB.S/MUL.S/DIV.S/SQRT.S/RSQRT.S/MADD.S/MSUB.S/MADDA.S/MSUBA.S/
+ADDA.S/SUBA.S/MULA.S/C.EQ.S/C.LT.S/C.LE.S, plus CVT.W.S/CVT.S.W and the
+BC1 branch-on-FP-condition family, all need genuine PPC750 FPU
+instructions (lfs/fadds/fsubs/fmuls/fdivs/stfs/fcmpu/...), MIPS-vs-PPC
+rounding and denormal-handling differences to reconcile, and PCSX2's own
+overflow/underflow clamping (`fpu_check_overflow`/`fpu_check_underflow`)
+ported faithfully - a substantially bigger lift than this round's scope,
+saved for a later round in this arc (task #884 covers Rounds 902-906;
+this is 902 of that range). Every opcode implemented THIS round instead
+operates purely on FPR/GPR/FCR31 raw 32-bit bit patterns with plain
+integer loads/stores/logical ops - MOV.S is a straight copy, ABS.S masks
+off just the sign bit (`rlwinm` with mb=1/me=31, equivalent to AND
+0x7FFFFFFF), NEG.S flips just the sign bit (`xoris` with the upper
+16 bits = 0x8000, equivalent to XOR 0x80000000) - matching ee_core.c's
+own case bodies exactly, so none of the real-arithmetic caveats above
+apply to any of the seven opcodes actually shipped.
+
+**COP1's sub-opcode field is `rs`** (bits 25-21), reusing the same
+decode variable this dynarec already extracts for every other opcode -
+no new field needed. MFC1/CFC1/MTC1/CTC1 address the FPR/FCR31 directly
+via `rd` (matching ee_core.c's own case bodies under `switch(rs)`, a
+DIFFERENT convention from COP1.S's fd=sa/fs=rd/ft=rt below it). CFC1's
+`rd` is a compile-time constant (part of the instruction encoding), so
+the dispatch block specializes to one of three fixed shapes (rd==31:
+real fcr31 read; rd==0: fixed 0x2E00 constant; anything else: always 0)
+rather than branching in generated code - zero runtime cost for the
+specialization. CTC1 similarly specializes: rd==31 emits a real write,
+every other rd emits nothing at all (a documented no-op, matching
+ee_core.c's own `if (rd == 31) ...` guard with no else).
+
+New `REG_FPR(f)`/`FCR31_OFFSET`/`ACC_OFFSET` addressing constants reach
+ee_state_t's COP1 fields the same "any field is a plain lwz/stw at its
+real offset from &gpr[0]" way as every other `*_OFFSET` constant this
+dynarec already uses (EXC_THIS_PC_OFFSET, NEXT_PC_OFFSET, etc.) -
+`fpr[32]` sits at byte offset 1464 (confirmed via a real `offsetof()`
+probe, not hand-counted), `fcr31` at 1592, `acc` at 1596, all comfortably
+within `lwz`/`stw`'s 16-bit signed displacement range. Asserted against
+real `offsetof(ee_state_t, ...)` values in ee_jit.c, same discipline as
+every other layout-dependent constant.
+
+**Verification**: new host-native harness `r902_cop1_data_verify.c`,
+same call-the-real-`translate_one()`-then-interpret-the-output
+methodology as every prior round. This round's opcodes never call a real
+C function, so the simulator is simpler than Round 900's - just
+`lwz`/`stw`/`addi`/`srawi`/`rlwinm`/`xoris`, no `bctrl` dispatch needed
+at all. First compile attempt hit one bug: the harness itself encoded
+`xoris` as major opcode 25 (`oris`'s real opcode) instead of 27 (xoris's
+real opcode, confirmed against `enc_xoris()`'s own encoding in
+ppc_dynarec.c) - a harness bug, not a codegen bug, caught immediately by
+an "unhandled opcode=27" abort from the simulator itself refusing to
+silently misinterpret an instruction it didn't recognize. Fixed by
+correcting the harness's own opcode dispatch to 27. 20 checks covering:
+MFC1's sign-extension in both directions (positive and negative-looking
+bit patterns) plus rt==0 discard; MTC1's raw-bit-pattern copy with the
+GPR's high word ignored; CFC1's all three rd-value shapes (31/0/other)
+plus rt==0 discard; CTC1's real-write-at-31 vs no-op-elsewhere behavior;
+MOV.S's exact bit-pattern copy; ABS.S on both a negative and an
+already-positive input; NEG.S's round-trip (positive->negative->
+positive) plus a check that only bit 31 flips, not any of the low 31
+bits. 20/20, clean under `-fsanitize=address,undefined`, exit 0, no
+compiler warnings, no sanitizer diagnostics.
+
+Regression-checked against Rounds 893/894/895/896/897/898/900's own
+harnesses (13/13, 17/17, 19/19, 35/35, 19/19, 27/27, 25/25) - no
+regressions.
+
+**Wii build**: `pcsx2-wii.elf` 3,113,596 bytes / `.dol` 537,504 bytes
+(+9,500 bytes elf / +832 bytes dol over Round 900), 0 warnings/errors
+(devkitPPC 8.1.0).
+
+**Status**: 76 opcodes now JIT-accelerated (69 from Round 900 + MFC1/
+CFC1/MTC1/CTC1/MOV.S/ABS.S/NEG.S). Next up (task #884 continuation,
+Round 903+): the real FPU arithmetic family (ADD.S/SUB.S/MUL.S/DIV.S and
+friends), which will need this dynarec's first genuine PPC750 FPU
+instructions.

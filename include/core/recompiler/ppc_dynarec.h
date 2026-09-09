@@ -234,6 +234,31 @@
  * (25/25 checks, after fixing that mask bug plus a couple of test-
  * harness bugs of its own). Next: JIT COP1 FPU opcodes (task #884,
  * Round 902-906).
+ *
+ * Round 902 (task #884) update: MFC1/CFC1/MTC1/CTC1 (op 0x11, rs-
+ * selected) and MOV.S/ABS.S/NEG.S (op 0x11, rs==0x10/COP1.S, funct-
+ * selected) are now JIT-accelerated - the first slice of the FPU family,
+ * deliberately scoped to exclude every opcode needing real floating-
+ * point arithmetic (ADD.S/SUB.S/MUL.S/DIV.S/SQRT.S/etc, CVT.W.S/
+ * CVT.S.W, the BC1 branch family), which need genuine PPC750 FPU
+ * instructions and PCSX2's own overflow/underflow clamping ported
+ * faithfully - saved for a later round in this same task's Round
+ * 902-906 range. Every opcode here operates on FPR/GPR/FCR31 raw 32-bit
+ * bit patterns with plain integer loads/stores/logical ops (MOV.S: copy;
+ * ABS.S: rlwinm clearing bit 0; NEG.S: xoris flipping bit 31), matching
+ * ee_core.c's own case bodies exactly - no float hardware touched at
+ * all. New REG_FPR()/FCR31_OFFSET/ACC_OFFSET constants (fpr[0] at byte
+ * offset 1464, fcr31 at 1592, acc at 1596 - confirmed via a real
+ * offsetof() probe) reach ee_state_t's COP1 fields the same way every
+ * other *_OFFSET constant does. CFC1/CTC1's `rd` field is a compile-time
+ * constant, so both specialize to fixed-shape codegen per rd value
+ * (CFC1: rd==31 real read / rd==0 fixed 0x2E00 / else always-0; CTC1:
+ * rd==31 real write / else a true no-op, zero instructions emitted) with
+ * no runtime branching. See docs/STATUS.md's Round 902 section for the
+ * full verification writeup (20/20 checks, one harness bug caught and
+ * fixed - a wrong xoris opcode number in the test harness itself, not in
+ * the generated code). Next: the real FPU arithmetic family (Round
+ * 903+), this dynarec's first genuine PPC750 FPU instructions.
  */
 
 typedef struct {

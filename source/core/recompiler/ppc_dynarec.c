@@ -772,6 +772,21 @@ static void emit_branch_blend_likely(ppc_codegen_ctx_t *ctx, int32_t disp)
 #define REG_HI1(r)   ((int16_t)(REG_SLOT(r) + 8))
 #define REG_LO1(r)   ((int16_t)(REG_SLOT(r) + 12))
 
+/* Round 902 (task #884): byte offsets of ee_state_t's COP1 (FPU) fields,
+ * reached from CTX_REG the same "any ee_state_t field is just a plain
+ * lwz/stw at its real offset from &gpr[0]" way as EXC_THIS_PC_OFFSET/
+ * NEXT_PC_OFFSET/etc. above (see that comment block). fpr[32] sits
+ * right after cop0[32]/branch_pending/tlb[48]/the exception-scratch
+ * bytes, at offset 1464 (verified via offsetof(ee_state_t, fpr) against
+ * the real struct, not hand-counted) - REG_FPR(f) = 1464 + f*4, well
+ * within lwz/stw's 16-bit signed displacement range. fcr31 and acc
+ * immediately follow fpr[32] (32*4 = 128 bytes later). These three
+ * constants are asserted against real offsetof(...) values in ee_jit.c,
+ * same discipline as the other *_OFFSET constants. */
+#define REG_FPR(f)      ((int16_t)(1464 + (f) * 4))
+#define FCR31_OFFSET    ((int16_t)1592)
+#define ACC_OFFSET      ((int16_t)1596)
+
 /* Round 890 (task #874): HI/LO pseudo-register indices. The R5900 has
  * two dedicated 64-bit registers (HI, LO - used by MULT/MULTU/DIV/
  * DIVU/MFHI/MTHI/MFLO/MTLO) that this dynarec's context array didn't
@@ -1995,6 +2010,114 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
         emit(ctx, enc_lwz(15, 1, 12));
         emit(ctx, enc_addi(1, 1, 32));
         return 0;
+    }
+
+    if (op == 0x11) {
+        /* Round 902 (task #884): COP1 (FPU) data-movement and bit-level
+         * opcodes - the first slice of the FPU family, deliberately
+         * scoped to exclude any opcode that needs REAL floating-point
+         * arithmetic (ADD.S/SUB.S/MUL.S/DIV.S/SQRT.S/etc - those need
+         * genuine PPC750 FPU instructions (lfs/fadds/fsubs/stfs/...),
+         * MIPS-vs-PPC rounding/denormal/exception-flag differences to
+         * reconcile, and PCSX2's own overflow/underflow clamping
+         * (fpu_check_overflow/fpu_check_underflow) ported faithfully -
+         * a substantially bigger lift saved for a later round in this
+         * arc). Every opcode below operates on the FPR/GPR/FCR31 raw
+         * 32-bit bit patterns with plain integer loads/stores/logical
+         * ops, exactly like ee_core.c's own case bodies do (see
+         * ee_core.c's `case 0x11:` COP1 block) - no float hardware
+         * touched at all, so none of the arithmetic-scope caveats above
+         * apply here.
+         *
+         * COP1's own sub-opcode field is `rs` (bits 25-21) - reusing the
+         * exact same decode variable this dynarec already extracts for
+         * every other opcode, no new field needed. MFC1/CFC1/MTC1/CTC1
+         * (rs==0x00/0x02/0x04/0x06) address the FPR/FCR with `rd`
+         * directly (matching ee_core.c's own case bodies under this
+         * `switch(rs)`, NOT COP1.S's fd/fs/ft convention below).
+         * COP1.S (rs==0x10) is a further `funct`-selected sub-dispatch
+         * with its own fd=sa/fs=rd/ft=rt field convention (also matching
+         * ee_core.c exactly) - only MOV.S/ABS.S/NEG.S are implemented
+         * here, the three funct values that are pure bit-twiddles. */
+        if (rs == 0x00) { /* MFC1: if (rt) GPR(rt) = sext32(fpr[rd]) */
+            if (rt == 0)
+                return 0;
+            emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_FPR(rd)));
+            emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_LO(rt)));
+            emit(ctx, enc_srawi(SCRATCH_B, SCRATCH_A, 31));
+            emit(ctx, enc_stw(SCRATCH_B, CTX_REG, REG_HI(rt)));
+            return 0;
+        }
+        if (rs == 0x04) { /* MTC1: fpr[rd] = rt32 (no sign-extension - a
+                            * raw 32-bit bit-pattern copy) */
+            emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rt)));
+            emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_FPR(rd)));
+            return 0;
+        }
+        if (rs == 0x02) { /* CFC1: rd is a COMPILE-TIME constant (part of
+                            * the instruction encoding), so this
+                            * specializes to one of three fixed shapes
+                            * per rd value rather than branching in
+                            * generated code. */
+            if (rt == 0)
+                return 0;
+            if (rd == 31) {
+                emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, FCR31_OFFSET));
+                emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_LO(rt)));
+                emit(ctx, enc_srawi(SCRATCH_B, SCRATCH_A, 31));
+                emit(ctx, enc_stw(SCRATCH_B, CTX_REG, REG_HI(rt)));
+            } else if (rd == 0) {
+                /* GPR(rt) = sext32(0x2E00) - positive, so hi is always 0. */
+                emit(ctx, enc_addi(SCRATCH_A, 0, 0x2E00));
+                emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_LO(rt)));
+                emit(ctx, enc_addi(SCRATCH_B, 0, 0));
+                emit(ctx, enc_stw(SCRATCH_B, CTX_REG, REG_HI(rt)));
+            } else {
+                emit(ctx, enc_addi(SCRATCH_A, 0, 0));
+                emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_LO(rt)));
+                emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_HI(rt)));
+            }
+            return 0;
+        }
+        if (rs == 0x06) { /* CTC1: only rd==31 does anything real
+                            * (fcr31 = rt32); every other rd is a
+                            * documented no-op, matching ee_core.c's own
+                            * `if (rd == 31) ...` guard with no else. */
+            if (rd != 31)
+                return 0;
+            emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rt)));
+            emit(ctx, enc_stw(SCRATCH_A, CTX_REG, FCR31_OFFSET));
+            return 0;
+        }
+        if (rs == 0x10) { /* COP1.S - fd=sa, fs=rd, ft=rt (ee_core.c's
+                            * own convention, reused verbatim). */
+            uint32_t fd = sa, fs = rd;
+            if (funct == 0x06) { /* MOV.S: fpr[fd] = fpr[fs] */
+                emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_FPR(fs)));
+                emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_FPR(fd)));
+                return 0;
+            }
+            if (funct == 0x05) { /* ABS.S: fpr[fd] = fpr[fs] & 0x7fffffff -
+                                   * rlwinm with mb=1,me=31,sh=0 clears just
+                                   * bit 0 (the sign bit), verified to equal
+                                   * AND-with-0x7FFFFFFF exactly. */
+                emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_FPR(fs)));
+                emit(ctx, enc_rlwinm(SCRATCH_A, SCRATCH_A, 0, 1, 31));
+                emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_FPR(fd)));
+                return 0;
+            }
+            if (funct == 0x07) { /* NEG.S: fpr[fd] = fpr[fs] ^ 0x80000000 -
+                                   * xoris only touches the upper 16 bits,
+                                   * exactly the bits 0x80000000 lives in. */
+                emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_FPR(fs)));
+                emit(ctx, enc_xoris(SCRATCH_A, SCRATCH_A, 0x8000));
+                emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_FPR(fd)));
+                return 0;
+            }
+            return -1; /* ADD.S/SUB.S/MUL.S/DIV.S/etc: not yet JIT-compiled,
+                        * fall back to the interpreter (later round). */
+        }
+        return -1; /* CVT.W.S/CVT.S.W/BC1/etc: not yet JIT-compiled. */
     }
 
     if (op == 0x02) {

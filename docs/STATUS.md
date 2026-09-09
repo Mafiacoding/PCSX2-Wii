@@ -38934,3 +38934,97 @@ Wii build: pcsx2-wii.elf 3,203,236 bytes / .dol 543,328 bytes
 Status: task #884 (JIT COP1 FPU opcodes, Rounds 902-906b) is now
 CLOSED. 96 opcodes total now JIT-accelerated. Next: task #885 (Round
 907: VU0 macro-mode VADD/VSUB/VMUL family, beyond the existing VADDq).
+
+## Round 907: JIT VU0 macro-mode VADD/VSUB/VMUL (task #892)
+
+First increment of the Rounds 907-913 COP2/VU0 macro-mode JIT arc
+(task #885). This dynarec's first VU0 opcodes - a genuinely new
+opcode class (op=0x12), not an extension of any prior COP1/GPR work.
+
+Re-verified against ee_core.c's real `case 0x12:` body (~lines
+8194-8307): rs<0x10 selects the scalar transfer family (MFC2/QMFC2/
+CFC2/MTC2/QMTC2/CTC2 - not yet JIT'd, declined and left to fall back
+to the interpreter). rs>=0x10 is the CO-format vector family, where
+rs = 0x10 | destmask (destmask bit3=X, bit2=Y, bit1=Z, bit0=W) and
+FT/FS/FD sit at bits 20-16/15-11/10-6 - the same field layout the
+interpreter's own case body uses for real vadd.xyzw/vsub.xyzw/
+vmul.xyzw encodings. VADD (funct=0x28), VMUL (funct=0x2A), and VSUB
+(funct=0x2C) compute FD[lane] = FS[lane] OP FT[lane] for every lane
+destmask selects - real single-precision arithmetic on the
+reinterpreted bit patterns, with NO clamping anywhere (confirmed
+absent from the real case body, unlike COP1.S's fpu_clamp32) - this
+makes VADD/VSUB/VMUL simpler to JIT than any COP1.S opcode: just
+`lfs` both operands directly from vu0_vf, one real `fadds`/`fsubs`/
+`fmuls`, one `stfs` back to vu0_vf, no clamp-then-spill-to-stack
+step needed.
+
+Key structural difference from every prior branch/condition-driven
+opcode in this file: destmask is a compile-time-constant field of
+THIS instruction's own encoding (not a runtime value read from a
+register or flag, unlike BC1's fcr31 condition in Round 906b), so
+the JIT emitter simply unrolls the active lanes in a plain C `for`
+loop at translate time - zero runtime branching or branchless-masking
+machinery needed in the generated PPC code at all.
+
+New macro `VU0_VF_OFF(reg, lane) = 1728 + reg*16 + lane*4` addresses
+`ee_state_t`'s `vu0_vf[32][4]` array (confirmed via a host-side
+offsetof() check against the real struct layout in ee_core.h: byte
+offset 1728, flat `uint32_t[32][4]`, no padding). Max offset (reg=31,
+lane=3) is 2236 bytes, comfortably within the PPC750 16-bit signed
+load/store displacement range. A new `_Static_assert` in ee_jit.c
+pins this offset so any future ee_state_t reshuffle fails the build
+loudly instead of silently corrupting VU0 register reads. Matching
+`ee_jit_opcode_supported()` gating added for op=0x12 (rs>=0x10,
+funct in {0x28,0x2A,0x2C}).
+
+Deliberately scoped OUT of this round (deferred to task #893, Round
+908, and beyond): the broadcast row (funct 0x00-0x1F), VMAX/VMINI
+(funct 0x2B/0x2F), VMADD/VMSUB (funct 0x29/0x2D, which read the
+vu0_acc accumulator), VOPMSUB, and the scalar MFC2-family transfers -
+none of these are exercised by task #892's stated scope ("vector,
+beyond existing VADDq"), consistent with this whole JIT arc's
+incremental "real, tested, roadmap-directed" scoping discipline.
+
+New host-native harness r907_vu0_vadd_vsub_vmul_verify.c (outputs
+scratch area, not tracked) reused the established simulator pattern
+(lfs/stfs/fadds/fsubs/fmuls decode, already exercised by r902-r904's
+COP1.S harnesses - no new PPC opcode decode needed this round) with
+an independent reference model (`vu0_ref()`) written directly from
+ee_core.c's real CO-format semantics, not from ppc_dynarec.c's own
+emit logic. 31 test cases: each op (VADD/VSUB/VMUL) with each
+single-lane destmask (X/Y/Z/W independently, confirming only the
+targeted lane is written and the other 3 are left untouched), full
+XYZW (destmask=0xF), 6 partial multi-lane combinations (XY/ZW/XZ/YW/
+XYZ/YZW), register aliasing (fs==ft for a "square" case, fd==fs for
+in-place accumulation), the maximum register index (vf31, confirming
+VU0_VF_OFF's high-offset math), a signed-zero case, a real IEEE
+overflow-to-Infinity case (3.0e38+3.0e38, explicitly confirming NO
+clamping happens - unlike every COP1.S op in Rounds 902-906b), and 4
+decline-path checks (VMAX/VMINI/VMADD funct values and a scalar
+MFC2-family encoding, all correctly declined via rc!=0, confirming
+the dispatch boundary matches the documented scope exactly).
+
+First run caught one bug - not in the JIT code, but in the test
+harness itself: an overflow test used 1e30+1e30, which is still well
+within float range (max ~3.4e38) and doesn't overflow. Corrected to
+3.0e38+3.0e38 (which does overflow to real +Infinity, 0x7F800000).
+After the fix: 31/31 passed, 0 warnings under
+-fsanitize=address,undefined, ASAN_OPTIONS=detect_leaks=1 confirmed
+clean.
+
+Regression-checked against Rounds 893/894/895/896/897/898/900/902/
+903/904's own still-present harnesses (13/13, 17/17, 19/19, 35/35,
+19/19, 27/27, 25/25, 20/20, 12/12, 13/13) - no regressions. (Rounds
+905/906/906b's own harness files were already deleted per this
+project's scratch-area convention; this round's new op=0x12 dispatch
+block is additive and cannot have touched their already-verified/
+committed COP1 dispatch code.)
+
+Wii build: pcsx2-wii.elf 3,207,028 bytes / .dol 543,296 bytes
+(+3,792 elf over Round 906b; dol -32 bytes, within normal
+alignment/padding noise), 0 warnings/errors (devkitPPC 8.1.0).
+
+Status: task #892 (Round 907) CLOSED. task #885 (COP2/VU0 umbrella)
+remains in progress - 3 of the ~15-20 real VU0 macro-mode opcodes now
+JIT-accelerated (VADD/VSUB/VMUL). Next: task #893 (Round 908: VU0
+VMAX/VMINI/VOPMSUB/VABS/VCLIP).

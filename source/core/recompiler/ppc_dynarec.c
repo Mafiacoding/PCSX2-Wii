@@ -1016,6 +1016,18 @@ static void emit_branch_blend_likely(ppc_codegen_ctx_t *ctx, int32_t disp)
 #define FCR31_OFFSET    ((int16_t)1592)
 #define ACC_OFFSET      ((int16_t)1596)
 
+/* Round 907 (task #892): byte offset of ee_state_t's VU0 macro-mode
+ * vector register file (vu0_vf[32][4], uint32_t raw bit patterns - same
+ * "reinterpret the bits as float, no clamping" convention ee_core.c's
+ * own VADD/VSUB/VMUL case body uses, unlike COP1's fpr[]/REG_FPR() above
+ * which DOES clamp). Verified via offsetof(ee_state_t, vu0_vf) == 1728,
+ * asserted against the real struct in ee_jit.c (same discipline as
+ * REG_FPR/FCR31_OFFSET/ACC_OFFSET). Lane order x=0/y=1/z=2/w=3 matches
+ * vu0_vf_write_lane()'s own indexing. Max offset (reg=31,lane=3) is
+ * 1728+31*16+12=2236, comfortably within lwz/stw/lfs/stfs's 16-bit
+ * signed displacement range. */
+#define VU0_VF_OFF(reg, lane)  ((int16_t)(1728 + (reg) * 16 + (lane) * 4))
+
 /* Round 890 (task #874): HI/LO pseudo-register indices. The R5900 has
  * two dedicated 64-bit registers (HI, LO - used by MULT/MULTU/DIV/
  * DIVU/MFHI/MTHI/MFLO/MTLO) that this dynarec's context array didn't
@@ -3146,6 +3158,67 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
         }
         return -1; /* everything else under COP1 (op==0x11): not yet
                      * JIT-compiled, fall back to the interpreter. */
+    }
+
+    if (op == 0x12) {
+        /* Round 907 (task #892): COP2 (VU0 macro mode) - this dynarec's
+         * first VU0 opcodes. Re-verified against ee_core.c's real
+         * `case 0x12:` body (~lines 8194-8307): rs<0x10 selects the
+         * scalar transfer family (MFC2/QMFC2/CFC2/MTC2/QMTC2/CTC2, not
+         * yet JIT'd - falls through below); rs>=0x10 is the CO-format
+         * vector family, where rs = 0x10 | destmask (destmask bit3=X,
+         * bit2=Y, bit1=Z, bit0=W, matching vu0_vf_write_lane()'s lane
+         * index 0=X..3=W) and FT/FS/FD sit at bits 20-16/15-11/10-6
+         * respectively - the exact same field layout the interpreter's
+         * own case body comment documents (confirmed against real
+         * vsub.xyzw/viswr encodings there). VADD(funct=0x28)/
+         * VMUL(funct=0x2A)/VSUB(funct=0x2C): FD[lane] = FS[lane] OP
+         * FT[lane] for every lane destmask selects - real float
+         * arithmetic on the reinterpreted bit patterns, NO clamping
+         * anywhere (confirmed absent from the real case body, unlike
+         * COP1's fpu_clamp32) - so this is simpler than any COP1.S
+         * opcode: just lfs both operands directly from vu0_vf (no
+         * clamp-then-spill-to-stack step), one real fadds/fsubs/fmuls,
+         * one stfs back to vu0_vf. destmask is a compile-time-constant
+         * field of THIS instruction's own encoding (not a runtime
+         * value), so the active lanes are simply unrolled here at
+         * JIT-compile time - no runtime branching/masking needed at
+         * all, unlike BC1's runtime fcr31 condition (Round 906b). The
+         * broadcast row (funct 0x00-0x1F), VMADD/VMSUB's ACC operand
+         * (funct 0x29/0x2D), VMAX/VMINI (funct 0x2B/0x2F), and the
+         * scalar MFC2-family transfers are deliberately left to later
+         * rounds (#893 onward) - not yet exercised by the traced boot
+         * path, same "real, tested, roadmap-directed" scoping this
+         * whole JIT arc has followed since Round 887. */
+        uint32_t rs = (mips_instr >> 21) & 0x1Fu;
+        if (rs >= 0x10u) {
+            uint32_t destmask = rs & 0xFu;
+            uint32_t ft = (mips_instr >> 16) & 0x1Fu;
+            uint32_t fs = (mips_instr >> 11) & 0x1Fu;
+            uint32_t fd = (mips_instr >> 6) & 0x1Fu;
+            uint32_t funct = mips_instr & 0x3Fu;
+            if (funct == 0x28u || funct == 0x2Au || funct == 0x2Cu) {
+                for (int lane = 0; lane < 4; lane++) {
+                    if (!(destmask & (0x8u >> lane)))
+                        continue;
+                    emit(ctx, enc_lfs(0, CTX_REG, VU0_VF_OFF(fs, (uint32_t)lane))); /* f0 = FS[lane] */
+                    emit(ctx, enc_lfs(1, CTX_REG, VU0_VF_OFF(ft, (uint32_t)lane))); /* f1 = FT[lane] */
+                    if (funct == 0x28u)
+                        emit(ctx, enc_fadds(2, 0, 1));      /* VADD: f2 = f0 + f1 */
+                    else if (funct == 0x2Cu)
+                        emit(ctx, enc_fsubs(2, 0, 1));      /* VSUB: f2 = f0 - f1 */
+                    else
+                        emit(ctx, enc_fmuls(2, 0, 1));      /* VMUL: f2 = f0 * f1 */
+                    emit(ctx, enc_stfs(2, CTX_REG, VU0_VF_OFF(fd, (uint32_t)lane))); /* FD[lane] = f2 */
+                }
+                return 0;
+            }
+            return -1; /* broadcast row / VMAX / VMINI / VMADD / VMSUB /
+                         * VOPMSUB / memory-access family: not yet
+                         * JIT-compiled, fall back to the interpreter. */
+        }
+        return -1; /* scalar MFC2/QMFC2/CFC2/MTC2/QMTC2/CTC2 family: not
+                     * yet JIT-compiled, fall back to the interpreter. */
     }
 
     if (op == 0x02) {

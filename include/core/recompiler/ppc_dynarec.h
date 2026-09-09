@@ -413,6 +413,23 @@
  * STATUS.md's Round 906b section for the full hex-trace derivation and
  * worked example. 96 opcodes now JIT-accelerated. Task #884 CLOSED.
  * Next: task #885, Round 907 - JIT VU0 macro-mode VADD/VSUB/VMUL.
+ *
+ * Round 907 (task #892) update: this dynarec's first VU0/COP2 opcodes
+ * (op=0x12). New CO-format vector dispatch block handles VADD
+ * (funct=0x28), VMUL (funct=0x2A), and VSUB (funct=0x2C): rs=0x10|
+ * destmask selects the active lanes (bit3=X..bit0=W), FD[lane]=
+ * FS[lane] OP FT[lane] with NO clamping (unlike every COP1.S op).
+ * Because destmask is a compile-time-constant field of the
+ * instruction's own encoding (unlike BC1's runtime fcr31 condition),
+ * the emitter simply unrolls active lanes in a plain C loop at
+ * translate time - no runtime branchless-masking machinery needed at
+ * all, simpler than any COP1.S opcode. New VU0_VF_OFF(reg,lane) macro
+ * addresses ee_state_t's vu0_vf[32][4] array (offset 1728, confirmed
+ * via host-side offsetof(), pinned by a new _Static_assert in
+ * ee_jit.c). Scalar MFC2-family transfers (rs<0x10), the broadcast
+ * row, VMAX/VMINI, and VMADD/VMSUB (ACC-operand) are deliberately
+ * left to Round 908 (task #893) onward. 31/31 checks passed under
+ * -fsanitize=address,undefined, 0 leaks.
  */
 
 typedef struct {

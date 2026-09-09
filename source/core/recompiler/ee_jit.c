@@ -72,6 +72,13 @@ _Static_assert(offsetof(ee_state_t, fcr31) == 1592,
 _Static_assert(offsetof(ee_state_t, acc) == 1596,
                "ppc_dynarec.c's ACC_OFFSET assumes acc sits at this exact byte offset");
 
+/* Round 907 (task #892): VADD/VSUB/VMUL (COP2/VU0 macro mode) are this
+ * dynarec's first opcodes to touch ee_state_t's VU0 vector-register
+ * file (vu0_vf[32][4], distinct from and much larger than the scalar
+ * COP1 fpr[32] above). */
+_Static_assert(offsetof(ee_state_t, vu0_vf) == 1728,
+               "ppc_dynarec.c's VU0_VF_OFF() assumes vu0_vf[0][0] sits at this exact byte offset");
+
 #define EE_JIT_CACHE_SLOTS 8192u /* power of two - see ee_jit_cache_lookup()/insert() */
 
 typedef struct {
@@ -269,6 +276,15 @@ static int ee_jit_opcode_supported(uint32_t instr)
             uint32_t rt = (instr >> 16) & 0x1Fu;
             if (rt == 0x00u || rt == 0x01u || rt == 0x02u || rt == 0x03u)
                 return 1; /* BC1F / BC1T / BC1FL / BC1TL (Round 906b) */
+        }
+        return 0;
+    }
+    if (op == 0x12u) {
+        uint32_t rs = (instr >> 21) & 0x1Fu;
+        if (rs >= 0x10u) {
+            uint32_t funct = instr & 0x3Fu;
+            if (funct == 0x28u || funct == 0x2Au || funct == 0x2Cu)
+                return 1; /* VADD / VMUL / VSUB (Round 907) */
         }
         return 0;
     }

@@ -595,6 +595,45 @@
  * passed under -fsanitize=address,undefined, 0 leaks.
  * Next: task #898, Round 913 - JIT the remaining VU0 opcodes to close
  * out task #885 (COP2/VU0 umbrella).
+ *
+ * Round 913 (task #898) update: JIT VMADD(funct=0x29)/VMSUB(funct=
+ * 0x2D) and VIADDI(funct=0x32), re-verified against ee_core.c's real
+ * case bodies (lines 8376-8408 for VMADD/VMSUB, lines 8957-8981 for
+ * VIADDI). VMADD/VMSUB share the same SPECIAL1 row as VADD/VMUL/VMAX/
+ * VSUB/VMINI/VOPMSUB (Rounds 907-908) but read a third operand from
+ * the fixed VU0 macro-mode accumulator (VU0_ACC_OFF, established by
+ * VOPMSUB - no register-index/reg==0 concept applies to ACC), writing
+ * FD only (never back into ACC - that's the separate, still-
+ * unimplemented VMADDA/VMSUBA family, matching ee_core.c's own scoped
+ * gap). Computed as two separate float ops (fmuls then fadds/fsubs)
+ * rather than a fused multiply-add, matching the plain C `acc +- a*b`
+ * expression shape the interpreter evaluates. VIADDI is the odd one
+ * out among the CO-format integer ops: dest=FT/src=FS/imm=FD-field
+ * (reversed from VIADD/VISUB/VIAND/VIOR's dest=FD), with a real-
+ * hardware sign-extension quirk ported verbatim from PCSX2's VUops.cpp
+ * _vuIADDI (imm5&0x10 ? 0xFFF0 : 0 | imm5&0xF - a signed 4-bit
+ * magnitude with a separate sign bit, not plain 5-bit two's-
+ * complement) - resolved entirely at JIT-compile time since imm5/FD
+ * is a constant instruction field, so a single `addi` with the
+ * precomputed imm cast to int16_t reproduces the interpreter's exact
+ * 32-bit sum with no extra load-immediate step. No new PPC750
+ * instruction forms were needed - lfs/stfs/fmuls/fadds/fsubs/lwz/stw/
+ * addi/rlwinm were all already established.
+ *
+ * New host-native harness r913_vu0_vmadd_vmsub_viaddi_verify.c reuses
+ * r904's ppcsim base with zero new opcode decode added. 8/8 checks
+ * passed under -fsanitize=address,undefined, 0 leaks.
+ *
+ * task #885 (COP2/VU0 umbrella) remains open after this round: the
+ * broadcast row (funct 0x00-0x1F - the Q/I-scalar-broadcast forms of
+ * VADD/VSUB/VMADD/VMSUB/VMAX/VMINI/VMUL, plus VMADDA/VMSUBA/VMULA's
+ * own broadcast siblings under the SPECIAL2 idx-based dispatch) is a
+ * substantially larger, more complex feature (8 op_kinds x 4
+ * broadcast-source selectors) deliberately deferred to its own round
+ * rather than folded in here, consistent with this project's pattern
+ * of splitting large features across rounds instead of rushing scope.
+ * Next: task #898 continues in a follow-up round scoping the
+ * broadcast row specifically.
  */
 
 typedef struct {

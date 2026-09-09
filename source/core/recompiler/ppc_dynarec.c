@@ -3908,8 +3908,82 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
                     emit(ctx, enc_stw(SCRATCH_C, CTX_REG, COP2_CTRL_OFF(fd)));
                 return 0;
             }
-            return -1; /* broadcast row (funct 0x00-0x1F) / VMADD(0x29) /
-                         * VMSUB(0x2D) / VIADDI(0x32) family: not yet
+            if (funct == 0x29u || funct == 0x2Du) {
+                /* Round 913 (task #898): VMADD(0x29)/VMSUB(0x2D) -
+                 * FD[lane] = ACC[lane] +- FS[lane]*FT[lane], per
+                 * destmask lane. Re-verified against ee_core.c's real
+                 * case body (lines 8376-8408): same SPECIAL1 row as
+                 * VADD/VMUL/VMAX/VSUB/VMINI (Round 907/908) and
+                 * VOPMSUB (Round 908), but reads a third operand from
+                 * the fixed VU0 macro-mode accumulator (st->vu0_acc[4],
+                 * lane order x=0/y=1/z=2/w=3 - VOPMSUB's own
+                 * VU0_ACC_OFF already established this exact offset
+                 * macro, no register-index concept applies to ACC so
+                 * no reg==0 guard is needed on the read side, unlike
+                 * FS/FT). Writes FD only - does NOT write back into
+                 * ACC (that's the separate VMADDA/VMSUBA accumulator-
+                 * dest family, a distinct scoped-out gap per
+                 * ee_core.c's own comment, not implemented in the
+                 * interpreter either). Computed as two separate float
+                 * ops (fmuls then fadds/fsubs), matching the plain C
+                 * `acc + a*b` / `acc - a*b` expression shape the
+                 * interpreter itself evaluates (no fused multiply-add
+                 * contraction assumed, same as VOPMSUB's own two-step
+                 * pattern). */
+                for (int lane = 0; lane < 4; lane++) {
+                    if (!(destmask & (0x8u >> lane))) continue;
+                    emit(ctx, enc_lfs(0, CTX_REG, VU0_ACC_OFF((uint32_t)lane))); /* f0 = ACC[lane] */
+                    emit(ctx, enc_lfs(1, CTX_REG, VU0_VF_OFF(fs, (uint32_t)lane))); /* f1 = FS[lane] */
+                    emit(ctx, enc_lfs(2, CTX_REG, VU0_VF_OFF(ft, (uint32_t)lane))); /* f2 = FT[lane] */
+                    emit(ctx, enc_fmuls(3, 1, 2));                    /* f3 = FS[lane] * FT[lane] */
+                    if (funct == 0x29u)
+                        emit(ctx, enc_fadds(4, 0, 3));                /* VMADD: f4 = ACC + FS*FT */
+                    else
+                        emit(ctx, enc_fsubs(4, 0, 3));                /* VMSUB: f4 = ACC - FS*FT */
+                    if (fd != 0) /* writes to VF00 are discarded on real hardware */
+                        emit(ctx, enc_stfs(4, CTX_REG, VU0_VF_OFF(fd, (uint32_t)lane)));
+                }
+                return 0;
+            }
+            if (funct == 0x32u) {
+                /* Round 913 (task #898): VIADDI - VI[ft] = VI[fs] +
+                 * sign_extend(imm), where imm is the raw 5-bit field
+                 * at the SAME bit position (6-10) as FD in every other
+                 * CO-format arithmetic op this file handles, reused
+                 * here as an immediate rather than a register index.
+                 * Re-verified against ee_core.c's real case body
+                 * (lines 8957-8981): unlike VIADD/VISUB/VIAND/VIOR
+                 * (dest=FD), VIADDI's real operand order is dest=FT,
+                 * src=FS, imm=SA (confirmed there against PCSX2's own
+                 * DisR5900asm.cpp P_VIADDI disassembly format). The
+                 * sign-extension is a real-hardware quirk ported
+                 * verbatim from PCSX2's VUops.cpp _vuIADDI: imm5=fd,
+                 * imm = (imm5&0x10 ? 0xFFF0 : 0) | (imm5&0xF) -
+                 * effectively a signed 4-bit magnitude with a separate
+                 * sign bit, not a plain 5-bit two's-complement
+                 * sign-extend. imm5/fd is a compile-time-constant
+                 * field of this instruction's own encoding, so imm is
+                 * fully resolved at JIT-compile time; its two possible
+                 * 32-bit value ranges (0x0-0xF or 0xFFF0-0xFFFF) are
+                 * exactly valid int16_t bit patterns, so a plain
+                 * `addi` with imm cast to int16_t reproduces the same
+                 * 32-bit sum the interpreter's unsigned `a + imm`
+                 * computes, with no separate load-immediate step
+                 * needed. Result masked to 16 bits (real VI registers
+                 * are 16-bit, same convention VIADD/VISUB already
+                 * use), guarded by the usual compile-time
+                 * `if (ft != 0)` (vu0_vi_write's own discard-on-VI0). */
+                uint32_t imm5 = fd;
+                uint32_t imm = ((imm5 & 0x10u) ? 0xFFF0u : 0u) | (imm5 & 0xFu);
+                if (ft != 0) {
+                    emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, COP2_CTRL_OFF(fs))); /* a = VI[fs] */
+                    emit(ctx, enc_addi(SCRATCH_A, SCRATCH_A, (int16_t)imm));   /* a + sign_extend(imm) */
+                    emit(ctx, enc_rlwinm(SCRATCH_A, SCRATCH_A, 0, 16, 31));    /* & 0xFFFF */
+                    emit(ctx, enc_stw(SCRATCH_A, CTX_REG, COP2_CTRL_OFF(ft)));
+                }
+                return 0;
+            }
+            return -1; /* broadcast row (funct 0x00-0x1F): not yet
                          * JIT-compiled, fall back to the interpreter. */
         }
         /* Round 912 (task #897): the rs<0x10 scalar transfer family -

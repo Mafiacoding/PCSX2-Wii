@@ -39545,3 +39545,94 @@ VMADD(0x29)/VMSUB(0x2D), VIADDI(0x32), and VCALLMS/VCALLMSR (still
 correctly deferred pending real interpreter-side VU0 micro-mode
 dispatch). Next: task #898 (Round 913: JIT the remaining VU0
 opcodes to close out task #885).
+
+## Round 913: JIT VU0 VMADD/VMSUB/VIADDI (task #898)
+
+Implemented VMADD(funct=0x29)/VMSUB(funct=0x2D) and VIADDI(funct=0x32)
+in `source/core/recompiler/ppc_dynarec.c`'s CO-format dispatch, right
+after the VIADD/VISUB/VIAND/VIOR block from Round 910. Re-verified
+against ee_core.c's real case bodies (lines 8376-8408 for VMADD/VMSUB,
+lines 8957-8981 for VIADDI) before writing any codegen.
+
+VMADD/VMSUB share the same SPECIAL1 row as VADD/VMUL/VMAX/VSUB/VMINI
+(Round 907/908) and VOPMSUB (Round 908) - `FD[lane] = ACC[lane] +-
+FS[lane]*FT[lane]`, per destmask lane - but read a third operand from
+the fixed VU0 macro-mode accumulator (`st->vu0_acc[4]`, lane order
+x=0/y=1/z=2/w=3). VOPMSUB had already established the `VU0_ACC_OFF`
+offset macro this round reuses directly; unlike FS/FT, ACC has no
+register-index concept at all, so no reg==0 guard applies on the read
+side. The write side keeps the usual `if (fd != 0)` compile-time
+guard (writes to VF00 are discarded on real hardware). Crucially,
+VMADD/VMSUB write FD only - they do NOT write back into ACC (that's
+the separate VMADDA/VMSUBA accumulator-destination family, which
+ee_core.c's own comment flags as a distinct, still-unimplemented
+scoped gap - not conflated with VMADD/VMSUB here). Computed as two
+separate float ops (`fmuls` then `fadds`/`fsubs`) rather than a fused
+multiply-add, deliberately matching the plain C `acc + a*b` / `acc -
+a*b` expression shape the interpreter itself evaluates (no FMA
+contraction assumed - same two-step pattern VOPMSUB's own codegen
+already uses).
+
+VIADDI is the odd one out among the CO-format integer ops this file
+handles: unlike VIADD/VISUB/VIAND/VIOR (dest=FD), VIADDI's real
+operand order is dest=FT, src=FS, imm=SA - where SA is the raw 5-bit
+field at the SAME bit position (6-10) as FD in every other CO-format
+op, reused here as an immediate rather than a register index
+(confirmed against PCSX2's own DisR5900asm.cpp P_VIADDI disassembly
+format, "viaddi FT, FS, 0x%x(SA)"). The sign-extension itself is a
+real-hardware quirk ported verbatim from PCSX2's VUops.cpp _vuIADDI:
+`imm = (imm5&0x10 ? 0xFFF0 : 0) | (imm5&0xF)` - effectively a signed
+4-bit magnitude with a separate sign bit, not a plain 5-bit two's-
+complement sign-extend. Since imm5 (the FD field) is a compile-time-
+constant field of the instruction's own encoding, `imm` is fully
+resolved at JIT-compile time; its only two possible 32-bit value
+ranges (0x0-0xF or 0xFFF0-0xFFFF) are exactly valid int16_t bit
+patterns, so a single `addi` with imm cast to int16_t reproduces the
+interpreter's exact 32-bit sum with no separate load-immediate step
+needed. Result masked to 16 bits via the same rlwinm idiom VIADD/
+VISUB already use, guarded by the usual compile-time `if (ft != 0)`
+(vu0_vi_write's own discard-on-VI0).
+
+No new PPC750 instruction forms were needed this round - lfs/stfs/
+fmuls/fadds/fsubs (established by Rounds 907-908's VADD/VSUB/VMUL/
+VOPMSUB) and lwz/stw/addi/rlwinm (established by LW/ADDIU/VIADD) cover
+the entire increment's codegen.
+
+New host-native harness `r913_vu0_vmadd_vmsub_viaddi_verify.c` reuses
+r904_cop1_div_verify.c's ppcsim base with ZERO new opcode decode added
+(lfs/stfs/fadds/fsubs/fmuls/lwz/stw/addi/rlwinm were all already
+there). 8 test cases cover: VMADD across all 4 lanes, VMSUB across all
+4 lanes, VMADD with a partial destmask (X,Z only - confirms untouched
+lanes stay untouched), VMADD with fd==0 (write discarded, VF00
+storage untouched), VIADDI with a small positive immediate, VIADDI's
+quirky sign-extend (imm5=0x11 -> imm=-15, confirming the separate-
+sign-bit behavior rather than plain two's-complement), VIADDI's
+16-bit result masking (0xFFFF+1 wraps to 0), and VIADDI with ft==0
+(write discarded, VI0 storage untouched). Independent reference values
+were derived directly from ee_core.c's real case bodies, not by
+re-running ppc_dynarec.c's own codegen logic. 8/8 checks passed under
+-fsanitize=address,undefined, 0 leaks - no bugs found, no fixes needed
+before shipping.
+
+Regression-checked against all 10 still-present prior harnesses
+(r893/894/895/896/897/898/900/902/903/904: 13/13, 17/17, 19/19,
+35/35, 19/19, 27/27, 25/25, 20/20, 12/12, 13/13) - no regressions, no
+compile warnings.
+
+Wii build: pcsx2-wii.elf 3,282,376 bytes / .dol 548,896 bytes (+1,388
+elf / +448 dol over Round 912), 0 warnings/errors (devkitPPC 8.1.0).
+
+Status: task #898 (Round 913) partially closed - VMADD/VMSUB/VIADDI
+are now JIT'd. task #885 (COP2/VU0 umbrella) remains open: the
+broadcast row (funct 0x00-0x1F - the Q/I-scalar-broadcast forms of
+VADD/VSUB/VMADD/VMSUB/VMAX/VMINI/VMUL, plus VMADDA/VMSUBA/VMULA's own
+broadcast siblings under the SPECIAL2 idx-based dispatch) is a
+substantially larger, more complex feature (8 op_kinds x 4
+broadcast-source selectors: bc0-3 lane-select, Q-register, I-register)
+deliberately deferred to its own follow-up round rather than folded in
+here, consistent with this project's pattern of splitting large
+features across rounds instead of rushing scope. VCALLMS/VCALLMSR
+remain correctly deferred pending real interpreter-side VU0
+micro-mode dispatch (an interpreter-side gap, not a JIT gap, per
+Round 911's finding). Next: continue task #898 with a round scoping
+the broadcast row specifically, to finally close out task #885.

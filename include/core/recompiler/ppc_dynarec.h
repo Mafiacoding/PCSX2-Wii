@@ -259,6 +259,47 @@
  * fixed - a wrong xoris opcode number in the test harness itself, not in
  * the generated code). Next: the real FPU arithmetic family (Round
  * 903+), this dynarec's first genuine PPC750 FPU instructions.
+ *
+ * Round 903 (task #884) update: ADD.S/SUB.S/MUL.S (op 0x11, rs==0x10/
+ * COP1.S, funct 0x00/0x01/0x02) are now JIT-accelerated - this dynarec's
+ * first opcodes using REAL PPC750 floating-point instructions (lfs/
+ * stfs/fadds/fsubs/fmuls, all new encoders this round). PPC has no
+ * GPR<->FPR move instruction, so every bit-pattern handoff between the
+ * integer and float register files goes through a small private stack
+ * frame pushed/popped around the whole sequence (stw+lfs to go GPR->FPR,
+ * stfs+lwz to come back).
+ *
+ * The real work is faithfully reproducing PCSX2's fpu_double()/
+ * fpu_check_overflow()/fpu_check_underflow() semantics in PPC integer
+ * code, since real PPC750 float hardware alone doesn't match them:
+ * fpu_double() is applied to BOTH source operands before arithmetic
+ * (denormal-or-zero magnitude -> signed zero, infinity/NaN magnitude
+ * -> signed Fmax 0x7F7FFFFF), and fpu_check_overflow()+
+ * fpu_check_underflow() are applied to the result after (the SAME
+ * transform, just described as two separate ee_core.c helper functions
+ * for a result rather than an operand). New emit_fpu_clamp32() helper
+ * implements this ONE transform branchlessly (magnitude-range mask-
+ * blend, reusing the exact subfc/subfe carry-to-mask idiom already
+ * established for SLT/SLTU/branch-condition masks) and is called three
+ * times per opcode: once for each input operand, once for the result -
+ * no real PPC branch instructions, keeping this whole file's "every
+ * compiled block is one straight-line run" invariant intact even
+ * though the underlying logic is a three-way conditional.
+ *
+ * ADD.S/SUB.S/MUL.S each emit roughly 61 PPC750 instructions (2x
+ * 15-instruction clamp calls for the operands + a 3rd for the result,
+ * plus stack-frame/spill/fill plumbing) - by far the largest single-
+ * opcode instruction count in this dynarec so far, prompting a bump of
+ * the per-block buffer-capacity constant from 40 to 80 words (see
+ * ppc_dynarec_init()'s own comment). See docs/STATUS.md's Round 903
+ * section for the full verification writeup (12/12 checks - basic
+ * arithmetic, negative operands, overflow-to-Fmax clamping in both
+ * signs, underflow-to-signed-zero clamping, denormal/infinity/NaN
+ * input clamping, and exact-zero passthrough - all passed on the first
+ * run, clean under -fsanitize=address,undefined). Next: DIV.S (needs a
+ * divide-by-zero special case), then SQRT.S/RSQRT.S/MAX.S/MIN.S/the
+ * MADD-family/comparison-family, CVT.W.S/CVT.S.W, and the BC1 branch
+ * family (remaining Round 904-906 budget for task #884).
  */
 
 typedef struct {

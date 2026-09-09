@@ -441,6 +441,53 @@ static inline uint32_t enc_rlwinm(int rA, int rS, int sh, int mb, int me)
            ((uint32_t)sh << 11) | ((uint32_t)mb << 6) | ((uint32_t)me << 1);
 }
 
+/* Round 903 (task #884) additions: lfs/stfs/fadds/fsubs/fmuls/fdivs -
+ * this dynarec's FIRST real PPC750 floating-point instructions, needed
+ * for COP1.S's genuine arithmetic family (ADD.S/SUB.S/MUL.S/DIV.S).
+ * lfs/stfs are D-form, same rD/rA/d layout as enc_lwz/enc_stw above but
+ * addressing the FPR file (opcodes 48/52) - PPC has no GPR<->FPR move
+ * instruction, so every bit-pattern handoff between the two register
+ * files in this dynarec goes through memory (stw+lfs or stfs+lwz),
+ * exactly like the emit_fpu_clamp32() spill/fill sequence below.
+ * fadds/fsubs/fdivs are A-form with frB as the second source operand;
+ * fmuls is the one arithmetic exception - it uses frC (bits 6-10)
+ * instead of frB, per the real PPC ISA's multiply-specific field
+ * layout. All six encodings verified bit-for-bit against real devkitPPC
+ * (powerpc-eabi-as/-objdump): "lfs f0,24(r1)" -> 0xC0010018, "stfs
+ * f0,24(r1)" -> 0xD0010018, "fadds f0,f1,f2" -> 0xEC01102A, "fsubs
+ * f3,f4,f5" -> 0xEC642828, "fmuls f6,f7,f8" -> 0xECC70232, "fdivs
+ * f9,f10,f11" -> 0xED2A5824 - all reproduced exactly by the formulas
+ * below. */
+static inline uint32_t enc_lfs(int frD, int rA, int16_t d)
+{
+    return (48u << 26) | ((uint32_t)frD << 21) | ((uint32_t)rA << 16) | (uint16_t)d;
+}
+
+static inline uint32_t enc_stfs(int frS, int rA, int16_t d)
+{
+    return (52u << 26) | ((uint32_t)frS << 21) | ((uint32_t)rA << 16) | (uint16_t)d;
+}
+
+static inline uint32_t enc_fadds(int frD, int frA, int frB)
+{
+    return (59u << 26) | ((uint32_t)frD << 21) | ((uint32_t)frA << 16) | ((uint32_t)frB << 11) | (21u << 1);
+}
+
+static inline uint32_t enc_fsubs(int frD, int frA, int frB)
+{
+    return (59u << 26) | ((uint32_t)frD << 21) | ((uint32_t)frA << 16) | ((uint32_t)frB << 11) | (20u << 1);
+}
+
+static inline uint32_t enc_fmuls(int frD, int frA, int frC)
+{
+    return (59u << 26) | ((uint32_t)frD << 21) | ((uint32_t)frA << 16) | ((uint32_t)frC << 6) | (25u << 1);
+}
+
+static inline uint32_t enc_fdivs(int frD, int frA, int frB)
+{
+    return (59u << 26) | ((uint32_t)frD << 21) | ((uint32_t)frA << 16) | ((uint32_t)frB << 11) | (18u << 1);
+}
+
 /* Round 894 (task #878): byte offsets of the three ee_state_t fields
  * J/JAL/JR/JALR need beyond the gpr[32]+hi+lo+pc/next_pc/sa_reg/cop0[32]
  * region this file's REG_HI/REG_LO addressing already covers - CTX_REG
@@ -659,6 +706,63 @@ static void emit_load_const32(ppc_codegen_ctx_t *ctx, int reg, uint32_t val)
     emit(ctx, enc_ori(reg, reg, (uint16_t)(val & 0xFFFFu)));
 }
 
+/* Round 903 (task #884): clamps SCRATCH_C's raw float32 bit pattern
+ * in place, per PCSX2's real fpu_double()/fpu_check_overflow()/
+ * fpu_check_underflow() semantics (ee_core.c lines ~3144-3168):
+ * denormals collapse to signed zero (a no-op for exact zero, since
+ * its bit pattern already IS "sign, rest 0"), infinities/NaNs
+ * (exponent byte == 0xFF, i.e. magnitude >= 0x7F800000) collapse to
+ * signed Fmax (0x7F7FFFFF | sign). This ONE routine covers BOTH the
+ * input-clamp (fpu_double() is applied to every FPR operand before
+ * arithmetic) and the output-clamp (fpu_check_overflow() then
+ * fpu_check_underflow() applied to every arithmetic result) cases
+ * used by the COP1.S ADD.S/SUB.S/MUL.S dispatch below - the two
+ * checks are the same "denormal-or-zero -> signed zero,
+ * infinity-or-NaN -> signed Fmax" transform on the exact same two
+ * magnitude thresholds, just described differently in ee_core.c's own
+ * separate helper functions.
+ *
+ * Requires the caller to have pre-loaded SCRATCH_A = 0x007FFFFF and
+ * SCRATCH_B = 0x7F7FFFFF (the two magnitude thresholds, hoisted once
+ * per opcode rather than re-loaded on every clamp call since they're
+ * invariant across the fs/ft/result clamp calls a single ADD.S/SUB.S/
+ * MUL.S makes). SCRATCH_D/E/F/G/H are used as scratch and left
+ * clobbered on return - nothing in this dynarec's calling convention
+ * needs them preserved across a single compiled block.
+ *
+ * Branchless throughout (three-way blend via mask-and-OR), matching
+ * this whole file's established style of never emitting real PPC
+ * control flow inside a compiled block - see BEQ/BNE's own comment
+ * above for the same rationale. The "allOnes iff CA==0/CA==1" mask
+ * derivations below reuse the exact subfc/subfe carry-to-mask idiom
+ * already established for SLT/SLTU and the branch-condition masks. */
+static void emit_fpu_clamp32(ppc_codegen_ctx_t *ctx)
+{
+    emit(ctx, enc_rlwinm(SCRATCH_D, SCRATCH_C, 0, 1, 31)); /* mag = bits & 0x7FFFFFFF */
+    emit(ctx, enc_rlwinm(SCRATCH_E, SCRATCH_C, 0, 0, 0));  /* sign = bits & 0x80000000 */
+
+    /* zero_mask: allOnes iff mag <= 0x007FFFFF (denormal-or-exact-zero) */
+    emit(ctx, enc_subfc(SCRATCH_F, SCRATCH_D, SCRATCH_A)); /* F=K1M1-mag, CA=1 iff mag<=K1M1 */
+    emit(ctx, enc_subfe(SCRATCH_F, SCRATCH_F, SCRATCH_F)); /* F=allOnes iff CA==0 (mag>K1M1) */
+    emit(ctx, enc_nor(SCRATCH_F, SCRATCH_F, SCRATCH_F));   /* F=zero_mask (flip to mag<=K1M1) */
+
+    /* ff_mask: allOnes iff mag > 0x7F7FFFFF (infinity-or-NaN); CA==0
+     * already lands on the wanted polarity here, no flip needed. */
+    emit(ctx, enc_subfc(SCRATCH_G, SCRATCH_D, SCRATCH_B)); /* G=K2M1-mag, CA=1 iff mag<=K2M1 */
+    emit(ctx, enc_subfe(SCRATCH_G, SCRATCH_G, SCRATCH_G)); /* G=ff_mask=allOnes iff mag>K2M1 */
+
+    emit(ctx, enc_or(SCRATCH_H, SCRATCH_B, SCRATCH_E));    /* H=fmax_val = K2M1 | sign */
+
+    emit(ctx, enc_or(SCRATCH_D, SCRATCH_F, SCRATCH_G));    /* D=zero_mask|ff_mask (mag dead) */
+    emit(ctx, enc_nor(SCRATCH_D, SCRATCH_D, SCRATCH_D));   /* D=normal_mask */
+
+    emit(ctx, enc_and(SCRATCH_C, SCRATCH_C, SCRATCH_D));   /* bits & normal_mask */
+    emit(ctx, enc_and(SCRATCH_E, SCRATCH_E, SCRATCH_F));   /* zero_val(sign) & zero_mask */
+    emit(ctx, enc_and(SCRATCH_H, SCRATCH_H, SCRATCH_G));   /* fmax_val & ff_mask */
+    emit(ctx, enc_or(SCRATCH_C, SCRATCH_C, SCRATCH_E));
+    emit(ctx, enc_or(SCRATCH_C, SCRATCH_C, SCRATCH_H));    /* SCRATCH_C = final clamped bits */
+}
+
 /* Round 895 (task #879): given a "taken" mask already computed into
  * SCRATCH_E (0xFFFFFFFF if the branch condition holds, else 0x00000000)
  * and this instruction's compile-time PC-relative displacement (4 +
@@ -862,8 +966,15 @@ int ppc_dynarec_init(ppc_codegen_ctx_t *ctx, size_t max_instructions)
      * instead of two. BNEL is the new worst case at 33 instructions total
      * (11-instruction mask computation + the 22-instruction helper body),
      * which EXCEEDS the previous 32-instruction ceiling. Bumped to 40 for
-     * headroom. */
-    size_t words = max_instructions * 40 + 1;
+     * headroom.
+     *
+     * Round 903 (task #884) update: ADD.S/SUB.S/MUL.S each emit ~61
+     * instructions (2x 15-instruction emit_fpu_clamp32() calls for the
+     * operands + a 3rd for the result, plus the stack-frame/spill/fill
+     * plumbing around them - see that dispatch block's own comment).
+     * Bumped to 80 for headroom (DIV.S, the next opcode in this arc,
+     * will need a few more for its divide-by-zero special case). */
+    size_t words = max_instructions * 80 + 1;
     ctx->code = memalign(32, words * sizeof(uint32_t));
     if (!ctx->code)
         return -1;
@@ -888,7 +999,7 @@ static void emit(ppc_codegen_ctx_t *ctx, uint32_t instr)
 
 int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
 {
-    if (ctx->used_words + 40 > ctx->capacity_words) /* Round 896: was 32, BNEL's 33-word worst case (emit_branch_blend_likely) */
+    if (ctx->used_words + 80 > ctx->capacity_words) /* Round 903: was 40, ADD.S/SUB.S/MUL.S's ~61-word worst case (2x input clamp + result clamp) */
         return -1; /* out of buffer space */
 
     uint32_t op    = (mips_instr >> 26) & 0x3F;
@@ -2114,8 +2225,64 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
                 emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_FPR(fd)));
                 return 0;
             }
-            return -1; /* ADD.S/SUB.S/MUL.S/DIV.S/etc: not yet JIT-compiled,
-                        * fall back to the interpreter (later round). */
+            if (funct == 0x00 || funct == 0x01 || funct == 0x02) {
+                /* Round 903 (task #884): ADD.S/SUB.S/MUL.S - this
+                 * dynarec's first genuine PPC750 floating-point
+                 * arithmetic. ft is COP1.S's `rt` field (fs=rd/fd=sa
+                 * already bound above, matching ee_core.c's own
+                 * convention for this sub-opcode).
+                 *
+                 * PPC has no GPR<->FPR move instruction, so every
+                 * bit-pattern handoff between the two register files
+                 * goes through a small private stack frame (pushed/
+                 * popped right here, offset 8 within it, never
+                 * assumed shared with any other opcode's frame use -
+                 * see LW/SW's own call-trampoline frame for the
+                 * unrelated convention those opcodes use instead).
+                 * fs/ft are each: load raw bits -> emit_fpu_clamp32()
+                 * (reproduces fpu_double()'s denormal/infinity input
+                 * handling) -> spill to stack -> lfs into an FPR.
+                 * Then the real float op, then the mirror-image
+                 * result path: stfs -> lwz -> emit_fpu_clamp32() again
+                 * (this time reproducing fpu_check_overflow()+
+                 * fpu_check_underflow()'s output clamping - the SAME
+                 * transform, see that function's own comment) -> stw
+                 * to fpr[fd]. SCRATCH_A/SCRATCH_B hold the clamp
+                 * routine's two magnitude-threshold constants,
+                 * hoisted once here since they're invariant across
+                 * all three clamp calls this opcode makes. */
+                emit(ctx, enc_addi(1, 1, -16)); /* push 16-byte scratch frame */
+                emit_load_const32(ctx, SCRATCH_A, 0x007FFFFFu); /* K1M1 */
+                emit_load_const32(ctx, SCRATCH_B, 0x7F7FFFFFu); /* K2M1 */
+
+                emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_FPR(fs)));
+                emit_fpu_clamp32(ctx);
+                emit(ctx, enc_stw(SCRATCH_C, 1, 8));
+                emit(ctx, enc_lfs(0, 1, 8)); /* f0 = clamped fs */
+
+                emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_FPR(rt)));
+                emit_fpu_clamp32(ctx);
+                emit(ctx, enc_stw(SCRATCH_C, 1, 8));
+                emit(ctx, enc_lfs(1, 1, 8)); /* f1 = clamped ft */
+
+                if (funct == 0x00)
+                    emit(ctx, enc_fadds(2, 0, 1));
+                else if (funct == 0x01)
+                    emit(ctx, enc_fsubs(2, 0, 1));
+                else
+                    emit(ctx, enc_fmuls(2, 0, 1)); /* fmuls uses frC, not frB */
+
+                emit(ctx, enc_stfs(2, 1, 8));
+                emit(ctx, enc_lwz(SCRATCH_C, 1, 8));
+                emit_fpu_clamp32(ctx); /* overflow-then-underflow output clamp */
+                emit(ctx, enc_stw(SCRATCH_C, CTX_REG, REG_FPR(fd)));
+
+                emit(ctx, enc_addi(1, 1, 16)); /* pop scratch frame */
+                return 0;
+            }
+            return -1; /* DIV.S/SQRT.S/RSQRT.S/MAX.S/MIN.S/ADDA.S/etc: not
+                        * yet JIT-compiled, fall back to the interpreter
+                        * (later round in this arc). */
         }
         return -1; /* CVT.W.S/CVT.S.W/BC1/etc: not yet JIT-compiled. */
     }

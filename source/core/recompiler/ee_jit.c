@@ -225,11 +225,11 @@ static int ee_jit_opcode_supported(uint32_t instr)
         }
     }
     if (op == 0x11u) {
-        /* COP1 (FPU), new in Round 902: like REGIMM above, `rs` selects
-         * the real sub-opcode, not a flat op-only dispatch - only the
-         * data-movement/bit-level subset ppc_dynarec.c's op==0x11 block
-         * actually implements returns 1 here; everything else (the real
-         * arithmetic family - ADD.S/SUB.S/MUL.S/DIV.S/SQRT.S/etc, plus
+        /* COP1 (FPU), new in Round 902, extended Round 903: like REGIMM
+         * above, `rs` selects the real sub-opcode, not a flat op-only
+         * dispatch - only the subset ppc_dynarec.c's op==0x11 block
+         * actually implements returns 1 here; everything else (DIV.S/
+         * SQRT.S/RSQRT.S/MAX.S/MIN.S/the MADD family/comparisons, plus
          * CVT.W.S/CVT.S.W and the BC1 branch-on-condition family) falls
          * through to the interpreter, matching translate_one()'s own
          * `return -1` paths inside this same op==0x11 block exactly -
@@ -241,6 +241,8 @@ static int ee_jit_opcode_supported(uint32_t instr)
             uint32_t funct = instr & 0x3Fu;
             if (funct == 0x05u || funct == 0x06u || funct == 0x07u)
                 return 1; /* ABS.S / MOV.S / NEG.S */
+            if (funct == 0x00u || funct == 0x01u || funct == 0x02u)
+                return 1; /* ADD.S / SUB.S / MUL.S (Round 903) */
         }
         return 0;
     }

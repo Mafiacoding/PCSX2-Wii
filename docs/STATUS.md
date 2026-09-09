@@ -38485,3 +38485,85 @@ CFC1/MTC1/CTC1/MOV.S/ABS.S/NEG.S). Next up (task #884 continuation,
 Round 903+): the real FPU arithmetic family (ADD.S/SUB.S/MUL.S/DIV.S and
 friends), which will need this dynarec's first genuine PPC750 FPU
 instructions.
+
+## Round 903: COP1.S real floating-point arithmetic - ADD.S/SUB.S/MUL.S
+
+Task #884 continuation. Three opcodes JIT-accelerated: ADD.S/SUB.S/
+MUL.S (op 0x11, `rs`==0x10/COP1.S, `funct`==0x00/0x01/0x02). This
+dynarec's first opcodes to use REAL PPC750 floating-point instructions
+- every prior round operated on FPR/GPR bit patterns through plain
+integer loads/stores/logical ops. Six new encoders this round: lfs/
+stfs (D-form, opcodes 48/52) and fadds/fsubs/fmuls/fdivs (A-form,
+opcode 59 - fdivs isn't used yet but was cheap to add alongside the
+other three for DIV.S next round). All six verified bit-for-bit
+against real devkitPPC (powerpc-eabi-as/-objdump) before use.
+
+**The real work: reproducing PCSX2's exact clamping semantics, not
+just doing float math.** PPC has no GPR<->FPR move instruction, so
+every bit-pattern handoff between the two register files goes through
+a small private stack frame pushed/popped around the whole sequence
+(`stw`+`lfs` to go GPR->FPR, `stfs`+`lwz` to come back). But the
+harder problem is that real PPC750 float hardware alone does NOT match
+PCSX2's PS2 FPU emulation: `fpu_double()` (ee_core.c) is applied to
+BOTH source operands before every arithmetic op - denormal-or-zero
+magnitude collapses to signed zero, infinity/NaN magnitude collapses
+to signed Fmax (0x7F7FFFFF) - and `fpu_check_overflow()` then
+`fpu_check_underflow()` apply the exact same transform to the result
+afterward. Since it's the same transform in both directions (just
+described as two separate helper functions on the output side), one
+new `emit_fpu_clamp32()` routine implements it once and is called
+three times per opcode: once per input operand, once for the result.
+
+The clamp itself is branchless (magnitude-range mask-blend: compute
+`zero_mask` = all-1s iff `magnitude <= 0x007FFFFF`, `ff_mask` = all-1s
+iff `magnitude > 0x7F7FFFFF`, then blend `(bits & normal_mask) |
+(sign & zero_mask) | (fmax_val & ff_mask)`), reusing the exact
+subfc/subfe carry-to-mask idiom already established for SLT/SLTU and
+every branch-condition mask in this file - keeping this whole
+dynarec's "every compiled block is one straight-line run, no internal
+PPC branches" invariant intact even though the underlying MIPS
+semantics are a three-way conditional.
+
+ADD.S/SUB.S/MUL.S each emit roughly 61 PPC750 instructions - by far
+the largest single-opcode instruction count in this dynarec so far
+(previous record was LWL/LWR/SWL/SWR/LQ/SQ's ~39). This pushed the
+per-block buffer-capacity constant from 40 to 80 words (both the
+allocation-time `words = max_instructions * N + 1` formula and the
+runtime `used_words + N > capacity_words` guard in
+`ppc_dynarec_translate_one()`), same kind of bump Round 896 already
+did once for BNEL.
+
+**Verification**: new host-native harness `r903_cop1_arith_verify.c`
+- first harness needing a real PPC750 FPU simulator (`float fpr[32]`
+register file plus lfs/stfs/fadds/fsubs/fmuls decodes, layered on top
+of the subfc/subfe/and/or/nor/rlwinm/addi/addis/ori/lwz/stw machinery
+every prior round's harness already established). 12 test cases: basic
+ADD.S/SUB.S/MUL.S arithmetic, negative operands, overflow-to-+Fmax and
+overflow-to--Fmax clamping (Fmax+Fmax and -Fmax+-Fmax, whose true IEEE
+sums are +-Infinity), underflow-to-signed-zero clamping (a MUL.S whose
+true result is a genuine subnormal float), denormal-input-as-zero
+clamping (both signs), +Infinity-input-as-+Fmax clamping, NaN-pattern-
+input-as-+Fmax clamping (confirming the broad exponent==0xFF rule
+covers NaN too, not just literal infinity), and an exact-zero
+passthrough sanity check. All 12/12 passed on the first run, clean
+under `-fsanitize=address,undefined`; no codegen bugs found this round
+(a first for this arc - Rounds 900 and 902 each found one real/harness
+bug apiece). Cross-checked against an independently-written reference
+model (`ref_op_s()`/`fpu_clamp_ref()`) rather than re-deriving the same
+logic ppc_dynarec.c itself uses, so this is a genuine second
+implementation, not just replaying the same formula twice.
+
+Regression-checked against Rounds 893/894/895/896/897/898/900/902's
+own harnesses (13/13, 17/17, 19/19, 35/35, 19/19, 27/27, 25/25, 20/20)
+- no regressions.
+
+Wii build: `pcsx2-wii.elf` 3,123,896 bytes / `pcsx2-wii.dol` 538,112
+bytes (+10,300 bytes elf / +608 bytes dol over Round 902), 0
+warnings/errors (devkitPPC 8.1.0).
+
+**Status**: 79 opcodes now JIT-accelerated (76 from Round 902 +
+ADD.S/SUB.S/MUL.S). Next up (task #884 continuation, Round 904+):
+DIV.S (needs a divide-by-zero special case - PCSX2's DIV.S has its own
+distinct handling for a zero denominator, bypassing the normal float
+divide), then SQRT.S/RSQRT.S/MAX.S/MIN.S/the MADD-family/comparison
+family, CVT.W.S/CVT.S.W, and the BC1 branch-on-FP-condition family.

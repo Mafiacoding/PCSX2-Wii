@@ -38759,3 +38759,91 @@ added to the COP1.S subset). Next up (task #884 continuation, Round
 906): the MADD/MSUB/ADDA/SUBA/MULA family and C.cond.S comparisons,
 then CVT.W.S/CVT.S.W and the BC1 branch-on-FP-condition family
 (Round 906b) to close out task #884.
+
+## Round 906: COP1.S ADDA/SUBA/MULA/MADD/MSUB/MADDA/MSUBA + C.cond.S comparisons (task #890)
+
+Ten more COP1.S opcodes, closing out everything task #884 needs except
+CVT.W.S/CVT.S.W and the BC1 branch family (Round 906b).
+
+ADDA.S/SUBA.S/MULA.S (funct 0x18/0x19/0x1A): re-verified against
+ee_core.c's real case bodies (~lines 8048-8066) - identical to Round
+903's ADD.S/SUB.S/MUL.S clamp-op-clamp structure, but the destination
+is ACC_OFFSET instead of fpr[fd] (this sub-opcode's own `sa`/fd field
+is unused - ACC is a single fixed register, not selected by any
+instruction field). One combined dispatch block, mirroring the ADD/SUB/
+MUL block's own three-way funct switch on the final operation only.
+
+MADDA.S/MSUBA.S (funct 0x1E/0x1F): ACC = clamp(clamp(ACC) +/-
+(clamp(fs)*clamp(ft))), ported from PCSX2's MADDA_S()/MSUBA_S(). The
+intermediate product is used DIRECTLY in the add/sub with NO second
+fpu_double() pass on it.
+
+MADD.S/MSUB.S (funct 0x1C/0x1D): fd = clamp(clamp(ACC) +/-
+clamp(clamp(fs)*clamp(ft))), ported from PCSX2's MADD_S()/MSUB_S().
+Re-verified directly against ee_core.c (~lines 8067-8093): real
+hardware/PCSX2 quirk worth preserving exactly - the intermediate
+product IS run through fpu_double() a SECOND time before being
+combined with ACC, unlike MADDA.S/MSUBA.S above which don't reclamp the
+product. This asymmetry was ported as-is rather than "simplified" to
+match the ACC variants, and the verify harness includes a dedicated
+test case (fs=+Fmax, ft=2.0, product deliberately overflows) proving
+the reclamp actually fires. Destination is fpr[fd] (a real register
+field), not ACC - confirmed with an explicit "ACC left unmodified" check.
+
+C.EQ.S/C.LT.S/C.LE.S (funct 0x32/0x34/0x36): compares clamp(fs) vs
+clamp(ft) and sets/clears fcr31 bit 0x00800000 (bit23) accordingly - no
+third "unordered" outcome is reachable in this dynarec's version, since
+emit_fpu_clamp32() already collapses every NaN input to a signed Fmax
+before either operand reaches the compare. Implemented using real
+PPC750 hardware fcmpu + mfcr (this dynarec's first CR-based
+instruction) instead of a hand-rolled integer bit-pattern ordering
+trick - deliberately, to get the -0.0==+0.0 edge case correct for free:
+a naive sign-flip-then-unsigned-compare trick would see 0x80000000
+(-0.0, flipped to 0x00000000) as LESS than 0x00000000 (+0.0, flipped to
+0x80000000), wrongly reporting C.EQ.S=false. Real fcmpu gets this right
+without any special-casing, and the harness has a dedicated test
+proving it. Two new low-level encoders added (enc_fcmpu/enc_mfcr),
+their bit-encodings verified against real powerpc-eabi-as/objdump
+output before being written into the source (same discipline
+previously applied to lfs/stfs/fadds/fsubs/fmuls/fdivs in Round 903):
+fcmpu cr0,f0,f1 -> 0xFC000800, fcmpu cr1,f2,f3 -> 0xFC821800, mfcr r4
+-> 0x7C800026, mfcr r10 -> 0x7D400026 - all four matched exactly. After
+mfcr, cr0's FL/FG/FE/FU bits sit at the top nibble of the GPR (bits
+31/30/29/28); each condition bit is extracted to a clean 0/1 via
+rlwinm's rotate-then-mask-to-bit0 idiom, and the final fcr31 write uses
+a branchless read-clear-OR sequence built entirely from rlwinm masks
+(no load_const32 needed) - including the project's first use of a
+WRAPPING rlwinm keep-mask (mb=9,me=7, keeping every bit except IBM bit
+8 = normal bit23) to clear bit23 without touching any other fcr31 bit
+(rounding mode etc. all survive unmodified, matching the real case
+bodies' own `|=`/`&= ~` pattern).
+
+New host-native harness r906_cop1_madd_ccond_verify.c (outputs scratch
+area, not tracked in this repo), extending Round 905's simulator with
+two decode forms never needed before: fcmpu (opc63, XO=0, sets a 4-bit
+CR field from a real hardware float compare) and mfcr (opc31, XO=19).
+21 test cases across ADDA/SUBA/MULA.S (4, including an ACC-overflow
+clamp proof), MADDA.S/MSUBA.S (2), MADD.S/MSUB.S (5, including the
+double-clamp-quirk distinguishing test and an explicit "ACC unmodified"
+check), and C.EQ.S/C.LT.S/C.LE.S (10, including baseline-bit-survival
+checks on both the set and clear paths, the LT/EQ/LE truth-table edges,
+and the -0.0==+0.0 proof). First run found 19/21 failing - not a
+codegen bug, but a bug in the harness's OWN rlwinm simulator: its
+mask-generation helper only implemented the non-wrapping mb<=me case,
+and Round 906 is the first generated sequence to use a wrapping
+mb>me mask (the fcr31 bit-clear idiom above). Fixed the simulator's
+rlwinm_mask() to implement the real PPC ISA's wraparound-mask semantics
+(OR the two shifted masks instead of AND when mb>me); re-ran clean,
+21/21 passed, 0 warnings under -fsanitize=address,undefined, no leaks.
+
+Regression-checked against Rounds 893/894/895/896/897/898/900/902/903/
+904/905's own harnesses (13/13, 17/17, 19/19, 35/35, 19/19, 27/27,
+25/25, 20/20, 12/12, 13/13, 20/20) - no regressions.
+
+Wii build: pcsx2-wii.elf 3,187,848 bytes / .dol 542,336 bytes
+(+24,172 / +1,952 over Round 905), 0 warnings/errors (devkitPPC 8.1.0).
+
+Status: 93 opcodes now JIT-accelerated. Only CVT.W.S/CVT.S.W and the
+BC1/BC1L branch-on-FP-condition family remain to close out task #884
+(Round 906b), after which task #885 (VU0 macro-mode, Rounds 907-913)
+begins.

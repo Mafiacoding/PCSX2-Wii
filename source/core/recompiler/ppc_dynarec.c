@@ -483,6 +483,36 @@ static inline uint32_t enc_fmuls(int frD, int frA, int frC)
     return (59u << 26) | ((uint32_t)frD << 21) | ((uint32_t)frA << 16) | ((uint32_t)frC << 6) | (25u << 1);
 }
 
+/* Round 906 (task #890): fcmpu/mfcr - this dynarec's first use of real
+ * PPC750 CR-based comparison, needed for C.EQ.S/C.LT.S/C.LE.S. Real
+ * hardware float compare (fcmpu) correctly handles the -0.0==+0.0 edge
+ * case and can't produce a NaN-unordered result here (this dynarec's
+ * clamp routine already collapses every NaN/Infinity input to a signed
+ * Fmax before either operand reaches fcmpu), so it's a safer and
+ * simpler choice than trying to hand-roll an integer bit-pattern
+ * ordering trick (which would need special-casing the -0.0 vs +0.0
+ * boundary to avoid a wrong C.EQ.S result - real hardware just handles
+ * it correctly for free). fcmpu sets crfD's 4 bits to (FL,FG,FE,FU) -
+ * always cr0 here (crfD=0) since this dynarec has no use for any other
+ * CR field. mfcr copies the whole 32-bit CR into a GPR, whose top
+ * nibble (bits 31/30/29/28 in normal C shift terms) is then exactly
+ * cr0's FL/FG/FE/FU - extracted branchlessly afterward via
+ * enc_rlwinm's rotate-then-mask-to-bit0 idiom (rotate left by i+1,
+ * mask [31,31]), no real PPC branch needed. Both encodings verified
+ * bit-for-bit against real devkitPPC (powerpc-eabi-as/-objdump):
+ * "fcmpu cr0,f0,f1" -> 0xFC000800, "fcmpu cr1,f2,f3" -> 0xFC821800,
+ * "mfcr r4" -> 0x7C800026, "mfcr r10" -> 0x7D400026 - all reproduced
+ * exactly by the formulas below. */
+static inline uint32_t enc_fcmpu(int crfD, int frA, int frB)
+{
+    return (63u << 26) | ((uint32_t)crfD << 23) | ((uint32_t)frA << 16) | ((uint32_t)frB << 11);
+}
+
+static inline uint32_t enc_mfcr(int rD)
+{
+    return (31u << 26) | ((uint32_t)rD << 21) | (19u << 1);
+}
+
 static inline uint32_t enc_fdivs(int frD, int frA, int frB)
 {
     return (59u << 26) | ((uint32_t)frD << 21) | ((uint32_t)frA << 16) | ((uint32_t)frB << 11) | (18u << 1);
@@ -2682,9 +2712,204 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
                 emit(ctx, enc_stw(SCRATCH_F, CTX_REG, REG_FPR(fd)));
                 return 0;
             }
-            return -1; /* the MADD/MSUB/ADDA.S family + C.cond.S
-                        * comparisons: not yet JIT-compiled, fall back to
-                        * the interpreter (later round in this arc). */
+            if (funct == 0x18 || funct == 0x19 || funct == 0x1A) {
+                /* Round 906 (task #890): ADDA.S/SUBA.S/MULA.S - ACC =
+                 * fs OP ft, ported from PCSX2's ADDA_S()/SUBA_S()/
+                 * MULA_S(). Re-verified against ee_core.c's real case
+                 * bodies (~lines 8048-8066): identical to Round 903's
+                 * ADD.S/SUB.S/MUL.S clamp->op->clamp structure, the
+                 * ONLY difference is the destination - ACC_OFFSET
+                 * instead of fpr[fd] (this sub-opcode's `sa`/fd field
+                 * is unused; ACC is a single fixed register, not
+                 * selected by any instruction field). */
+                emit(ctx, enc_addi(1, 1, -16));
+                emit_load_const32(ctx, SCRATCH_A, 0x007FFFFFu);
+                emit_load_const32(ctx, SCRATCH_B, 0x7F7FFFFFu);
+
+                emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_FPR(fs)));
+                emit_fpu_clamp32(ctx);
+                emit(ctx, enc_stw(SCRATCH_C, 1, 8));
+                emit(ctx, enc_lfs(0, 1, 8));
+
+                emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_FPR(rt)));
+                emit_fpu_clamp32(ctx);
+                emit(ctx, enc_stw(SCRATCH_C, 1, 8));
+                emit(ctx, enc_lfs(1, 1, 8));
+
+                if (funct == 0x18)
+                    emit(ctx, enc_fadds(2, 0, 1));
+                else if (funct == 0x19)
+                    emit(ctx, enc_fsubs(2, 0, 1));
+                else
+                    emit(ctx, enc_fmuls(2, 0, 1));
+
+                emit(ctx, enc_stfs(2, 1, 8));
+                emit(ctx, enc_lwz(SCRATCH_C, 1, 8));
+                emit_fpu_clamp32(ctx);
+                emit(ctx, enc_stw(SCRATCH_C, CTX_REG, ACC_OFFSET)); /* -> ACC, not fpr[fd] */
+
+                emit(ctx, enc_addi(1, 1, 16));
+                return 0;
+            }
+            if (funct == 0x1E || funct == 0x1F) {
+                /* Round 906 (task #890): MADDA.S/MSUBA.S - ACC =
+                 * fpu_double(ACC) +/- (fpu_double(fs)*fpu_double(ft)),
+                 * ported from PCSX2's MADDA_S()/MSUBA_S(). Re-verified
+                 * against ee_core.c (~lines 8094-8108): the intermediate
+                 * product is used DIRECTLY in the add/sub, with NO
+                 * second fpu_double() pass on it - unlike MADD.S/MSUB.S
+                 * below, which DO reclamp the product. That asymmetry
+                 * is real (matches PCSX2 exactly), not an oversight to
+                 * "fix" by making it consistent with MADD.S. */
+                emit(ctx, enc_addi(1, 1, -16));
+                emit_load_const32(ctx, SCRATCH_A, 0x007FFFFFu);
+                emit_load_const32(ctx, SCRATCH_B, 0x7F7FFFFFu);
+
+                emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_FPR(fs))); /* f0 = clamped fs */
+                emit_fpu_clamp32(ctx);
+                emit(ctx, enc_stw(SCRATCH_C, 1, 8));
+                emit(ctx, enc_lfs(0, 1, 8));
+
+                emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_FPR(rt))); /* f1 = clamped ft */
+                emit_fpu_clamp32(ctx);
+                emit(ctx, enc_stw(SCRATCH_C, 1, 8));
+                emit(ctx, enc_lfs(1, 1, 8));
+
+                emit(ctx, enc_fmuls(2, 0, 1)); /* f2 = product, NOT reclamped */
+
+                emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, ACC_OFFSET)); /* f1 = clamped acc (reuse f1) */
+                emit_fpu_clamp32(ctx);
+                emit(ctx, enc_stw(SCRATCH_C, 1, 8));
+                emit(ctx, enc_lfs(1, 1, 8));
+
+                if (funct == 0x1E)
+                    emit(ctx, enc_fadds(3, 1, 2)); /* f3 = acc + product */
+                else
+                    emit(ctx, enc_fsubs(3, 1, 2)); /* f3 = acc - product */
+
+                emit(ctx, enc_stfs(3, 1, 8));
+                emit(ctx, enc_lwz(SCRATCH_C, 1, 8));
+                emit_fpu_clamp32(ctx);
+                emit(ctx, enc_stw(SCRATCH_C, CTX_REG, ACC_OFFSET));
+
+                emit(ctx, enc_addi(1, 1, 16));
+                return 0;
+            }
+            if (funct == 0x1C || funct == 0x1D) {
+                /* Round 906 (task #890): MADD.S/MSUB.S - fd = ACC +/-
+                 * (fs*ft), ported from PCSX2's MADD_S()/MSUB_S().
+                 * Re-verified against ee_core.c (~lines 8067-8093): real
+                 * hardware/PCSX2 quirk worth preserving exactly - the
+                 * intermediate product IS run through fpu_double() a
+                 * SECOND time when read back for the add/sub (PCSX2's
+                 * own FPRreg temp: temp.f = fpuDouble(fs)*fpuDouble(ft);
+                 * then fpuDouble(temp.UL) again) - unlike MADDA.S/
+                 * MSUBA.S above, which don't do this second pass. Not a
+                 * simplification target - ported as-is, verified against
+                 * source rather than assumed consistent with the ACC
+                 * variants. Destination is fpr[fd] (a real register
+                 * field this time), not ACC. */
+                emit(ctx, enc_addi(1, 1, -16));
+                emit_load_const32(ctx, SCRATCH_A, 0x007FFFFFu);
+                emit_load_const32(ctx, SCRATCH_B, 0x7F7FFFFFu);
+
+                emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_FPR(fs))); /* f0 = clamped fs */
+                emit_fpu_clamp32(ctx);
+                emit(ctx, enc_stw(SCRATCH_C, 1, 8));
+                emit(ctx, enc_lfs(0, 1, 8));
+
+                emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_FPR(rt))); /* f1 = clamped ft */
+                emit_fpu_clamp32(ctx);
+                emit(ctx, enc_stw(SCRATCH_C, 1, 8));
+                emit(ctx, enc_lfs(1, 1, 8));
+
+                emit(ctx, enc_fmuls(2, 0, 1)); /* f2 = product */
+                emit(ctx, enc_stfs(2, 1, 8));
+                emit(ctx, enc_lwz(SCRATCH_C, 1, 8));
+                emit_fpu_clamp32(ctx); /* SECOND clamp pass on the product - the MADD.S/MSUB.S quirk */
+                emit(ctx, enc_stw(SCRATCH_C, 1, 8));
+                emit(ctx, enc_lfs(0, 1, 8)); /* f0 = re-clamped product (reuse f0) */
+
+                emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, ACC_OFFSET)); /* f1 = clamped acc (reuse f1) */
+                emit_fpu_clamp32(ctx);
+                emit(ctx, enc_stw(SCRATCH_C, 1, 8));
+                emit(ctx, enc_lfs(1, 1, 8));
+
+                if (funct == 0x1C)
+                    emit(ctx, enc_fadds(2, 1, 0)); /* f2 = acc + reclamped_product */
+                else
+                    emit(ctx, enc_fsubs(2, 1, 0)); /* f2 = acc - reclamped_product */
+
+                emit(ctx, enc_stfs(2, 1, 8));
+                emit(ctx, enc_lwz(SCRATCH_C, 1, 8));
+                emit_fpu_clamp32(ctx);
+                emit(ctx, enc_stw(SCRATCH_C, CTX_REG, REG_FPR(fd))); /* -> fd, NOT ACC */
+
+                emit(ctx, enc_addi(1, 1, 16));
+                return 0;
+            }
+            if (funct == 0x32 || funct == 0x34 || funct == 0x36) {
+                /* Round 906 (task #890): C.EQ.S/C.LT.S/C.LE.S -
+                 * ee_core.c's real bodies (~lines 8110-8121) compare
+                 * fpu_double(fs) against fpu_double(ft) with a plain C
+                 * `==`/`<`/`<=` and set-or-clear fcr31 bit 0x00800000
+                 * (bit23) accordingly - no third "unordered" outcome is
+                 * ever reachable in this dynarec's version, since
+                 * emit_fpu_clamp32() already collapses every NaN input
+                 * to a signed Fmax before either operand can reach the
+                 * compare. Uses real hardware fcmpu (this dynarec's
+                 * first CR-based instruction) rather than a hand-rolled
+                 * integer bit-pattern ordering trick - deliberately, to
+                 * get -0.0==+0.0 correct for free instead of having to
+                 * special-case it (see enc_fcmpu's own comment above).
+                 * mfcr pulls CR0's FL/FG/FE bits into a GPR; each is
+                 * extracted to a clean 0/1 via enc_rlwinm's rotate-then-
+                 * mask-to-bit0 idiom (same style already used throughout
+                 * this file's mask-based branchless-select code). C.LE.S
+                 * needs both FL and FE, ORed together. The final bit
+                 * write is a branchless read-clear-OR sequence on
+                 * fcr31, touching only bit23 - every other fcr31 bit
+                 * (rounding mode etc.) survives unmodified, matching
+                 * the real case bodies' own `|=`/`&= ~` pattern exactly. */
+                emit(ctx, enc_addi(1, 1, -16));
+                emit_load_const32(ctx, SCRATCH_A, 0x007FFFFFu);
+                emit_load_const32(ctx, SCRATCH_B, 0x7F7FFFFFu);
+
+                emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_FPR(fs))); /* f0 = clamped fs */
+                emit_fpu_clamp32(ctx);
+                emit(ctx, enc_stw(SCRATCH_C, 1, 8));
+                emit(ctx, enc_lfs(0, 1, 8));
+
+                emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_FPR(rt))); /* f1 = clamped ft */
+                emit_fpu_clamp32(ctx);
+                emit(ctx, enc_stw(SCRATCH_C, 1, 8));
+                emit(ctx, enc_lfs(1, 1, 8));
+
+                emit(ctx, enc_fcmpu(0, 0, 1)); /* cr0 = compare(f0, f1) */
+                emit(ctx, enc_mfcr(SCRATCH_D)); /* SCRATCH_D bits31/30/29 = FL/FG/FE */
+
+                if (funct == 0x32) { /* C.EQ.S: want FE (IBM bit2 = normal bit29) */
+                    emit(ctx, enc_rlwinm(SCRATCH_E, SCRATCH_D, 3, 31, 31));
+                } else if (funct == 0x34) { /* C.LT.S: want FL (IBM bit0 = normal bit31) */
+                    emit(ctx, enc_rlwinm(SCRATCH_E, SCRATCH_D, 1, 31, 31));
+                } else { /* C.LE.S: FL | FE */
+                    emit(ctx, enc_rlwinm(SCRATCH_F, SCRATCH_D, 1, 31, 31)); /* FL */
+                    emit(ctx, enc_rlwinm(SCRATCH_G, SCRATCH_D, 3, 31, 31)); /* FE */
+                    emit(ctx, enc_or(SCRATCH_E, SCRATCH_F, SCRATCH_G));
+                }
+
+                emit(ctx, enc_lwz(SCRATCH_D, CTX_REG, FCR31_OFFSET));
+                emit(ctx, enc_rlwinm(SCRATCH_D, SCRATCH_D, 0, 9, 7));   /* clear bit23 (wrap-mask keep-all-but) */
+                emit(ctx, enc_rlwinm(SCRATCH_E, SCRATCH_E, 23, 0, 8));  /* cond << 23 */
+                emit(ctx, enc_or(SCRATCH_D, SCRATCH_D, SCRATCH_E));
+                emit(ctx, enc_stw(SCRATCH_D, CTX_REG, FCR31_OFFSET));
+
+                emit(ctx, enc_addi(1, 1, 16));
+                return 0;
+            }
+            return -1; /* CVT.W.S/CVT.S.W and the BC1 branch family:
+                        * not yet JIT-compiled, fall back to the
+                        * interpreter (Round 906b). */
         }
         return -1; /* CVT.W.S/CVT.S.W/BC1/etc: not yet JIT-compiled. */
     }

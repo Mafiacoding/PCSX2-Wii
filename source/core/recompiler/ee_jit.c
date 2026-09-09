@@ -225,15 +225,15 @@ static int ee_jit_opcode_supported(uint32_t instr)
         }
     }
     if (op == 0x11u) {
-        /* COP1 (FPU), new in Round 902, extended Round 903/904/905: like
-         * REGIMM above, `rs` selects the real sub-opcode, not a flat
-         * op-only dispatch - only the subset ppc_dynarec.c's op==0x11
-         * block actually implements returns 1 here; everything else
-         * (the MADD family/C.cond.S comparisons, plus CVT.W.S/CVT.S.W
-         * and the BC1 branch-on-condition family) falls through to the
-         * interpreter, matching translate_one()'s own `return -1` paths
-         * inside this same op==0x11 block exactly - kept in sync by
-         * hand, same discipline as every entry above. */
+        /* COP1 (FPU), new in Round 902, extended Round 903/904/905/906:
+         * like REGIMM above, `rs` selects the real sub-opcode, not a
+         * flat op-only dispatch - only the subset ppc_dynarec.c's
+         * op==0x11 block actually implements returns 1 here; everything
+         * else (CVT.W.S/CVT.S.W, plus the BC1 branch-on-condition
+         * family) falls through to the interpreter, matching
+         * translate_one()'s own `return -1` path inside this same
+         * op==0x11 block exactly - kept in sync by hand, same
+         * discipline as every entry above. */
         uint32_t rs = (instr >> 21) & 0x1Fu;
         if (rs == 0x00u || rs == 0x02u || rs == 0x04u || rs == 0x06u)
             return 1; /* MFC1 / CFC1 / MTC1 / CTC1 */
@@ -249,6 +249,14 @@ static int ee_jit_opcode_supported(uint32_t instr)
                 return 1; /* SQRT.S / RSQRT.S (Round 905) */
             if (funct == 0x28u || funct == 0x29u)
                 return 1; /* MAX.S / MIN.S (Round 905) */
+            if (funct == 0x18u || funct == 0x19u || funct == 0x1Au)
+                return 1; /* ADDA.S / SUBA.S / MULA.S (Round 906) */
+            if (funct == 0x1Cu || funct == 0x1Du)
+                return 1; /* MADD.S / MSUB.S (Round 906) */
+            if (funct == 0x1Eu || funct == 0x1Fu)
+                return 1; /* MADDA.S / MSUBA.S (Round 906) */
+            if (funct == 0x32u || funct == 0x34u || funct == 0x36u)
+                return 1; /* C.EQ.S / C.LT.S / C.LE.S (Round 906) */
         }
         return 0;
     }

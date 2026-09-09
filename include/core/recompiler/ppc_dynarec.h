@@ -368,6 +368,29 @@
  * ADDA/SUBA/MULA family and C.cond.S comparisons (Round 906), then
  * CVT.W.S/CVT.S.W and the BC1 branch family (Round 906b) to close out
  * task #884.
+ *
+ * Round 906 (task #890) update: ADDA.S/SUBA.S/MULA.S (funct
+ * 0x18/0x19/0x1A, write ACC not fpr[fd]), MADDA.S/MSUBA.S (funct
+ * 0x1E/0x1F, ACC +/= fs*ft with NO second clamp pass on the product),
+ * MADD.S/MSUB.S (funct 0x1C/0x1D, fd = ACC +/- fs*ft WITH a second
+ * clamp pass on the product - a real hardware/PCSX2 quirk verified
+ * directly from ee_core.c and deliberately NOT made consistent with
+ * the MADDA/MSUBA variants), and C.EQ.S/C.LT.S/C.LE.S (funct
+ * 0x32/0x34/0x36, write fcr31 bit 0x00800000 only) are now
+ * JIT-accelerated. The comparison family uses this dynarec's first
+ * CR-based instructions - real PPC750 hardware fcmpu + mfcr, chosen
+ * over a hand-rolled integer bit-pattern ordering trick specifically
+ * because real hardware gets the -0.0==+0.0 edge case right for free
+ * (a naive sign-flip-then-unsigned-compare trick would get it wrong -
+ * see docs/STATUS.md's Round 906 section for the worked example and a
+ * dedicated regression test proving it). The fcr31 bit-clear sequence
+ * is this project's first generated use of a WRAPPING rlwinm mask
+ * (mb>me) - which also exposed and fixed a latent bug in the verify
+ * harness's OWN rlwinm simulator (it only implemented the non-wrapping
+ * mb<=me case; real generated code was always correct, only the test
+ * tool's decode was incomplete). 93 opcodes now JIT-accelerated,
+ * 21/21 checks passed. Next: CVT.W.S/CVT.S.W and the BC1/BC1L
+ * branch-on-FP-condition family (Round 906b), closing out task #884.
  */
 
 typedef struct {

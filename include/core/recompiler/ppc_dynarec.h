@@ -52,6 +52,28 @@
  * also still NOT called from anywhere in ee_core.c/system.c/main.c -
  * wiring it into real execution is explicitly out of scope for this
  * round (see docs/STATUS.md task #864).
+ *
+ * Round 890 (task #874) update: this PoC IS now wired into real EE
+ * execution (see ee_jit.c/ee_jit.h, done back in Round 887) and its
+ * context contract just grew. MULT/MULTU/DIV/DIVU/MFHI/MTHI/MFLO/MTLO
+ * need somewhere real to read/write the R5900's dedicated HI/LO
+ * registers, which this PoC's `gpr[32]` context array alone can't
+ * represent. Rather than widening the function-pointer signature (and
+ * touching every existing call site/opcode block), HI/LO are modeled
+ * as two more MIPS-register-shaped slots immediately following gpr[31]
+ * in the SAME contiguous array - i.e. the context this PoC's generated
+ * code addresses is really `ppc_dynarec_gpr128_t ctx[34]`, where
+ * ctx[0..31] are the real MIPS GPRs, ctx[32] is HI, and ctx[33] is LO
+ * (see ppc_dynarec.c's HI_IDX/LO_IDX). This only works because
+ * `ee_state_t` (include/core/ee/ee_core.h) was deliberately reordered
+ * in Round 890 to put `hi, lo` immediately after `gpr[32]` - see that
+ * struct's own comment for why that reordering is safe. ee_jit.c's
+ * `_Static_assert`s next to the `fn(...)` call site are what actually
+ * enforce this contract at compile time; this header and
+ * ppc_dynarec.c itself intentionally still don't #include ee_core.h,
+ * to keep this file's only real dependency on the wider codebase
+ * exactly what it always was: "a flat array of 16-byte register
+ * slots", now just two slots longer than it looks from `gpr[32]` alone.
  */
 
 typedef struct {

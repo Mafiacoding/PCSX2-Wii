@@ -201,6 +201,61 @@ static inline uint32_t enc_sraw(int rA, int rS, int rB)
     return (31u << 26) | ((uint32_t)rS << 21) | ((uint32_t)rA << 16) | ((uint32_t)rB << 11) | (792u << 1);
 }
 
+/* Round 890 (task #874) additions: mullw/mulhw/mulhwu/divw/divwu - the
+ * 32-bit multiply/divide primitives needed for MULT/MULTU/DIV/DIVU.
+ * All five share the same "dest first" rD/rA/rB field layout as
+ * enc_add/enc_subf (NOT the "dest is really rA" layout enc_and/or/xor/
+ * nor/slw/srw/sraw use). Verified bit-for-bit against real devkitPPC
+ * (powerpc-eabi-as/-objdump): "mullw r4,r5,r6" -> 0x7C8531D6,
+ * "mulhw r4,r5,r6" -> 0x7C853096, "mulhwu r4,r5,r6" -> 0x7C853016,
+ * "divw r4,r5,r6" -> 0x7C8533D6, "divwu r4,r5,r6" -> 0x7C853396 - all
+ * reproduced exactly by the formulas below.
+ *
+ * mullw gives the LOW 32 bits of the 32x32 product - identical
+ * regardless of operand signedness (the low half of a two's-complement
+ * product never depends on how the operands' sign bits are
+ * interpreted), so MULT and MULTU share the same mullw call and only
+ * differ in which high-word instruction they use.
+ * mulhw/mulhwu give the HIGH 32 bits of the signed/unsigned 32x32
+ * product respectively - together with mullw this reproduces a full
+ * 64-bit widening multiply from two PPC750 32-bit-only instructions,
+ * matching MIPS MULT/MULTU's 32x32->64 semantics exactly.
+ * divw/divwu give ONLY the 32-bit quotient (PPC has no combined
+ * quotient+remainder instruction); the remainder is computed
+ * separately as `rs32 - quotient*rt32` via mullw+subf (both already
+ * available above) - see the DIV/DIVU dispatch block below. Per the
+ * PPC ISA, a zero divisor does not trap by default (OE=0 here) and
+ * simply leaves the destination register "undefined" (implementation-
+ * defined bit pattern, but never a fault) - safe to execute
+ * unconditionally and discard the result via the same branch-free mask
+ * trick MOVZ/MOVN (Round 889) established, since MIPS DIV/DIVU's own
+ * real semantics leave HI/LO completely UNCHANGED when rt32==0 (see
+ * ee_core.c's `if (rt32 != 0) { ... }` guard on both cases). */
+static inline uint32_t enc_mullw(int rD, int rA, int rB)
+{
+    return (31u << 26) | ((uint32_t)rD << 21) | ((uint32_t)rA << 16) | ((uint32_t)rB << 11) | (235u << 1);
+}
+
+static inline uint32_t enc_mulhw(int rD, int rA, int rB)
+{
+    return (31u << 26) | ((uint32_t)rD << 21) | ((uint32_t)rA << 16) | ((uint32_t)rB << 11) | (75u << 1);
+}
+
+static inline uint32_t enc_mulhwu(int rD, int rA, int rB)
+{
+    return (31u << 26) | ((uint32_t)rD << 21) | ((uint32_t)rA << 16) | ((uint32_t)rB << 11) | (11u << 1);
+}
+
+static inline uint32_t enc_divw(int rD, int rA, int rB)
+{
+    return (31u << 26) | ((uint32_t)rD << 21) | ((uint32_t)rA << 16) | ((uint32_t)rB << 11) | (491u << 1);
+}
+
+static inline uint32_t enc_divwu(int rD, int rA, int rB)
+{
+    return (31u << 26) | ((uint32_t)rD << 21) | ((uint32_t)rA << 16) | ((uint32_t)rB << 11) | (459u << 1);
+}
+
 /* Scratch PPC GPRs used by generated code. r3 is the incoming context
  * pointer (ppc_dynarec_gpr128_t *gpr) per the PowerPC EABI calling
  * convention - we never touch r1 (stack ptr) or r2/r13 (TOC/small-
@@ -211,6 +266,17 @@ static inline uint32_t enc_sraw(int rA, int rS, int rB)
 #define SCRATCH_B 5
 #define SCRATCH_C 6
 #define SCRATCH_D 7
+/* Round 890 (task #874) additions: MULT/DIV need more live values at
+ * once than the 4-register budget above comfortably allows (quotient,
+ * remainder, mask, notmask, plus operands - see the DIV/DIVU block
+ * below), so this round adds four more scratch registers. r8-r11 are
+ * still ordinary EABI volatile (caller-saved) GPRs, same class as
+ * r4-r7 - this file still never touches r1 (stack ptr) or r2/r13
+ * (TOC/small-data), per the original scratch-register comment above. */
+#define SCRATCH_E 8
+#define SCRATCH_F 9
+#define SCRATCH_G 10
+#define SCRATCH_H 11
 
 /* Shared core for SLT/SLTU/SLTI/SLTIU: given the LEFT operand's hi/lo
  * pre-loaded into SCRATCH_C/SCRATCH_A and the RIGHT operand's (a real
@@ -260,21 +326,47 @@ static void emit_slt_core(ppc_codegen_ctx_t *ctx, int is_signed)
 #define REG_HI(r)    ((int16_t)(REG_SLOT(r) + 0))
 #define REG_LO(r)    ((int16_t)(REG_SLOT(r) + 4))
 
+/* Round 890 (task #874): HI/LO pseudo-register indices. The R5900 has
+ * two dedicated 64-bit registers (HI, LO - used by MULT/MULTU/DIV/
+ * DIVU/MFHI/MTHI/MFLO/MTLO) that this dynarec's context array didn't
+ * previously have anywhere to put: `ppc_dynarec_gpr128_t gpr[32]` only
+ * ever modeled the 32 real MIPS GPRs. Rather than widening the
+ * ppc_block_fn signature to take a second pointer (which would touch
+ * every existing opcode block and the ee_jit.c call site), HI and LO
+ * are addressed as if they were simply MIPS registers 32 and 33 in the
+ * SAME flat array the real GPRs live in - REG_SLOT/REG_HI/REG_LO above
+ * already generalize to any integer index with no changes needed, so
+ * `REG_HI(HI_IDX)`/`REG_LO(HI_IDX)` just fall out of the existing
+ * macros. This is only valid because `ee_state_t` (ee_core.h) was
+ * reordered in this same round to place `hi, lo` immediately after
+ * `gpr[32]` in memory - see that struct's own comment, and see
+ * ee_jit.c's `_Static_assert`s next to the `fn(...)` call site, which
+ * are what actually enforce this contract at compile time (this file
+ * deliberately still doesn't #include ee_core.h, to keep its only real
+ * dependency on the wider codebase as narrow as it's always been: "a
+ * flat array of 16-byte register slots"). */
+#define HI_IDX 32
+#define LO_IDX 33
+
 int ppc_dynarec_init(ppc_codegen_ctx_t *ctx, size_t max_instructions)
 {
     memset(ctx, 0, sizeof(*ctx));
 
-    /* Round 889 (task #866/#868/#869 continuation): worst case is now
-     * MOVN's 20 PPC instructions per MIPS instruction (6 setup loads +
-     * 4 for the mask computation + 1 extra nor to invert it for MOVN
-     * specifically + 1 notmask nor + 6 for the hi/lo and/and/or blends
-     * + 2 stores - see ppc_dynarec_translate_one's MOVZ/MOVN block).
-     * MOVZ is one instruction cheaper (19, no invert). Previously SLT/
-     * SLTI's 13 (4 setup loads/li's + 6 for the signed emit_slt_core
-     * chain + 3 store/li/store) were the worst case; SLTU/SLTIU are
-     * cheaper at 11, the 64-bit logical ops OR/AND/XOR/NOR at 8,
-     * ADDIU/ADDU/SUBU cheaper still at 5-6), plus one trailing blr. */
-    size_t words = max_instructions * 20 + 1;
+    /* Round 890 (task #874) update: DIV/DIVU is now the worst case at
+     * 32 PPC instructions per MIPS instruction (2 setup loads + divw/
+     * divwu + mullw + subf for the raw quotient/remainder + 4 for the
+     * mask/notmask computation + 2 srawi sign-fills + 2x(2 loads + 2
+     * ands + 1 or + 1 store) for the LO blend + 2x(2 loads + 2 ands + 1
+     * or + 1 store) for the HI blend - see ppc_dynarec_translate_one's
+     * DIV/DIVU block; verified by direct emit() count, not just this
+     * prose tally). MULT/MULTU is cheaper at up to 13 (11 unconditional
+     * + 2 more if rd!=0); MFHI/MTHI/MFLO/MTLO cheapest of this round's
+     * additions at 4. Previously MOVN's 20 PPC instructions (Round 889)
+     * were the worst case; SLT/SLTI's 13, SLTU/SLTIU's 11, the 64-bit
+     * logical ops OR/AND/XOR/NOR's 8, and ADDIU/ADDU/SUBU's 5-6 remain
+     * comfortably under this round's new ceiling), plus one trailing
+     * blr. */
+    size_t words = max_instructions * 32 + 1;
     ctx->code = memalign(32, words * sizeof(uint32_t));
     if (!ctx->code)
         return -1;
@@ -299,7 +391,7 @@ static void emit(ppc_codegen_ctx_t *ctx, uint32_t instr)
 
 int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
 {
-    if (ctx->used_words + 20 > ctx->capacity_words) /* Round 889: was 13, MOVN's 20-word worst case */
+    if (ctx->used_words + 32 > ctx->capacity_words) /* Round 890: was 20, DIV/DIVU's 32-word worst case */
         return -1; /* out of buffer space */
 
     uint32_t op    = (mips_instr >> 26) & 0x3F;
@@ -575,6 +667,133 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
         emit(ctx, enc_and(SCRATCH_C, SCRATCH_C, SCRATCH_B)); /* SCRATCH_C = rd_old.hi & notmask */
         emit(ctx, enc_or(SCRATCH_D, SCRATCH_D, SCRATCH_C)); /* SCRATCH_D = blended hi result */
         emit(ctx, enc_stw(SCRATCH_D, CTX_REG, REG_HI(rd)));
+        return 0;
+    }
+
+    if (op == 0x00 && (funct == 0x10 || funct == 0x11 || funct == 0x12 || funct == 0x13)) {
+        /* MIPS: mfhi/mthi/mflo/mtlo - full 64-bit copies between a real
+         * GPR and the HI or LO pseudo-slot (see HI_IDX/LO_IDX above),
+         * exactly mirroring ee_core.c's own `GPR(rd) = st->hi.ud0` /
+         * `st->hi.ud0 = GPR(rs)` bodies. Unlike every arithmetic opcode
+         * above, MFHI/MFLO's "rd==0 declines" guard is the ONLY
+         * rd-related guard needed (MTHI/MTLO have no destination GPR to
+         * guard at all - $zero is a perfectly normal, always-zero
+         * SOURCE for MTHI/MTLO, same as any other read of $zero). */
+        int src_idx = (funct == 0x11 || funct == 0x13) ? (int)rs : (funct == 0x10 ? HI_IDX : LO_IDX);
+        int dst_idx = (funct == 0x10 || funct == 0x12) ? (int)rd : (funct == 0x11 ? HI_IDX : LO_IDX);
+        if ((funct == 0x10 || funct == 0x12) && rd == 0)
+            return 0;
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_HI(src_idx)));
+        emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_LO(src_idx)));
+        emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_HI(dst_idx)));
+        emit(ctx, enc_stw(SCRATCH_B, CTX_REG, REG_LO(dst_idx)));
+        return 0;
+    }
+
+    if (op == 0x00 && (funct == 0x18 || funct == 0x19)) {
+        /* MIPS: mult/multu rs, rt -> a genuine 32x32->64 widening
+         * multiply (signed for MULT, unsigned for MULTU), which PPC750
+         * only offers as a pair of separate 32-bit-result instructions
+         * (mullw for the low half, mulhw/mulhwu for the high half - see
+         * their shared comment above). Per ee_core.c's own case bodies,
+         * BOTH 32-bit halves of the result get independently
+         * sign-extended into their own 64-bit HI/LO slot (this is real
+         * R5900 hardware behavior, not an interpreter quirk - it
+         * applies even for MULTU's unsigned high half), and this
+         * happens UNCONDITIONALLY regardless of rd - only the OPTIONAL
+         * `if (rd) GPR(rd) = st->lo.ud0` extra copy is gated on rd!=0.
+         * So, unlike every earlier opcode's `if (rd==0) return 0` early
+         * decline, that guard here would be WRONG - it would silently
+         * skip the always-real HI/LO side effect whenever a real
+         * program computed a product into $zero on purpose (legal and
+         * not unusual, e.g. as a pure remainder-via-DIV setup) . */
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs))); /* rs32 */
+        emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_LO(rt))); /* rt32 */
+        emit(ctx, enc_mullw(SCRATCH_C, SCRATCH_A, SCRATCH_B)); /* lo32 */
+        if (funct == 0x18) /* MULT: signed high half */
+            emit(ctx, enc_mulhw(SCRATCH_D, SCRATCH_A, SCRATCH_B));
+        else /* MULTU: unsigned high half */
+            emit(ctx, enc_mulhwu(SCRATCH_D, SCRATCH_A, SCRATCH_B));
+        emit(ctx, enc_srawi(SCRATCH_E, SCRATCH_C, 31)); /* sign fill of lo32 -> new LO.hi */
+        emit(ctx, enc_stw(SCRATCH_E, CTX_REG, REG_HI(LO_IDX)));
+        emit(ctx, enc_stw(SCRATCH_C, CTX_REG, REG_LO(LO_IDX)));
+        emit(ctx, enc_srawi(SCRATCH_F, SCRATCH_D, 31)); /* sign fill of hi32 -> new HI.hi */
+        emit(ctx, enc_stw(SCRATCH_F, CTX_REG, REG_HI(HI_IDX)));
+        emit(ctx, enc_stw(SCRATCH_D, CTX_REG, REG_LO(HI_IDX)));
+        if (rd != 0) {
+            emit(ctx, enc_stw(SCRATCH_E, CTX_REG, REG_HI(rd)));
+            emit(ctx, enc_stw(SCRATCH_C, CTX_REG, REG_LO(rd)));
+        }
+        return 0;
+    }
+
+    if (op == 0x00 && (funct == 0x1A || funct == 0x1B)) {
+        /* MIPS: div/divu rs, rt -> quotient into LO, remainder into HI
+         * (see ee_core.c's own case bodies) - but ONLY if rt32 != 0;
+         * per real MIPS semantics, HI/LO are left COMPLETELY UNCHANGED
+         * on divide-by-zero (there's no MIPS-I/II trap for this, unlike
+         * some later ISA revisions' optional trap instructions). This
+         * dynarec has no branch-emission capability at all (see the
+         * MOVZ/MOVN comment above), so the divide-by-zero case can't be
+         * skipped with a real branch - instead this reuses Round 889's
+         * branch-free mask-blend idiom: unconditionally execute
+         * divw/divwu (safe - PPC's ISA-defined behavior for a zero
+         * divisor is an UNDEFINED result value, never a trap, when OE
+         * isn't set, which it never is here), compute the remainder
+         * from that possibly-garbage quotient the same way regardless,
+         * then blend the (possibly-garbage) new HI/LO against their OLD
+         * values using a mask built from "is rt32 != 0" - the garbage
+         * is simply discarded by the mask whenever rt32==0. DIV/DIVU
+         * never touch any GPR (no `if (rd)` in ee_core.c's case bodies
+         * at all - only HI/LO), so `rd` is deliberately unused here. */
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs))); /* rs32 */
+        emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_LO(rt))); /* rt32 */
+        if (funct == 0x1A) /* DIV: signed */
+            emit(ctx, enc_divw(SCRATCH_C, SCRATCH_A, SCRATCH_B));
+        else /* DIVU: unsigned */
+            emit(ctx, enc_divwu(SCRATCH_C, SCRATCH_A, SCRATCH_B));
+        emit(ctx, enc_mullw(SCRATCH_D, SCRATCH_C, SCRATCH_B)); /* quotient*rt32 */
+        emit(ctx, enc_subf(SCRATCH_E, SCRATCH_D, SCRATCH_A)); /* remainder = rs32 - quotient*rt32 */
+
+        /* mask/notmask from "rt32 != 0", same subfc/subfe carry-to-mask
+         * idiom as MOVZ/MOVN (Round 889), just testing rt32 directly
+         * (a single 32-bit word) instead of an OR'd 64-bit pair - DIV/
+         * DIVU's rt32 truncation (see ee_core.c's own `rt32` decode) is
+         * already a 32-bit value by definition, no OR-of-hi/lo needed.
+         * subfe(F,F,F) after subfc gives F = -1+CA: CA=1 (rt32!=0) ->
+         * F=0; CA=0 (rt32==0) -> F=0xFFFFFFFF - i.e. F comes out as
+         * NOTMASK directly (the "keep old value" condition), saving the
+         * extra invert MOVN needed; mask is then just NOT(notmask). */
+        emit(ctx, enc_addi(SCRATCH_F, 0, 1)); /* li F, 1 */
+        emit(ctx, enc_subfc(SCRATCH_A, SCRATCH_F, SCRATCH_B)); /* A=throwaway, CA=(rt32!=0) (rs32's old value no longer needed) */
+        emit(ctx, enc_subfe(SCRATCH_F, SCRATCH_F, SCRATCH_F)); /* F = notmask */
+        emit(ctx, enc_nor(SCRATCH_G, SCRATCH_F, SCRATCH_F)); /* G = mask */
+
+        emit(ctx, enc_srawi(SCRATCH_H, SCRATCH_C, 31)); /* sign fill of quotient -> new LO.hi */
+        /* --- blend LO (quotient) --- */
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_HI(LO_IDX))); /* old LO.hi */
+        emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_LO(LO_IDX))); /* old LO.lo */
+        emit(ctx, enc_and(SCRATCH_D, SCRATCH_H, SCRATCH_G)); /* new LO.hi & mask */
+        emit(ctx, enc_and(SCRATCH_A, SCRATCH_A, SCRATCH_F)); /* old LO.hi & notmask */
+        emit(ctx, enc_or(SCRATCH_D, SCRATCH_D, SCRATCH_A));
+        emit(ctx, enc_stw(SCRATCH_D, CTX_REG, REG_HI(LO_IDX)));
+        emit(ctx, enc_and(SCRATCH_D, SCRATCH_C, SCRATCH_G)); /* new LO.lo & mask */
+        emit(ctx, enc_and(SCRATCH_B, SCRATCH_B, SCRATCH_F)); /* old LO.lo & notmask */
+        emit(ctx, enc_or(SCRATCH_D, SCRATCH_D, SCRATCH_B));
+        emit(ctx, enc_stw(SCRATCH_D, CTX_REG, REG_LO(LO_IDX)));
+
+        /* --- blend HI (remainder) - mask(G)/notmask(F) still valid --- */
+        emit(ctx, enc_srawi(SCRATCH_H, SCRATCH_E, 31)); /* sign fill of remainder -> new HI.hi */
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_HI(HI_IDX))); /* old HI.hi */
+        emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_LO(HI_IDX))); /* old HI.lo */
+        emit(ctx, enc_and(SCRATCH_D, SCRATCH_H, SCRATCH_G)); /* new HI.hi & mask */
+        emit(ctx, enc_and(SCRATCH_A, SCRATCH_A, SCRATCH_F)); /* old HI.hi & notmask */
+        emit(ctx, enc_or(SCRATCH_D, SCRATCH_D, SCRATCH_A));
+        emit(ctx, enc_stw(SCRATCH_D, CTX_REG, REG_HI(HI_IDX)));
+        emit(ctx, enc_and(SCRATCH_D, SCRATCH_E, SCRATCH_G)); /* new HI.lo & mask */
+        emit(ctx, enc_and(SCRATCH_B, SCRATCH_B, SCRATCH_F)); /* old HI.lo & notmask */
+        emit(ctx, enc_or(SCRATCH_D, SCRATCH_D, SCRATCH_B));
+        emit(ctx, enc_stw(SCRATCH_D, CTX_REG, REG_LO(HI_IDX)));
         return 0;
     }
 

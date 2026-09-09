@@ -26,9 +26,28 @@ typedef struct {
 
 typedef struct {
     ee_reg128_t gpr[32];
+    /* Round 890 (task #874): hi/lo moved to sit IMMEDIATELY after gpr[32]
+     * (they used to come after pc/next_pc below) so that ppc_dynarec.c's
+     * context pointer - which is just `&gpr[0]` cast to its own
+     * ppc_dynarec_gpr128_t*, per ee_jit.c's `fn((ppc_dynarec_gpr128_t
+     * *)&st->gpr[0])` call - can address HI/LO as if they were simply
+     * MIPS pseudo-registers 32/33 in the same flat, contiguous array,
+     * reusing 100% of the existing REG_SLOT/REG_HI/REG_LO addressing
+     * macros with zero new addressing logic (see ppc_dynarec.c's
+     * HI_IDX/LO_IDX). This is the ONLY reason for this field's exact
+     * position: every other access in this codebase goes through the
+     * `->hi`/`->lo` field names, not raw offsets, so reordering it here
+     * is otherwise inert (checkpoint.c's save/load round-trips the
+     * whole struct as one opaque `sizeof(ee_state_t)` blob via
+     * fwrite/fread, not a byte-stable cross-version format, so it does
+     * not care about field order either). ppc_dynarec.c itself still
+     * does NOT #include this header - it only knows "gpr[32] followed
+     * immediately by two more 16-byte slots" as a documented contract,
+     * verified by the _Static_assert in ee_jit.c right next to the
+     * `fn(...)` call site that actually relies on it. */
+    ee_reg128_t hi, lo;
     uint32_t pc;
     uint32_t next_pc;       /* branch delay slot handling */
-    ee_reg128_t hi, lo;
     /* Task #177: the R5900's dedicated 32-bit "SA" (Shift Amount)
      * control register - real, documented R5900-specific CPU state
      * (ps2tek's SPECIAL opcode table: funct 0x28=MFSA, 0x29=MTSA),

@@ -12,6 +12,25 @@
 #include "core/recompiler/ppc_dynarec.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h> /* offsetof, for the _Static_assert layout checks below */
+
+/* Round 890 (task #874): compile-time enforcement of the layout
+ * contract ppc_dynarec.c's HI_IDX/LO_IDX (see that file) depends on:
+ * `gpr[32]` must be the very FIRST field of ee_state_t (so `&st->gpr[0]`
+ * is also byte offset 0 of the whole struct - this was already relied
+ * on before this round, just never asserted), and `hi`/`lo` must sit
+ * immediately after it with no padding, so that ppc_dynarec.c's flat
+ * "register 32 = HI, register 33 = LO" addressing lands exactly on the
+ * real fields. If ee_core.h's struct layout ever changes, this fires a
+ * compile error here instead of silently corrupting HI/LO (or some
+ * unrelated field) the next time a MULT/DIV/MFHI/MTHI/MFLO/MTLO
+ * instruction gets JIT-compiled. */
+_Static_assert(offsetof(ee_state_t, gpr) == 0,
+               "ppc_dynarec.c's context pointer is &st->gpr[0] - gpr must be ee_state_t's first field");
+_Static_assert(offsetof(ee_state_t, hi) == sizeof(ee_reg128_t) * 32,
+               "ppc_dynarec.c's HI_IDX (32) assumes hi sits immediately after gpr[32]");
+_Static_assert(offsetof(ee_state_t, lo) == sizeof(ee_reg128_t) * 33,
+               "ppc_dynarec.c's LO_IDX (33) assumes lo sits immediately after hi");
 
 #define EE_JIT_CACHE_SLOTS 8192u /* power of two - see ee_jit_cache_lookup()/insert() */
 
@@ -35,12 +54,15 @@ static uint64_t g_jit_executed = 0;
  * (op 0x0F, Round 887b); SPECIAL (op 0x00) ADDU/SUBU/AND/OR/XOR/NOR/
  * SLT/SLTU (funct 0x21/0x23-0x27/0x2A/0x2B); SLL/SRL/SRA/SLLV/SRLV/SRAV
  * (funct 0x00/0x02-0x04/0x06/0x07, Round 888); MOVZ/MOVN (funct
- * 0x0A/0x0B, Round 889). Kept in sync by hand with translate_one()'s
- * own dispatch - see that function's own comments for the
- * authoritative list. This is a cheap pre-filter so the (much more
- * expensive) cache lookup/compile path is never attempted for the
- * vast majority of real instructions ppc_dynarec.c can't handle yet
- * (branches, loads/stores, MMI, COP0/1/2, ...). */
+ * 0x0A/0x0B, Round 889); MFHI/MTHI/MFLO/MTLO (funct 0x10-0x13) and
+ * MULT/MULTU/DIV/DIVU (funct 0x18/0x19/0x1A/0x1B), both new in Round
+ * 890 now that HI/LO have somewhere real to live (see HI_IDX/LO_IDX in
+ * ppc_dynarec.c). Kept in sync by hand with translate_one()'s own
+ * dispatch - see that function's own comments for the authoritative
+ * list. This is a cheap pre-filter so the (much more expensive) cache
+ * lookup/compile path is never attempted for the vast majority of real
+ * instructions ppc_dynarec.c can't handle yet (branches, loads/stores,
+ * MMI, COP0/1/2, ...). */
 static int ee_jit_opcode_supported(uint32_t instr)
 {
     uint32_t op = (instr >> 26) & 0x3Fu;
@@ -54,6 +76,9 @@ static int ee_jit_opcode_supported(uint32_t instr)
         case 0x02: case 0x03: /* SRL / SRA */
         case 0x04: case 0x06: case 0x07: /* SLLV / SRLV / SRAV */
         case 0x0A: case 0x0B: /* MOVZ / MOVN */
+        case 0x10: case 0x11: case 0x12: case 0x13: /* MFHI / MTHI / MFLO / MTLO */
+        case 0x18: case 0x19: /* MULT / MULTU */
+        case 0x1A: case 0x1B: /* DIV / DIVU */
         case 0x21: case 0x23: /* ADDU / SUBU */
         case 0x24: case 0x25: case 0x26: case 0x27: /* AND / OR / XOR / NOR */
         case 0x2A: case 0x2B: /* SLT / SLTU */

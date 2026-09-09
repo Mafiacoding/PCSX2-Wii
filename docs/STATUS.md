@@ -37367,3 +37367,108 @@ block-level translation with delay-slot semantics, or continued
 interpreter fallback for all control flow). Same sandbox limitation as
 every prior JIT round: real native-PPC-execution correctness still
 can't be verified without Wii hardware or Dolphin access here.
+
+## Round 890: HI/LO register context-slot support + MFHI/MTHI/MFLO/MTLO/MULT/MULTU/DIV/DIVU
+
+Closes the HI/LO gap Round 889 flagged. Before this round, the
+dynarec's context was exactly `ppc_dynarec_gpr128_t gpr[32]` - no
+representation of the R5900's dedicated HI/LO registers at all, so
+nothing in the MULT/DIV/MFHI/MFLO family could be JIT-compiled no
+matter how straightforward its arithmetic.
+
+**Design - HI/LO as pseudo-registers 32/33, not a new context
+parameter**: the obvious fix (widen `ppc_block_fn`'s signature to take
+a second pointer for HI/LO) would touch every existing call site and
+every already-shipped opcode's dispatch code for no real benefit.
+Instead, `ee_state_t` (`include/core/ee/ee_core.h`) was reordered so
+`hi`/`lo` sit immediately after `gpr[32]`, with `gpr` confirmed to
+remain the struct's first field. That makes the context this dynarec's
+generated code already receives - `&st->gpr[0]`, unchanged since Round
+887 - equivalent to a flat `ppc_dynarec_gpr128_t ctx[34]`, where
+`ctx[32]` is HI and `ctx[33]` is LO. `ppc_dynarec.c` gets two new named
+constants, `HI_IDX=32`/`LO_IDX=33`, and reuses 100% of the existing
+`REG_SLOT`/`REG_HI`/`REG_LO` addressing macros with zero new
+addressing logic. The reordering is safe because every other access to
+`ee_state_t` in this codebase goes through field names, never raw
+offsets, and `checkpoint.c` round-trips the whole struct as one opaque
+`sizeof(ee_state_t)` blob (magic "PW2K", same-build only) rather than a
+byte-stable format. `ppc_dynarec.c` still deliberately does not
+`#include ee_core.h` - its only contract with the wider codebase
+remains "a flat array of 16-byte register slots," now two slots
+longer. `ee_jit.c` (which does transitively see `ee_core.h`) carries
+three `_Static_assert`s, using `offsetof`, that turn any future layout
+drift into a compile error instead of silent HI/LO corruption.
+
+**Three semantic subtleties**, each confirmed against `ee_core.c`'s
+real interpreter bodies before implementing:
+
+1. MFHI/MFLO's `rd==0` guard is a true no-op skip (matches every prior
+   opcode's pattern), but MTHI/MTLO have no such guard - there's no
+   destination GPR to gate on.
+2. MULT/MULTU ALWAYS write HI/LO regardless of `rd`; only the optional
+   extra copy into GPR(rd) is gated on `rd != 0`. This is the first
+   opcode class in this dynarec where the "if (rd==0) return 0" early
+   decline used by every earlier opcode would be wrong - the dispatch
+   block deliberately does NOT early-return on rd==0.
+3. DIV/DIVU leave HI/LO **completely unchanged** (not zeroed, not
+   trapped) when the divisor is zero - real MIPS semantics. PPC's
+   `divw`/`divwu` don't trap on zero divisor either (OE=0 here), they
+   just produce an implementation-defined result, so it's safe to
+   unconditionally execute the divide and then branch-free-mask away
+   the garbage: reusing Round 889's self-subtract carry-to-mask trick
+   (`subfc` against 0, then self-referencing `subfe` to turn XER.CA
+   into an all-0s/all-1s keep-old-value mask) tests `rt32 != 0` and
+   blends the real result against the untouched sentinel.
+
+**New PPC750 encodings** (verified bit-for-bit against real
+`powerpc-eabi-as`/`objdump` output before use): `mullw` (XO=235, low 32
+bits of the product, same for signed/unsigned), `mulhw` (XO=75, signed
+high 32 bits), `mulhwu` (XO=11, unsigned high 32 bits), `divw` (XO=491,
+signed quotient only - PPC750 has no combined quotient+remainder
+instruction, so the remainder is computed separately as
+`dividend - quotient*divisor`), `divwu` (XO=459, unsigned quotient).
+
+**Buffer budget**: per-instruction PPC-word worst case bumped from 20
+to 32, measured exactly (not estimated) via `grep -c "emit(ctx,"` over
+the DIV/DIVU dispatch block - the new worst case, ahead of MULT/MULTU's
+13. Both `ppc_dynarec_init()`'s allocation formula and
+`ppc_dynarec_translate_one()`'s early-bail check were updated to match.
+
+**Verification**: `r890_hilo_muldiv_verify.c`, same host-native
+call-the-real-`ppc_dynarec_translate_one()`-and-interpret-the-bytes
+methodology as prior rounds, with the embedded PPC subset simulator
+extended to cover `subf`, `srawi`, `mullw`, `mulhw`, `mulhwu`, `divw`,
+`divwu`. 44 checks: MFHI/MFLO/MTHI/MTLO exact-copy semantics (4);
+MULT across 6 signed pairs including INT32_MAX- and INT32_MIN-adjacent
+values, checking LO/HI/rd-copy (18); MULTU proving its unsigned HI
+diverges from MULT's signed HI for the same bit pattern (2); MULT-to-
+`$zero` proving HI/LO are written even when rd==0 (2); DIV across 6
+signed pairs checking LO=quotient/HI=remainder (12); DIVU (2); and -
+the most critical test of this round's mask-blend correctness - DIV
+and DIVU each run with a zero divisor and sentinel HI/LO values,
+asserting both registers are left completely untouched (4). **Result:
+44/44 checks passed.**
+
+- Host-native: `ppc_dynarec.c` and `ee_jit.c` both compile clean under
+  `gcc -O2 -Wall -Wextra` (0 warnings), including the three new
+  `_Static_assert` layout checks.
+- `r890_hilo_muldiv_verify.c`: **44/44 checks passed**.
+- Full regression suite, chunked per the established pattern:
+  **135/135 tests pass, 0 failures**.
+- devkitPPC/libogc Wii cross-build (`make clean && make -j4`, real
+  target): clean, 0 warnings/errors, fresh `pcsx2-wii.elf`
+  (2,991,864 bytes) / `.dol` (529,376 bytes).
+
+**Status**: 28 opcodes now JIT-accelerated (the 20 from Round 889 plus
+MFHI, MTHI, MFLO, MTLO, MULT, MULTU, DIV, DIVU). Together with Round
+889's set, this is now the complete pure-ALU MIPS-I integer subset this
+architecture can express without memory access, branching, or
+exceptions - HI/LO included. The two harder categories flagged since
+Round 887 are now the *only* remaining gaps: memory ops (need a "call
+arbitrary C function from generated PPC code" trampoline, since
+`ee_mem_read/write*` are C functions with real side effects) and
+branches/jumps (need either real block-level translation with correct
+delay-slot semantics, or continued interpreter fallback for all
+control flow). Same sandbox limitation as every prior JIT round: real
+native-PPC-execution correctness still can't be verified without Wii
+hardware or Dolphin access here.

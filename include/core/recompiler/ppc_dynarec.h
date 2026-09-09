@@ -74,6 +74,20 @@
  * to keep this file's only real dependency on the wider codebase
  * exactly what it always was: "a flat array of 16-byte register
  * slots", now just two slots longer than it looks from `gpr[32]` alone.
+ *
+ * Round 891 (task #875) update: LW/SW are this PoC's first opcodes
+ * that need to call a REAL C function (ee_mem_read32/ee_mem_write32)
+ * instead of only moving bits between the context array and PPC
+ * registers - real memory access has side effects (MMIO, TLB, EE
+ * exceptions) this PoC has no intention of reimplementing a second
+ * time in generated code. ppc_dynarec.c now knows how to emit a small
+ * stack frame (to spill/restore the two non-volatile GPRs it borrows
+ * as scratch across the call, per the PowerPC EABI) plus the
+ * lis+ori/mtctr/bctrl call sequence itself; see that file's own
+ * ADDR_EE_MEM_READ32/WRITE32 comment for exactly how the callee's
+ * absolute address is obtained (differently on GEKKO vs. host-native
+ * verification builds) and its LW/SW dispatch blocks' comments for the
+ * full register-preservation walkthrough.
  */
 
 typedef struct {

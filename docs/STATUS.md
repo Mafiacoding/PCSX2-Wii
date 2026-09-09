@@ -37472,3 +37472,115 @@ delay-slot semantics, or continued interpreter fallback for all
 control flow). Same sandbox limitation as every prior JIT round: real
 native-PPC-execution correctness still can't be verified without Wii
 hardware or Dolphin access here.
+
+## Round 891: LW/SW dynarec opcodes - first real C-function-call trampoline
+
+Closes half of the "two harder categories" gap Round 890 flagged.
+Before this round, every JIT-compiled block was pure straight-line
+register/context manipulation - no opcode ever called anything. LW/SW
+need to reach `ee_mem_read32`/`ee_mem_write32`, real C functions with
+genuine side effects (MMIO dispatch, TLB translation, EE exceptions)
+this dynarec has no intention of reimplementing a second time in
+generated PPC code, so this round builds the actual call mechanism
+from scratch.
+
+**New encoders**: `ori` (the plain non-dot immediate-OR, paired with
+the existing `lis`/`addis` to materialize an arbitrary 32-bit constant
+with no sign-extension correction needed - see `enc_ori`'s comment),
+`mflr`/`mtlr` (save/restore the link register around the internal
+call), `mtctr` (load the callee's address for an indirect branch), and
+`bctrl` (branch-to-CTR-and-link - this dynarec's first-ever function
+call emission). All five verified bit-for-bit against real devkitPPC
+output before use.
+
+**Design - a real (if minimal) stack frame**: calling a C function
+clobbers the volatile registers (r3-r12, LR, CTR) per the PowerPC
+EABI, but LW's post-call code still needs the context pointer (to
+store the loaded value back) and every block still needs its own
+original return address (LR) preserved across the internal `bctrl`,
+which overwrites LR with an address inside the block itself. Both
+values are stashed in non-volatile registers (r15=ctx, r14=return
+address) for the duration of the call - safe, since the EABI guarantees
+`ee_mem_read32`/`write32` preserve r14-r31 for their caller. But this
+generated block is ITSELF a callee (of `ee_jit_try_execute_one`, via a
+plain C function-pointer call), so it must not clobber ITS caller's
+r14/r15 either - hence a small `addi r1,r1,-32` / `stw`-pair prologue
+that spills the caller's r14/r15 to the stack before repurposing them,
+and a matching epilogue that reloads them before the block's own
+trailing `blr`. (No back-chain word is written at `[r1+0]` - nothing
+ever needs to unwind through JIT-generated code here, so this frame is
+privately consistent but not a fully conformant EABI frame; documented
+in the LW dispatch block's own comment rather than silently assumed
+away.)
+
+**Two semantic details**, confirmed against `ee_core.c`'s interpreter
+before implementing: LW's read side effect happens even when `rt==0`
+(`if (rt) GPR(rt) = sext32(ee_mem_read32(...)); else
+ee_mem_read32(...);`) - only the register write is skipped, so this
+dynarec always emits the call and conditionally skips only the two
+trailing `stw`s; SW has no `rt==0` guard at all (reading `$zero` as
+the value-to-store is always valid and always 0).
+
+**Host-vs-Wii address handling**: the generated `lis+ori` sequence
+embeds a real 32-bit address to call - correct and meaningful on the
+real Wii target (Broadway's entire address space is 32 bits), but
+meaningless on this x86_64 host, where a real function pointer is 64
+bits and would truncate to garbage. `ADDR_EE_MEM_READ32`/
+`ADDR_EE_MEM_WRITE32` are therefore `#ifdef GEKKO`-gated: on the real
+target they resolve to `(uint32_t)(uintptr_t)&ee_mem_read32` (declared
+locally with a `void*` state-pointer parameter instead of pulling in
+`ee_core.h`'s `ee_state_t`, preserving this file's narrow "flat
+register-slot array" contract - pointer representation doesn't depend
+on pointee type, so this is safe); on host builds they're small fixed
+sentinel constants (`0x101`/`0x102`) a verify harness's own PPC
+simulator can recognize by matching CTR right before a simulated
+`bctrl`, routing to a local test-double memory model instead of
+needing any real address at all.
+
+**Buffer budget**: LW's worst case (`rt!=0`) is 18 PPC instructions,
+SW's fixed case is 13 - both comfortably under DIV/DIVU's existing
+32-instruction ceiling from Round 890, so no change to the
+per-instruction word-budget formula was needed this round.
+
+**Verification**: `r891_lwsw_verify.c`, same host-native call-the-real-
+`ppc_dynarec_translate_one()`-and-interpret-the-bytes methodology as
+every prior round, with the embedded PPC750 simulator extended to
+handle `mflr`/`mtlr`/`mtctr`/`bctrl`/`ori` plus the sentinel-based call
+dispatch described above. 14 checks: LW positive-value round-trip -
+correct lo word, zero-fill hi word, and (the two most load-bearing
+checks this round) the caller's r14/r15 AND the stack pointer come back
+completely unchanged after the internal call (3); LW negative-value
+sign-extension into the hi word (2); LW with a nonzero base+immediate
+address computation (1); LW to `$zero` correctly skips the register
+write while still (implicitly, via the call happening at all)
+performing the read (1); SW basic store plus register/stack
+preservation (2); SW from `$zero` stores exactly 0 (1); SW followed by
+LW round-trips the exact stored value through two independently
+compiled single-instruction blocks, exactly mirroring how `ee_jit.c`
+invokes them in real execution (1); plus the LW-to-`$zero` skip-check
+already counted above. **Result: 14/14 checks passed.**
+
+- Host-native: `ppc_dynarec.c` and `ee_jit.c` both compile clean under
+  `gcc -O2 -Wall -Wextra` (0 warnings).
+- `r891_lwsw_verify.c`: **14/14 checks passed**.
+- Full regression suite, chunked per the established pattern:
+  **135/135 tests pass, 0 failures**.
+- devkitPPC/libogc Wii cross-build (`make clean && make -j4`, real
+  target): clean, 0 warnings/errors, fresh `pcsx2-wii.elf`
+  (3,000,880 bytes) / `.dol` (529,920 bytes).
+
+**Status**: 30 opcodes now JIT-accelerated (the 28 from Round 890 plus
+LW, SW). This is the first crack in the "memory ops need a trampoline"
+wall flagged since Round 887 - the trampoline mechanism itself
+(stack-frame save/restore, absolute-address materialization, indirect
+call) is now built and verified, and every remaining base-ISA
+load/store (LB, LBU, LH, LHU, LWU, LD, SB, SH, SD) is a straightforward
+application of the exact same pattern with a different callee and
+load/store width - no further architectural novelty expected there,
+just careful per-width sign/zero-extension bookkeeping matching
+`ee_core.c`'s own case bodies. Branches/jumps remain the one genuinely
+unopened category: real block-level translation with correct
+delay-slot semantics, or continued interpreter fallback for all
+control flow. Same sandbox limitation as every prior JIT round: real
+native-PPC-execution correctness still can't be verified without Wii
+hardware or Dolphin access here.

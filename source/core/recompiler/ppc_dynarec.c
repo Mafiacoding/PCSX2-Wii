@@ -256,6 +256,114 @@ static inline uint32_t enc_divwu(int rD, int rA, int rB)
     return (31u << 26) | ((uint32_t)rD << 21) | ((uint32_t)rA << 16) | ((uint32_t)rB << 11) | (459u << 1);
 }
 
+/* Round 891 (task #875): call-emission primitives for LW/SW - the first
+ * opcodes this dynarec has ever needed to invoke a real C function
+ * (ee_mem_read32/ee_mem_write32) rather than just moving bits between
+ * the context array and PPC registers. All five encodings verified
+ * bit-for-bit against real devkitPPC (powerpc-eabi-as/-objdump):
+ * "ori r4,r5,0x1234" -> 0x60A51234, "mflr r14" -> 0x7DC802A6,
+ * "mtlr r14" -> 0x7DC803A6, "mtctr r12" -> 0x7D8903A6,
+ * "bctrl" -> 0x4E800421 - all reproduced exactly by the formulas below. */
+
+/* ori rA(dest), rS, UIMM -> rA = rS | UIMM (no CR0 update, unlike
+ * andi. - there's a plain non-dot "ori", the immediate-logical odd one
+ * out from andi./xoris above). Used with a preceding `lis` (enc_addis
+ * with rA=0) to materialize an arbitrary 32-bit constant: lis places
+ * the upper 16 bits with no sign-extension surprises (see enc_addis's
+ * own comment), and ori ALSO doesn't sign-extend its immediate, so
+ * `lis rD,hi16; ori rD,rD,lo16` reconstructs any 32-bit value exactly
+ * via plain bitwise OR - no lis-value +1 correction is ever needed
+ * (unlike the classic "lis+addi" idiom, which does need that
+ * correction whenever the low half's bit 15 is set, because addi's
+ * immediate IS sign-extended). Same "dest is really rA field" layout
+ * as enc_or/enc_and/enc_xor/enc_nor. */
+static inline uint32_t enc_ori(int rA, int rS, uint16_t uimm)
+{
+    return (24u << 26) | ((uint32_t)rS << 21) | ((uint32_t)rA << 16) | uimm;
+}
+
+/* mflr rD -> rD = LR (XFX-form "mfspr rD, LR"; LR's SPR number is 8,
+ * encoded as two 5-bit halves with the LOW 5 bits in bits 20-16 and the
+ * HIGH 5 bits in bits 15-11 - for SPR 8 that's low5=8, high5=0, so only
+ * the bits16-20 field is ever nonzero for this particular SPR). Used to
+ * save this generated block's own incoming return address before this
+ * block's own internal call (bctrl, below) overwrites LR with an
+ * address inside this same block. */
+static inline uint32_t enc_mflr(int rD)
+{
+    return (31u << 26) | ((uint32_t)rD << 21) | (8u << 16) | (339u << 1);
+}
+
+/* mtlr rS -> LR = rS (XFX-form "mtspr LR, rS", same SPR=8 field layout
+ * as enc_mflr above but XO=467 and the register field is a SOURCE, not
+ * a destination). Used to restore the saved return address into LR
+ * right after this block's internal call returns, so this block's own
+ * trailing `blr` (emitted by ppc_dynarec_finalize) returns to the REAL
+ * caller (ee_jit_try_execute_one) rather than to the address bctrl
+ * itself left in LR. */
+static inline uint32_t enc_mtlr(int rS)
+{
+    return (31u << 26) | ((uint32_t)rS << 21) | (8u << 16) | (467u << 1);
+}
+
+/* mtctr rS -> CTR = rS (XFX-form "mtspr CTR, rS"; CTR's SPR number is 9,
+ * same low5/high5 split as LR above - low5=9, high5=0). Used to load
+ * the absolute address of the real C function this block is about to
+ * call (materialized via lis+ori, above) into CTR immediately before
+ * branching to it. */
+static inline uint32_t enc_mtctr(int rS)
+{
+    return (31u << 26) | ((uint32_t)rS << 21) | (9u << 16) | (467u << 1);
+}
+
+/* bctrl -> branch to CTR, set LR = address of the instruction right
+ * after this one (XL-form, BO=20 "branch always", BI=0 unused, LK=1).
+ * This is this dynarec's first-ever emission of an actual function
+ * call - every opcode through Round 890 was pure straight-line
+ * register/context manipulation with no calls at all. */
+static inline uint32_t enc_bctrl(void)
+{
+    return (19u << 26) | (20u << 21) | (528u << 1) | 1u;
+}
+
+/* Round 891 (task #875): absolute addresses of the two real EE
+ * memory-access entry points LW/SW need to call. Declared here with a
+ * `void *` state-pointer parameter instead of pulling in
+ * "core/ee/ee_core.h" for ee_state_t - a pointer's calling-convention
+ * representation never depends on its pointee type, so this preserves
+ * this file's established narrow contract with the wider codebase (see
+ * the file's own top comment and HI_IDX/LO_IDX's comment above): it
+ * only needs these two functions' names, parameter types, and calling
+ * convention, never ee_state_t's actual layout (which ee_jit.c's
+ * _Static_asserts already enforce separately, for the context-array
+ * contract these two functions' first parameter shares). The real
+ * symbols live in ee_core.c and are linked in unconditionally on the
+ * real Wii build (see the project Makefile's SOURCES list).
+ *
+ * On host-native (non-GEKKO) builds, taking a REAL function pointer's
+ * address would be meaningless here: x86_64 host addresses are 64
+ * bits, but lis+ori (above) only ever builds a 32-bit constant -
+ * correctly, since the real Wii target's entire address space is 32
+ * bits - so a truncated host pointer would be garbage, not a
+ * usable-but-wrong address. Host builds never execute this generated
+ * code as real machine code anyway (see ee_jit.c's GEKKO gate) - only
+ * host verify harnesses that INTERPRET (never execute) the generated
+ * bytes with a synthetic PPC750 simulator ever reach translate_one()
+ * here, so this file instead embeds small fixed sentinel constants
+ * such a harness's simulator can recognize by exact value (matching
+ * CTR right before a simulated bctrl) and route to its own local test-
+ * double implementation - no real address of any kind is needed on
+ * that path. */
+#ifdef GEKKO
+extern uint32_t ee_mem_read32(void *st, uint32_t addr);
+extern void     ee_mem_write32(void *st, uint32_t addr, uint32_t val);
+#define ADDR_EE_MEM_READ32  ((uint32_t)(uintptr_t)&ee_mem_read32)
+#define ADDR_EE_MEM_WRITE32 ((uint32_t)(uintptr_t)&ee_mem_write32)
+#else
+#define ADDR_EE_MEM_READ32  0x00000101u
+#define ADDR_EE_MEM_WRITE32 0x00000102u
+#endif
+
 /* Scratch PPC GPRs used by generated code. r3 is the incoming context
  * pointer (ppc_dynarec_gpr128_t *gpr) per the PowerPC EABI calling
  * convention - we never touch r1 (stack ptr) or r2/r13 (TOC/small-
@@ -316,6 +424,17 @@ static void emit_slt_core(ppc_codegen_ctx_t *ctx, int is_signed)
     emit(ctx, enc_andi_dot(SCRATCH_A, SCRATCH_A, 1));
 }
 
+/* Round 891 (task #875): materializes an arbitrary 32-bit constant into
+ * `reg` via lis+ori (see enc_ori's comment for why no lis-value
+ * correction is needed with this particular pairing). Used only to
+ * load the absolute address of the real C function LW/SW are about to
+ * call into r12 immediately before mtctr+bctrl. */
+static void emit_load_const32(ppc_codegen_ctx_t *ctx, int reg, uint32_t val)
+{
+    emit(ctx, enc_addis(reg, 0, (int16_t)(val >> 16)));
+    emit(ctx, enc_ori(reg, reg, (uint16_t)(val & 0xFFFFu)));
+}
+
 /* Byte offset of MIPS register `r`'s ppc_dynarec_gpr128_t slot within
  * the context array (16 bytes/slot: 8-byte ud0 + 8-byte ud1 - see the
  * header's endianness note before touching these). REG_HI/REG_LO give
@@ -365,7 +484,15 @@ int ppc_dynarec_init(ppc_codegen_ctx_t *ctx, size_t max_instructions)
      * were the worst case; SLT/SLTI's 13, SLTU/SLTIU's 11, the 64-bit
      * logical ops OR/AND/XOR/NOR's 8, and ADDIU/ADDU/SUBU's 5-6 remain
      * comfortably under this round's new ceiling), plus one trailing
-     * blr. */
+     * blr.
+     *
+     * Round 891 (task #875) update: LW/SW (the first opcodes that call
+     * a real C function - see the ADDR_EE_MEM_READ32/WRITE32 comment
+     * above) add a small stack-frame prologue/epilogue and call
+     * sequence around that. LW's worst case (rt!=0) is 18 instructions,
+     * SW's fixed case is 13 - both still comfortably under DIV/DIVU's
+     * 32-instruction ceiling above, so no change to `words` was needed
+     * this round. */
     size_t words = max_instructions * 32 + 1;
     ctx->code = memalign(32, words * sizeof(uint32_t));
     if (!ctx->code)
@@ -797,9 +924,94 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
         return 0;
     }
 
-    /* Unsupported: branches, loads/stores, MMI, COP1/2, everything
-     * else. Real coverage would require this switch to be the size of
-     * ee_core's interpreter (or larger, with scheduling). */
+    if (op == 0x23) {
+        /* MIPS: lw rt, imm(rs) -> gpr[rt] = sext32(ee_mem_read32(st,
+         * rs32+imm)); the memory READ happens even when rt==0 (real
+         * loads to $zero still perform their side effects - see
+         * ee_core.c's own `if (rt) GPR(rt) = ...; else
+         * ee_mem_read32(...);` case body), only the register WRITE is
+         * skipped. This is this dynarec's first-ever opcode that calls
+         * a real C function instead of just moving bits around, and the
+         * first that must preserve registers across that call per the
+         * PowerPC EABI:
+         *
+         *   - r3-r12 are volatile (caller need not preserve them across
+         *     a call) - CTX_REG(r3) itself is exactly ee_mem_read32's
+         *     first argument, so no register-shuffling is needed to set
+         *     that argument up, but r3 is NOT valid to use as the
+         *     context pointer again once bctrl returns (it now holds
+         *     the loaded value, ee_mem_read32's real return value).
+         *   - r14/r15 are non-volatile: safe to use as OUR OWN scratch
+         *     across the call (the callee, ee_mem_read32, must
+         *     preserve them for us) - r15 holds a saved copy of the
+         *     context pointer (needed again after the call, to store
+         *     the loaded value back), r14 holds this whole generated
+         *     block's own incoming return address (LR), which bctrl's
+         *     own "branch AND LINK" semantics would otherwise clobber
+         *     with an address inside this very block.
+         *   - BUT r14/r15 being non-volatile from ee_mem_read32's point
+         *     of view cuts both ways: THIS block is itself a callee (of
+         *     ee_jit_try_execute_one, via the plain C function-pointer
+         *     call in ee_jit.c), so it must not clobber its OWN
+         *     caller's r14/r15 either. Hence the small stack frame
+         *     below: the caller's r14/r15 are spilled there at entry
+         *     and reloaded right before this block returns. (No back-
+         *     chain word is written at [r1+0] - nothing ever needs to
+         *     unwind through JIT-generated code here - so this frame is
+         *     privately consistent but not a fully conformant EABI
+         *     frame; documented rather than silently assumed away.) */
+        emit(ctx, enc_addi(1, 1, -32));              /* grow frame */
+        emit(ctx, enc_stw(14, 1, 8));                 /* save caller's r14 */
+        emit(ctx, enc_stw(15, 1, 12));                /* save caller's r15 */
+        emit(ctx, enc_or(15, 3, 3));                  /* r15 = ctx (mr r15,r3) */
+        emit(ctx, enc_mflr(14));                      /* r14 = this block's real return address */
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs))); /* rs32 */
+        emit(ctx, enc_addi(SCRATCH_A, SCRATCH_A, (int16_t)imm)); /* r4 = addr (arg2); r3=ctx already arg1 */
+        emit_load_const32(ctx, 12, ADDR_EE_MEM_READ32);
+        emit(ctx, enc_mtctr(12));
+        emit(ctx, enc_bctrl());                       /* r3 = ee_mem_read32(ctx, addr) */
+        emit(ctx, enc_mtlr(14));                      /* restore this block's real return address */
+        if (rt != 0) {
+            /* r3 = loaded 32-bit value, r15 = saved ctx pointer (still
+             * valid - non-volatile, untouched by the call). LW
+             * sign-extends into the full 64-bit destination register,
+             * same srawi-by-31 fill-word idiom as ADDIU/ADDU/SLL. */
+            emit(ctx, enc_stw(3, 15, REG_LO(rt)));
+            emit(ctx, enc_srawi(SCRATCH_A, 3, 31));
+            emit(ctx, enc_stw(SCRATCH_A, 15, REG_HI(rt)));
+        }
+        emit(ctx, enc_lwz(14, 1, 8));                  /* restore caller's r14 */
+        emit(ctx, enc_lwz(15, 1, 12));                 /* restore caller's r15 */
+        emit(ctx, enc_addi(1, 1, 32));                 /* shrink frame */
+        return 0;
+    }
+
+    if (op == 0x2B) {
+        /* MIPS: sw rt, imm(rs) -> ee_mem_write32(st, rs32+imm,
+         * (uint32_t)gpr[rt]); no rt==0 guard exists in ee_core.c's own
+         * case body - reading $zero as the value-to-store is always
+         * valid (and always 0), so this always emits unconditionally.
+         * Simpler than LW: no result flows back, so no r15 (saved ctx)
+         * is needed - only r14 (saved return address) crosses the call. */
+        emit(ctx, enc_addi(1, 1, -32));
+        emit(ctx, enc_stw(14, 1, 8));
+        emit(ctx, enc_mflr(14));
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_LO(rs))); /* rs32 */
+        emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_LO(rt))); /* value (arg3) - read before r3/r4 get set up */
+        emit(ctx, enc_addi(SCRATCH_A, SCRATCH_A, (int16_t)imm)); /* r4 = addr (arg2); r3=ctx already arg1 */
+        emit_load_const32(ctx, 12, ADDR_EE_MEM_WRITE32);
+        emit(ctx, enc_mtctr(12));
+        emit(ctx, enc_bctrl());                       /* ee_mem_write32(ctx, addr, val) */
+        emit(ctx, enc_mtlr(14));
+        emit(ctx, enc_lwz(14, 1, 8));                  /* restore caller's r14 */
+        emit(ctx, enc_addi(1, 1, 32));                 /* shrink frame */
+        return 0;
+    }
+
+    /* Unsupported: branches, loads/stores (other than LW/SW above), MMI,
+     * COP1/2, everything else. Real coverage would require this switch
+     * to be the size of ee_core's interpreter (or larger, with
+     * scheduling). */
     return -1;
 }
 

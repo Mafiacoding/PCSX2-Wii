@@ -55,20 +55,27 @@ static uint64_t g_jit_executed = 0;
  * SLT/SLTU (funct 0x21/0x23-0x27/0x2A/0x2B); SLL/SRL/SRA/SLLV/SRLV/SRAV
  * (funct 0x00/0x02-0x04/0x06/0x07, Round 888); MOVZ/MOVN (funct
  * 0x0A/0x0B, Round 889); MFHI/MTHI/MFLO/MTLO (funct 0x10-0x13) and
- * MULT/MULTU/DIV/DIVU (funct 0x18/0x19/0x1A/0x1B), both new in Round
- * 890 now that HI/LO have somewhere real to live (see HI_IDX/LO_IDX in
- * ppc_dynarec.c). Kept in sync by hand with translate_one()'s own
- * dispatch - see that function's own comments for the authoritative
- * list. This is a cheap pre-filter so the (much more expensive) cache
- * lookup/compile path is never attempted for the vast majority of real
- * instructions ppc_dynarec.c can't handle yet (branches, loads/stores,
- * MMI, COP0/1/2, ...). */
+ * MULT/MULTU/DIV/DIVU (funct 0x18/0x19/0x1A/0x1B), added in Round 890
+ * now that HI/LO have somewhere real to live (see HI_IDX/LO_IDX in
+ * ppc_dynarec.c); and LW/SW (op 0x23/0x2B), new in Round 891 - this
+ * dynarec's first opcodes that call a real C function
+ * (ee_mem_read32/ee_mem_write32) rather than just moving bits between
+ * the context array and PPC registers (see ppc_dynarec.c's
+ * ADDR_EE_MEM_READ32/WRITE32 comment for the call-emission mechanism).
+ * Kept in sync by hand with translate_one()'s own dispatch - see that
+ * function's own comments for the authoritative list. This is a cheap
+ * pre-filter so the (much more expensive) cache lookup/compile path is
+ * never attempted for the vast majority of real instructions
+ * ppc_dynarec.c can't handle yet (branches, other loads/stores, MMI,
+ * COP0/1/2, ...). */
 static int ee_jit_opcode_supported(uint32_t instr)
 {
     uint32_t op = (instr >> 26) & 0x3Fu;
     if (op == 0x09u) return 1; /* ADDIU */
     if (op == 0x0Au || op == 0x0Bu) return 1; /* SLTI / SLTIU */
     if (op == 0x0Fu) return 1; /* LUI */
+    if (op == 0x23u) return 1; /* LW (Round 891) */
+    if (op == 0x2Bu) return 1; /* SW (Round 891) */
     if (op == 0x00u) {
         uint32_t funct = instr & 0x3Fu;
         switch (funct) {

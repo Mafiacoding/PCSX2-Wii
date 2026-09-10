@@ -39636,3 +39636,97 @@ remain correctly deferred pending real interpreter-side VU0
 micro-mode dispatch (an interpreter-side gap, not a JIT gap, per
 Round 911's finding). Next: continue task #898 with a round scoping
 the broadcast row specifically, to finally close out task #885.
+
+## Round 913b: JIT the full VU0 broadcast row (task #898 continuation)
+
+Implemented the entire broadcast row (funct 0x00-0x1F) in
+`source/core/recompiler/ppc_dynarec.c`'s CO-format dispatch, placed
+right at the top of the `rs >= 0x10` block (checked before the
+existing funct==0x28/0x2A/0x2B/0x2C/0x2F combined block, since 0x1F
+< 0x28 the two ranges never overlap). Re-verified against
+ee_core.c's real case body (lines 8308-8375, its own `else if (funct
+<= 0x1F)` branch) before writing any codegen; that body itself
+matches PCSX2's R5900OpcodeTables.cpp SPECIAL1 table's first 4 rows
+(8 columns x 4 rows): 0x00-0x03 VADDx/y/z/w, 0x04-0x07 VSUBx/y/z/w,
+0x08-0x0B VMADDx/y/z/w, 0x0C-0x0F VMSUBx/y/z/w, 0x10-0x13 VMAXx/y/z/w,
+0x14-0x17 VMINIx/y/z/w, 0x18-0x1B VMULx/y/z/w, 0x1C VMULq/0x1D
+VMAXi/0x1E VMULi/0x1F VMINIi.
+
+`bc_lane = funct & 3` selects which FT lane is broadcast (or, for the
+Q/I row, which control register); `base_op = (funct >> 2) & 7`
+selects the arithmetic operation (0=ADD, 1=SUB, 2=MADD, 3=MSUB,
+4=MAX, 5=MINI, 6=MUL, 7=Q/I-row-with-op-selected-by-bc_lane-instead:
+bc_lane 0 -> VMULq reading Q(cop2_ctrl[22]), 1 -> VMAXi reading
+I(cop2_ctrl[21]), 2 -> VMULi reading I, 3 -> VMINIi reading I). Every
+one of these fields is a function of `funct` alone - a compile-time-
+constant field of the instruction's own encoding - so op_kind and the
+broadcast source (VF[ft][bc_lane] vs a control register) are BOTH
+resolved entirely at JIT-compile time: unlike the interpreter's
+runtime op_kind switch, this codegen emits only the exact instruction
+sequence the resolved op_kind needs, zero runtime branching, the same
+"compile-time-constant field, no runtime branch" treatment every
+other CO-format op in this file already uses for destmask/reg==0.
+The broadcast scalar is loaded once into f1 before the per-lane loop
+(it's lane-invariant), matching the interpreter's own single `b`
+computation outside its loop.
+
+VMADDx/y/z/w and VMSUBx/y/z/w read the same fixed VU0_ACC_OFF
+accumulator VOPMSUB/Round 913's non-broadcast VMADD/VMSUB already
+established (no reg==0 concept for ACC), writing FD only via the same
+two-separate-float-ops (fmuls then fadds/fsubs) convention Round 913
+used. VMAXx/y/z/w, VMINIx/y/z/w, and the Q/I-row VMAXi/VMINIi all
+reuse the exact fsubs+fsel idiom Round 908's non-broadcast VMAX/VMINI
+already established: `fsubs(3,0,1)` gives FS-broadcast, then
+`fsel(2,3,0,1)` (MAX: pick FS if diff>=0 else broadcast) or
+`fsel(2,3,1,0)` (MINI: pick broadcast if diff>=0 else FS) - real
+hardware ternary comparison, not the sign-magnitude bit trick COP1.S's
+MAX.S/MIN.S uses. The Q/I control registers already store raw float
+bit patterns (established by VDIV/VRSQRT, Round 909), so reading one
+via a direct `lfs` from COP2_CTRL_OFF needs no int->float conversion -
+plain bit reinterpretation, same as every other Q/I read in this
+file. Every per-lane FD write keeps the usual compile-time `if (fd !=
+0)` guard (writes to VF00 are discarded on real hardware).
+
+No new PPC750 instruction forms were needed beyond `fsel`, which
+Round 908 already introduced into ppc_dynarec.c itself - this round's
+new host-native harness, unlike Round 912's and Round 913's (which
+both reused r904's ppcsim base completely unchanged), needed to add
+exactly one new decode entry (fsel, opcode 63, 5-bit xo=23) since no
+surviving harness from Round 908 was still on disk to reuse (scratch
+harnesses are deleted after each round ships per this project's
+convention).
+
+New host-native harness `r913b_vu0_broadcast_row_verify.c` extends
+r904_cop1_div_verify.c's ppcsim base with that one fsel addition. 24
+test cases cover: VADDx/VSUBy/VMADDz/VMSUBw/VMAXx/VMINIy/VMULz (one
+representative bc_lane per non-Q/I base_op, all 4 lanes), VMULq/
+VMAXi/VMULi/VMINIi (the full Q/I row), a partial-destmask case
+(x/w-only, confirming y/z stay untouched), an fd==0 write-discard
+case (VF00 stays hardwired at (0,0,0,1.0)), and an 11-case sweep
+cross-checking every remaining funct value (0x01,0x06,0x0B,0x0C,0x11,
+0x16,0x1B,0x1C,0x1D,0x1E,0x1F) against an independent reference model
+transcribed directly from ee_core.c's real case body - not derived by
+re-running ppc_dynarec.c's own codegen logic. 24/24 checks passed
+under -fsanitize=address,undefined, 0 leaks - no bugs found, no fixes
+needed before shipping.
+
+Regression-checked against all 10 still-present prior harnesses
+(r893/894/895/896/897/898/900/902/903/904: 13/13, 17/17, 19/19,
+35/35, 19/19, 27/27, 25/25, 20/20, 12/12, 13/13) - no regressions, no
+compile warnings.
+
+Wii build: pcsx2-wii.elf 3,288,588 bytes / .dol 549,632 bytes (+6,212
+elf / +736 dol over Round 913), 0 warnings/errors (devkitPPC 8.1.0).
+
+Status: task #898 (Rounds 913+913b) CLOSED. task #885 (COP2/VU0
+umbrella) is now effectively closed too - every VU0 macro-mode
+opcode with real, evidenced interpreter semantics is JIT'd (the full
+CO-format vector/integer family from Rounds 907-911, the 6 scalar
+transfers from Round 912, VMADD/VMSUB/VIADDI from Round 913, and now
+the complete broadcast row from Round 913b). The one remaining
+documented gap, VCALLMS/VCALLMSR, was correctly classified by Round
+911 as an interpreter-side VU0 micro-mode-dispatch gap (not a JIT
+gap) and stays deferred pending that separate interpreter work - it
+is noted here so the gap isn't lost, but does not block closing out
+task #885's JIT scope. Next: task #886 (Round 914+: JIT the MMI
+opcode family).

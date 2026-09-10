@@ -3227,6 +3227,98 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
             uint32_t fs = (mips_instr >> 11) & 0x1Fu;
             uint32_t fd = (mips_instr >> 6) & 0x1Fu;
             uint32_t funct = mips_instr & 0x3Fu;
+            if (funct <= 0x1Fu) {
+                /* Round 913b (task #898 continuation): the full
+                 * broadcast row (funct 0x00-0x1F). Re-verified against
+                 * ee_core.c's real case body (lines 8308-8375, its own
+                 * "else if (funct <= 0x1F)" branch), which itself
+                 * confirms this against PCSX2's R5900OpcodeTables.cpp
+                 * SPECIAL1 table's first 4 rows (8 columns x 4 rows):
+                 * 0x00-0x03 VADDx/y/z/w, 0x04-0x07 VSUBx/y/z/w,
+                 * 0x08-0x0B VMADDx/y/z/w, 0x0C-0x0F VMSUBx/y/z/w,
+                 * 0x10-0x13 VMAXx/y/z/w, 0x14-0x17 VMINIx/y/z/w,
+                 * 0x18-0x1B VMULx/y/z/w, 0x1C VMULq/0x1D VMAXi/0x1E
+                 * VMULi/0x1F VMINIi. bc_lane=funct&3 selects which FT
+                 * lane is broadcast (or, for the Q/I row, which
+                 * control register); base_op=(funct>>2)&7 selects the
+                 * arithmetic op (0=ADD,1=SUB,2=MADD,3=MSUB,4=MAX,
+                 * 5=MINI,6=MUL,7=Q/I-row-with-op-selected-by-bc_lane-
+                 * instead). Every one of these fields is a function of
+                 * `funct` alone - a compile-time constant field of
+                 * this instruction's own encoding - so op_kind and
+                 * the broadcast source (VF[ft][bc_lane] vs a control
+                 * register) are BOTH resolved entirely at JIT-compile
+                 * time here: unlike the interpreter's runtime
+                 * op_kind switch, this codegen emits only the exact
+                 * instruction sequence the resolved op_kind needs, no
+                 * runtime branching at all - the same "compile-time-
+                 * constant field, no runtime branch" treatment every
+                 * other CO-format op in this file already uses for
+                 * destmask/reg==0. The broadcast scalar is loaded ONCE
+                 * into f1 before the lane loop (it's lane-invariant),
+                 * matching the interpreter's own single `ub`/`b`
+                 * computation outside its loop. VMADDx/y/z/w and
+                 * VMSUBx/y/z/w read the same fixed VU0_ACC_OFF
+                 * accumulator VOPMSUB/VMADD/VMSUB (Rounds 908/913)
+                 * already established (no reg==0 concept for ACC).
+                 * VMAX/VMINI (both the x/y/z/w and Q/I-row VMAXi/
+                 * VMINIi forms) reuse the exact fsubs+fsel idiom
+                 * Round 908's non-broadcast VMAX/VMINI already
+                 * established (real hardware ternary, not the sign-
+                 * magnitude bit trick COP1.S's MAX.S/MIN.S uses). The
+                 * Q/I control registers (cop2_ctrl[22]/cop2_ctrl[21])
+                 * already store raw float bit patterns (established
+                 * by VDIV/VRSQRT, Round 909), so reading one via a
+                 * direct `lfs` from COP2_CTRL_OFF needs no int->float
+                 * conversion - it's a plain bit reinterpretation, same
+                 * as every other Q/I read in this file. */
+                uint32_t bc_lane = funct & 0x3u;
+                uint32_t base_op = (funct >> 2) & 0x7u;
+                uint32_t op_kind;
+                int use_vi_broadcast = 0;
+                uint32_t vi_reg = 0;
+                if (base_op == 7u) {
+                    use_vi_broadcast = 1;
+                    if (bc_lane == 0u)      { op_kind = 6u; vi_reg = 22u; } /* VMULq: Q */
+                    else if (bc_lane == 1u) { op_kind = 4u; vi_reg = 21u; } /* VMAXi: I */
+                    else if (bc_lane == 2u) { op_kind = 6u; vi_reg = 21u; } /* VMULi: I */
+                    else                    { op_kind = 5u; vi_reg = 21u; } /* VMINIi: I */
+                } else {
+                    op_kind = base_op;
+                }
+                if (use_vi_broadcast)
+                    emit(ctx, enc_lfs(1, CTX_REG, COP2_CTRL_OFF(vi_reg))); /* f1 = broadcast scalar (Q or I) */
+                else
+                    emit(ctx, enc_lfs(1, CTX_REG, VU0_VF_OFF(ft, bc_lane))); /* f1 = FT[bc_lane] */
+                for (int lane = 0; lane < 4; lane++) {
+                    if (!(destmask & (0x8u >> lane))) continue;
+                    emit(ctx, enc_lfs(0, CTX_REG, VU0_VF_OFF(fs, (uint32_t)lane))); /* f0 = FS[lane] */
+                    if (op_kind == 0u) {
+                        emit(ctx, enc_fadds(2, 0, 1));                     /* VADDx/y/z/w: f2 = f0 + f1 */
+                    } else if (op_kind == 1u) {
+                        emit(ctx, enc_fsubs(2, 0, 1));                     /* VSUBx/y/z/w: f2 = f0 - f1 */
+                    } else if (op_kind == 2u) {
+                        emit(ctx, enc_lfs(3, CTX_REG, VU0_ACC_OFF((uint32_t)lane))); /* f3 = ACC[lane] */
+                        emit(ctx, enc_fmuls(4, 0, 1));                     /* f4 = FS*bc */
+                        emit(ctx, enc_fadds(2, 3, 4));                     /* VMADDx/y/z/w: f2 = ACC + FS*bc */
+                    } else if (op_kind == 3u) {
+                        emit(ctx, enc_lfs(3, CTX_REG, VU0_ACC_OFF((uint32_t)lane))); /* f3 = ACC[lane] */
+                        emit(ctx, enc_fmuls(4, 0, 1));                     /* f4 = FS*bc */
+                        emit(ctx, enc_fsubs(2, 3, 4));                     /* VMSUBx/y/z/w: f2 = ACC - FS*bc */
+                    } else if (op_kind == 4u) {
+                        emit(ctx, enc_fsubs(3, 0, 1));                     /* f3 = FS - bc (sign drives fsel) */
+                        emit(ctx, enc_fsel(2, 3, 0, 1));                   /* VMAXx/y/z/w or VMAXi: f2 = (FS>=bc) ? FS : bc */
+                    } else if (op_kind == 5u) {
+                        emit(ctx, enc_fsubs(3, 0, 1));                     /* f3 = FS - bc */
+                        emit(ctx, enc_fsel(2, 3, 1, 0));                   /* VMINIx/y/z/w or VMINIi: f2 = (FS>=bc) ? bc : FS */
+                    } else {
+                        emit(ctx, enc_fmuls(2, 0, 1));                     /* VMULx/y/z/w or VMULq/VMULi: f2 = FS*bc */
+                    }
+                    if (fd != 0) /* writes to VF00 are discarded on real hardware */
+                        emit(ctx, enc_stfs(2, CTX_REG, VU0_VF_OFF(fd, (uint32_t)lane)));
+                }
+                return 0;
+            }
             if (funct == 0x28u || funct == 0x2Au || funct == 0x2Cu ||
                 funct == 0x2Bu || funct == 0x2Fu) {
                 /* Round 908 (task #893) BUGFIX + extension: this loop

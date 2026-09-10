@@ -634,6 +634,54 @@
  * of splitting large features across rounds instead of rushing scope.
  * Next: task #898 continues in a follow-up round scoping the
  * broadcast row specifically.
+ *
+ * Round 913b (task #898 continuation) update: the full broadcast row
+ * (funct 0x00-0x1F) is now JIT'd - re-verified against ee_core.c's
+ * real case body (lines 8308-8375), which is itself cross-checked
+ * against PCSX2's own R5900OpcodeTables.cpp SPECIAL1 table's first 4
+ * rows. `funct` alone determines bc_lane=funct&3 (which FT lane, or
+ * which control register, is broadcast) and base_op=(funct>>2)&7
+ * (0=ADD,1=SUB,2=MADD,3=MSUB,4=MAX,5=MINI,6=MUL,7=Q/I-row-with-op-
+ * selected-by-bc_lane-instead: bc_lane 0=VMULq/Q, 1=VMAXi/I, 2=VMULi/I,
+ * 3=VMINIi/I). Because funct is a compile-time-constant field of this
+ * instruction's own encoding, op_kind and the broadcast source
+ * (VF[ft][bc_lane] vs cop2_ctrl[21 or 22]) are BOTH resolved entirely
+ * at JIT-compile time - unlike the interpreter's runtime op_kind
+ * switch, this codegen emits only the exact instruction sequence the
+ * resolved op_kind needs, zero runtime branching, consistent with
+ * every other CO-format op in this file. The broadcast scalar is
+ * loaded once into f1 before the per-lane loop since it's lane-
+ * invariant, matching the interpreter's own single `b` computation
+ * outside its loop. VMADD/VMSUB read the same fixed VU0_ACC_OFF
+ * accumulator VOPMSUB/Round-913's non-broadcast VMADD/VMSUB already
+ * established (no reg==0 concept for ACC, write to FD only). VMAX/
+ * VMINI (both the x/y/z/w and Q/I-row VMAXi/VMINIi forms) reuse the
+ * exact fsubs+fsel idiom Round 908's non-broadcast VMAX/VMINI already
+ * established (real hardware ternary comparison, not the sign-
+ * magnitude bit trick COP1.S's MAX.S/MIN.S uses). The Q/I control
+ * registers (cop2_ctrl[22]/cop2_ctrl[21]) already store raw float bit
+ * patterns (established by VDIV/VRSQRT, Round 909), so a direct `lfs`
+ * from COP2_CTRL_OFF needs no int->float conversion. No new PPC750
+ * instruction forms were needed beyond fsel, which Round 908 already
+ * introduced and this round's harness (unlike Round 912/913's, which
+ * didn't need it) had to add to its own ppcsim decode table.
+ *
+ * New host-native harness r913b_vu0_broadcast_row_verify.c extends
+ * r904's ppcsim base with exactly one new decode addition (fsel,
+ * opcode 63, xo5=23). 24/24 checks passed under
+ * -fsanitize=address,undefined, 0 leaks - covering all 7 non-Q/I
+ * base_ops, all 4 Q/I-row forms, partial destmask, fd==0 write-
+ * discard, and an 11-case cross-check against an independent
+ * reference model transcribed directly from ee_core.c.
+ *
+ * Status: task #898 (Rounds 913+913b) CLOSED. task #885 (COP2/VU0
+ * umbrella) is now effectively closed too: every VU0 macro-mode
+ * opcode with real, evidenced interpreter semantics is JIT'd. The one
+ * remaining documented gap, VCALLMS/VCALLMSR, was correctly
+ * classified by Round 911 as an interpreter-side micro-mode-dispatch
+ * gap (not a JIT gap) and stays deferred pending that interpreter
+ * work - noted here so the gap isn't lost, not treated as blocking.
+ * Next: task #886 (Round 914+: JIT the MMI opcode family).
  */
 
 typedef struct {

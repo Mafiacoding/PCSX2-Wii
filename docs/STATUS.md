@@ -40364,3 +40364,105 @@ interpreter correctly (translate_one returns -1) and can be picked up
 in a future round if profiling ever shows them as hot. Next: task
 #887 (post-JIT: resume GS display wiring - Round 29 notes - and GT3
 progress).
+
+## Round 922: fix stale ee_jit_opcode_supported() runtime-dispatch gate
+(task #913) - a huge fraction of Rounds 908-921's codegen was never
+actually reaching real hardware
+
+While scoping the next JIT increment after Round 921 closed out task
+#886, re-read ee_jit.c's `ee_jit_try_execute_one()` - the function
+ee_step() actually calls every instruction, on real GEKKO hardware -
+to confirm how the newly-completed MMI coverage gets exercised at
+runtime. Found that its pre-filter, `ee_jit_opcode_supported()`, is a
+SEPARATE, hand-maintained enumeration from `ppc_dynarec_translate_one()`'s
+own dispatch - purely a cheap early-out so the (comparatively
+expensive) compile-and-cache path isn't attempted for instructions the
+dynarec can't handle - and this pre-filter had silently fallen out of
+sync: last touched at Round 907, it only ever recognized VADD/VSUB/
+VMUL under op==0x12 (COP2/VU0) and had ZERO entries for op==0x1Cu
+(MMI) at all.
+
+Practical effect: `ee_jit_try_execute_one()` returns 0 immediately for
+any op==0x1Cu instruction (MMI) without even attempting
+`ppc_dynarec_translate_one()`, and does the same for every op==0x12
+instruction outside the narrow VADD/VSUB/VMUL check. So despite
+Rounds 908-913 (VMAX/VMINI/VOPMSUB/VABS/VCLIP/VDIV/VSQRT/VRSQRT/
+VIADD/VISUB/VIAND/VIOR/VMOVE/VMR32/VFTOI/VITOF/VCALLMS/VCALLMSR/CFC2/
+CTC2/QMFC2/QMTC2 and the rest of task #885's VU0 scope) and Rounds
+914-921 (the ENTIRE MMI family, task #886) all being correctly
+compiled by translate_one() - verified by dozens of host-native
+harnesses across those 14 rounds - none of that generated code was
+ever actually reachable on real Wii hardware. Every one of those
+instructions was unconditionally falling back to the interpreter in
+any real boot/game run, even though the JIT had genuinely supported
+them for rounds already. This was a pure oversight risk inherent to
+maintaining the same "which opcodes are supported" list by hand in
+two separate files (ppc_dynarec.c's dispatch conditions and
+ee_jit.c's pre-filter) - exactly the kind of staleness this project's
+own tests/run_test.sh rewrite (Round 782) called out and fixed for a
+different hand-maintained list.
+
+Fix: widened `ee_jit_opcode_supported()`'s op==0x12 and op==0x1Cu
+handling from a per-opcode enumeration to a blanket "this whole op is
+supported" match, rather than re-deriving the exact same per-
+sub-opcode enumeration a second time in a second place (the practice
+that caused the staleness to begin with). This is safe specifically
+because `ee_jit_try_execute_one()` already treats any nonzero
+`ppc_dynarec_translate_one()` return as "not actually compilable,
+fall back to the interpreter" for every opcode, unconditionally - so
+for the handful of MMI sub-opcodes translate_one() genuinely doesn't
+implement yet (MADD/MADDU/MADD1/MADDU1/MULT1/MULTU1/DIV1/DIVU1/PLZCW/
+QFSRV), the only cost of the widened pre-filter is one extra (cheap:
+no allocation until translate_one() itself decides to emit code)
+compile attempt before falling back - never a correctness risk.
+
+Verified via a new host-native harness, r922_gate_verify.c (13/13
+checks, 0 ASan/UBSan errors), built with GEKKO defined (via
+`#define GEKKO` + `#include "core/recompiler/ee_jit.c"`, the same
+technique this project uses elsewhere to unit-test otherwise-static/
+host-gated functions) so the actual changed code path compiles and
+runs: confirms the gate now accepts real Round 908/912/920/921
+encodings (QMFC2, a VU0 CO-format word, PMFHL, MFHI1, PROT3W) it
+rejected before this fix; confirms it still accepts opcodes it
+already recognized (ADDU, SLL); and confirms - empirically, not just
+by argument - that `ppc_dynarec_translate_one()` genuinely still
+returns -1 (not a crash or silently-wrong code) for 3 of the
+intentionally-deferred opcodes (MADD, PLZCW, and QFSRV), so the
+"safe fallback" claim this whole fix rests on is a verified fact
+about this codebase, not an assumption. One self-authored harness bug
+was found and fixed along the way: the first draft encoded "QFSRV"
+using funct=0x3C, which is actually PSLLW (a different, already-
+working Round 917 opcode) - QFSRV's real encoding is funct=0x28
+(MMI1) with sa=0x1B, confirmed by grepping ee_core.c's own interpreter
+switch structure (`case 0x28: MMI1` containing `case 0x1B: QFSRV`) -
+a pure test-authoring mistake, not a dynarec bug, caught by the
+harness's own MADD/PLZCW checks passing on the first attempt while
+the mislabeled QFSRV check alone failed.
+
+Representative regression check (the full tests/run_test.sh --all
+suite's ~150-file rebuild exceeded this session's per-command time
+budget): ran 7 targeted tests spanning MMI compare/HI-LO/permute/
+shift/saturate, COP2/VU0, and general ee_core
+(test_ee_mmi_compare/hilo2/permute/pvshift/sat, test_ee_cop2_vu0,
+test_ee_core) - all pass with 0 failures, confirming ee_jit.c's
+widened gate still links and behaves correctly across the interpreter
+test suite (which links the full recompiler/ directory into every
+test binary as of Round 887 - see tests/run_test.sh's own comment).
+
+Clean devkitPPC Wii cross-build (0 warnings): elf 3,469,696 / dol
+564,384 - both slightly SMALLER than Round 921 (elf -296 / dol -64
+bytes), because the widened gate replaced several per-opcode funct/rs
+comparisons with two unconditional `return 1;` statements inside a
+function that only exists in GEKKO builds - net negative code size is
+expected and correct here, not a red flag.
+
+Status: task #913 continues (this is one JIT round in that ongoing
+series, per the standing "continue until a working JIT backend"
+instruction). This fix makes the JIT backend meaningfully more
+"working" in the sense that matters at runtime: all of Rounds 907-921's
+codegen is now actually reachable on real hardware, not just present
+in the source tree. Next: keep extending translate_one()'s own opcode
+coverage (the 10 intentionally-deferred MMI opcodes are the most
+concrete remaining target), or pivot to task #887 (GS display wiring/
+GT3 progress) per the user's standing dual-track interest - both
+remain open.

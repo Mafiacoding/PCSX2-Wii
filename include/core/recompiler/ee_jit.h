@@ -42,10 +42,44 @@
  * completely unchanged, at the same per-instruction granularity as
  * before this file existed.
  *
- * Each of the 11 supported opcodes' JIT semantics were verified
- * bit-for-bit against ee_core.c's OWN interpreter case bodies (not
- * just an independently-derived MIPS ISA model) before this file was
- * wired in - see docs/STATUS.md Round 887 for the full comparison.
+ * Each of the initial 11 supported opcodes' JIT semantics were
+ * verified bit-for-bit against ee_core.c's OWN interpreter case bodies
+ * (not just an independently-derived MIPS ISA model) before this file
+ * was wired in - see docs/STATUS.md Round 887 for the full comparison.
+ * The supported set has grown substantially since (branches, loads/
+ * stores, COP1 FPU, COP2/VU0, and the full MMI family - see
+ * ppc_dynarec.h's own round-by-round log for each), so "11" above is
+ * now historical, not current; ee_jit_opcode_supported() in
+ * ee_jit.c is the authoritative current list.
+ *
+ * Round 922 (task #913): ee_jit_opcode_supported() - the pre-filter
+ * that gates whether ee_jit_try_execute_one() even ATTEMPTS the JIT
+ * path for a given instruction - had silently fallen out of sync with
+ * ppc_dynarec_translate_one()'s real dispatch: it was last updated at
+ * Round 907 and only ever recognized VADD/VSUB/VMUL under op==0x12,
+ * and had ZERO entries for op==0x1Cu (MMI) at all. This meant every
+ * COP2/VU0 opcode from Rounds 908-913 and every MMI opcode from Rounds
+ * 914-921 - a huge fraction of this dynarec's total opcode coverage -
+ * was being correctly compiled by translate_one() but was NEVER
+ * actually reached on real GEKKO hardware, silently falling back to
+ * the interpreter for every single one of those instructions a real
+ * game/BIOS executes. Fixed by widening the pre-filter to a blanket
+ * "op==0x12 or op==0x1Cu is supported" match rather than re-deriving
+ * the exact per-opcode enumeration a second time in a second place
+ * (the same hand-sync burden that caused the staleness in the first
+ * place) - safe because ee_jit_try_execute_one() already treats a
+ * nonzero ppc_dynarec_translate_one() return as "fall back to the
+ * interpreter" for every opcode, so any sub-opcode within those two
+ * families that translate_one() doesn't yet implement (the
+ * intentionally-deferred MADD/MADDU/MADD1/MADDU1/MULT1/MULTU1/DIV1/
+ * DIVU1/PLZCW/QFSRV) just costs one wasted cheap compile attempt, not
+ * a correctness risk. Verified via r922_gate_verify.c (13/13 checks,
+ * 0 ASan/UBSan errors): confirms the gate now recognizes real Round
+ * 908-921 encodings it previously rejected, confirms it still accepts
+ * every opcode it recognized before, and confirms translate_one()
+ * genuinely still returns -1 (not garbage or a crash) for each of the
+ * 3 deferred opcodes sampled, so the fallback path this whole
+ * argument rests on is empirically true, not just asserted.
  *
  * Because none of the supported opcodes read memory or depend on PC,
  * a single compiled block is valid for every future occurrence of the

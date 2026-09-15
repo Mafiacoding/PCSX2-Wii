@@ -280,13 +280,49 @@ static int ee_jit_opcode_supported(uint32_t instr)
         return 0;
     }
     if (op == 0x12u) {
-        uint32_t rs = (instr >> 21) & 0x1Fu;
-        if (rs >= 0x10u) {
-            uint32_t funct = instr & 0x3Fu;
-            if (funct == 0x28u || funct == 0x2Au || funct == 0x2Cu)
-                return 1; /* VADD / VMUL / VSUB (Round 907) */
-        }
-        return 0;
+        /* Round 922: broadened from a hand-enumerated funct list (which
+         * only ever named VADD/VMUL/VSUB, Round 907) to a blanket
+         * "op==0x12 is supported" match. This pre-filter had silently
+         * fallen out of sync with translate_one()'s own op==0x12
+         * dispatch, which by Round 913 covers nearly all of task #885's
+         * COP2/VU0 macro-mode scope: the VADD/VSUB/VMUL family (907),
+         * VMAX/VMINI/VOPMSUB/VABS/VCLIP (908), VDIV/VSQRT/VRSQRT (909),
+         * VIADD/VISUB/VIAND/VIOR/VMOVE/VMR32 (910), VFTOI/VITOF/
+         * VCALLMS/VCALLMSR (911), and the scalar transfer family
+         * MFC2/QMFC2/CFC2/MTC2/QMTC2/CTC2 (912) - none of which this
+         * pre-filter ever let through, so on real GEKKO hardware every
+         * one of those Round-908-through-913 instructions was silently
+         * falling back to the interpreter despite translate_one()
+         * successfully compiling it. Widening this to a blanket op
+         * match (rather than re-enumerating every rs/funct combination
+         * here too, which is exactly the hand-sync burden that caused
+         * this staleness) is safe: ee_jit_try_execute_one() below
+         * already treats a nonzero ppc_dynarec_translate_one() return
+         * as "not actually supported, fall back to the interpreter" for
+         * every opcode, not just this one - so any op==0x12 sub-opcode
+         * translate_one() doesn't yet implement costs one wasted (cheap)
+         * ppc_dynarec_init()/translate_one() attempt, not a correctness
+         * risk. */
+        return 1;
+    }
+    if (op == 0x1Cu) {
+        /* Round 922: same blanket-match rationale as op==0x12 just
+         * above, for the MMI (EE multimedia/SIMD) family this pre-filter
+         * had ZERO entries for at all - meaning every MMI opcode shipped
+         * across the entire Round 914-921 arc (task #886, now closed:
+         * PADDx/PSUBx, PMULTx/PDIVx, PAND/POR/PXOR/PNOR, the shift
+         * family, the pack/unpack family, the merge family, PMFHI/PMFLO/
+         * PMTHI/PMTLO/PMFHL/PMTHL, MFHI1/MTHI1/MFLO1/MTLO1, and PROT3W)
+         * was being compiled correctly by translate_one() but was NEVER
+         * actually reached on real GEKKO hardware, unconditionally
+         * falling back to the interpreter for every single MMI
+         * instruction a real game/BIOS executes. A handful of rare MMI
+         * opcodes remain genuinely unimplemented by design (MADD/MADDU/
+         * MADD1/MADDU1, MULT1/MULTU1/DIV1/DIVU1, PLZCW, QFSRV) - those
+         * safely fall through translate_one()'s own `return -1` and the
+         * same fallback path as every other not-yet-supported opcode
+         * project-wide, same safety argument as op==0x12 above. */
+        return 1;
     }
     if (op == 0x00u) {
         uint32_t funct = instr & 0x3Fu;

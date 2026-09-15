@@ -422,6 +422,27 @@ static inline uint32_t enc_lbz(int rD, int rA, int16_t d)
     return (34u << 26) | ((uint32_t)rD << 21) | ((uint32_t)rA << 16) | (uint16_t)d;
 }
 
+/* Round 914 (task #899): lhz/sth rD/rS, d(rA) - the halfword-width
+ * members of the same D-form load/store family as enc_lwz/enc_lbz
+ * (opcode 32) and enc_stw/enc_stb (opcode 36): standard PowerPC
+ * numbering is 32=lwz, 34=lbz, 40=lhz, 36=stw, 38=stb, 44=sth. Needed
+ * for MMI's 16-bit-lane SIMD family (PADDH/PSUBH first, this round) -
+ * lhz zero-extends the loaded halfword into a 32-bit GPR (matching
+ * this dynarec's existing lbz usage, which also zero-extends), and
+ * sth truncates a 32-bit GPR down to its low 16 bits on write - exactly
+ * the semantics needed to reproduce ee_core.c's set_lane_h()'s own
+ * `(uint16_t)(...)` truncating cast without any extra masking
+ * instruction. */
+static inline uint32_t enc_lhz(int rD, int rA, int16_t d)
+{
+    return (40u << 26) | ((uint32_t)rD << 21) | ((uint32_t)rA << 16) | (uint16_t)d;
+}
+
+static inline uint32_t enc_sth(int rS, int rA, int16_t d)
+{
+    return (44u << 26) | ((uint32_t)rS << 21) | ((uint32_t)rA << 16) | (uint16_t)d;
+}
+
 /* Round 894 (task #878): rlwinm rA, rS, SH, MB, ME (M-form) - rotate
  * left rS by SH bits then mask to the contiguous bit range [MB, ME]
  * (PPC bit numbering, MSB=0). Only used here as "rA = rS & 0xF0000000"
@@ -1013,6 +1034,73 @@ static void emit_branch_blend_likely(ppc_codegen_ctx_t *ctx, int32_t disp)
  * as REG_HI/REG_LO - see this header's own endianness note. */
 #define REG_HI1(r)   ((int16_t)(REG_SLOT(r) + 8))
 #define REG_LO1(r)   ((int16_t)(REG_SLOT(r) + 12))
+
+/* Round 914 (task #899): per-lane byte-offset helpers for MMI's SIMD
+ * opcode family, which treats each 128-bit GPR as 4x32-bit / 8x16-bit /
+ * 16x8-bit lanes (ee_core.c's own lane_w/lane_h/lane_b + set_lane_w/
+ * set_lane_h/set_lane_b helpers, ~line 3195). These do a bit-shift
+ * extraction on the plain uint64_t ud0/ud1 fields (e.g. lane_w(r,n) =
+ * (uint32_t)((n<2?r.ud0:r.ud1) >> ((n&1)*32))), which is host-endianness-
+ * independent AT THE VALUE LEVEL - but this dynarec must reproduce the
+ * exact BYTE ADDRESS a real big-endian PPC750/Broadway memory read at
+ * that offset would hit, so the mapping isn't simply "lane order ==
+ * address order". Worked out from REG_HI/REG_LO/REG_HI1/REG_LO1's own
+ * established meaning (REG_HI(r) = high 32 bits of ud0, etc.):
+ *   w-lane 0 = REG_LO(r)   (ud0's low 32 bits = lane_w's n=0 term)
+ *   w-lane 1 = REG_HI(r)   (ud0's high 32 bits = n=1, ud0>>32)
+ *   w-lane 2 = REG_LO1(r)  (ud1's low 32 bits = n=2, ud1>>0)
+ *   w-lane 3 = REG_HI1(r)  (ud1's high 32 bits = n=3, ud1>>32)
+ * Each of those 4-byte words further splits into 2 halfwords / 4 bytes
+ * by big-endian sub-addressing (most-significant sub-field at the
+ * LOWEST address within the word) - e.g. h-lane 0 (ud0 bits 0-15, the
+ * LOW half of the LOW word) sits at the HIGH two bytes of REG_LO(r),
+ * i.e. byte offset REG_LO(r)+2; h-lane 1 (ud0 bits 16-31, the HIGH half
+ * of the low word) sits at REG_LO(r)+0. Every one of the 4/8/16 cases
+ * below was hand-derived the same way and cross-checked against the
+ * bit-shift formulas directly (see this round's STATUS.md writeup for
+ * the full worked derivation) - these are NOT guessed from a pattern,
+ * every lane's offset traces back to a specific bit-range of a specific
+ * ud0/ud1 half. reg/lane are always compile-time-constant instruction
+ * fields when called from codegen, so these compute pure compile-time
+ * displacement constants - zero runtime cost. */
+static int16_t mmi_w_off(int reg, int lane)
+{
+    switch (lane & 3) {
+    case 0:  return REG_LO(reg);
+    case 1:  return REG_HI(reg);
+    case 2:  return REG_LO1(reg);
+    default: return REG_HI1(reg);
+    }
+}
+
+static int16_t mmi_h_off(int reg, int lane)
+{
+    switch (lane & 7) {
+    case 0:  return (int16_t)(REG_LO(reg) + 2);
+    case 1:  return REG_LO(reg);
+    case 2:  return (int16_t)(REG_HI(reg) + 2);
+    case 3:  return REG_HI(reg);
+    case 4:  return (int16_t)(REG_LO1(reg) + 2);
+    case 5:  return REG_LO1(reg);
+    case 6:  return (int16_t)(REG_HI1(reg) + 2);
+    default: return REG_HI1(reg);
+    }
+}
+
+static int16_t mmi_b_off(int reg, int lane)
+{
+    int l = lane & 15;
+    int word_sel = l >> 2;           /* 0=LO,1=HI,2=LO1,3=HI1 */
+    int byte_in_word = 3 - (l & 3);  /* big-endian: sub-lane 0 -> highest byte address */
+    int16_t base;
+    switch (word_sel) {
+    case 0:  base = REG_LO(reg); break;
+    case 1:  base = REG_HI(reg); break;
+    case 2:  base = REG_LO1(reg); break;
+    default: base = REG_HI1(reg); break;
+    }
+    return (int16_t)(base + byte_in_word);
+}
 
 /* Round 902 (task #884): byte offsets of ee_state_t's COP1 (FPU) fields,
  * reached from CTX_REG the same "any ee_state_t field is just a plain
@@ -4436,12 +4524,89 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
         return 0;
     }
 
+    if (op == 0x1Cu && funct == 0x08u) {
+        /* Round 914 (task #899): MMI0 group (op=0x1C/MMI, funct=0x08 is
+         * itself a meta-opcode whose OWN sub-dispatch key is the `sa`
+         * field, bits 10-6 - the "shift amount" position in a normal
+         * R-type MIPS instruction, repurposed here, matching ee_core.c's
+         * own `case 0x08: switch (sa) { ... }` nesting at ~line 9276).
+         * This round covers the 3 add/sub SIMD pairs: PADDW/PSUBW (4x
+         * 32-bit lanes, sa=0x00/0x01), PADDH/PSUBH (8x 16-bit lanes,
+         * sa=0x04/0x05), PADDB/PSUBB (16x 8-bit lanes, sa=0x08/0x09) -
+         * verified against ee_core.c's real case bodies at lines
+         * 9278-9283. Every real case body is byte-for-byte `set_lane_X(
+         * &gpr[rd], n, lane_X(gpr[rs],n) +/- lane_X(gpr[rt],n))` for
+         * n across the lane count, guarded by `if (rd)` - real hardware
+         * discards writes to $zero, same compile-time-resolved guard
+         * this whole file uses everywhere else. No saturation, no
+         * overflow detection - plain wraparound add/sub, matching the
+         * interpreter's plain C `+`/`-` on the unsigned lane types
+         * exactly (uint32_t/uint16_t/uint8_t, so C's usual arithmetic
+         * already wraps the same way real hardness does).
+         *
+         * Byte-lane addressing is the interesting part here (see
+         * mmi_w_off/mmi_h_off/mmi_b_off's own comment for the full
+         * derivation) - once those helpers give the right compile-time
+         * offset per lane, the codegen itself is a plain load-add/sub-
+         * store loop with no new arithmetic idioms. lhz/sth (opcodes
+         * 40/44) are the only new PPC750 instruction forms this round
+         * introduces - lwz/stw/lbz/stb/add/subf were all already
+         * established. subf's `rT = rB - rA` calling convention (see
+         * SUBU's own comment, Round 887) computes rs-rt via
+         * enc_subf(SCRATCH_A, SCRATCH_B, SCRATCH_A): SCRATCH_A already
+         * holds rs (rB, minuend) when this executes, SCRATCH_B holds rt
+         * (rA, subtrahend). lhz/lbz zero-extend on load and sth/stb
+         * truncate on store, so no separate masking instruction is
+         * needed to reproduce set_lane_h/set_lane_b's own truncating
+         * cast - the store width does that for free. */
+        if (sa == 0x00u || sa == 0x01u) { /* PADDW / PSUBW: 4x 32-bit lanes */
+            for (int lane = 0; lane < 4; lane++) {
+                emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, mmi_w_off((int)rs, lane)));
+                emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, mmi_w_off((int)rt, lane)));
+                if (sa == 0x00u)
+                    emit(ctx, enc_add(SCRATCH_A, SCRATCH_A, SCRATCH_B));
+                else
+                    emit(ctx, enc_subf(SCRATCH_A, SCRATCH_B, SCRATCH_A)); /* rs - rt */
+                if (rd != 0)
+                    emit(ctx, enc_stw(SCRATCH_A, CTX_REG, mmi_w_off((int)rd, lane)));
+            }
+            return 0;
+        }
+        if (sa == 0x04u || sa == 0x05u) { /* PADDH / PSUBH: 8x 16-bit lanes */
+            for (int lane = 0; lane < 8; lane++) {
+                emit(ctx, enc_lhz(SCRATCH_A, CTX_REG, mmi_h_off((int)rs, lane)));
+                emit(ctx, enc_lhz(SCRATCH_B, CTX_REG, mmi_h_off((int)rt, lane)));
+                if (sa == 0x04u)
+                    emit(ctx, enc_add(SCRATCH_A, SCRATCH_A, SCRATCH_B));
+                else
+                    emit(ctx, enc_subf(SCRATCH_A, SCRATCH_B, SCRATCH_A));
+                if (rd != 0)
+                    emit(ctx, enc_sth(SCRATCH_A, CTX_REG, mmi_h_off((int)rd, lane)));
+            }
+            return 0;
+        }
+        if (sa == 0x08u || sa == 0x09u) { /* PADDB / PSUBB: 16x 8-bit lanes */
+            for (int lane = 0; lane < 16; lane++) {
+                emit(ctx, enc_lbz(SCRATCH_A, CTX_REG, mmi_b_off((int)rs, lane)));
+                emit(ctx, enc_lbz(SCRATCH_B, CTX_REG, mmi_b_off((int)rt, lane)));
+                if (sa == 0x08u)
+                    emit(ctx, enc_add(SCRATCH_A, SCRATCH_A, SCRATCH_B));
+                else
+                    emit(ctx, enc_subf(SCRATCH_A, SCRATCH_B, SCRATCH_A));
+                if (rd != 0)
+                    emit(ctx, enc_stb(SCRATCH_A, CTX_REG, mmi_b_off((int)rd, lane)));
+            }
+            return 0;
+        }
+        return -1; /* other MMI0 sub-opcodes (PCGTW/PMAXW/PEXTLW/... etc): not yet JIT-compiled */
+    }
+
     /* Unsupported: remaining REGIMM sub-opcodes (BLTZAL/BGEZAL/-ALL,
-     * trap instructions), MMI, COP1/2, everything else. Every base
-     * conditional/unconditional MIPS branch/jump opcode this project's
-     * boot traces are known to exercise is now handled: J/JAL/JR/JALR,
-     * BEQ/BNE/BLEZ/BGTZ/BLTZ/BGEZ, and their six "likely" counterparts
-     * (BEQL/BNEL/BLEZL/BGTZL/BLTZL/BGEZL). */
+     * trap instructions), the rest of MMI, COP1/2, everything else.
+     * Every base conditional/unconditional MIPS branch/jump opcode this
+     * project's boot traces are known to exercise is now handled:
+     * J/JAL/JR/JALR, BEQ/BNE/BLEZ/BGTZ/BLTZ/BGEZ, and their six
+     * "likely" counterparts (BEQL/BNEL/BLEZL/BGTZL/BLTZL/BGEZL). */
     return -1;
 }
 

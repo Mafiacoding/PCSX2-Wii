@@ -39730,3 +39730,96 @@ gap) and stays deferred pending that separate interpreter work - it
 is noted here so the gap isn't lost, but does not block closing out
 task #885's JIT scope. Next: task #886 (Round 914+: JIT the MMI
 opcode family).
+
+## Round 914: JIT MMI0 add/sub SIMD family - PADDW/PSUBW/PADDH/PSUBH/PADDB/PSUBB (task #899, opens task #886)
+
+Implemented MMI0's add/sub SIMD family in `source/core/recompiler/
+ppc_dynarec.c`'s new `op == 0x1Cu && funct == 0x08u` block, the first
+code in this file to touch the MMI (SPECIAL2, op=0x1C) opcode space at
+all. MMI's own `funct` field (bits 5-0) selects among direct opcodes
+(MADD/MADDU/PLZCW/MFHI1/etc.) and four meta-groups - MMI0 (funct=
+0x08), MMI1 (0x09), MMI2 (0x28), MMI3 (0x29) - each of which re-uses
+the `sa` field (bits 10-6, the shift-amount position in a normal
+R-type MIPS instruction) as ITS OWN sub-opcode selector. Verified
+against ee_core.c's real nested `case 0x08: switch (sa) { ... }`
+dispatch (lines 9276-9283) before writing any codegen: PADDW(sa=0x00)/
+PSUBW(0x01) operate on 4x32-bit lanes, PADDH(0x04)/PSUBH(0x05) on
+8x16-bit lanes, PADDB(0x08)/PSUBB(0x09) on 16x8-bit lanes. Every case
+body is byte-for-byte `set_lane_X(&gpr[rd], n, lane_X(gpr[rs],n) +/-
+lane_X(gpr[rt],n))` for n across the lane count, guarded by the usual
+compile-time-resolved `if (rd)` (real hardware discards writes to
+$zero). No saturation or overflow detection - plain wraparound
+add/sub, matching the interpreter's plain C `+`/`-` on unsigned lane
+types (uint32_t/uint16_t/uint8_t) exactly, since C's usual arithmetic
+already wraps the same way real hardware does.
+
+The real work this round was byte-offset derivation, not arithmetic.
+ee_core.c's lane_w/lane_h/lane_b helpers do value-level bit-shift
+extraction on the plain uint64_t ud0/ud1 fields, which is host-
+endianness-independent AT THE VALUE LEVEL - but this dynarec needs the
+exact BYTE ADDRESS a real big-endian PPC750/Broadway memory access at
+that offset would hit, and the mapping is NOT simply "lane order ==
+address order". Worked out from REG_HI/REG_LO/REG_HI1/REG_LO1's
+already-established meaning: w-lane 0 = REG_LO(r), w-lane 1 =
+REG_HI(r), w-lane 2 = REG_LO1(r), w-lane 3 = REG_HI1(r) - each of
+those 4-byte words further splits into 2 halfwords / 4 bytes by big-
+endian sub-addressing (most-significant sub-field at the LOWEST
+address within the word). New helper functions `mmi_w_off()`/
+`mmi_h_off()`/`mmi_b_off()` encode this mapping as three small
+compile-time offset-lookup functions (reg/lane are always compile-
+time-constant instruction fields when called from codegen, so these
+compute pure compile-time displacement constants - zero runtime
+cost). Every one of the 4/8/16 per-function cases was hand-derived
+from the bit-shift formulas directly, not guessed from a pattern - see
+the functions' own long derivation comment in ppc_dynarec.c for the
+full worked-out offsets.
+
+Two new PPC750 instruction forms this round: `enc_lhz`/`enc_sth`
+(opcodes 40/44), the halfword-width members of the existing lwz/lbz/
+stw/stb D-form load/store family this file already had. lhz zero-
+extends the loaded halfword into a 32-bit GPR on load and sth
+truncates a 32-bit GPR down to its low 16 bits on write - exactly
+enough to reproduce set_lane_h's own `(uint16_t)(...)` truncating cast
+with no separate masking instruction needed. lwz/stw/lbz/stb/add/subf
+were all already established elsewhere in this file; subf's `rT = rB
+- rA` calling convention (established by SUBU, Round 887/888)
+computes rs-rt via `enc_subf(SCRATCH_A, SCRATCH_B, SCRATCH_A)` the
+exact same way SUBU's own codegen already does.
+
+New host-native harness `r914_mmi0_paddsub_verify.c` extends
+r904_cop1_div_verify.c's ppcsim base with THREE new decode additions:
+lhz, sth, and opcode 31's plain `add` (xo10=266) and `subf` (xo10=40)
+forms - the first harness in this project's entire VU0/MMI JIT arc
+(Rounds 907-914) to need integer add/subf at all, since every prior
+round in that arc only ever needed float ops or bitwise/shift ops.
+8 test cases: PADDW/PSUBW/PADDH/PSUBH/PADDB/PSUBB each cross-checked
+against an independent reference model built directly from ee_core.c's
+own lane_w/lane_h/lane_b/set_lane_w/set_lane_h/set_lane_b bit-shift
+formulas transcribed verbatim into the harness (NOT derived from this
+dynarec's own mmi_w_off/mmi_h_off/mmi_b_off offset logic - a genuine
+independent cross-check), covering both plain arithmetic and
+wraparound/overflow cases at each lane width; plus an rd==0 write-
+discard case and an rs==rt self-add case specifically chosen to catch
+any lane-aliasing bug the byte-offset derivation might have introduced
+(none found). 8/8 checks passed under -fsanitize=address,undefined,
+0 leaks - no bugs found, no fixes needed before shipping.
+
+Regression-checked against all 10 still-present prior harnesses
+(r893/894/895/896/897/898/900/902/903/904: 13/13, 17/17, 19/19,
+35/35, 19/19, 27/27, 25/25, 20/20, 12/12, 13/13) - no regressions, no
+compile warnings. (The op==0x1C MMI block is structurally isolated
+from every prior opcode's own `if (op == ...)` branch, so no overlap
+risk was expected or found.)
+
+Wii build: pcsx2-wii.elf 3,297,196 bytes / .dol 549,984 bytes (+8,608
+elf / +352 dol over Round 913b), 0 warnings/errors (devkitPPC 8.1.0).
+
+Status: task #899 (Round 914) CLOSED - MMI0's add/sub SIMD family is
+JIT'd. task #886 (the MMI sibling of the now-closed COP2/VU0 umbrella,
+task #885) is now open and in progress: MMI0 itself still has PCGTW/
+PMAXW/PCGTH/PMAXH/PCGTB/PEXTLW/PPACW/etc. beyond this round's 6
+opcodes, and MMI1/MMI2/MMI3 (the other three funct=0x09/0x28/0x29
+meta-groups) plus the top-level MADD/MADDU/PLZCW/MFHI1/MTHI1/MFLO1/
+MTLO1/MULT1/MULTU1/DIV1/DIVU1/etc. opcodes remain entirely
+unaddressed. Next: task #900 (Round 915: JIT MMI multiply-divide
+family - PMULTH/PMULTW/PDIVW/PDIVBW).

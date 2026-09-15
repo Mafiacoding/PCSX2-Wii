@@ -682,6 +682,62 @@
  * gap (not a JIT gap) and stays deferred pending that interpreter
  * work - noted here so the gap isn't lost, not treated as blocking.
  * Next: task #886 (Round 914+: JIT the MMI opcode family).
+ *
+ * Round 914 (task #899, task #886 start) update: JIT'd MMI0's add/sub
+ * SIMD family - PADDW/PSUBW (4x32-bit lanes), PADDH/PSUBH (8x16-bit
+ * lanes), PADDB/PSUBB (16x8-bit lanes). MMI is op=0x1C with funct=0x08
+ * itself a meta-opcode ("MMI0") whose real sub-dispatch key is the `sa`
+ * field (bits 10-6, the shift-amount position in a normal R-type MIPS
+ * instruction) - verified against ee_core.c's real nested `case 0x08:
+ * switch (sa)` dispatch (~line 9276-9283) before writing any codegen.
+ * Every case body is byte-for-byte `set_lane_X(&gpr[rd], n, lane_X(
+ * gpr[rs],n) +/- lane_X(gpr[rt],n))`, guarded by the usual compile-
+ * time-resolved `if (rd)`, with plain unsigned wraparound (no
+ * saturation) - ee_core.c's own lane_w/lane_h/lane_b/set_lane_*
+ * helpers already do this via C's ordinary unsigned arithmetic on
+ * uint32_t/uint16_t/uint8_t.
+ *
+ * The real work this round was byte-offset derivation, not arithmetic:
+ * ee_core.c's lane accessors do value-level bit-shifts on the plain
+ * uint64_t ud0/ud1 fields, which is host-endianness-independent AT THE
+ * VALUE LEVEL, but this dynarec needs the exact BYTE ADDRESS a real
+ * big-endian PPC750/Broadway memory access at that offset would hit -
+ * and the mapping is NOT simply "lane order == address order" (see
+ * the new mmi_w_off()/mmi_h_off()/mmi_b_off() helpers' own long
+ * derivation comment for the full worked-out byte offsets). Every
+ * offset was hand-derived from REG_HI/REG_LO/REG_HI1/REG_LO1's already-
+ * established meaning, not guessed from a pattern.
+ *
+ * Two new PPC750 instruction forms: enc_lhz/enc_sth (opcodes 40/44,
+ * the halfword members of the existing lwz/lbz/stw/stb D-form load/
+ * store family) - lhz zero-extends on load and sth truncates on store,
+ * so set_lane_h's own `(uint16_t)(...)` truncating cast needs no
+ * separate masking instruction. lwz/stw/lbz/stb/add/subf were all
+ * already established; subf's `rT=rB-rA` calling convention (from
+ * SUBU, Round 887) computes rs-rt the same way SUBU's own codegen
+ * already does.
+ *
+ * New host-native harness r914_mmi0_paddsub_verify.c extends r904's
+ * ppcsim base with THREE new decode additions (lhz/sth, plus opcode
+ * 31's plain `add`/xo266 and `subf`/xo40 forms - the first VU0/MMI-arc
+ * harness needing integer add/subf at all, since every prior round in
+ * this arc only ever needed float ops or bitwise/shift ops). 8/8
+ * checks passed under -fsanitize=address,undefined, 0 leaks: PADDW/
+ * PSUBW/PADDH/PSUBH/PADDB/PSUBB each cross-checked against an
+ * independent reference model using ee_core.c's own lane_w/lane_h/
+ * lane_b/set_lane_* bit-shift formulas (not this dynarec's own offset
+ * logic), plus rd==0 write-discard and an rs==rt self-add case
+ * specifically to catch any lane-aliasing bug in the offset
+ * derivation.
+ *
+ * Status: task #899 (Round 914) CLOSED - MMI0's add/sub SIMD family is
+ * JIT'd. task #886 (COP2/VU0's MMI sibling umbrella) is now open and
+ * in progress: MMI0 still has PCGTW/PMAXW/PCGTH/PMAXH/PCGTB/PEXTLW/
+ * PPACW/etc. beyond this round's 6 opcodes, and MMI1/MMI2/MMI3 (the
+ * other three funct=0x09/0x28/0x29 meta-groups) plus the top-level
+ * MADD/MADDU/PLZCW/MFHI1/MTHI1/MFLO1/MTLO1/MULT1/MULTU1/etc. opcodes
+ * remain entirely unaddressed. Next: task #900 (Round 915: JIT MMI
+ * multiply-divide family).
  */
 
 typedef struct {

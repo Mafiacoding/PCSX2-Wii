@@ -41617,3 +41617,85 @@ window (dozens of COP2/VU0/MMI/etc suites, all "0 check(s) failed").
 Next round: catch GT3's real, organic SIF0 send (not a forced one) to
 get ground truth on the priority-bitmap-vs-missing-sink question, then
 implement whichever real fix (or both) the evidence supports.
+
+## Round 934 (task #919 continuation, per user's "start the fix even if it takes more rounds" instruction)
+
+**Goal:** catch GT3's REAL, organic SIF-send/dispatch activity (not a forced/instrumented
+one) to resolve Round 933's open question: does the stall sit at the missing-DMA_CHANNEL_SIF0-sink
+gap, at the priority-bitmap gate, or somewhere else entirely?
+
+**Method.** Rather than a multi-billion-instruction cold-boot re-run, checked all locally
+persisted GT3 checkpoints (`checkpoints/gt3_round817/818/825/826/861*.ckpt`, all far
+earlier - 58M to 1.17B instructions - than the Round-931 checkpoint's 4.56B) for the exact
+memory state Round 932/933 tracked (`*(0x80020000+0x4054)` status byte, `*(0x80020000+0x3D60)`
+"priority bitmap", `*(0x80020000+0x4448)` busy flag). All of round817 through round861 read
+**zero** for all three fields - none of them are inside the retry loop yet. Only the
+Round-931 checkpoint (4.56B instructions) shows the stuck state (`0x4054=0x24`,
+`0x3D60=0x230`). So no earlier "pre-stall" checkpoint exists locally; instead, resumed
+directly from the Round-931 checkpoint itself and let it run **forward, organically, with
+zero forcing**, for 24M more instructions (`system_run_interleaved`-based driver,
+`/tmp/r934_organic_trace.c`), with both Round 933 trace macros
+(`R933_RPCCALL_TRACE`/`R933_DMA_KICK_TRACE`) compiled in.
+
+**Result - corrects Round 933's "priority bitmap empty" hypothesis.** Register capture at
+load time already showed the checkpoint frozen *mid-instruction* inside the real dispatcher
+(pc=0x8000FA58, $a1=0x80023d90, $a0=0x80023d60 = the bitmap address, $a1=0x00000230 = the
+bitmap value freshly loaded) - i.e. the organic run reaches this code with the bitmap
+**non-empty**, contradicting Round 933's forced-experiment finding that the bitmap read as
+empty. Over the following 24M organic instructions:
+
+- The real per-tick dispatcher `0x8000FBA0` (checks `a0 & 0x40000000`, called with
+  `a0` = the *debounced* value of the real hardware register **SIF_SMFLAG** (0x1000F230,
+  read via 0x8000FA10's read-read-compare debounce loop) is invoked **41,096 times**.
+  The branch `beq v0,zero,0x8000FBE8` (taken when bit 30 of SMFLAG is clear) fires on
+  **all 41,096** invocations - the fall-through path (`0x8000FBBC` onward, which reads
+  `*(0x80023EF8)` and eventually calls `0x8000FAF0`, the function that actually programs
+  real DMAC channel registers at base 0x1000C800 = **SIF2**, not SIF0: MADR/QWC/CHCR=0x100
+  kick) is **never once reached** (0 hits for every address from 0x8000FBBC through
+  0x8000FB7C across the whole 24M-instruction window; 0 `R933DMA` trace lines; 0
+  `R933EVT` trace lines).
+- So: GT3's real, organic BIOS-side SIF-cmd dispatcher is blocked because bit 30
+  (`0x40000000`) of the real EE-side `SIF_SMFLAG` register is never set, not because of an
+  empty priority bitmap (Round 933's forced-resend test reached that gate as an artifact of
+  the forcing itself, not the real condition) and not (yet evidenced) because of the missing
+  `DMA_CHANNEL_SIF0` sink - the DMA kick that gap would affect is never even attempted here,
+  because this specific dispatch path targets **SIF2** (0x1000C800), a different channel,
+  and the code never gets far enough to reach it anyway.
+- Cross-checked against real ps2sdk (`iop/include/sifman.h`, uploaded source): the only
+  three documented `SIF_STAT_*` bits are `SIFINIT=0x10000`, `CMDINIT=0x20000`,
+  `BOOTEND=0x40000` (bits 16/17/18) - **none of these is bit 30**. Bit 30 is not part of
+  the public ps2sdk SIF status-flag vocabulary; it's most likely a Sony-internal BIOS-only
+  convention specific to this (larger, more complete) real SIF-cmd implementation, which is
+  visibly more elaborate than the homebrew ps2sdk reimplementation.
+- This project's own `include/core/hw/sif.h` already self-documents the relevant
+  architecture gap in its own header comment (written in an earlier round, re-confirmed
+  correct here): "iop_core.c isn't wired to a shared MMIO bus yet... nothing currently
+  writes this from the IOP side" - **partially stale**: `sif_iop_mmio_write32()` **is**
+  wired into `iop_core.c`'s memory-write dispatch (line 330) and **is** used
+  (`source/hw/iop_module_loader.c:1311-1312` ORs in `SIF_STAT_SIFINIT` through it), so the
+  IOP-side path to SMFLAG exists and partially works - it just never has a reason to set bit
+  30, because no code (real or HLE) in this tree currently does so.
+
+**New, currently unresolved anomaly.** Dumping real IOP RAM at the checkpoint's actual IOP
+pc (0x00155B40, taken directly from checkpoint load, confirmed via a new scratch tool
+`/tmp/r934_iop_dump.c`) lands inside what looks like a **string/data table**, not code (the
+preceding word at 0x00155B20 decodes as the ASCII bytes "Sync", and the region is preceded
+by two back-to-back unconditional `j` instructions with no intervening valid code path).
+This is either a genuine wild-IOP-pc bug, a artifact of MIPS-I literal-pool-style data
+embedded between real functions (normal on this architecture), or evidence our IOP is
+executing a location it shouldn't be. Not yet resolved - flagged as the concrete next-round
+target below.
+
+**Explicitly not done this round:** no source change. This was a pure, organic (unforced)
+investigation round; both mandatory-workflow gates that require a source diff (regression
+suite re-run, Wii cross-build) are correctly skipped per this project's own established
+convention for docs-only investigation rounds - `git status --short` is clean.
+
+**Next round's concrete target:** disassemble the real IOP code around 0x00155A00-0x00155E00
+properly (the EE-oriented disassembler used here mis-decodes at least one MIPS-I-vs-EE
+opcode-space collision - e.g. it labels 0x18 as EE's `daddi`, which doesn't exist on the
+R3000 IOP, so its "tge" decode at 0x00155B40 needs independent verification against a
+correct MIPS-I-only opcode table) to determine whether the IOP is genuinely executing valid
+code there (in which case identify what it's doing and why it never proceeds to set SMFLAG
+bit 30) or whether this is a genuine wild-jump/corruption bug in this project's IOP
+core/module loader.

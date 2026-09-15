@@ -40773,3 +40773,58 @@ JIT opcode family shows zero correctness divergence from the real
 interpreter across ~392M real, boot-encountered instructions. The
 on-target Dolphin/hardware half (Round 924) is still awaiting the
 user's own test results.
+
+## Round 924 result (user-reported): JIT-on vs JIT-off, real Dolphin x64
+
+The user loaded both `pcsx2-wii-jit-on.dol` and `pcsx2-wii-jit-off.dol`
+(Round 924's pair, identical tree/commit except for the
+`PCSX2WII_JIT_DISABLE` toggle) in Dolphin x64 and reported: **"both
+run fine on dolphin x64 without any breaks."**
+
+**Why this matters.** Dolphin executes the `.dol`'s PPC750 code for
+real - it is a genuine Wii/GameCube CPU emulator, not a simulator this
+project wrote. Everything before this moment (Rounds 887-924b) only
+ever showed that the JIT's generated PPC750 bytes were well-formed by
+this project's own standards: clean devkitPPC compiles, and two
+different host-native simulators (a general one since Round 886, and
+Round 924b's dual-execution diff against the real interpreter)
+agreeing with the emitted encoding. None of that touched a real PPC
+execution engine. This is the first time the JIT's actual output has
+been fed to an independent, real PPC-executing target. A crash, hang,
+or illegal-instruction trap in the JIT-on build (with the JIT-off
+build still running fine) would have been concrete, previously-
+undetectable-by-simulation evidence of a codegen bug. That didn't
+happen.
+
+**What this confirms.** Across whatever portion of the boot process
+Dolphin reached for both builds, the JIT-enabled `.dol` did not crash,
+hang, or otherwise "break" relative to the JIT-disabled baseline. Per
+Round 923's coverage survey, the diskless BIOS boot's JIT-eligible
+instruction stream is >99% covered by the ALU/shift/immediate,
+load/store, branch, and other implemented families - so this is a
+real, if coarse-grained (crash/no-crash, not pixel-exact comparison),
+positive signal across the JIT's actual working set, not just the
+narrow slice Round 924b dual-checked.
+
+**What this does NOT confirm.** The user's report is a "no breaks"
+outcome, not a frame-by-frame visual diff - it doesn't rule out subtly
+wrong-but-not-crashing computation (e.g. a register ending up with a
+slightly wrong value that never manifests as a visible glitch in
+whatever the boot animation looks like). Round 924b's dual-execution
+harness remains the stronger, register-exact check, but it only covers
+one opcode family (887-899) so far.
+
+**Answer to "is the JIT working on Gekko hardware?", updated.** Prior
+answer (Round 923 writeup) was "unknown - never actually tested on
+target." That is no longer accurate. As of this result: the JIT has
+now run for real on an independent PPC-executing target (Dolphin x64)
+across a real boot, produced no crash/hang/divergence-from-baseline,
+and (for the one opcode family checked register-exactly so far) shows
+zero computational divergence from the interpreter across ~392M real
+instructions. This is genuine, if not yet exhaustive, evidence the JIT
+is working, not just "compiles cleanly."
+
+Status: task #913 continues - both halves of the user's "prep both"
+request are now answered with real positive results. No tracked
+source changed this round (user-reported test result, documentation
+only) - regression suite and Wii cross-build correctly skipped.

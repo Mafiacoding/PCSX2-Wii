@@ -40958,3 +40958,102 @@ disc-boot paths reconfirmed to hit their known early walls, unchanged
 from prior documented findings, with the specific methodology gap
 (plain instruction-counter checks miss Round 862's "not really stuck"
 activity) now noted for the next round to work around.
+
+## Round 926 (task #887, user-requested): SD card deliverable for GT3 disc-boot testing - sandbox bandwidth limitation found, delivered as instructions instead
+
+**User request.** Following Round 925's recommendation that a real
+disc image reaches GS-display milestones much faster than the
+diskless path, the user asked for an SD card image/folder containing
+their uploaded GT3 ISO so they could try disc-boot on Dolphin
+directly, in the exact layout `main.c`'s own disc-mount logic expects
+(confirmed by source inspection, `source/main.c:442-455`):
+`sd:/pcsx2/games/game.bin` tried first, then `sd:/pcsx2/games/game.iso`
+as fallback (same convention as the existing BIOS search path
+`sd:/pcsx2/bios/SCPH39001.bin` / `SCPH10000.bin` / `bios.bin`).
+
+**What was attempted.** A `pcsx2/games/` folder structure was created
+under this session's outputs mount and a direct copy of the user's
+uploaded 3,687,022,592-byte GT3 ISO (read-only `uploads` mount) into
+it was attempted via `cp`, then two `rsync` resume strategies
+(`--append-verify`, then `--inplace --append-verify`) after the first
+`cp` was killed by the sandbox's ~170-178s per-call wall-clock cap
+partway through.
+
+**Root cause found this round.** Two independent, deliberate
+bandwidth/permission probes established that this is fundamentally a
+sandbox infrastructure limit, not a bug in the copy strategy:
+
+1. `dd if=<uploads ISO> of=/dev/null bs=16M count=32` (512MB) measured
+   ~205 MB/s real read throughput from the read-only `uploads` mount -
+   fast, not the bottleneck.
+2. `dd if=/dev/zero of=<outputs mount>/writetest.bin bs=16M count=32`
+   (512MB, brand-new never-before-written file) measured a hard-capped
+   ~6.9-7.0 MB/s write throughput to the `outputs` mount, regardless of
+   block size - consistent across the whole 512MB test, so this is a
+   sustained rate limit on the mount itself, not a transient/startup
+   effect.
+3. Separately, `dd ... conv=notrunc` (and both rsync strategies before
+   it) confirmed that re-opening ANY existing file already written to
+   the `outputs` mount - even one left mid-write by a killed/timed-out
+   `cp`, i.e. never explicitly "finalized" - fails immediately with
+   `Permission denied (13)` on `open()`. This is the same write-once
+   restriction documented for delete/rename, extended to re-open-for-
+   append/write as well.
+
+Combining (2) and (3): at ~7 MB/s, the full 3.69GB ISO would need
+~527 seconds of continuous, uninterrupted write - far beyond any
+single tool call's ~170-178s cap - and (3) rules out resuming a
+partial write across multiple calls. There is therefore no way to
+deliver a file this large into the `outputs` mount from within this
+sandbox session; this is a hard infrastructure ceiling, not something
+a different copy tool or flag combination can work around.
+
+**Resolution - delivered as instructions instead of a file copy.**
+Since the user already has the GT3 ISO on their own machine (it was
+uploaded from there), the actual gap is not the ISO itself but the
+`pcsx2/games/` folder layout `main.c` expects. The practical fix is
+for the user to build that folder structure directly on their own
+computer (trivial - create one folder, copy/rename one existing file)
+and point Dolphin's SD Card "Folder" mode at it, rather than routing
+the multi-gigabyte disc image through this sandbox at all:
+
+1. Create a folder anywhere on their PC, e.g. `gt3-sd-card/`.
+2. Inside it, create `pcsx2/games/`.
+3. Copy their GT3 ISO into that folder, named exactly `game.iso`
+   (or `game.bin` if they prefer - both are checked).
+4. In Dolphin: SD card settings -> enable SD card -> set type to
+   "Folder" (not a raw `.raw`/`.img` file) -> browse to the
+   `gt3-sd-card` folder created in step 1.
+5. Launch the existing Round 924 pcsx2-wii Dolphin build as usual;
+   `main.c`'s existing disc-mount logic will find and mount the ISO
+   automatically at `sd:/pcsx2/games/game.iso`.
+
+This sidesteps the mtools/root/loop-mount limitations found earlier
+this session (no raw FAT32 `.img` needs to be built at all - Dolphin's
+folder-backed virtual SD card reads a real host directory directly)
+and the newly-found `outputs`-mount bandwidth ceiling documented above.
+
+**Leftover partial files (harmless, non-blocking).** Three incomplete
+files remain in `outputs/gt3-sd-card/pcsx2/games/` from the failed
+transfer attempts (`game.iso` at 1,151,148,032 bytes, `game2.iso` at
+1,127,485,440 bytes, `writetest.bin` at 536,870,912 bytes) - these
+cannot be deleted per this session's file-handling rules (`outputs`
+files are write-once/no-delete) and are harmless clutter, not used by
+anything; the user does not need this folder at all given the
+instructions above.
+
+**Classification and mandatory workflow scoping.** This is an
+infrastructure-diagnosis round, not a source-code round - no
+`pcsx2-wii` source file was touched, so host-native regression suite
+and Wii cross-build are correctly skipped. Documenting here per
+standing project convention (STATUS.md is the record of every round's
+investigation, including negative/infrastructure findings) and so the
+project itself doesn't repeat this exact large-file-transfer attempt
+in a future round.
+
+Status: task #887 (GS display wiring / GT3 progress) - user-requested
+SD-card deliverable resolved via folder-structure instructions rather
+than an in-sandbox file copy; Round 925's underlying "why no GS
+output" investigation (PMODE-gate finding, GT3/Tekken disc-boot walls)
+remains the substantive open thread for the next round to continue
+once the user has tried the disc-boot path themselves.

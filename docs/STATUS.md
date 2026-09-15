@@ -41160,3 +41160,96 @@ load + RAM dump + offline disassembly). Regression suite and Wii
 cross-build correctly skipped. Scratch tools
 (`/tmp/r927_gt3_freeze_trace.c`) not committed, per this project's
 scratch-tool convention.
+
+## Round 928-929 (task #887): diskless-boot and disc-boot blockers are TWO SEPARATE problems, not one unified cause - and the SIF-RPC poll's caller resolves to one shared 0x80020000-based kernel table
+
+Continuing directly from Round 927, per the user's request to keep
+digging into the real BIOS disassembly for the root cause blocking
+DISP1/DISP2 on both paths.
+
+**Round 928 - tested the "one unified root cause" hypothesis, found it
+false.** Built `/tmp/r928_diskless_check.c` to check whether the
+diskless BIOS boot (checkpoint `/tmp/r925_bios.ckpt`, 1,055,999,045
+instructions, Round 925) ever reaches the same `pc=0x8000FD6C/0x8000FD74`
+SIF-RPC poll the GT3 disc-boot freezes at (Round 884/927). Ran it
+640,000,000 further instructions (to 1,695,999,045 total) with
+fine-grained sampling. **Result: never reached.** The diskless path
+instead cycles indefinitely through a completely different, separately
+well-documented address range (`0x8000cc6c-0x8000d010` and
+`0x8000f76c-0x8000f874`) - this is the long-established real OSDSYS
+idle/animation-dispatch loop this project has characterized many times
+before (Rounds 269-272, 424, 429, 528-529, 594-622 among others).
+PMODE stayed `0x00` throughout. **Correction to this round's own
+working hypothesis**: the disc-boot SIF-RPC freeze and the diskless
+idle-loop plateau are two distinct blockers in two different code
+regions, not one shared root cause - diskless boot never even attempts
+the SIF-RPC exchange the disc-boot path gets stuck waiting on, since
+it has no disc to talk to CDVD about in the first place. Both remain
+open, but must be tracked (and eventually fixed) separately.
+
+**Round 929 - captured the SIF-RPC poll's real register state at the
+moment of the call (not a stale snapshot from elsewhere).** Round
+927's register dump was taken at the checkpoint's raw load-time pc
+(`0x0000023c`, mid an unrelated code path), not at the actual call
+site - registers there don't reflect what the SIF-RPC function's
+pointers really hold. Fixed by running exactly the same one
+`system_run_interleaved(50)` step Round 927 already showed reaches
+`pc=0x8000FD6C`, then reading registers at that exact point:
+
+```
+s0 = s4 = s5 = s7 = fp(s8) = 0x80020000   (identical value in all five!)
+-> s0+0x4030 = 0x80024030
+-> s5+0x4038 = 0x80024038
+-> s4+0x4044 = 0x80024044
+-> s7+0x4054 = 0x80024054
+-> fp+0x4058 = 0x80024058
+```
+
+This corrects Round 927's working assumption that `s0/s4/s5/s7` were
+separate per-channel pointers - **they're all the SAME base pointer**
+(`0x80020000`), and the four/five fields Round 927's disassembly found
+being checked (`+0x4030/+0x4038/+0x4044/+0x4054/+0x4058`) are all
+different fields of ONE shared kernel structure, roughly 16KB into a
+table based at `0x80020000`. Cross-referenced against this project's
+own established `0x00200000`/`0x80020000`-area citations (Round 274's
+OSDSYS-module-load-base, Round 867's decompressor output base) - this
+confirms the SIF-RPC function's channel-state checks live in the same
+general kernel/OSDSYS data region this project has touched many times
+before, strengthening the "real BIOS SIF client code" identification
+from Round 927.
+
+**Important negative result carried forward**: none of these
+`0x80024030-0x80024058` fields are anywhere near the poll's actual
+target address (`0x0000F000`/`0xB000F000`, physical, per Round
+884/927) - so the fields Round 927 found being checked are NOT the
+same data as what the freeze polls. Grepped tracked source (`source/hw/`,
+`source/core/`) for any handling of `0xF000`/`0xE010`-style physical
+addresses: **none found**, confirming (again) that nothing in this
+project's own C code treats that address specially - it is plain EE
+RAM in our model, matching real EE hardware (real SIF/DMA MMIO lives
+at physical `0x1000F200+`/`0x10008000+`, nowhere near `0x0000F000`).
+Also checked the incorporated real `ps2sdk/sifrpc.c` and
+`ee/kernel/src/iopcontrol.c` reference sources (Round 395/491
+citations) for a matching low-RAM mailbox/queue constant - no direct
+`0xF000`-literal match found in the excerpted regions checked this
+round (not an exhaustive full-file search - flagged as unresolved, not
+ruled out).
+
+**Current synthesis for the next round**: the real BIOS's own SIF-RPC
+send/receive code (identified via genuine debug strings, Round 927)
+unconditionally polls a hardcoded literal address (`0xB000F000`,
+embedded directly as `lui/ori` immediates in the ROM - not computed
+from a variable base, so this is deliberate real-hardware BIOS design,
+not something our code could have miscalculated) that currently just
+holds leftover code bytes in our model. The two open threads worth
+pursuing next: (1) full, systematic search of the real BIOS ROM/kernel
+disassembly for any `lui X,0xB000` / `ori X,X,0xF0xx`-style code that
+WRITES (not reads) near this address, to find the intended real
+producer; (2) full-file (not excerpt) search of the incorporated
+`ps2sdk` reference sources for the SIF driver's actual in-RAM
+mailbox/queue struct layout, to check whether `0x0000F000` corresponds
+to a named, documented field rather than being unexplained.
+
+No source changed this round - purely diagnostic. Regression suite and
+Wii cross-build correctly skipped. Scratch tools (`/tmp/r928_diskless_check.c`,
+`/tmp/r929c_regcapture.c`) not committed, per convention.

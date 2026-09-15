@@ -9,6 +9,9 @@
 
 #include "core/hw/dma.h"
 #include <string.h>
+#ifdef R933_DMA_KICK_TRACE
+#include <stdio.h>
+#endif
 
 static dma_state_t g_dma;
 static uint8_t *g_ee_ram = NULL;
@@ -192,6 +195,10 @@ void dma_channel_kick(int channel)
     }
 
     uint32_t mod = (ch->chcr >> 2) & 0x3u;
+#ifdef R933_DMA_KICK_TRACE
+    fprintf(stderr, "[R933DMA] kick channel=%d chcr=0x%08x madr=0x%08x qwc=%u tadr=0x%08x mod=%u sink=%p\n",
+            channel, ch->chcr, ch->madr, ch->qwc, ch->tadr, mod, (void*)g_sinks[channel]);
+#endif
 
     if (mod == 0) {
         /* NORMAL mode: one shot, QWC quadwords straight from MADR. */

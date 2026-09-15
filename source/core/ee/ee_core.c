@@ -5445,6 +5445,26 @@ static int ee_step(void)
                             uint32_t call_recvbuf = ee_mem_read32(st, src + 0x28u);
                             uint32_t call_cd = ee_mem_read32(st, src + 0x1Cu);
                             uint32_t call_sid = sif_cmd_iop_lookup_bind_sid(call_cd); /* task #202 (79th finding) - see sif.h citation */
+#ifdef R933_RPCCALL_TRACE
+                            /* Round 933 (task #917/#918, per user's
+                             * "then let's have a lot of work ahead of
+                             * us, start the fix even if it takes more
+                             * rounds" instruction): diagnostic-only,
+                             * zero-cost-when-unset log of EVERY real
+                             * EE->IOP SIF_CMD_RPC_CALL, independent of
+                             * whether call_sid is individually
+                             * recognized/dispatched below. Round 932
+                             * pinpointed GT3's disc-boot retry loop to
+                             * a specific EE-RAM status field
+                             * (*(0x80020000+0x4054)) that never gets
+                             * cleared; this trace exists to find
+                             * exactly which real RPC service/fno GT3
+                             * is calling so a genuine IOP-side fix
+                             * (not another shortcut) can be scoped. */
+                            fprintf(stderr, "[R933EVT] RPC_CALL call_sid=0x%08x rpc_number=%u call_recvbuf=0x%08x call_cd=0x%08x pc=0x%08x ra=0x%08x tid=%d\n",
+                                    call_sid, rpc_number, call_recvbuf, call_cd, st->pc,
+                                    (uint32_t)st->gpr[31].ud0, ee_hle_thread_get_current_thread_id());
+#endif
                             if (call_sid == SIF_SID_LOADFILE && rpc_number == 1u && call_recvbuf != 0u && i >= 1u) {
                                 /* The real _lf_elf_load_arg payload
                                  * (path[252] starting at its own

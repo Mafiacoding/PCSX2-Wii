@@ -40034,3 +40034,95 @@ top-level direct-funct MMI opcodes (MADD/MADDU/PLZCW/MFHI1/MTHI1/
 MFLO1/MTLO1/MULT1/MULTU1/DIV1/DIVU1/QFSRV/PROT3W/etc.) all remain
 unimplemented in the JIT. Next: task #903 (Round 918: JIT the MMI
 pack-unpack family - PPACB/PPACH/PPACW/PEXTB/PEXTH/PEXTW).
+
+## Round 918: JIT MMI pack family - PPACW/PPACH/PPACB (task #903)
+
+Scoping correction first: PEXTB/PEXTH/PEXTW (as named in the task
+list) are NOT real EE mnemonics - grep-confirmed against ee_core.c,
+no such cases exist anywhere in the MMI dispatch tables. This round's
+real, actionable scope is the three PPACx pack ops (PPACW sa=0x13,
+PPACH sa=0x17, PPACB sa=0x1B, all inside the existing MMI0 funct=0x08
+block established Round 914). The real PEXTLx/PEXTUx extend family
+remains correctly slated for task #904 (Round 919).
+
+Real semantics (ee_core.c lines 9402/9420/9440), all three a pure
+lane-reorder/subselect with no arithmetic: PPACW takes Rt's lanes
+{w0,w2} into out's {w0,w1} and Rs's lanes {w0,w2} into out's {w2,w3}.
+PPACH takes Rt's even lanes {h0,h2,h4,h6} into out's {h0..h3} and Rs's
+even lanes into out's {h4..h7}. PPACB takes Rt's even byte lanes
+{b0,b2,...,b14} into out's {b0..b7} and Rs's even byte lanes into
+out's {b8..b15}.
+
+Codegen simplification: this round initially drafted a complex
+rlwinm-based byte-deinterleave approach (in the style of Round 917's
+H/W-family shift formulas) before re-reading the mmi_w_off/mmi_h_off/
+mmi_b_off helper functions (established Round 914) and realizing they
+already return the correct compile-time byte offset for ANY lane of
+ANY register - including these ops' non-contiguous even-lane subsets.
+So the actual codegen is plain lwz/lhz/lbz + stw/sth/stb through those
+helpers, no bit manipulation needed at all.
+
+Alias safety: real hardware reads both full source registers into
+local copies before writing the destination (`Rs = gpr[rs]; Rt =
+gpr[rt]; ... gpr[rd] = out;` in ee_core.c), so when rd aliases rs or
+rt a naive interleaved read/write could read an already-overwritten
+lane. PPACW (4 lanes) and PPACH (8 lanes) each fit entirely within
+this dynarec's 8 scratch GPRs (SCRATCH_A..H), so they simply read
+every needed source lane into scratch registers first, then write
+rd's lanes only after all reads are done - always alias-safe. PPACB
+needs 16 independent source lanes, more than the 8 scratch registers
+available, so it introduces a new pattern: a small 16-byte stack
+scratch buffer (`addi 1,1,-16` / stage all 16 source bytes via lbz+
+stb / read the buffer back and write rd via lbz+stb / `addi 1,1,16`),
+reusing the existing C-trampoline convention's "temporarily borrow
+stack space for a single compiled block" idea but holding staged data
+instead of a saved register - the first opcode in this whole project
+to issue real r1-relative stack instructions from JIT-generated code.
+
+Verification: wrote r918_mmi_pack_verify.c (31 checks) covering each
+of PPACW/PPACH/PPACB with a normal case, an rd==0 poison check, and
+dedicated rd==rs/rd==rt register-aliasing cases - the aliasing cases
+use an independent unaliased-copy register fed into the harness's own
+td_ reference functions to compute ground truth while the actual
+dynarec-compiled code runs against genuinely aliased registers, a new
+technique for this project's harnesses. First run crashed the
+harness's own stack-pointer simulation (uninitialized st.gpr[1] before
+PPACB's new r1-relative codegen executed in the simulator) - fixed by
+seeding st.gpr[1] to a safe address before every test case. After that
+fix, PPACW passed immediately (9/9) but PPACH/PPACB failed (20 FAILs).
+Root-caused to an unrelated second harness bug: the harness's own
+rd32/wr32 memory helpers used host-native (little-endian x86) memcpy,
+while its ppcsim_run's lhz/sth/lbz/stb opcode simulation explicitly
+modeled big-endian PPC750 byte access (byte<<8|byte construction) to
+match real hardware. This mismatch silently round-tripped correctly
+for whole-word lwz/stw (a self-consistent same-function round trip,
+which is why PPACW's checks passed on the very first try) but produced
+wrong-half/byte-swapped results for any half-word/byte-granular
+access - which PPACH/PPACB exercise for the first time this round via
+mmi_h_off/mmi_b_off's non-zero sub-word offsets. Fixed by making
+rd32/wr32 explicitly big-endian to match the simulator's own
+convention; after that fix, all 31/31 checks passed with 0 further
+changes to ppc_dynarec.c - the dynarec codegen itself (independently
+hand-derived from ee_core.c's real PPACW/PPACH/PPACB bodies, verified
+by hand-tracing the expected output word-by-word against the real
+formulas before ever running the harness) was correct all along, the
+same "harness bug, not codegen bug" pattern as Round 917.
+
+Regression-checked against all 10 prior harnesses
+(r893/894/895/896/897/898/900/902/903/904: 13/13, 17/17, 19/19, 35/35,
+19/19, 27/27, 25/25, 20/20, 12/12, 13/13) - no regressions, no compile
+warnings.
+
+Wii build: pcsx2-wii.elf 3,334,040 bytes / .dol 553,856 bytes
+(+10,276 elf / +864 dol over Round 917), 0 warnings/errors (devkitPPC
+8.1.0).
+
+Status: task #903 (Round 918) CLOSED - the MMI pack family is JIT'd.
+task #886 remains open: MMI0's remaining sub-opcodes, MMI1 (funct
+0x28, entirely unaddressed), MMI2's remaining sub-opcodes, MMI3's
+remaining sub-opcodes, the MMI merge/HI-LO-pair families (PCPYLD/
+PCPYUD/PCPYH/PEXTLx/PEXTUx/PMFHI/PMFLO/PMTHI/PMTLO/PMFHL/PMTHL), and
+the remaining top-level direct-funct MMI opcodes (MADD/MADDU/PLZCW/
+MFHI1/MTHI1/MFLO1/MTLO1/MULT1/MULTU1/DIV1/DIVU1/QFSRV/PROT3W/etc.)
+all remain unimplemented in the JIT. Next: task #904 (Round 919: JIT
+MMI merge family - PCPYLD/PCPYUD/PCPYH/PEXTLx/PEXTUx).

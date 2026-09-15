@@ -4630,6 +4630,85 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
             }
             return 0;
         }
+        /* Round 918 (task #903): MMI0's pack family - PPACW (sa=0x13,
+         * 4x 32-bit lanes), PPACH (sa=0x17, 8x 16-bit lanes), PPACB
+         * (sa=0x1B, 16x 8-bit lanes) - grep-confirmed at ee_core.c
+         * lines 9402/9420/9440. Each takes alternating (even-indexed)
+         * lanes from Rt into the low half of the result and from Rs
+         * into the high half - a pure lane-reorder/subselect, no
+         * arithmetic. mmi_w_off/mmi_h_off/mmi_b_off (established Round
+         * 914) already give the correct compile-time byte offset for
+         * ANY lane of ANY register, including the non-contiguous even-
+         * lane subsets these ops read, so the codegen is plain lwz/
+         * lhz/lbz + stw/sth/stb - no bit-packing or byte-deinterleave
+         * needed, unlike an earlier draft of this round's PPACB
+         * codegen assumed before re-reading mmi_h_off/mmi_b_off's own
+         * definitions and realizing they already solve exactly this.
+         *
+         * The one real hazard: real hardware reads BOTH full source
+         * registers before writing anything to the destination (see
+         * ee_core.c's own `Rs = gpr[rs]; Rt = gpr[rt]; ... gpr[rd] =
+         * out;` local-copy pattern) - so if rd aliases rs or rt, a
+         * naive interleaved read/write could read an already-
+         * overwritten lane. PPACW (4 lanes) and PPACH (8 lanes) each
+         * fit entirely within this dynarec's 8 scratch GPRs, so they
+         * simply read every needed source lane into scratch registers
+         * FIRST, then write rd's lanes only after all reads are done -
+         * always alias-safe, no special-casing needed. PPACB needs 16
+         * independent source lanes, more than the 8 available scratch
+         * registers, so it stages through a small stack scratch buffer
+         * instead (push 16 bytes, read+stage all 16 source bytes, then
+         * read the buffer back and write rd, pop the 16 bytes) - the
+         * same "temporarily borrow stack space for a single compiled
+         * block" pattern the C-function trampolines already use
+         * (Round 891+), just holding data instead of a saved register. */
+        if (sa == 0x13u) { /* PPACW */
+            emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, mmi_w_off((int)rt, 0)));
+            emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, mmi_w_off((int)rt, 2)));
+            emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, mmi_w_off((int)rs, 0)));
+            emit(ctx, enc_lwz(SCRATCH_D, CTX_REG, mmi_w_off((int)rs, 2)));
+            if (rd != 0) {
+                emit(ctx, enc_stw(SCRATCH_A, CTX_REG, mmi_w_off((int)rd, 0)));
+                emit(ctx, enc_stw(SCRATCH_B, CTX_REG, mmi_w_off((int)rd, 1)));
+                emit(ctx, enc_stw(SCRATCH_C, CTX_REG, mmi_w_off((int)rd, 2)));
+                emit(ctx, enc_stw(SCRATCH_D, CTX_REG, mmi_w_off((int)rd, 3)));
+            }
+            return 0;
+        }
+        if (sa == 0x17u) { /* PPACH */
+            static const int src_lane4[4] = { 0, 2, 4, 6 };
+            int scratch8[8] = { SCRATCH_A, SCRATCH_B, SCRATCH_C, SCRATCH_D,
+                                 SCRATCH_E, SCRATCH_F, SCRATCH_G, SCRATCH_H };
+            for (int k = 0; k < 4; k++)
+                emit(ctx, enc_lhz(scratch8[k], CTX_REG, mmi_h_off((int)rt, src_lane4[k])));
+            for (int k = 0; k < 4; k++)
+                emit(ctx, enc_lhz(scratch8[4 + k], CTX_REG, mmi_h_off((int)rs, src_lane4[k])));
+            if (rd != 0) {
+                for (int k = 0; k < 8; k++)
+                    emit(ctx, enc_sth(scratch8[k], CTX_REG, mmi_h_off((int)rd, k)));
+            }
+            return 0;
+        }
+        if (sa == 0x1Bu) { /* PPACB */
+            static const int src_lane8[8] = { 0, 2, 4, 6, 8, 10, 12, 14 };
+            emit(ctx, enc_addi(1, 1, -16)); /* 16-byte stack scratch buffer */
+            for (int k = 0; k < 8; k++) {
+                emit(ctx, enc_lbz(SCRATCH_A, CTX_REG, mmi_b_off((int)rt, src_lane8[k])));
+                emit(ctx, enc_stb(SCRATCH_A, 1, (int16_t)k));
+            }
+            for (int k = 0; k < 8; k++) {
+                emit(ctx, enc_lbz(SCRATCH_A, CTX_REG, mmi_b_off((int)rs, src_lane8[k])));
+                emit(ctx, enc_stb(SCRATCH_A, 1, (int16_t)(8 + k)));
+            }
+            if (rd != 0) {
+                for (int k = 0; k < 16; k++) {
+                    emit(ctx, enc_lbz(SCRATCH_A, 1, (int16_t)k));
+                    emit(ctx, enc_stb(SCRATCH_A, CTX_REG, mmi_b_off((int)rd, k)));
+                }
+            }
+            emit(ctx, enc_addi(1, 1, 16));
+            return 0;
+        }
         return -1; /* other MMI0 sub-opcodes (PCGTW/PMAXW/PEXTLW/... etc): not yet JIT-compiled */
     }
 

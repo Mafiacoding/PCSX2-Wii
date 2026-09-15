@@ -862,6 +862,59 @@
  * (+8,288/+800 over Round 916). Status: task #902 (Round 917) CLOSED.
  * Next: task #903 (Round 918: JIT the MMI pack-unpack family -
  * PPACB/PPACH/PPACW/PEXTB/PEXTH/PEXTW).
+ *
+ * Round 918 (task #903) update: JIT'd the MMI pack family - PPACW
+ * (MMI0 sa=0x13), PPACH (sa=0x17), PPACB (sa=0x1B). PEXTB/PEXTH/PEXTW
+ * are NOT real EE mnemonics (grep-confirmed against ee_core.c - no
+ * such cases exist anywhere in the MMI dispatch); the task's actual
+ * scope is just the three PPACx pack ops, with the real PEXTLx/PEXTUx
+ * extend family already correctly slated for task #904 (Round 919).
+ * All three ops are pure lane-reorder/subselect (no arithmetic): each
+ * takes the even-indexed lanes of Rt into the low half of the result
+ * and the even-indexed lanes of Rs into the high half. Discovered that
+ * the mmi_w_off/mmi_h_off/mmi_b_off helpers (established Round 914)
+ * already return the correct compile-time byte offset for ANY lane of
+ * ANY register, including these ops' non-contiguous even-lane subsets
+ * - so codegen is plain lwz/lhz/lbz + stw/sth/stb, no bit-packing or
+ * byte-deinterleave needed (an initial draft assumed otherwise before
+ * re-reading those helpers' own definitions). Alias safety: real
+ * hardware reads both full source registers before writing the
+ * destination (ee_core.c's `Rs = gpr[rs]; Rt = gpr[rt]; ... gpr[rd] =
+ * out;` local-copy pattern), so when rd aliases rs/rt a naive
+ * interleaved read/write could read an already-overwritten lane.
+ * PPACW (4 lanes) and PPACH (8 lanes) fit entirely within the 8
+ * scratch GPRs, so they read every source lane into scratch registers
+ * first, then write rd only after all reads are done. PPACB needs 16
+ * independent source lanes - more than the 8 scratch registers -  so
+ * it introduces a new pattern: a small 16-byte stack scratch buffer
+ * (addi 1,1,-16 / stage all 16 source bytes / read back and write rd
+ * / addi 1,1,16), reusing the C-trampoline convention's "temporarily
+ * borrow stack space for one compiled block" idea but holding data
+ * instead of a saved register - the first opcode in this project to
+ * issue real r1-relative stack instructions from generated code.
+ * Verification (r918_mmi_pack_verify.c, 31/31 checks: PPACW/PPACH/
+ * PPACB each with a normal case, an rd==0 poison check, and dedicated
+ * rd==rs/rd==rt aliasing cases using an independent-copy-register
+ * technique for ground truth) initially found an unrelated harness
+ * bug: the harness's own rd32/wr32 memory helpers used host-native
+ * (little-endian x86) memcpy while its ppcsim_run's lhz/sth/lbz/stb
+ * simulation explicitly modeled big-endian PPC750 byte access - a
+ * mismatch that silently round-tripped correctly for whole-word lwz/
+ * stw (self-consistent same-function round trip, which is why PPACW
+ * passed immediately) but produced wrong-half/byte-swapped results
+ * for any half-word/byte-granular access, which PPACH/PPACB exercise
+ * for the first time this round. Fixed by making rd32/wr32 explicitly
+ * big-endian to match the simulator's own convention; after the fix,
+ * all 31/31 checks passed on the very next run - the dynarec codegen
+ * itself (independently hand-derived from ee_core.c's real PPACW/
+ * PPACH/PPACB bodies) was correct all along, matching Round 917's
+ * experience of a harness-only bug rather than a codegen bug. Full
+ * 10-harness regression suite unchanged (13/13, 17/17, 19/19, 35/35,
+ * 19/19, 27/27, 25/25, 20/20, 12/12, 13/13); clean devkitPPC Wii
+ * cross-build (0 warnings), elf 3,334,040/dol 553,856 (+10,276/+864
+ * over Round 917). Status: task #903 (Round 918) CLOSED. Next: task
+ * #904 (Round 919: JIT MMI merge family - PCPYLD/PCPYUD/PCPYH/
+ * PEXTLx/PEXTUx).
  */
 
 typedef struct {

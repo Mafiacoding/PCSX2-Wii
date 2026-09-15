@@ -41403,3 +41403,101 @@ fixed:
   just transiently raised once by this shortcut). That's the next
   concrete lead, not idle-loop detection or a broader syscall-patch
   sweep.
+
+Round 932 (task #887, user-directed root-cause hunt following up on
+Round 930-931's honest "real but partial" fix): traced the GT3
+disc-boot retry loop down to its EXACT gating mechanism - a single
+32-bit field in EE RAM, table[0x80020000+0x4054], that never becomes
+zero. This directly answers the user's own two debug questions
+("does EE_INTC_STAT ever get written by SW during the loop?" / "what
+are the low/high addresses of the 40-address loop?") and corrects
+their shared external hypothesis on one specific technical point,
+while confirming its general instinct that something downstream of
+the interrupt bit was the real blocker.
+
+**Correcting the "sticky bit" hypothesis.** The user's own shared
+write-up theorized the loop persists because the real ISR writes 1 to
+EE_INTC_STAT to acknowledge/clear the SBUS bit, but this project's
+emulator "ignores or mishandles" that write, leaving the bit stuck at
+1 forever. Checked directly against `source/hw/ee_intc.c`
+(`ee_intc_mmio_write32()`, `EE_INTC_STAT` case): the write-1-to-clear
+semantic is already correctly implemented (`g_intc.stat &= ~value;`,
+matching real PCSX2's own `HwWrite.cpp` mcase(INTC_STAT) exactly, per
+the existing code comment). So specifically: the bit-acknowledgment
+mechanism is not the bug. The real disassembly (below) confirms the
+BIOS code itself DOES write `2` (bit 1) back to `EE_INTC_STAT` at
+0x8000FDA8 on one of its two exit paths, and that write correctly
+clears the bit in this project's model - verified by inspecting
+`sw v0,0(s0)` at that address against the real handler code.
+
+**What actually gates the loop.** Full disassembly of
+0x8000F800-0x80013000 from the Round 931 480M-instruction checkpoint
+(`/tmp/r932_loopdump.bin`, decoded with `tools/round655-ee-disasm/
+disasm.c`) plus a targeted register/memory probe
+(`/tmp/r932_retry_probe.c`, 30 consecutive hits) shows the real
+structure:
+
+- `0x8000FD30-0x8000FDC4`: a SBUS-wait wrapper. Checks DMAC_STAT bit
+  0x80 (real SIF2 completion) first; if not set, falls through to the
+  EE_INTC_STAT/SBUS poll at 0x8000FD6C-0x8000FD7C (this project's own
+  Round 930 shortcut fires here); once satisfied, calls the SIF_SMFLAG
+  settle-wait primitive at 0x8000FA10-0x8000FAE8 (a genuine, working
+  "poll until two consecutive reads agree" primitive - confirmed
+  functioning correctly, not itself buggy) and, depending on the
+  settled value, either acks EE_INTC_STAT itself (writes 2) or not -
+  either way falls through to `0x8000FBA0`.
+- The REAL top-level SIF-RPC send function is `0x80012488-0x800126DC`.
+  Its very first real instruction (0x800124A4, before doing anything
+  else) is `lw v1, 0x4054(v0)` where v0=0x80020000 - i.e. this
+  function reads table[+0x4054] as its OWN entry gate: if zero, skip
+  the entire send/retry body and return immediately (success/no-op
+  fast path, 0x800124C4's `beq v1,zero,0x800126B0`); if nonzero
+  (always observed: constant 0x00000024), fall through and actually
+  perform a full SifSendCmd-style request (build a command buffer,
+  call the real send primitive at 0x80013908, then call the
+  0x8000FD30 wrapper above to wait for the low-level completion
+  signal).
+- After 0x8000FD30 returns, the caller (0x80012614/0x8001261C) checks
+  TWO real flags - `*(s7+0x4054)` and `*(s0+0x4030)`, where s0==s7==
+  0x80020000 (same shared kernel table this project's Round 929
+  finding already identified) - and jumps back to 0x80012510 to
+  resend the ENTIRE request if either is still nonzero.
+- Direct measurement (30 consecutive hits of pc==0x80012614 across
+  ~17,000 EE instructions, i.e. this loop iterates roughly every 570
+  instructions): `*(0x80020000+0x4054)` is a rock-steady, unchanging
+  0x00000024 every single time - not a growing counter, not
+  fluctuating - a fixed value that is simply never cleared. `*(0x80020000
+  +0x4030)` is already 0 (not blocking). So the ENTIRE observed retry
+  loop is gated on this ONE field.
+- Static scan of the surrounding kernel code found the field's real
+  writers: `0x80011850` (`sw zero, 0x4054(s0)`) unconditionally zeroes
+  it as part of a small `a0`-dispatched (0/1/2) status-setting
+  function; `0x80012DBC` sets it to 37 and `0x80012EC0` sets it to
+  32 or 33 depending on a prior call's result - all real, in-kernel
+  writers, not something this project's own code touches. Nothing in
+  the currently-reached code path ever calls the zeroing writer for
+  real, because (per the entry-gate logic above) that would require
+  the SifSendCmd call to have genuinely succeeded end-to-end - which
+  it structurally cannot, since this project's Round 930 shortcut only
+  supplies the low-level EE_INTC_STAT/SBUS bit, not any actual IOP-side
+  processing of the request or a real reply payload.
+
+**Honest classification.** This confirms and sharpens (does not
+contradict) Round 930-931's own conclusion that the SBUS shortcut
+alone is insufficient - now with an exact, byte-level target instead
+of a general suspicion. Resolving this for real requires implementing
+genuine IOP-side handling for whatever real SIF-RPC server this
+request targets (the request's exact server ID/function number was
+not yet extracted this round - the next concrete step, not done here)
+and writing back a real reply that satisfies the client's own
+completion bookkeeping, matching the scale of this project's existing
+IOP-RPC-architecture work (e.g. Round 347's "IOP RPC re-entry
+architecture", Round 511's "real SIF2 inbound DMA payload-copy
+engine") rather than another narrow interrupt-flag shortcut. No
+source changed this round - purely diagnostic, evidence-gathering
+work, per this project's anti-fabrication discipline (do not ship a
+guessed fix for a mechanism this precise without first identifying
+which real RPC server is actually being called). Regression suite and
+Wii cross-build correctly skipped (no tracked source changed). Scratch
+tools (`/tmp/r932_ckpt_disasm.c` reuse, `/tmp/r932_retry_probe.c`,
+`/tmp/r932_disasm` reuse) not committed, per convention.

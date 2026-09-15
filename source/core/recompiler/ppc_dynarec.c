@@ -826,6 +826,33 @@ extern void ee_jit_helper_pdivbw(void *st, int rs, int rt, int rd);
 #define ADDR_EE_JIT_PDIVBW 0x0000010Eu
 #endif
 
+/* Round 920 (task #905): PMFHL's two saturating sub-modes - SLW
+ * (sa=0x02, clamp the 64-bit HI:LO pipe value to signed 32-bit range)
+ * and SH (sa=0x04, clamp each of 8 32-bit lanes to signed 16-bit
+ * range) - involve real overflow-boundary comparisons (>=0x7fffffff/
+ * <=-0x80000000 for SLW, >0x7fff/<-0x8000 per-lane for SH) that would
+ * be error-prone to hand-translate into PPC750 compare/branch
+ * sequences bit-exactly. Same trampoline rationale as Round 915's
+ * MMI2 muldiv family: call a dedicated C helper (ee_jit_helper_
+ * pmfhl_slw/pmfhl_sh, defined in ee_core.c, byte-for-byte ports of
+ * this file's own PMFHL case 0x02/0x04 bodies) so the JIT and
+ * interpreter can never silently disagree on the saturation boundary
+ * math. PMFHL's LW/UW/LH sub-modes (sa=0x00/0x01/0x03) are pure bit
+ * selection with no arithmetic, so those are inline codegen instead
+ * (see the funct==0x30 dispatch block below) - only the two genuinely
+ * saturating sub-modes need a helper. PMFHL takes no rs/rt (only rd),
+ * so these helpers only need `rd`, unlike the 3-arg muldiv helpers
+ * above. Sentinels 0x10F-0x110 continue the existing numbering. */
+#ifdef GEKKO
+extern void ee_jit_helper_pmfhl_slw(void *st, int rd);
+extern void ee_jit_helper_pmfhl_sh(void *st, int rd);
+#define ADDR_EE_JIT_PMFHL_SLW ((uint32_t)(uintptr_t)&ee_jit_helper_pmfhl_slw)
+#define ADDR_EE_JIT_PMFHL_SH  ((uint32_t)(uintptr_t)&ee_jit_helper_pmfhl_sh)
+#else
+#define ADDR_EE_JIT_PMFHL_SLW 0x0000010Fu
+#define ADDR_EE_JIT_PMFHL_SH  0x00000110u
+#endif
+
 /* Scratch PPC GPRs used by generated code. r3 is the incoming context
  * pointer (ppc_dynarec_gpr128_t *gpr) per the PowerPC EABI calling
  * convention - we never touch r1 (stack ptr) or r2/r13 (TOC/small-
@@ -4927,12 +4954,40 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
             return 0;
         }
 
+        /* Round 920 (task #905): PMFHI (sa=0x08) / PMFLO (sa=0x09) -
+         * "move from HI/LO", a plain full-128-bit register copy from
+         * the special HI or LO pipe pseudo-register (HI_IDX=32/
+         * LO_IDX=33, established Round 890) into rd. Real bodies
+         * (grep-confirmed ee_core.c lines 9696-9697): `if (rd)
+         * gpr[rd] = hi;` / `if (rd) gpr[rd] = lo;` - rs is completely
+         * unused (real hardware only reads the HI/LO pipe register,
+         * never a GPR), so this codegen never touches rs at all. No
+         * aliasing is possible since the source is always the fixed
+         * HI_IDX/LO_IDX pseudo-slot and the destination is always a
+         * real GPR 0-31 (pseudo-slots 32/33 are never reachable as an
+         * rd value), so the four words can be copied in any order
+         * with a plain lwz+stw per word, same shape as PCPYLD/PCPYUD
+         * just above but sourced from a fixed pseudo-register instead
+         * of rs/rt. */
+        if (sa == 0x08u || sa == 0x09u) {
+            int src = (sa == 0x08u) ? HI_IDX : LO_IDX;
+            int16_t offsrc[4] = { REG_HI(src), REG_LO(src), REG_HI1(src), REG_LO1(src) };
+            if (rd != 0) {
+                int16_t offd[4] = { REG_HI((int)rd), REG_LO((int)rd), REG_HI1((int)rd), REG_LO1((int)rd) };
+                for (int w = 0; w < 4; w++) {
+                    emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, offsrc[w]));
+                    emit(ctx, enc_stw(SCRATCH_A, CTX_REG, offd[w]));
+                }
+            }
+            return 0;
+        }
+
         uint32_t helper_addr;
         if (sa == 0x0Cu)      helper_addr = ADDR_EE_JIT_PMULTW;
         else if (sa == 0x0Du) helper_addr = ADDR_EE_JIT_PDIVW;
         else if (sa == 0x1Cu) helper_addr = ADDR_EE_JIT_PMULTH;
         else if (sa == 0x1Du) helper_addr = ADDR_EE_JIT_PDIVBW;
-        else return -1; /* other MMI2 sub-opcodes (PMFHI/PMADDW/... etc): not yet JIT-compiled */
+        else return -1; /* other MMI2 sub-opcodes (PMADDW/... etc): not yet JIT-compiled */
 
         emit(ctx, enc_addi(1, 1, -32));
         emit(ctx, enc_stw(14, 1, 8));
@@ -5015,7 +5070,29 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
             }
             return 0;
         }
-        return -1; /* other MMI3 sub-opcodes (PMTHI/PMTLO/PINTEH/... etc): not yet JIT-compiled */
+        /* Round 920 (task #905): PMTHI (sa=0x08) / PMTLO (sa=0x09) -
+         * "move to HI/LO", the write-direction mirror of PMFHI/PMFLO
+         * above: a plain full-128-bit copy from rs into the HI or LO
+         * pipe pseudo-register. Real bodies (grep-confirmed ee_core.c
+         * lines 9997-9998): `hi = gpr[rs];` / `lo = gpr[rs];` -
+         * unconditional, no rd involved at all (there is no rd output;
+         * MIPS R-type rd field is simply unused/ignored by real
+         * hardware for these two opcodes), so the store is never
+         * skipped the way rd==0 skips a GPR write elsewhere. Same
+         * no-aliasing argument as PMFHI/PMFLO (source is always a real
+         * GPR 0-31, destination is always the fixed HI_IDX/LO_IDX
+         * pseudo-slot), so a plain per-word lwz+stw suffices. */
+        if (sa == 0x08u || sa == 0x09u) {
+            int dst = (sa == 0x08u) ? HI_IDX : LO_IDX;
+            int16_t offs[4] = { REG_HI((int)rs), REG_LO((int)rs), REG_HI1((int)rs), REG_LO1((int)rs) };
+            int16_t offdst[4] = { REG_HI(dst), REG_LO(dst), REG_HI1(dst), REG_LO1(dst) };
+            for (int w = 0; w < 4; w++) {
+                emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, offs[w]));
+                emit(ctx, enc_stw(SCRATCH_A, CTX_REG, offdst[w]));
+            }
+            return 0;
+        }
+        return -1; /* other MMI3 sub-opcodes (PINTEH/... etc): not yet JIT-compiled */
     }
 
     if (op == 0x1Cu && (funct == 0x34u || funct == 0x36u || funct == 0x37u ||
@@ -5110,6 +5187,125 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
             emit(ctx, enc_or(SCRATCH_A, SCRATCH_C, SCRATCH_B));       /* reassemble */
             if (rd != 0)
                 emit(ctx, enc_stw(SCRATCH_A, CTX_REG, offd[w]));
+        }
+        return 0;
+    }
+
+    if (op == 0x1Cu && funct == 0x30u) {
+        /* Round 920 (task #905): PMFHL - "move from HI:LO", a TOP-
+         * LEVEL direct-funct MMI opcode (funct=0x30, grep-confirmed
+         * ee_core.c line 9278) like the shift family above, not an
+         * MMI0-3 sa-sub-group. Real hardware selects one of 5 sub-
+         * modes via the `sa` field: LW=0x00, UW=0x01, SLW=0x02, LH=0x03,
+         * SH=0x04 (any other sa value is reserved/no-op per the real
+         * interpreter's switch having no default case). PMFHL reads
+         * ONLY the HI/LO pipe pseudo-registers (HI_IDX=32/LO_IDX=33)
+         * and writes ONLY rd - rs and rt are both completely unused,
+         * matching PMFHI/PMFLO's shape above.
+         *
+         * LW/UW/LH (sa=0x00/0x01/0x03) are pure bit selection with no
+         * arithmetic - each output word/halfword is just some 16 or 32
+         * contiguous bits lifted directly out of one of HI.ud0/HI.ud1/
+         * LO.ud0/LO.ud1, which this dynarec already stores as four
+         * independent 32-bit word slots per pseudo-register (REG_HI/
+         * REG_LO for ud0's upper/lower half, REG_HI1/REG_LO1 for ud1's).
+         * LW wants the LOW 32 bits of each ud-half (= REG_LO/REG_LO1
+         * directly, no shifting needed); UW wants the UPPER 32 bits
+         * (= REG_HI/REG_HI1 directly). LH wants the low 16 bits of
+         * EIGHT specific 32-bit source words (both the low- and high-
+         * half of each of LO.ud0/HI.ud0/LO.ud1/HI.ud1) - real body
+         * (grep-confirmed ee_core.c lines 9309-9317) confirms each
+         * output lane is `(uint16_t)someWord` or `(uint16_t)(someWord
+         * >> 32)`, i.e. always the LOW 16 bits of one of 8 specific
+         * 32-bit words, never the high 16 bits of any of them - so a
+         * plain lwz followed by sth (which only ever stores its
+         * source register's low 16 bits) reproduces this exactly with
+         * no masking instructions needed at all. No aliasing is
+         * possible (source is always the fixed HI_IDX/LO_IDX pseudo-
+         * slot, destination is always a real GPR 0-31), so lanes can
+         * be processed in any order without a read-everything-first
+         * pass. */
+        if (sa == 0x00u || sa == 0x01u) { /* LW / UW */
+            int16_t offsrc[4];
+            if (sa == 0x00u) {
+                offsrc[0] = REG_LO(LO_IDX); offsrc[1] = REG_LO(HI_IDX);
+                offsrc[2] = REG_LO1(LO_IDX); offsrc[3] = REG_LO1(HI_IDX);
+            } else {
+                offsrc[0] = REG_HI(LO_IDX); offsrc[1] = REG_HI(HI_IDX);
+                offsrc[2] = REG_HI1(LO_IDX); offsrc[3] = REG_HI1(HI_IDX);
+            }
+            if (rd != 0) {
+                for (int n = 0; n < 4; n++) {
+                    emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, offsrc[n]));
+                    emit(ctx, enc_stw(SCRATCH_A, CTX_REG, mmi_w_off((int)rd, n)));
+                }
+            }
+            return 0;
+        }
+        if (sa == 0x03u) { /* LH */
+            int16_t offsrc[8] = {
+                REG_LO(LO_IDX), REG_HI(LO_IDX), REG_LO(HI_IDX), REG_HI(HI_IDX),
+                REG_LO1(LO_IDX), REG_HI1(LO_IDX), REG_LO1(HI_IDX), REG_HI1(HI_IDX)
+            };
+            if (rd != 0) {
+                for (int n = 0; n < 8; n++) {
+                    emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, offsrc[n]));
+                    emit(ctx, enc_sth(SCRATCH_A, CTX_REG, mmi_h_off((int)rd, n)));
+                }
+            }
+            return 0;
+        }
+        if (sa == 0x02u || sa == 0x04u) { /* SLW / SH - real saturation
+             * arithmetic, delegated to a C-function-call trampoline
+             * (see this file's ADDR_EE_JIT_PMFHL_SLW/SH declarations
+             * above for the full rationale). Only `rd` is passed (r4) -
+             * PMFHL has no rs/rt input at all, unlike the 3-arg muldiv
+             * trampolines. */
+            uint32_t helper_addr = (sa == 0x02u) ? ADDR_EE_JIT_PMFHL_SLW : ADDR_EE_JIT_PMFHL_SH;
+            emit(ctx, enc_addi(1, 1, -32));
+            emit(ctx, enc_stw(14, 1, 8));
+            emit(ctx, enc_mflr(14));
+            emit(ctx, enc_addi(SCRATCH_A, 0, (int16_t)rd)); /* r4 = rd (arg2); r3=ctx already arg1 */
+            emit_load_const32(ctx, 12, helper_addr);
+            emit(ctx, enc_mtctr(12));
+            emit(ctx, enc_bctrl());                       /* ee_jit_helper_pmfhl_XXX(ctx, rd) */
+            emit(ctx, enc_mtlr(14));
+            emit(ctx, enc_lwz(14, 1, 8));
+            emit(ctx, enc_addi(1, 1, 32));
+            return 0;
+        }
+        return -1; /* other sa values: reserved/no-op on real hardware, not yet special-cased in the JIT */
+    }
+
+    if (op == 0x1Cu && funct == 0x31u) {
+        /* Round 920 (task #905): PMTHL - "move to HI:LO", the write-
+         * direction mirror of PMFHL. Real hardware only implements
+         * sa==0 (LW mode); any other sa is a genuine no-op (grep-
+         * confirmed ee_core.c line 9351: `if (sa == 0) { ... }` with no
+         * else branch at all) - so this JIT only compiles sa==0 and
+         * falls back to the interpreter (itself a no-op) for anything
+         * else, rather than trying to special-case a "compiled no-op".
+         * Real body (grep-confirmed ee_core.c lines 9352-9356) writes
+         * the LOW 32 bits of each of LO.ud0/HI.ud0/LO.ud1/HI.ud1 from
+         * rs's four word lanes, explicitly preserving the upper 32
+         * bits of each - a genuine hardware quirk (not a bug) per this
+         * project's own prior comment on the real interpreter body.
+         * Because this dynarec already stores each ud-half's upper and
+         * lower 32 bits as SEPARATE, non-overlapping word slots
+         * (REG_HI/REG_HI1 for the upper halves, REG_LO/REG_LO1 for the
+         * lower), the "preserve upper 32 bits" requirement needs no
+         * read-modify-write or masking at all: simply never emit a
+         * store to REG_HI/REG_HI1 for LO_IDX/HI_IDX, and only overwrite
+         * REG_LO(LO_IDX)/REG_LO(HI_IDX)/REG_LO1(LO_IDX)/REG_LO1(HI_IDX)
+         * with rs's four lanes - the untouched upper-half word slots
+         * are left bit-for-bit exactly as they already stood, which is
+         * precisely the real semantics. Unconditional (no rd, and no
+         * rd==0-style skip - real PMTHL has no GPR output to skip). */
+        if (sa != 0u) return -1;
+        int16_t offd[4] = { REG_LO(LO_IDX), REG_LO(HI_IDX), REG_LO1(LO_IDX), REG_LO1(HI_IDX) };
+        for (int n = 0; n < 4; n++) {
+            emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, mmi_w_off((int)rs, n)));
+            emit(ctx, enc_stw(SCRATCH_A, CTX_REG, offd[n]));
         }
         return 0;
     }

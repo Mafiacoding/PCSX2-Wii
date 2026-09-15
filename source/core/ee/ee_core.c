@@ -3303,6 +3303,54 @@ void ee_jit_helper_pdivbw(ee_state_t *st, int rs, int rt, int rd)
     }
 }
 
+/* Round 920 (task #905): JIT helper functions for PMFHL's two
+ * saturating sub-modes (SLW=sa 0x02, SH=sa 0x04 - opcode 0x1C funct
+ * 0x30). Called from ppc_dynarec.c's translate_one() through the same
+ * established C-function-call trampoline pattern as the Round 915
+ * MMI2 muldiv helpers just above (see that block's own comment and
+ * this file's ADDR_EE_JIT_PMFHL_SLW/SH declarations for the call-site
+ * details) - each function below is a byte-for-byte port of this
+ * file's own interpreter case body for the same sub-mode (see the
+ * PMFHL case 0x30 block above, sa cases 0x02/0x04), not a
+ * re-derivation, so the JIT and interpreter can never silently
+ * disagree on the real overflow-boundary saturation math (SLW's
+ * >=0x7fffffff/<=-0x80000000 64-bit clamp, SH's per-lane >0x7fff/
+ * <-0x8000 16-bit clamp). PMFHL has no rs/rt input at all (it only
+ * reads the HI/LO pipe registers and writes rd), so unlike the 4-arg
+ * muldiv helpers these only take `rd`. */
+void ee_jit_helper_pmfhl_slw(ee_state_t *st, int rd)
+{
+    if (!rd) return;
+    int64_t v0 = (int64_t)(((uint64_t)(uint32_t)st->hi.ud0 << 32) | (uint32_t)st->lo.ud0);
+    int64_t v1 = (int64_t)(((uint64_t)(uint32_t)st->hi.ud1 << 32) | (uint32_t)st->lo.ud1);
+    uint64_t r0, r1;
+    if (v0 >= 0x7fffffffLL) r0 = 0x7fffffffu;
+    else if (v0 <= -0x80000000LL) r0 = 0xffffffff80000000ULL;
+    else r0 = sext32((uint32_t)st->lo.ud0);
+    if (v1 >= 0x7fffffffLL) r1 = 0x7fffffffu;
+    else if (v1 <= -0x80000000LL) r1 = 0xffffffff80000000ULL;
+    else r1 = sext32((uint32_t)st->lo.ud1);
+    st->gpr[rd].ud0 = r0;
+    st->gpr[rd].ud1 = r1;
+}
+
+void ee_jit_helper_pmfhl_sh(ee_state_t *st, int rd)
+{
+    if (!rd) return;
+    int32_t vals[8];
+    vals[0] = (int32_t)(uint32_t)st->lo.ud0;       vals[1] = (int32_t)(uint32_t)(st->lo.ud0 >> 32);
+    vals[2] = (int32_t)(uint32_t)st->hi.ud0;       vals[3] = (int32_t)(uint32_t)(st->hi.ud0 >> 32);
+    vals[4] = (int32_t)(uint32_t)st->lo.ud1;       vals[5] = (int32_t)(uint32_t)(st->lo.ud1 >> 32);
+    vals[6] = (int32_t)(uint32_t)st->hi.ud1;       vals[7] = (int32_t)(uint32_t)(st->hi.ud1 >> 32);
+    for (int n = 0; n < 8; n++) {
+        uint16_t r;
+        if (vals[n] > 0x7fff) r = 0x7fffu;
+        else if (vals[n] < -0x8000) r = 0x8000u;
+        else r = (uint16_t)vals[n];
+        set_lane_h(&st->gpr[rd], n, r);
+    }
+}
+
 /* Round 630 (task #536/#611) experimental safety-net counter - see the
  * guard's own comment below for full rationale. Exposed non-static so
  * host-native tests/tools can observe it if useful; intentionally NOT

@@ -40219,3 +40219,88 @@ PMFHL/PMTHL), and the remaining top-level direct-funct MMI opcodes
 QFSRV/PROT3W/etc.) all remain unimplemented in the JIT. Next: task
 #905 (Round 920: JIT MMI HI/LO-pair access - PMFHI/PMFLO/PMTHI/PMTLO/
 PMFHL/PMTHL).
+
+## Round 920: JIT MMI HI/LO-pair access - PMFHI/PMFLO/PMTHI/PMTLO/
+PMFHL/PMTHL (task #905)
+
+Six opcodes covering all "move between a real GPR and the EE's
+special HI/LO pipe accumulator" instructions, closing another slice
+of task #886's MMI opcode subset:
+
+- PMFHI (MMI2 sa=0x08) / PMFLO (MMI2 sa=0x09): "move from HI/LO" -
+  a plain full-128-bit copy from the fixed HI_IDX/LO_IDX pseudo-
+  register (Round 890) into gpr[rd], skipped entirely when rd==0
+  (real ee_core.c body: `if (rd) gpr[rd] = hi;` / `= lo;`). rs/rt are
+  completely unused by real hardware. Codegen: 4x(lwz+stw), one per
+  128-bit word lane, guarded by a single `if (rd != 0)`.
+- PMTHI (MMI3 sa=0x08) / PMTLO (MMI3 sa=0x09): the inverse "move to
+  HI/LO" - copies gpr[rs] into the HI_IDX/LO_IDX pseudo-register,
+  unconditionally (real hardware doesn't even give these an rd
+  field). Same 4x(lwz+stw) shape, no guard needed.
+- PMFHL (top-level funct=0x30 - NOT an MMI0-3 sa-sub-group, grep-
+  confirmed directly against ee_core.c's dispatch): 5 real sub-modes
+  selected by sa. LW(0x00)/UW(0x01) are plain low/high-32-bit-of-
+  each-ud-half word extractions (inline lwz/stw, no arithmetic).
+  LH(0x03) packs the low 16 bits of 8 specific source words into 8
+  halfword lanes of rd (inline lwz+sth per lane - sth's natural
+  truncation does the masking for free). SLW(0x02) and SH(0x04) are
+  genuinely saturating: SLW clamps a combined 64-bit value to signed-
+  32 range with real hardware's loose `>=0x7fffffff`/`<=-0x80000000`
+  bounds, SH clamps each of 8 32-bit lane values to signed-16 range
+  with the stricter `>0x7fff`/`<-0x8000` bounds - non-uniform,
+  bit-exact-fiddly saturation logic that (following the Round 915/
+  905/906b precedent) is JIT'd via a C-function-call trampoline into
+  two new byte-for-byte-ported helpers in ee_core.c
+  (ee_jit_helper_pmfhl_slw/sh) rather than hand-translated inline;
+  these two helpers take only `rd` as an argument since PMFHL has no
+  rs/rt input at all.
+- PMTHL (top-level funct=0x31): real hardware only implements sa==0
+  (LW mode) - any other sa is a genuine silent no-op on real hardware
+  (ee_core.c's `if (sa == 0) {...}` has no else branch at all), so
+  the codegen returns -1 for sa!=0 rather than emit anything mislead-
+  ing. sa==0 writes only the LOW 32 bits of each of lo.ud0/hi.ud0/
+  lo.ud1/hi.ud1 from rs's four word lanes, deliberately never
+  touching the REG_HI/REG_HI1 slots - this is how "the upper 32 bits
+  of each destination half are preserved" (a documented real-hardware
+  quirk) falls out for free from the existing word-slot storage
+  layout, with no extra read-modify-write step needed.
+
+Verification (r920_hilo_verify.c, 22/22 checks covering all 6 opcode
+groups, including rd==0 skip-write checks and, for the two trampoline
+sub-modes, cross-checks against an independent local reference
+reimplementation) initially SEGV'd under ASan on its very first
+compile_and_run call. Root-caused to two harness-only bugs, neither
+touching ppc_dynarec.c:
+
+1. compile_and_run() memset its whole simulated PPC register file
+   (including r1, the stack pointer) to zero before every test, and
+   never initialized r1 the way Round 891's r891_lwsw_verify.c
+   harness does (`st.gpr[1] = 0x00004000u`). This was invisible for
+   the 4 non-trampoline opcode groups (they never touch r1), but the
+   PMFHL SLW/SH trampoline's standard preamble (`addi r1,r1,-32`
+   then `stw r14,r1,8`) computed an out-of-bounds effective address
+   when r1 started at 0, crashing under ASan. Confirmed harness-only,
+   not a codegen bug, by dumping the actual generated instruction
+   words for the failing test case in isolation and hand-decoding
+   them: addi/stw/mflr/mtctr/bctrl/mtlr/lwz were all correctly formed
+   and matched the established trampoline pattern exactly. Fixed by
+   setting gpr[1]=0x4000 inside compile_and_run itself.
+2. A second, unrelated bug: the "PMFHI rd=0: gpr[0] slot untouched"
+   check poisoned register 9 (`poison_reg(9)`) instead of register 0
+   - so the check compared an unrelated register's poison pattern
+   against a slot (gpr[0]) that was never poisoned in the first
+   place, and could never have legitimately passed. Fixed to
+   `poison_reg(0)`.
+
+All 22 checks pass cleanly after both fixes, 0 ASan/UBSan errors.
+Full 10-harness regression suite unchanged (13/13, 17/17, 19/19,
+35/35, 19/19, 27/27, 25/25, 20/20, 12/12, 13/13); clean devkitPPC Wii
+cross-build (0 warnings), elf 3,460,136/dol 563,712 (+16,240/+2,208
+over Round 919 - a notably smaller delta than Round 919's, since 4 of
+this round's 6 opcode groups are trivial word-copy codegen and only 2
+pull in the heavier trampoline-call machinery).
+
+Status: task #905 (Round 920) CLOSED. Next: task #906 (Round 921:
+JIT MMI remaining opcodes - QFSRV/PLZCW/PROT3W etc, close out task
+#886, transition to task #887: post-JIT GS display wiring and GT3
+progress).

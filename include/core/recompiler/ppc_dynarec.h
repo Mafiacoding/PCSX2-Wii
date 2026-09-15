@@ -956,6 +956,76 @@
  * distinct funct dispatch blocks including a brand-new MMI1 block).
  * Status: task #904 (Round 919) CLOSED. Next: task #905 (Round 920:
  * JIT MMI HI/LO-pair access - PMFHI/PMFLO/PMTHI/PMTLO/PMFHL/PMTHL).
+ *
+ * Round 920 (task #905): PMFHI/PMFLO (MMI2 sa=0x08/0x09) and PMTHI/
+ * PMTLO (MMI3 sa=0x08/0x09) are plain full-128-bit register copies
+ * between a real GPR and the fixed HI_IDX/LO_IDX pseudo-register
+ * slots (Round 890) - PMFHI/PMFLO read the pipe register and write
+ * gpr[rd] (skipped when rd==0, matching real `if (rd) gpr[rd]=hi/lo`
+ * bodies), PMTHI/PMTLO read gpr[rs] and write the pipe register
+ * unconditionally (real hardware doesn't even encode an rd field for
+ * these two). Since the source is always the fixed pseudo-slot and
+ * the destination is always a real GPR (or vice versa for the MTx
+ * pair), no aliasing is possible and all four opcodes decompose into
+ * a plain 4x(lwz+stw) word copy, same shape as Round 919's PCPYLD
+ * block. PMFHL (top-level funct=0x30, NOT an MMI0-3 sa-sub-group -
+ * grep-confirmed against ee_core.c) has 5 real sub-modes selected by
+ * sa: LW(0x00)/UW(0x01) are plain low/high-32-of-each-ud-half word
+ * copies (inline lwz/stw, no arithmetic); LH(0x03) packs 8 specific
+ * source words' low 16 bits into 8 halfword lanes of rd (inline
+ * lwz+sth per lane, relying on sth's natural truncation - no masking
+ * needed); SLW(0x02) and SH(0x04) involve genuine saturating 64-bit-
+ * to-32-bit and 32-bit-to-16-bit arithmetic with real hardware's
+ * specific (and non-uniform - SLW uses inclusive `>=`/`<=` bounds,
+ * SH uses strict `>`/`<` bounds) clamp thresholds, so - following the
+ * established Round 915/905/906b trampoline convention rather than
+ * risk hand-translating that bit-exactly - these two dispatch through
+ * a C-function-call trampoline into two new byte-for-byte-ported
+ * helpers (ee_jit_helper_pmfhl_slw/sh, ee_core.c) that take only `rd`
+ * as an argument (PMFHL has no rs/rt input at all - it only reads the
+ * HI/LO pipes). PMTHL (top-level funct=0x31) real hardware only
+ * implements sa==0 (LW mode) - any other sa is a genuine silent
+ * no-op on real hardware (ee_core.c's `if (sa == 0) {...}` has no
+ * else), so the codegen returns -1 for sa!=0 rather than emit
+ * anything; sa==0 writes only the LOW 32 bits of each of lo.ud0/
+ * hi.ud0/lo.ud1/hi.ud1 from rs's four word lanes via mmi_w_off,
+ * deliberately never touching the REG_HI/REG_HI1 slots - this is how
+ * "upper 32 bits preserved" (a documented real-hardware quirk) falls
+ * out for free from the existing word-slot storage layout, no extra
+ * read-modify-write needed.
+ *
+ * Verification (r920_hilo_verify.c, 22/22 checks covering all 6
+ * opcode groups including rd==0 skip-write checks and, for the two
+ * trampoline sub-modes, cross-checks against an independent local
+ * reference reimplementation) initially SEGV'd under ASan on its very
+ * first compile_and_run call. Root cause was confirmed to be harness-
+ * only, not dynarec codegen: dumping the actual generated instruction
+ * words for the PMFHL-SLW trampoline test case in isolation showed
+ * correctly-formed addi/stw/mflr/mtctr/bctrl/mtlr/lwz sequences
+ * matching the established trampoline preamble exactly, but the
+ * harness's compile_and_run() memset its whole simulated register
+ * file (including r1, the stack pointer) to zero before every test
+ * and never initialized r1 the way Round 891's r891_lwsw_verify.c
+ * harness does (`st.gpr[1] = 0x00004000u`) - so `addi r1,r1,-32`
+ * wrapped to a huge unsigned address and the trampoline's `stw
+ * r14,r1,8` computed an out-of-bounds write. Fixed by setting
+ * gpr[1]=0x4000 inside compile_and_run itself (applies uniformly,
+ * harmless for the non-trampoline opcodes since they never touch
+ * r1). A second, unrelated harness bug was then found and fixed: the
+ * "PMFHI rd=0: gpr[0] slot untouched" check poisoned register 9
+ * (`poison_reg(9)`) instead of register 0, so it could never
+ * legitimately have passed - corrected to `poison_reg(0)`. Neither
+ * bug touched ppc_dynarec.c; the actual codegen for all 6 opcode
+ * groups was correct from the first draft. Full 10-harness regression
+ * suite unchanged (13/13, 17/17, 19/19, 35/35, 19/19, 27/27, 25/25,
+ * 20/20, 12/12, 13/13); clean devkitPPC Wii cross-build (0 warnings),
+ * elf 3,460,136/dol 563,712 (+16,240/+2,208 over Round 919 - smaller
+ * delta than Round 919 since 4 of the 6 opcode groups here are trivial
+ * word-copy codegen, and only 2 of the 6 pull in the heavier trampoline
+ * pattern's helper-call overhead).
+ * Status: task #905 (Round 920) CLOSED. Next: task #906 (Round 921:
+ * JIT MMI remaining opcodes - QFSRV/PLZCW/PROT3W etc, close out task
+ * #886, transition to task #887).
  */
 
 typedef struct {

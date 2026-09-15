@@ -1312,47 +1312,6 @@ static void ee_check_browser_idle_carousel(ee_state_t *st)
  * to prevent this from ever fighting or duplicating a real write. */
 #define EE_SBUS_WAIT_LOOP_PC 0x8000CFCCu
 
-/* Round 930 (task #887): a SECOND, independently-discovered real BIOS
- * site polling the exact same EE_INTC_STAT bit 1 (SBUS) condition,
- * found while investigating GT3's disc-boot SIF-RPC freeze (Round
- * 884/927/929). Fresh disassembly (Round 930, `/tmp/r930_kernel_dump.bin`,
- * decoded with tools/round655-ee-disasm against the live GT3 checkpoint
- * chain) confirms:
- *   0x8000FD6C: lui  s0, 0xB000
- *   0x8000FD70: ori  s0, s0, 0xF000   ; s0 = 0xB000F000 = EE_INTC_STAT
- *   0x8000FD74: lw   v0, 0(s0)        ; <- this project's own hook fires
- *                                     ;    HERE, one instruction before
- *                                     ;    the read completes, matching
- *                                     ;    the exact Round 314 timing
- *                                     ;    fix already applied to the
- *                                     ;    sibling site above
- *   0x8000FD78: andi v0, v0, 0x0002   ; test EE_INTC_IRQ_SBUS bit
- *   0x8000FD7C: beqz v0, 0x8000FDBC   ; not ready -> retry/return path
- * This is bit-for-bit the same register and the same bit as
- * EE_SBUS_WAIT_LOOP_PC above - just a different call site (part of the
- * real BIOS's own SIF-RPC send/receive routine, identified via genuine
- * debug strings "send req err"/"recv err"/"send err", Round 927) that
- * happens to test the identical condition. This ALSO corrects Round
- * 884's own "coincidental code bytes, not a real status flag" framing:
- * that round computed the physical address as `0xB000F000 - 0xB0000000
- * = 0x0000F000` (plain RAM), but the real MIPS KSEG1 mapping is
- * `vaddr - 0xA0000000` (equivalently `vaddr & 0x1FFFFFFF`, exactly the
- * convention `ee_mem_translate_kseg()`/`ee_mem_read32()` already use
- * elsewhere in this file) giving physical `0x1000F000` - real EE_INTC_STAT
- * hardware, not RAM at all. Round 884's read of "leftover code bytes"
- * was very likely an artifact of that scratch tool's own address math,
- * not evidence about what this project's real interpreter does.
- *
- * Extending the existing, already-accepted (Round 177/178/262-264)
- * "supply the real SBUS signal one instruction before it's consumed"
- * shortcut to this second, independently-verified site is the same
- * kind of narrow, safe, evidence-driven change as the original - not a
- * new invention. The two existing guards (never fires if INTC_STAT bit
- * 1 is already set by a real write; never fires if the DMAC_STAT/SIF2
- * half of the real OR-condition is already satisfied) are unchanged
- * and apply identically here. */
-#define EE_SBUS_WAIT_LOOP_PC2 0x8000FD74u
-
 /* Round 262 (task #423, 302nd finding): exact instrumentation showed
  * this wait loop's target PC is visited 6,161,403 times in a single
  * 60M-instruction run, with only the very first visit satisfiable by
@@ -1386,7 +1345,7 @@ static void ee_check_browser_idle_carousel(ee_state_t *st)
  * signals - it just no longer limits itself to a single occurrence. */
 static void ee_check_boot_unblock_sbus_wait(ee_state_t *st)
 {
-    if (st->pc != EE_SBUS_WAIT_LOOP_PC && st->pc != EE_SBUS_WAIT_LOOP_PC2)
+    if (st->pc != EE_SBUS_WAIT_LOOP_PC)
         return;
     ee_intc_state_t *intc = ee_intc_get_state();
     if (intc->stat & (1u << EE_INTC_IRQ_SBUS))

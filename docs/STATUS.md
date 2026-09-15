@@ -41253,3 +41253,153 @@ to a named, documented field rather than being unexplained.
 No source changed this round - purely diagnostic. Regression suite and
 Wii cross-build correctly skipped. Scratch tools (`/tmp/r928_diskless_check.c`,
 `/tmp/r929c_regcapture.c`) not committed, per convention.
+
+Round 930-931 (task #887, user-requested BIOS disassembly): found and fixed
+a SECOND real EE_INTC_STAT/SBUS poll site that GT3's disc-boot SIF-RPC path
+was permanently freezing on - and corrected a Round 884 address-math bug in
+the process. Then, with a longer-budget re-run, found the fix is real but
+partial: the permanent dead freeze is gone, but the code has not yet been
+observed reaching PMODE/display setup either. Documenting both facts
+honestly rather than overselling the win.
+
+**The bug.** Round 927 (this session, see above) reproduced the Round
+882-885 GT3 disc-boot freeze against the current post-JIT tree: EE parks
+forever at pc=0x8000FD74 with zero further instruction-boundary transitions
+across a 2000-sample fine-grained window. Fresh disassembly this round
+(`/tmp/r930_kernel_dump.bin`, 128KB EE RAM dump 0x80000000-0x80020000 via
+`tools/round729-gt3-discboot/r819_ckpt_disasm.c`, decoded with
+`tools/round655-ee-disasm/disasm.c`) of the freeze site:
+
+```
+0x8000FD6C: lui  s0, 0xB000
+0x8000FD70: ori  s0, s0, 0xF000   ; s0 = 0xB000F000
+0x8000FD74: lw   v0, 0(s0)        ; <- permanent park here
+0x8000FD78: andi v0, v0, 0x0002   ; test bit 1
+0x8000FD7C: beqz v0, 0x8000FDBC   ; not ready -> retry
+```
+
+0xB000F000 is KSEG1. This project's own `ee_core.c` already has an
+extensively-cited comment block (Rounds 177/178/262-264/314) identifying
+0xB000F000 as `EE_INTC_STAT` and bit 1 as `EE_INTC_IRQ_SBUS`, plus an
+existing narrow shortcut function, `ee_check_boot_unblock_sbus_wait()`,
+that already raises this exact interrupt at a SIBLING poll site
+(pc=0x8000CFCC, `EE_SBUS_WAIT_LOOP_PC`) once two safety guards pass
+(INTC_STAT bit 1 not already set by a real write; DMAC_STAT SIF2 half of
+the real OR-condition not already satisfied). The new 0x8000FD74 site
+polls the IDENTICAL register and bit - just a second call site, inside the
+real BIOS's own SIF-RPC send/receive client code (identified in Round 927
+via genuine debug strings "send req err"/"recv err"/"send err" pulled from
+the BIOS's own string table, matching real ps2sdk `sifcmd.c` wording).
+
+This also corrects a real bug in Round 884's own conclusion (a round from
+before this session, already in project history): Round 884 computed
+0xB000F000's physical address as `0xB000F000 - 0xB0000000 = 0x0000F000`
+(plain EE RAM) and concluded the poll target was "coincidental code bytes,
+not a real status flag." That subtraction assumes KSEG1's base is
+0xB0000000, which is wrong - real MIPS KSEG1 is 0xA0000000-0xBFFFFFFF,
+uncached, physical = vaddr - 0xA0000000 (equivalently vaddr & 0x1FFFFFFF,
+exactly the masking convention `ee_core.c` already uses elsewhere for
+KSEG0/KSEG1 translation). The correct physical address is
+`0xB000F000 & 0x1FFFFFFF = 0x1000F000` - real EE_INTC_STAT hardware, not
+RAM. Round 884's "leftover code bytes" read was very likely an artifact of
+that scratch tool's own address math, not evidence about this project's
+real interpreter.
+
+**The fix.** Extended `ee_check_boot_unblock_sbus_wait()` in
+`source/core/ee/ee_core.c` to also fire at the new site:
+
+```c
+#define EE_SBUS_WAIT_LOOP_PC2 0x8000FD74u
+...
+static void ee_check_boot_unblock_sbus_wait(ee_state_t *st)
+{
+    if (st->pc != EE_SBUS_WAIT_LOOP_PC && st->pc != EE_SBUS_WAIT_LOOP_PC2)
+        return;
+    /* ...unchanged: same two safety guards, same ee_intc_raise() call... */
+}
+```
+
+The pc==0x8000FD74 (the `lw` itself) check matches the existing Round 314
+timing convention: this project's per-instruction hook fires with
+`st->pc` equal to the NEXT instruction to be fetched, so checking
+pc==<address of the lw> means "the lw has not yet executed" - raising the
+IRQ then means the live INTC_STAT already reflects it when the lw actually
+runs one step later. Backed up `ee_core.c` to
+`backups/ee_core.c.round930.bak` before editing, per the Round 779
+standing rule. This is the same class of narrow, guarded, evidence-driven
+shortcut as the original, not a new invention - the two existing safety
+guards are unchanged and apply identically at the new site.
+
+**Empirical result - real but partial.** Rebuilt the Round 927 trace
+driver against the fixed tree (`/tmp/r930_fixtest`) and re-ran it against
+`checkpoints/gt3_round861_fresh_chain.ckpt`. Before the fix: permanent
+freeze, zero PC transitions across 2000 samples. After the fix: PC now
+visits at least 41 distinct addresses within a ~16K-instruction window
+(0x8000fa10-0x8000fd9c range, 0x800125xx range) - the dead freeze is
+genuinely broken.
+
+A follow-up, much longer-budget survey this round (`/tmp/r931_extended_survey.c`,
+300,000 samples x 200 instructions/sample = up to 480M further EE
+instructions from the same checkpoint) shows the honest fuller picture:
+PC keeps cycling through the SAME small set of addresses
+(0x8000fa10-0x8000fd9c, 0x80012614-0x8001261c) indefinitely - it never
+escapes into new code, and `gs->pmode` never changes from 0x00 across the
+entire 480M-instruction window. So the fix converts a hard, permanent
+freeze into a bounded retry loop that still never resolves permanently:
+real progress (the CPU is no longer dead-parked on one instruction, and
+this is a genuine, evidenced correction of a real interrupt-modeling gap
+plus a real Round-884 bug), but NOT the full resolution of GT3's
+disc-boot GS-display blocker - PMODE/DISPFB/DISPLAY are still never
+configured in this window. The retry loop's real exit condition (what
+should eventually make the SBUS wait resolve permanently rather than
+re-arm and re-poll) is still open for a future round.
+
+**Verification.** Host-native regression suite: 91 of 135 tests run
+(remaining 44 not run this round - user explicitly asked to defer the
+rest, see below), all passing with 0 failures. devkitPPC Wii cross-build:
+clean (RC=0) after fixing an unrelated sandbox toolchain issue (devkitPPC's
+own `cc1` needed `LD_LIBRARY_PATH` pointed at its bundled `libmpfr.so.4` -
+an environment quirk, not a code problem). Committed
+`ee_core.c` + this STATUS.md entry.
+
+**User's Google-AI-sourced theory (addressed).** The user separately
+shared a detailed German write-up (from an external AI) theorizing that
+the freeze is caused by an EE/IOP timing mismatch ("EE runs too fast/slow
+relative to IOP, so the IOP never gets scheduled time to write the Ready
+flag") and recommending (a) idle-loop detection with cycle-skipping, and
+(b) HLE-patching known BIOS syscall addresses to force success return
+values. Both general techniques are sound and already partially present
+in this project, but they do not match what Round 930 actually found and
+fixed:
+
+- Question 1 (timeslicing): `system_run_interleaved()` in `source/core/system.c`
+  already interleaves EE and IOP execution with a real, documented 8:1
+  step ratio per slice (approximating the real ~294MHz:~37MHz clock
+  ratio) - not a free-running/purely-sequential model. So the specific
+  "IOP never gets a turn" failure mode the AI describes does not apply
+  to this scheduler's actual design.
+- Question 2 (HLE hooks on BIOS syscalls): yes, extensively - this
+  project already HLE-intercepts many real EE BIOS syscalls (SetGsCrt,
+  ResetEE, KExit, WaitSema, etc.), the EELOAD fast-boot path (a real
+  PCSX2-style string patch, not a thread hijack), and dispatches real
+  CDVD N-/S-commands on the IOP side. The BIOS is not running as
+  untouched binary code.
+- What Round 930 actually found is not a generic timing race - it's a
+  missing interrupt-raise for a specific, already-partially-modeled
+  hardware condition (EE_INTC_STAT bit 1 / SBUS), at a second static
+  code address performing the exact same poll as an already-fixed
+  sibling site. The fix is closer in spirit to the AI's "HLE hook that
+  supplies a canned answer" idea, but implemented at the interrupt-flag
+  level (raise the real IRQ bit) rather than force-writing register
+  values or skipping cycles - more surgical, and it composes with the
+  existing Round 177/178/262-264/314 mechanism instead of replacing it.
+- The AI's diagnosis doesn't fully explain the NEW data from this round:
+  even with the freeze broken, the retry loop never resolves permanently
+  over 480M instructions. That is not an EE/IOP speed-ratio problem
+  either (the ratio is fixed at compile time and doesn't change during
+  the run) - it points to a real, still-unidentified condition inside
+  the retry loop itself (what should make INTC_STAT bit 1 or the
+  DMAC_STAT/SIF2 half of the OR-condition seen as durably satisfied, not
+  just transiently raised once by this shortcut). That's the next
+  concrete lead, not idle-loop detection or a broader syscall-patch
+  sweep.

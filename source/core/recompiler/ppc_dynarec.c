@@ -4753,6 +4753,102 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
         return -1; /* other MMI3 sub-opcodes (PMTHI/PMTLO/PCPYUD/... etc): not yet JIT-compiled */
     }
 
+    if (op == 0x1Cu && (funct == 0x34u || funct == 0x36u || funct == 0x37u ||
+                         funct == 0x3Cu || funct == 0x3Eu || funct == 0x3Fu)) {
+        /* Round 917 (task #902): MMI shift family - PSLLH (funct=0x34),
+         * PSRLH (0x36), PSRAH (0x37), PSLLW (0x3C), PSRLW (0x3E),
+         * PSRAW (0x3F). Unlike MMI0-3, these are TOP-LEVEL direct-funct
+         * MMI opcodes - ee_core.c's `case 0x1C: switch(funct)` dispatches
+         * straight to them (grep-confirmed at ee_core.c lines 9237-9242),
+         * no intermediate sa-based sub-group the way funct 0x08/0x09/0x29
+         * work. All six shift rt ONLY (never rs) by the compile-time-
+         * constant sa field, write to rd (skipped when rd==0, matching
+         * every prior MMI round's convention). Real semantics:
+         * PSLLH/PSRLH/PSRAH operate on 8x 16-bit lanes with the shift
+         * masked to sa&0xF (0-15); PSLLW/PSRLW/PSRAW operate on 4x
+         * 32-bit lanes with the full 5-bit sa (0-31), per-lane, via
+         * set_lane_h/set_lane_w in the interpreter. */
+        if (funct == 0x3Cu || funct == 0x3Eu || funct == 0x3Fu) {
+            /* W-family: each of the 4 memory words IS one lane already -
+             * native PPC750 shift-by-immediate applies directly, no
+             * lane-packing concerns (unlike H below, where two lanes
+             * share one 32-bit word). slwi/srwi are the standard
+             * rlwinm-based idioms (rA,rS,n,0,31-n and rA,rS,(32-n)&31,
+             * n,31 respectively); PSRAW's arithmetic shift is a real
+             * srawi, PPC750's native instruction for it. */
+            int shamt = (int)(sa & 0x1Fu);
+            int16_t offt[4] = { REG_HI(rt), REG_LO(rt), REG_HI1(rt), REG_LO1(rt) };
+            int16_t offd[4] = { REG_HI(rd), REG_LO(rd), REG_HI1(rd), REG_LO1(rd) };
+            for (int w = 0; w < 4; w++) {
+                emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, offt[w]));
+                if (funct == 0x3Cu)      /* PSLLW: slwi rA,rS,n */
+                    emit(ctx, enc_rlwinm(SCRATCH_A, SCRATCH_A, shamt, 0, 31 - shamt));
+                else if (funct == 0x3Eu) /* PSRLW: srwi rA,rS,n */
+                    emit(ctx, enc_rlwinm(SCRATCH_A, SCRATCH_A, (32 - shamt) & 31, shamt, 31));
+                else                      /* PSRAW: srawi rA,rS,n */
+                    emit(ctx, enc_srawi(SCRATCH_A, SCRATCH_A, shamt));
+                if (rd != 0)
+                    emit(ctx, enc_stw(SCRATCH_A, CTX_REG, offd[w]));
+            }
+            return 0;
+        }
+
+        /* H-family: PSLLH/PSRLH/PSRAH. Each 32-bit memory word packs
+         * TWO independent 16-bit lanes that must not bleed into each
+         * other - shifting the whole 32-bit word directly (as the
+         * W-family does) would let bits cross the halfword boundary,
+         * which real hardware never does. Per word: extract each
+         * 16-bit half right-aligned into its own scratch register
+         * (rlwinm(x,x,0,16,31) for the low half, rlwinm(x,x,16,16,31)
+         * for the high half - the standard "extract low/high halfword"
+         * idiom, hand-verified bit-exactly against concrete examples
+         * before use here), apply the shift to each half independently
+         * (PSLLH/PSRLH reuse the exact same slwi/srwi-style rlwinm
+         * formulas as the W-family above - still exact for a 16-bit
+         * field, since the extraction step already zeroed the other 16
+         * bits: shifting a zero-extended value left and re-masking to
+         * 16 bits is bit-exact truncation, and shifting right is
+         * bit-exact zero-fill since there's nothing above bit15 to leak
+         * in), then reassemble via shift-left-16 + or. PSRAH needs real
+         * 16-bit sign extension (not the zero-extension the isolation
+         * step leaves behind) before its arithmetic shift: first shift
+         * the isolated half up into the TOP of the register (via
+         * rlwinm(x,x,16,0,15), so its bit15 becomes the register's true
+         * sign bit), then a real srawi by 16+s - the low 16 bits of
+         * that result are exactly (int16_t)H >> s two's-complement
+         * floor-shift, verified by hand against a negative test value
+         * (0x8001 >> 1 -> 0xC000) before use here - and the final
+         * rlwinm(x,x,0,16,31) discards the extra sign-extension bits
+         * above bit15, matching the interpreter's (uint16_t) cast. */
+        int s = (int)(sa & 0xFu);
+        int16_t offt[4] = { REG_HI(rt), REG_LO(rt), REG_HI1(rt), REG_LO1(rt) };
+        int16_t offd[4] = { REG_HI(rd), REG_LO(rd), REG_HI1(rd), REG_LO1(rd) };
+        for (int w = 0; w < 4; w++) {
+            emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, offt[w]));          /* A = whole word */
+            emit(ctx, enc_rlwinm(SCRATCH_B, SCRATCH_A, 0, 16, 31));   /* B = lo16 (right-aligned) */
+            emit(ctx, enc_rlwinm(SCRATCH_C, SCRATCH_A, 16, 16, 31));  /* C = hi16 (right-aligned) */
+            if (funct == 0x34u) { /* PSLLH */
+                emit(ctx, enc_rlwinm(SCRATCH_B, SCRATCH_B, s, 16, 31)); /* (lo16<<s)&0xFFFF */
+                emit(ctx, enc_rlwinm(SCRATCH_C, SCRATCH_C, s, 16, 31)); /* (hi16<<s)&0xFFFF */
+            } else if (funct == 0x36u) { /* PSRLH */
+                emit(ctx, enc_rlwinm(SCRATCH_B, SCRATCH_B, (32 - s) & 31, s, 31));
+                emit(ctx, enc_rlwinm(SCRATCH_C, SCRATCH_C, (32 - s) & 31, s, 31));
+            } else { /* PSRAH */
+                emit(ctx, enc_rlwinm(SCRATCH_B, SCRATCH_B, 16, 0, 15));  /* B <<= 16 (sign->bit31) */
+                emit(ctx, enc_srawi(SCRATCH_B, SCRATCH_B, 16 + s));
+                emit(ctx, enc_rlwinm(SCRATCH_B, SCRATCH_B, 0, 16, 31));  /* truncate to 16 bits */
+                emit(ctx, enc_rlwinm(SCRATCH_C, SCRATCH_C, 16, 0, 15));
+                emit(ctx, enc_srawi(SCRATCH_C, SCRATCH_C, 16 + s));
+                emit(ctx, enc_rlwinm(SCRATCH_C, SCRATCH_C, 0, 16, 31));
+            }
+            emit(ctx, enc_rlwinm(SCRATCH_C, SCRATCH_C, 16, 0, 15));   /* hi16' << 16 into position */
+            emit(ctx, enc_or(SCRATCH_A, SCRATCH_C, SCRATCH_B));       /* reassemble */
+            if (rd != 0)
+                emit(ctx, enc_stw(SCRATCH_A, CTX_REG, offd[w]));
+        }
+        return 0;
+    }
+
     /* Unsupported: remaining REGIMM sub-opcodes (BLTZAL/BGEZAL/-ALL,
      * trap instructions), the rest of MMI, COP1/2, everything else.
      * Every base conditional/unconditional MIPS branch/jump opcode this

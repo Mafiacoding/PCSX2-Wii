@@ -39962,3 +39962,75 @@ top-level direct-funct MMI opcodes (MADD/MADDU/PLZCW/MFHI1/MTHI1/
 MFLO1/MTLO1/MULT1/MULTU1/DIV1/DIVU1/etc.) all remain unimplemented
 in the JIT. Next: task #902 (Round 917: JIT the MMI shift family -
 PSLLH/PSRLH/PSRAH/PSLLW/PSRLW/PSRAW).
+
+## Round 917: JIT MMI shift family - PSLLH/PSRLH/PSRAH/PSLLW/PSRLW/PSRAW (task #902)
+
+PSLLH/PSRLH/PSRAH (funct=0x34/0x36/0x37) and PSLLW/PSRLW/PSRAW
+(funct=0x3C/0x3E/0x3F) - grep-confirmed at ee_core.c lines 9237-9242.
+Unlike every other MMI opcode JIT'd so far, these are TOP-LEVEL
+direct-funct MMI opcodes (op=0x1C, funct dispatches straight to them,
+no intermediate sa-based MMI0/1/2/3 sub-group). The H-family shifts
+8x 16-bit lanes with the amount masked to sa&0xF (0-15); the W-family
+shifts 4x 32-bit lanes with the full 5-bit sa (0-31).
+
+The W-family maps directly onto native PPC750 shift-by-immediate
+instructions applied independently to each of the 4 memory words -
+no lane-packing concerns since each word IS one lane. slwi/srwi are
+the standard rlwinm-based idioms (rA,rS,n,0,31-n and rA,rS,(32-n)&31,
+n,31 respectively); PSRAW's arithmetic shift is a real srawi.
+
+The H-family is harder: each 32-bit word packs TWO independent 16-bit
+lanes that must not bleed into each other, so shifting the whole word
+directly (as the W-family does) would let bits cross the halfword
+boundary. The codegen extracts each half right-aligned into its own
+scratch register (the standard "extract low/high halfword" rlwinm
+idiom), shifts each half independently (PSLLH/PSRLH reuse the exact
+same slwi/srwi rlwinm formulas as the W-family - still bit-exact for
+a 16-bit field since the extraction step already zeroed the other
+half: shifting a zero-extended value left and re-masking to 16 bits
+is bit-exact truncation, and shifting right is bit-exact zero-fill),
+then reassembles via shift-left-16 + or. PSRAH needed real 16-bit
+sign extension (not the zero-extension the isolation step leaves
+behind): shift the isolated half up into the register's true sign-bit
+position first, then a real srawi by 16+s, then truncate back to 16
+bits. Every rlwinm formula was hand-derived and verified against
+concrete bit patterns (including a negative PSRAH case, 0x8001>>1 ->
+0xC000) before being committed to code.
+
+Verification: new host-native harness r917_mmi_shift_verify.c,
+extending r893's shared ppcsim base with ONE new simulated opcode
+(rlwinm, the M-form rotate-and-mask this round's codegen leans on
+heavily; lwz/stw/or/srawi were already simulated by earlier
+harnesses). The harness's own independent test-double reference model
+(td_lane_h) initially had a transcription bug of its own - it
+selected ud0-vs-ud1 at word granularity (n<4) instead of correctly
+mirroring real lane_h's per-lane-pair indexing (n/2), which is what
+actually maps each 32-bit memory word to its two 16-bit lanes. This
+produced 12 spurious H-family failures on the first run; the dynarec
+codegen itself was never wrong - only the harness's own reference
+model was, diagnosed by re-deriving lane_h's real n->word mapping
+directly from ee_core.c's source line ((n<4 ? ud0 : ud1) >>
+((n&3)*16)) rather than trusting the first draft's assumption. After
+the harness fix, all 54/54 checks passed (covering shift amounts at
+both ends of each family's valid range - sh=1/15 for H, sh=1/31 for
+W - plus an rd==0 poison check per opcode).
+
+Regression-checked against all 10 still-present prior harnesses
+(r893/894/895/896/897/898/900/902/903/904: 13/13, 17/17, 19/19, 35/35,
+19/19, 27/27, 25/25, 20/20, 12/12, 13/13) - no regressions, no compile
+warnings.
+
+Wii build: pcsx2-wii.elf 3,323,764 bytes / .dol 552,992 bytes
+(+8,288 elf / +800 dol over Round 916), 0 warnings/errors (devkitPPC
+8.1.0).
+
+Status: task #902 (Round 917) CLOSED - the MMI shift family is JIT'd.
+task #886 remains open: MMI0's remaining sub-opcodes, MMI1 (funct
+0x28, entirely unaddressed), MMI2's remaining sub-opcodes, MMI3's
+remaining sub-opcodes, the MMI pack-unpack/merge/HI-LO-pair families
+(PPACB/PPACH/PPACW/PEXTB/PEXTH/PEXTW/PCPYLD/PCPYUD/PCPYH/PEXTLx/
+PEXTUx/PMFHI/PMFLO/PMTHI/PMTLO/PMFHL/PMTHL), and the remaining
+top-level direct-funct MMI opcodes (MADD/MADDU/PLZCW/MFHI1/MTHI1/
+MFLO1/MTLO1/MULT1/MULTU1/DIV1/DIVU1/QFSRV/PROT3W/etc.) all remain
+unimplemented in the JIT. Next: task #903 (Round 918: JIT the MMI
+pack-unpack family - PPACB/PPACH/PPACW/PEXTB/PEXTH/PEXTW).

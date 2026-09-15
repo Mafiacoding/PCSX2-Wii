@@ -814,6 +814,54 @@
  * warnings), elf 3,315,476/dol 552,192 (+4,976/+544 over Round 915).
  * Status: task #901 (Round 916) CLOSED. Next: task #902 (Round 917:
  * JIT the MMI shift family - PSLLH/PSRLH/PSRAH/PSLLW/PSRLW/PSRAW).
+ *
+ * Round 917 (task #902) update: JIT'd the MMI shift family - PSLLH/
+ * PSRLH/PSRAH (funct=0x34/0x36/0x37, 8x 16-bit lanes, shift masked to
+ * sa&0xF) and PSLLW/PSRLW/PSRAW (funct=0x3C/0x3E/0x3F, 4x 32-bit
+ * lanes, full 5-bit sa) - grep-confirmed at ee_core.c lines 9237-9242.
+ * Unlike every other MMI opcode JIT'd so far, these are TOP-LEVEL
+ * direct-funct MMI opcodes (op=0x1C, funct dispatches straight to
+ * them), not nested under an sa-based MMI0/1/2/3 sub-group. The
+ * W-family maps directly onto native PPC750 shift-by-immediate
+ * instructions applied independently to each of the 4 memory words
+ * (slwi/srwi via the standard rlwinm formulas, srawi natively) - no
+ * lane-packing concerns since each word IS one lane. The H-family is
+ * harder: each 32-bit word packs TWO independent 16-bit lanes that
+ * must not bleed into each other, so the codegen extracts each half
+ * right-aligned (the standard "extract low/high halfword" rlwinm
+ * idiom), shifts each half independently (PSLLH/PSRLH reuse the same
+ * slwi/srwi rlwinm formulas as the W-family - still bit-exact for a
+ * 16-bit field since the extraction already zeroed the other half),
+ * and reassembles via shift-left-16 + or. PSRAH needed real 16-bit
+ * sign extension before its arithmetic shift (not the zero-extension
+ * the isolation step leaves behind): shift the isolated half up into
+ * the register's true sign-bit position first, then a real srawi by
+ * 16+s, then truncate back to 16 bits - every formula was hand-derived
+ * and verified against concrete bit patterns (including a negative
+ * PSRAH case, 0x8001>>1 -> 0xC000) before being committed to code.
+ *
+ * Verification: new host-native harness r917_mmi_shift_verify.c,
+ * extending r893's shared ppcsim base with ONE new opcode (rlwinm -
+ * the M-form rotate-and-mask this round's codegen leans on heavily;
+ * lwz/stw/or/srawi were already simulated). The harness's OWN
+ * independent test-double reference model (td_lane_h) initially had a
+ * transcription bug - it selected ud0-vs-ud1 at word granularity
+ * (n<4) instead of correctly mirroring real lane_h's per-lane-pair
+ * indexing (n/2), which is what actually maps each 32-bit memory word
+ * to its two 16-bit lanes. This produced 12 spurious H-family failures
+ * on the first run; the dynarec codegen itself was never wrong - only
+ * the harness's own reference model was, diagnosed by re-deriving
+ * lane_h's real n->word mapping from ee_core.c's source line directly
+ * ((n<4 ? ud0 : ud1) >> ((n&3)*16)) rather than trusting the first
+ * draft's assumption. After the harness fix, all 54/54 checks passed
+ * (covering shift amounts at both ends of each family's valid range -
+ * sh=1/15 for H, sh=1/31 for W - plus an rd==0 poison check per
+ * opcode). Full 10-harness regression suite unchanged (13/13, 17/17,
+ * 19/19, 35/35, 19/19, 27/27, 25/25, 20/20, 12/12, 13/13); clean
+ * devkitPPC Wii cross-build (0 warnings), elf 3,323,764/dol 552,992
+ * (+8,288/+800 over Round 916). Status: task #902 (Round 917) CLOSED.
+ * Next: task #903 (Round 918: JIT the MMI pack-unpack family -
+ * PPACB/PPACH/PPACW/PEXTB/PEXTH/PEXTW).
  */
 
 typedef struct {

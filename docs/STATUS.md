@@ -40587,3 +40587,74 @@ semantic correctness verification for the JIT's already-covered
 opcode set (highest-value per this round's coverage-vs-correctness
 finding above) rather than further coverage expansion, or pivot to
 task #887 - the user's call given both are now legitimately viable.
+
+## Round 924 (task #913): JIT-on vs JIT-off Dolphin/real-Wii comparison builds
+
+**Why.** Round 923 measured JIT *coverage* on real workloads; the user
+then asked directly whether the JIT actually works correctly on real
+Gekko hardware. Honest answer given: unknown - every verification to
+date has been host-native (interpret the generated PPC words on
+x86_64, never execute them) plus a clean devkitPPC compile, and this
+project has no Dolphin/real-Wii debug connector available in-sandbox.
+The user asked to prep a real on-target A/B comparison so they can
+check it themselves.
+
+**What changed.** One small, additive, purely-off-by-default change to
+`ee_jit.c`'s existing host-safety gate: the condition guarding the
+no-op path went from `#ifndef GEKKO` to `#if !defined(GEKKO) ||
+defined(PCSX2WII_JIT_DISABLE)`. `PCSX2WII_JIT_DISABLE` is not defined
+anywhere in the normal build (not in the Makefile, not in any tracked
+file) - it's only passed via a one-off `make CC="powerpc-eabi-gcc
+-DPCSX2WII_JIT_DISABLE"` invocation. With it undefined (every normal
+build, including every build this project has shipped since Round
+887), the condition is logically identical to the old `#ifndef GEKKO`
+- confirmed by rebuilding the default target and diffing: the
+resulting `.dol`'s sha256 (`337800c3...`) matches a build from before
+this round's edit was made, byte-for-byte.
+
+**Two .dol builds produced, same commit/tree, differing only in that
+one flag:**
+- `pcsx2-wii-jit-on.dol` (564,384 bytes) - the normal build, JIT
+  active, unchanged behavior from Round 887 onward.
+- `pcsx2-wii-jit-off.dol` (525,216 bytes, -39,168 bytes) - JIT forced
+  off, interpreter runs every instruction. The meaningful size drop is
+  itself a useful sanity check: with `ee_jit_try_execute_one()`'s
+  GEKKO branch compiled out, nothing calls into `ppc_dynarec.c`'s
+  codegen anymore, and the linker's dead-code elimination correctly
+  drops all of it - confirms the toggle actually disables the intended
+  code path rather than leaving it dead-but-linked.
+
+Both are saved to `outputs/round924-jit-dolphin-compare/` (NOT `/tmp` -
+these are meant for the user to actually load into Dolphin/a real Wii,
+unlike this project's checkpoint/BIOS/disc scratch files) along with a
+README explaining what to compare and why.
+
+**Verification.**
+- Default `make` (no flag) re-run after the edit: exit 0, 0 warnings,
+  output verified byte-identical to the immediately-prior default
+  build via `sha256sum`/`diff` - confirms zero behavior change for
+  every existing build configuration.
+- `make CC="... -DPCSX2WII_JIT_DISABLE"`: exit 0, 0 warnings, produces
+  the smaller jit-off `.dol` described above.
+- Host-native regression: `test_ee_core` and `test_ee_cop2_vu0` (both
+  link `ee_jit.c` per Round 887's build-graph change) re-run against
+  the edited tree - 0 failures on both, confirming the new `#if`
+  condition doesn't break host-native test builds either (where GEKKO
+  is undefined and PCSX2WII_JIT_DISABLE is also undefined - same
+  no-op path as always).
+
+**Not yet done.** The comparison itself - actually loading both `.dol`
+files in Dolphin (or a real Wii) and seeing whether they diverge -
+requires the user's own Dolphin/hardware, outside this sandbox. This
+round only prepares the artifacts; the result is still unknown as of
+this writeup.
+
+**No regression risk carried forward.** `PCSX2WII_JIT_DISABLE` is not
+referenced anywhere except this one guard clause, is not set by any
+tracked build path, and this round's own byte-identical-default-build
+check is the concrete evidence that shipping this toggle changes
+nothing about the project's normal behavior.
+
+Status: task #913 continues. Round 924b (dual-execution host-native
+correctness harness, ALU/shift/immediate opcode family) is the
+parallel host-native track requested alongside this one.

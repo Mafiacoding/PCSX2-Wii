@@ -389,7 +389,7 @@ static void ee_jit_cache_insert(uint32_t instr, ppc_block_fn fn)
 
 int ee_jit_try_execute_one(ee_state_t *st, uint32_t instr)
 {
-#ifndef GEKKO
+#if !defined(GEKKO) || defined(PCSX2WII_JIT_DISABLE)
     /* Round 887 host-safety gate: ppc_dynarec.c generates raw PPC750
      * machine code, and the block below CALLS it as a function
      * pointer. This project's regression/test suite builds and runs
@@ -406,7 +406,19 @@ int ee_jit_try_execute_one(ee_state_t *st, uint32_t instr)
      * r880_ppc_verify.c is the correct way to verify the generated PPC
      * ENCODINGS on host: it interprets the raw bytes in a synthetic
      * PPC model rather than executing them natively. See
-     * include/core/recompiler/ee_jit.h's header comment. */
+     * include/core/recompiler/ee_jit.h's header comment.
+     *
+     * Round 924 (task #913): PCSX2WII_JIT_DISABLE is a new, additive,
+     * off-by-default compile-time toggle (not passed by the normal
+     * Makefile - only by a separate one-off `make` invocation with
+     * `CFLAGS += -DPCSX2WII_JIT_DISABLE`) that forces this same no-op
+     * path even on a real GEKKO build. It exists purely to produce a
+     * "JIT off" .dol built from the exact same commit/tree as the
+     * normal "JIT on" .dol, for a real, on-target Dolphin/Wii A/B
+     * comparison - see docs/STATUS.md's Round 924 entry for how to
+     * build and use it. Does not change default behavior at all: a
+     * plain `make` is byte-for-byte the same JIT-on build as before
+     * this round. */
     (void)st;
     (void)instr;
     return 0;

@@ -794,6 +794,38 @@ static float ee_jit_cvt_s_w_helper(int32_t v)
 #define ADDR_EE_CVT_S_W 0x0000010Au
 #endif
 
+/* Round 915 (task #900): MMI2 multiply/divide family - PMULTW/PDIVW/
+ * PMULTH/PDIVBW (opcode 0x1C funct 0x09, sa 0x0C/0x0D/0x1C/0x1D). Same
+ * GEKKO-vs-host dual-address scheme as ADDR_EE_MEM_READ32/etc above,
+ * but the four real implementations (ee_jit_helper_pmultw/pdivw/
+ * pmulth/pdivbw) live in ee_core.c rather than this file - unlike
+ * ADDR_EE_CVT_S_W's trivial one-line int->float cast, these opcodes
+ * need real access to ee_state_t's gpr/hi/lo fields plus the file-
+ * private lane_w/lane_h/set_lane_w static-inline helpers that already
+ * live in ee_core.c (see that file's own Round 915 comment for the
+ * full rationale and the exact ported case-body source). Declared
+ * `void *st` here (not `ee_state_t *st`) since this file never needs
+ * ee_state_t's full definition - only ee_core.c's actual function
+ * bodies dereference it - exactly the same forward-declaration
+ * convention ee_mem_read32/etc already use above. Sentinels 0x10B-
+ * 0x10E continue the existing 0x101-0x10A numbering (next 4 free
+ * values). */
+#ifdef GEKKO
+extern void ee_jit_helper_pmultw(void *st, int rs, int rt, int rd);
+extern void ee_jit_helper_pdivw(void *st, int rs, int rt, int rd);
+extern void ee_jit_helper_pmulth(void *st, int rs, int rt, int rd);
+extern void ee_jit_helper_pdivbw(void *st, int rs, int rt, int rd);
+#define ADDR_EE_JIT_PMULTW ((uint32_t)(uintptr_t)&ee_jit_helper_pmultw)
+#define ADDR_EE_JIT_PDIVW  ((uint32_t)(uintptr_t)&ee_jit_helper_pdivw)
+#define ADDR_EE_JIT_PMULTH ((uint32_t)(uintptr_t)&ee_jit_helper_pmulth)
+#define ADDR_EE_JIT_PDIVBW ((uint32_t)(uintptr_t)&ee_jit_helper_pdivbw)
+#else
+#define ADDR_EE_JIT_PMULTW 0x0000010Bu
+#define ADDR_EE_JIT_PDIVW  0x0000010Cu
+#define ADDR_EE_JIT_PMULTH 0x0000010Du
+#define ADDR_EE_JIT_PDIVBW 0x0000010Eu
+#endif
+
 /* Scratch PPC GPRs used by generated code. r3 is the incoming context
  * pointer (ppc_dynarec_gpr128_t *gpr) per the PowerPC EABI calling
  * convention - we never touch r1 (stack ptr) or r2/r13 (TOC/small-
@@ -4599,6 +4631,65 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
             return 0;
         }
         return -1; /* other MMI0 sub-opcodes (PCGTW/PMAXW/PEXTLW/... etc): not yet JIT-compiled */
+    }
+
+    if (op == 0x1Cu && funct == 0x09u) {
+        /* Round 915 (task #900): MMI2 multiply/divide family - PMULTW
+         * (sa=0x0C), PDIVW (sa=0x0D), PMULTH (sa=0x1C), PDIVBW
+         * (sa=0x1D). IMPORTANT naming note: this project's own
+         * ee_core.c interpreter labels its `case 0x09:` block "MMI2"
+         * in its comment (matching real R5900 EE Core hardware - the
+         * funct 0x09 sub-group really is MMI2, and funct 0x28 is
+         * really MMI1; a prior session's summary had these two swapped,
+         * corrected here after re-reading the actual interpreter source
+         * directly rather than trusting the stale note).
+         *
+         * All four opcodes involve substantial 64-bit HI:LO-pipe-pair
+         * arithmetic with real-hardware edge-case handling (INT32_MIN/
+         * -1 overflow guards, MIPS sign-of-dividend div-by-zero
+         * convention, PDIVBW's broadcast-one-halfword-divisor-across-
+         * four-lanes quirk) that would take many dozens of individual
+         * PPC750 instructions to hand-translate bit-exactly, at real
+         * risk of silently drifting from the interpreter's own
+         * behavior. Rather than do that (as Round 914's simpler add/
+         * sub-only MMI0 family did), this round uses the established
+         * C-function-call trampoline pattern instead (first used for
+         * LW/SW in Round 891, extended through SQRT.S/CVT.S.W in
+         * Rounds 905/906b): emit a call into a small dedicated C helper
+         * per opcode (ee_jit_helper_pmultw/pdivw/pmulth/pdivbw, defined
+         * in ee_core.c - see that file's own Round 915 comment), each a
+         * byte-for-byte port of the real interpreter case body, so the
+         * JIT and interpreter can never silently disagree here. rs/rt/
+         * rd are compile-time-constant instruction fields (this JIT
+         * compiles exactly one MIPS instruction per block), so they're
+         * passed as plain li-loaded integer arguments in r4/r5/r6 -
+         * SCRATCH_A/B/C's register numbers exactly match the EABI's
+         * arg2/arg3/arg4 slots, so no extra register-shuffling is
+         * needed beyond the li itself. No result flows back into any
+         * PPC register after the call (the helper writes gpr[rd]/hi/lo
+         * directly through the ctx pointer) - same "SW-style" simpler
+         * frame as the plain-write trampolines above, no r15 (saved
+         * ctx) needed, only r14 (saved LR) crosses the call. */
+        uint32_t helper_addr;
+        if (sa == 0x0Cu)      helper_addr = ADDR_EE_JIT_PMULTW;
+        else if (sa == 0x0Du) helper_addr = ADDR_EE_JIT_PDIVW;
+        else if (sa == 0x1Cu) helper_addr = ADDR_EE_JIT_PMULTH;
+        else if (sa == 0x1Du) helper_addr = ADDR_EE_JIT_PDIVBW;
+        else return -1; /* other MMI2 sub-opcodes (PMFHI/PMADDW/PAND/... etc): not yet JIT-compiled */
+
+        emit(ctx, enc_addi(1, 1, -32));
+        emit(ctx, enc_stw(14, 1, 8));
+        emit(ctx, enc_mflr(14));
+        emit(ctx, enc_addi(SCRATCH_A, 0, (int16_t)rs)); /* r4 = rs (arg2); r3=ctx already arg1 */
+        emit(ctx, enc_addi(SCRATCH_B, 0, (int16_t)rt)); /* r5 = rt (arg3) */
+        emit(ctx, enc_addi(SCRATCH_C, 0, (int16_t)rd)); /* r6 = rd (arg4) */
+        emit_load_const32(ctx, 12, helper_addr);
+        emit(ctx, enc_mtctr(12));
+        emit(ctx, enc_bctrl());                       /* ee_jit_helper_pXXXX(ctx, rs, rt, rd) */
+        emit(ctx, enc_mtlr(14));
+        emit(ctx, enc_lwz(14, 1, 8));
+        emit(ctx, enc_addi(1, 1, 32));
+        return 0;
     }
 
     /* Unsupported: remaining REGIMM sub-opcodes (BLTZAL/BGEZAL/-ALL,

@@ -39823,3 +39823,79 @@ meta-groups) plus the top-level MADD/MADDU/PLZCW/MFHI1/MTHI1/MFLO1/
 MTLO1/MULT1/MULTU1/DIV1/DIVU1/etc. opcodes remain entirely
 unaddressed. Next: task #900 (Round 915: JIT MMI multiply-divide
 family - PMULTH/PMULTW/PDIVW/PDIVBW).
+
+## Round 915: JIT MMI2 multiply/divide family - PMULTW/PDIVW/PMULTH/PDIVBW (task #900)
+
+JIT'd PMULTW (sa=0x0C), PDIVW (sa=0x0D), PMULTH (sa=0x1C), PDIVBW
+(sa=0x1D) - opcode 0x1C, funct 0x09.
+
+**Naming correction** (found this round by re-reading ee_core.c's real
+interpreter source directly, not from a prior session's summary):
+funct 0x09 is real MMI2 and funct 0x28 is real MMI1 - the reverse of
+what Round 914's docs paragraph (and an earlier session's carried-over
+notes) implied. This matches real R5900 EE Core hardware. Round 914's
+own MMI0 block (funct 0x08) is unaffected by this correction. Any
+future MMI1-family round should target funct 0x28, not 0x09.
+
+**Trampoline dispatch, not inline codegen.** Unlike every opcode JIT'd
+so far - including Round 914's inline lwz/add/stb MMI0 codegen - these
+four opcodes are dispatched through a "whole-operation" C-function-call
+trampoline. Four new non-static helper functions in ee_core.c
+(ee_jit_helper_pmultw/pdivw/pmulth/pdivbw, placed right before
+ee_step() where ee_state_t/lane_w/lane_h/set_lane_w/sext32 are already
+visible) do ALL the real arithmetic themselves - each is a byte-for-
+byte port of ee_core.c's own interpreter case body for the same
+opcode. The JIT-generated PPC code only does li r4=rs/r5=rt/r6=rd
+(compile-time-constant instruction fields - this JIT compiles exactly
+one MIPS instruction per block) and then bctrl through a new
+ADDR_EE_JIT_PMULTW/PDIVW/PMULTH/PDIVBW sentinel quartet in
+ppc_dynarec.c (host sentinels 0x10B-0x10E, real function addresses
+under GEKKO) - an "SW-style" simple call frame (only r14/LR saved
+across the call, no r15/saved-ctx needed, since no result flows back
+into any PPC register: the helper writes gpr[rd]/HI/LO directly
+through the ctx pointer it's given).
+
+This was a deliberate choice, not a shortcut. PMULTW/PDIVW/PMULTH/
+PDIVBW's real 64-bit HI:LO-pipe-pair arithmetic - including MIPS's
+sign-of-dividend div-by-zero convention, the INT32_MIN/-1 overflow
+special case, and PDIVBW's single-halfword-divisor-broadcast-across-
+four-lanes quirk - would take many dozens of individual PPC750
+instructions to hand-translate bit-exactly, at real risk of silently
+drifting from the interpreter's own behavior over time. The trampoline
+call instead guarantees byte-for-byte agreement, since the JIT and
+interpreter now literally execute the same C function for these
+opcodes.
+
+Verification: new host-native harness r915_mmi2_muldiv_verify.c
+extends r893_ld_sd_verify.c's bctrl-dispatch-simulation base (the
+first harness in this project to need to simulate a function-call
+trampoline) with the four new sentinel targets. Its own test doubles
+are an INDEPENDENTLY transcribed port of the same real case bodies
+(not a call into the real ee_jit_helper_* functions), preserving this
+project's established cross-check-independence discipline - the
+harness verifies both the dispatch (right sentinel, right args in
+r4/r5/r6, ctx/r1/r14 preserved) and the arithmetic (ordinary division,
+divide-by-zero sign convention, INT32_MIN/-1 clamp, PMULTH's 8-way
+lane packing, PDIVBW's broadcast divisor) independently. 35/35 checks
+passed on the first run under ASan/UBSan, 0 leaks.
+
+Regression-checked against all 10 still-present prior harnesses
+(r893/894/895/896/897/898/900/902/903/904: 13/13, 17/17, 19/19, 35/35,
+19/19, 27/27, 25/25, 20/20, 12/12, 13/13) - no regressions, no compile
+warnings.
+
+Wii build: pcsx2-wii.elf 3,310,500 bytes / .dol 551,648 bytes
+(+13,304 elf / +1,664 dol over Round 914), 0 warnings/errors (devkitPPC
+8.1.0).
+
+Status: task #900 (Round 915) CLOSED - MMI2's multiply/divide family
+is JIT'd. task #886 remains open: MMI0's remaining sub-opcodes
+(PCGTW/PMAXW/PCGTH/PMAXH/PCGTB/PEXTLW/PPACW/etc.), MMI1 (funct 0x28,
+entirely unaddressed), MMI2's remaining sub-opcodes (PMFHI/PMFLO/
+PCPYLD/PAND/PXOR/PSLLVW/PSRLVW/PINTH/PEXEH/PREVH/PEXEW/PROT3W/PMADDW/
+PMSUBW/PMADDH/PHMADH/PMSUBH/PHMSBH/etc.), MMI3 (funct 0x29, entirely
+unaddressed), and the top-level direct-funct MMI opcodes (MADD/MADDU/
+PLZCW/MFHI1/MTHI1/MFLO1/MTLO1/MULT1/MULTU1/DIV1/DIVU1/etc.) all remain
+unimplemented in the JIT. Next: task #901 (Round 916: JIT the
+PAND/POR/PXOR/PNOR logical family, spanning MMI2 sa=0x12/0x13 and
+MMI3 sa=0x12/0x13).

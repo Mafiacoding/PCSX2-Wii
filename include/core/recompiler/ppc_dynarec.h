@@ -738,6 +738,53 @@
  * MADD/MADDU/PLZCW/MFHI1/MTHI1/MFLO1/MTLO1/MULT1/MULTU1/etc. opcodes
  * remain entirely unaddressed. Next: task #900 (Round 915: JIT MMI
  * multiply-divide family).
+ *
+ * Round 915 (task #900) update: JIT'd MMI2's multiply/divide family -
+ * PMULTW (sa=0x0C), PDIVW (sa=0x0D), PMULTH (sa=0x1C), PDIVBW
+ * (sa=0x1D) - opcode 0x1C funct 0x09. Naming correction found this
+ * round (superseding a stale prior-session note): per real R5900 EE
+ * Core hardware AND this project's own ee_core.c interpreter source
+ * (re-read directly, not from memory), funct 0x09 is MMI2 and funct
+ * 0x28 is MMI1 - the reverse of what an earlier session summary
+ * claimed. Round 914's block comments already correctly said "MMI0"
+ * for funct 0x08 (unaffected), but any future MMI1-family round
+ * should target funct 0x28, not 0x09.
+ *
+ * Unlike every opcode JIT'd so far (including Round 914's inline
+ * lwz/add/stb MMI0 codegen), these four opcodes are dispatched via a
+ * "whole-operation" C-function-call trampoline: the real
+ * ee_jit_helper_pmultw/pdivw/pmulth/pdivbw() functions (new this
+ * round, defined in ee_core.c right before ee_step(), where
+ * ee_state_t/lane_w/lane_h/set_lane_w/sext32 are already visible) do
+ * ALL the arithmetic themselves - each is a byte-for-byte port of
+ * ee_core.c's own interpreter case body for the same opcode. The
+ * JIT-generated PPC code only does li r4=rs/r5=rt/r6=rd (compile-time
+ * constants - single-instruction-granularity JIT) then bctrl through
+ * a new ADDR_EE_JIT_PMULTW/PDIVW/PMULTH/PDIVBW sentinel quartet
+ * (0x10B-0x10E on host builds, real function addresses under GEKKO),
+ * following the SW-style simple frame (only r14/LR saved across the
+ * call - no r15/saved-ctx needed, since no result flows back into any
+ * PPC register: the helper writes gpr[rd]/HI/LO directly through the
+ * ctx pointer it's given). This trampoline choice was deliberate, not
+ * a shortcut: PMULTW/PDIVW/PMULTH/PDIVBW's real 64-bit HI:LO-pipe-pair
+ * arithmetic (including MIPS's div-by-zero sign-of-dividend
+ * convention, the INT32_MIN/-1 overflow special case, and PDIVBW's
+ * single-halfword-divisor-broadcast-across-four-lanes quirk) would
+ * take many dozens of individual PPC750 instructions to hand-translate
+ * bit-exactly, at real risk of silently drifting from the
+ * interpreter's own behavior - the trampoline call guarantees
+ * byte-for-byte agreement instead, since JIT and interpreter now
+ * literally share the same C arithmetic. New host-native harness
+ * r915_mmi2_muldiv_verify.c extends r893's bctrl-dispatch-simulation
+ * base with the four new sentinel targets; its own test doubles are
+ * an INDEPENDENTLY transcribed port of the same real case bodies (not
+ * a call into the real ee_jit_helper_* functions), preserving this
+ * project's cross-check-independence discipline. 35/35 checks passed
+ * on the first run; full 10-harness regression suite unchanged; clean
+ * devkitPPC Wii cross-build (0 warnings), elf 3,310,500/dol 551,648
+ * (+13,304/+1,664 over Round 914). Status: task #900 (Round 915)
+ * CLOSED. Next: task #901 (Round 916: JIT MMI2's logical family -
+ * PAND/POR/PXOR/PNOR).
  */
 
 typedef struct {

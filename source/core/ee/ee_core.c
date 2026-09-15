@@ -3220,6 +3220,89 @@ static inline void set_lane_b(ee_reg128_t *r, int n, uint8_t val) {
     *p = (*p & mask) | ((uint64_t)val << sh);
 }
 
+/* Round 915 (task #900): JIT helper functions for the MMI2 multiply/
+ * divide family (PMULTW/PDIVW/PMULTH/PDIVBW - opcode 0x1C funct 0x09,
+ * sa 0x0C/0x0D/0x1C/0x1D). Called from ppc_dynarec.c's translate_one()
+ * through the same established C-function-call trampoline pattern
+ * first used for LW/SW (Round 891) and extended through SQRT.S/
+ * CVT.S.W (Rounds 905/906b) - see that file's ADDR_EE_JIT_PMULTW/etc
+ * declarations and dispatch block for the call-site details. Each
+ * function below is a byte-for-byte port of this file's own
+ * interpreter case body for the same opcode (see the MMI2 case block
+ * above, sa cases 0x0C/0x0D/0x1C/0x1D) - not a re-derivation - so
+ * the JIT and interpreter can never silently disagree on these
+ * opcodes' many real-hardware edge cases (INT32_MIN/-1 overflow
+ * guards, MIPS sign-of-dividend div-by-zero convention, PDIVBW's
+ * broadcast-one-halfword-divisor-across-four-lanes quirk). Deliberately
+ * NOT hand-translated into inline PPC750 arithmetic the way the
+ * simpler add/sub-only MMI0 family was in Round 914 - the full 64-bit
+ * HI:LO-pipe-pair bookkeeping here would take many dozens of
+ * individual PPC instructions to reproduce bit-exactly, at real risk
+ * of behavioral drift from the interpreter; the trampoline call
+ * guarantees byte-for-byte agreement instead. Declared non-static
+ * (like ee_mem_read32/etc) so ppc_dynarec.c can call them across
+ * translation units; rs/rt/rd are plain ints here (not MIPS register-
+ * encoding-width bitfields) since ppc_dynarec.c passes them as
+ * compile-time-constant integers extracted from the single MIPS
+ * instruction this JIT block compiles (single-instruction-granularity
+ * JIT - see ee_jit_try_execute_one()). */
+void ee_jit_helper_pmultw(ee_state_t *st, int rs, int rt, int rd)
+{
+    int64_t t0 = (int64_t)(int32_t)lane_w(st->gpr[rs], 0) * (int64_t)(int32_t)lane_w(st->gpr[rt], 0);
+    int64_t t1 = (int64_t)(int32_t)lane_w(st->gpr[rs], 2) * (int64_t)(int32_t)lane_w(st->gpr[rt], 2);
+    st->lo.ud0 = (uint64_t)(int64_t)(int32_t)(t0 & 0xFFFFFFFFu); st->hi.ud0 = (uint64_t)(t0 >> 32);
+    st->lo.ud1 = (uint64_t)(int64_t)(int32_t)(t1 & 0xFFFFFFFFu); st->hi.ud1 = (uint64_t)(t1 >> 32);
+    if (rd) { st->gpr[rd].ud0 = (uint64_t)t0; st->gpr[rd].ud1 = (uint64_t)t1; }
+}
+
+void ee_jit_helper_pdivw(ee_state_t *st, int rs, int rt, int rd)
+{
+    (void)rd; /* real PDIVW has no rd output at all - HI/LO only */
+    for (int k = 0; k < 2; k++) {
+        int ss = (k == 0) ? 0 : 2;
+        uint32_t rsv = lane_w(st->gpr[rs], ss), rtv = lane_w(st->gpr[rt], ss);
+        int64_t qlo, qhi;
+        if (rsv == 0x80000000u && rtv == 0xFFFFFFFFu) { qlo = (int32_t)0x80000000; qhi = 0; }
+        else if ((int32_t)rtv != 0) { qlo = (int32_t)rsv / (int32_t)rtv; qhi = (int32_t)rsv % (int32_t)rtv; }
+        else { qlo = ((int32_t)rsv < 0) ? 1 : -1; qhi = (int32_t)rsv; }
+        if (k == 0) { st->lo.ud0 = sext32((uint32_t)qlo); st->hi.ud0 = sext32((uint32_t)qhi); }
+        else        { st->lo.ud1 = sext32((uint32_t)qlo); st->hi.ud1 = sext32((uint32_t)qhi); }
+    }
+}
+
+void ee_jit_helper_pmulth(ee_state_t *st, int rs, int rt, int rd)
+{
+    int32_t r0 = (int32_t)(int16_t)lane_h(st->gpr[rs], 0) * (int32_t)(int16_t)lane_h(st->gpr[rt], 0);
+    int32_t r1 = (int32_t)(int16_t)lane_h(st->gpr[rs], 1) * (int32_t)(int16_t)lane_h(st->gpr[rt], 1);
+    int32_t r2 = (int32_t)(int16_t)lane_h(st->gpr[rs], 2) * (int32_t)(int16_t)lane_h(st->gpr[rt], 2);
+    int32_t r3 = (int32_t)(int16_t)lane_h(st->gpr[rs], 3) * (int32_t)(int16_t)lane_h(st->gpr[rt], 3);
+    int32_t r4 = (int32_t)(int16_t)lane_h(st->gpr[rs], 4) * (int32_t)(int16_t)lane_h(st->gpr[rt], 4);
+    int32_t r5 = (int32_t)(int16_t)lane_h(st->gpr[rs], 5) * (int32_t)(int16_t)lane_h(st->gpr[rt], 5);
+    int32_t r6 = (int32_t)(int16_t)lane_h(st->gpr[rs], 6) * (int32_t)(int16_t)lane_h(st->gpr[rt], 6);
+    int32_t r7 = (int32_t)(int16_t)lane_h(st->gpr[rs], 7) * (int32_t)(int16_t)lane_h(st->gpr[rt], 7);
+    st->lo.ud0 = ((uint64_t)(uint32_t)r1 << 32) | (uint32_t)r0;
+    st->hi.ud0 = ((uint64_t)(uint32_t)r3 << 32) | (uint32_t)r2;
+    st->lo.ud1 = ((uint64_t)(uint32_t)r5 << 32) | (uint32_t)r4;
+    st->hi.ud1 = ((uint64_t)(uint32_t)r7 << 32) | (uint32_t)r6;
+    if (rd) { set_lane_w(&st->gpr[rd], 0, (uint32_t)r0); set_lane_w(&st->gpr[rd], 1, (uint32_t)r2);
+              set_lane_w(&st->gpr[rd], 2, (uint32_t)r4); set_lane_w(&st->gpr[rd], 3, (uint32_t)r6); }
+}
+
+void ee_jit_helper_pdivbw(ee_state_t *st, int rs, int rt, int rd)
+{
+    (void)rd; /* real PDIVBW also has no rd output - HI/LO only */
+    for (int n = 0; n < 4; n++) {
+        uint32_t rsv = lane_w(st->gpr[rs], n);
+        uint16_t rtv16 = lane_h(st->gpr[rt], 0); /* broadcast: Rt's halfword lane 0 for ALL 4 iterations - real hardware quirk, not a bug */
+        int32_t qlo, qhi;
+        if (rsv == 0x80000000u && rtv16 == 0xFFFFu) { qlo = (int32_t)0x80000000; qhi = 0; }
+        else if ((int16_t)rtv16 != 0) { qlo = (int32_t)rsv / (int32_t)(int16_t)rtv16; qhi = (int32_t)rsv % (int32_t)(int16_t)rtv16; }
+        else { qlo = ((int32_t)rsv < 0) ? 1 : -1; qhi = (int32_t)rsv; }
+        set_lane_w(&st->lo, n, (uint32_t)qlo);
+        set_lane_w(&st->hi, n, (uint32_t)qhi);
+    }
+}
+
 /* Round 630 (task #536/#611) experimental safety-net counter - see the
  * guard's own comment below for full rationale. Exposed non-static so
  * host-native tests/tools can observe it if useful; intentionally NOT

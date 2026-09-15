@@ -40126,3 +40126,96 @@ the remaining top-level direct-funct MMI opcodes (MADD/MADDU/PLZCW/
 MFHI1/MTHI1/MFLO1/MTLO1/MULT1/MULTU1/DIV1/DIVU1/QFSRV/PROT3W/etc.)
 all remain unimplemented in the JIT. Next: task #904 (Round 919: JIT
 MMI merge family - PCPYLD/PCPYUD/PCPYH/PEXTLx/PEXTUx).
+
+## Round 919: JIT MMI merge family - PCPYLD/PCPYUD/PCPYH/PEXTLx/PEXTUx (task #904)
+
+Scope: 9 opcodes across 4 distinct MMI funct dispatch blocks.
+PEXTLW/PEXTLH/PEXTLB live in the existing MMI0 (funct=0x08) block at
+sa=0x12/0x16/0x1A. PEXTUW/PEXTUH/PEXTUB live at the same sa values but
+under MMI1 (funct=0x28) - the first codegen this project has ever
+emitted for that funct value, since Rounds 914-918 only ever touched
+MMI0/MMI2/MMI3. PCPYLD lives in the existing MMI2 (funct=0x09) block
+at sa=0x0E. PCPYUD/PCPYH live in the existing MMI3 (funct=0x29) block
+at sa=0x0E/0x1B.
+
+Real semantics (ee_core.c, cross-checked against each case body
+directly): PEXTLW interleaves Rt/Rs's low half {w0,w1} into out's
+4 words (out.w0=Rt.w0, out.w1=Rs.w0, out.w2=Rt.w1, out.w3=Rs.w1);
+PEXTLH does the same 8-way for the low 4 half-words; PEXTLB does the
+same 16-way for the low 8 bytes. PEXTUW/PEXTUH/PEXTUB are identical
+but source the HIGH half of each register (lanes 2-3 / 4-7 / 8-15)
+instead. PCPYLD swaps 64-bit halves across rs/rt: out.ud1=rs.ud0,
+out.ud0=rt.ud0. PCPYUD is PCPYLD's upper-half mirror: out.ud0=rs.ud1,
+out.ud1=rt.ud1. PCPYH broadcasts Rt only (Rs unused): Rt's lane-0
+half-word fills out's lanes 0-3, Rt's lane-4 half-word fills out's
+lanes 4-7.
+
+Codegen: PEXTLW/PEXTUW/PEXTLH/PEXTUH reuse Round 918's established
+alias-safe pattern verbatim - read every needed source lane into a
+scratch GPR via mmi_w_off/mmi_h_off first, write rd's lanes only
+after all reads are done. PEXTLB/PEXTUB need 16 independent source
+bytes (8 interleaved from each of Rt/Rs) - more than the 8 available
+scratch GPRs - so they reuse PPACB's 16-byte r1-relative stack-
+scratch-buffer pattern from Round 918 verbatim, with only the source-
+lane indices changed (n vs n+8 for the upper-half variant). PCPYLD/
+PCPYUD/PCPYH are the simplest ops JIT'd this round: each real
+ee_core.c body builds a fully local `out` struct before its single
+`gpr[rd] = out;` assignment, so alias safety is automatic by
+construction - no special read-all-first discipline was needed, only
+plain lwz/stw (PCPYLD/PCPYUD, 4 words each) or lhz/sth (PCPYH, 2
+source reads broadcast to 8 destination writes).
+
+Verification: wrote r919_mmi_merge_verify.c (73 checks: each of the 9
+opcodes gets a normal case, an rd==0 poison check, and - for every
+opcode except PCPYLD/PCPYUD, which have no natural single-register
+alias case in their rs/rt-swap semantics - a dedicated rd==rs or
+rd==rt aliasing case). First run: 49/73 passed. PEXTLW/PEXTUW/PEXTLH/
+PEXTUH/PCPYH passed every check immediately, including their alias
+cases. PEXTLB/PEXTUB/PCPYLD/PCPYUD failed their normal-case and (where
+applicable) alias-case checks, while their rd==0 poison checks still
+passed - a pattern strongly suggesting the harness's own reference
+model, not the generated code, since a codegen bug would be unlikely
+to spare the poison check by coincidence across four unrelated
+opcodes. Manual code review (re-reading td_word/td_set_word's own
+documented widx convention: 0=LO,1=HI,2=LO1,3=HI1) found
+td_pcpyld/td_pcpyud passing their hi/lo word values to td_set_word in
+an order that silently wrote hi where lo belonged and vice versa - an
+authoring mistake in the harness, confirmed by inspection alone before
+any debug run. A second, independent bug was found in td_lane_b by
+comparing a debug-instrumented run's raw actual-vs-expected byte dump
+against a fresh hand-derivation of both sides: td_lane_b's byte-in-
+word extraction shift was (3-(n&3))*8, but it needed to be (n&3)*8.
+Reasoning: rd32/wr32 (made explicitly big-endian in Round 918)
+already reconstructs a word so the byte at memory offset base+j lands
+in bits (24-8*j) of the returned integer; mmi_b_off's real, separately
+-verified-correct convention (Round 914) fetches byte_in_word=3-k for
+lane-within-word k - substituting j=3-k into "bits (24-8*j)" gives
+bits (8*k), the inverse of what td_lane_b's first draft assumed, so
+it was silently double-reversing the byte order. Both fixes applied
+directly to the harness's reference functions only; ppc_dynarec.c was
+not touched. Re-ran: 73/73 checks passed, 0 ASan/UBSan errors - the
+dynarec codegen for all 9 opcodes was correct from the first draft,
+the third consecutive round (917/918/919) where every real bug found
+during verification lived in the test harness rather than the JIT
+itself.
+
+Regression-checked against all 10 prior harnesses
+(r893/894/895/896/897/898/900/902/903/904: 13/13, 17/17, 19/19, 35/35,
+19/19, 27/27, 25/25, 20/20, 12/12, 13/13) - no regressions, no compile
+warnings.
+
+Wii build: pcsx2-wii.elf 3,443,896 bytes / .dol 561,504 bytes
+(+109,856 elf / +7,648 dol over Round 918), 0 warnings/errors
+(devkitPPC 8.1.0). This is the largest single-round size delta of the
+MMI arc so far, consistent with 9 new opcodes spanning 4 distinct
+funct dispatch blocks including a brand-new MMI1 block (which also
+pulls in MMI1's dispatch-table scaffolding for the first time).
+
+Status: task #904 (Round 919) CLOSED - the MMI merge/extend family is
+JIT'd. task #886 remains open: MMI0/MMI1/MMI2/MMI3's remaining sub-
+opcodes, the HI/LO-pair access family (PMFHI/PMFLO/PMTHI/PMTLO/
+PMFHL/PMTHL), and the remaining top-level direct-funct MMI opcodes
+(MADD/MADDU/PLZCW/MFHI1/MTHI1/MFLO1/MTLO1/MULT1/MULTU1/DIV1/DIVU1/
+QFSRV/PROT3W/etc.) all remain unimplemented in the JIT. Next: task
+#905 (Round 920: JIT MMI HI/LO-pair access - PMFHI/PMFLO/PMTHI/PMTLO/
+PMFHL/PMTHL).

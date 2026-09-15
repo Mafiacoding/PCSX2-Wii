@@ -915,6 +915,47 @@
  * over Round 917). Status: task #903 (Round 918) CLOSED. Next: task
  * #904 (Round 919: JIT MMI merge family - PCPYLD/PCPYUD/PCPYH/
  * PEXTLx/PEXTUx).
+ *
+ * Round 919 (task #904) update: JIT'd the MMI merge/extend family -
+ * PEXTLW/PEXTLH/PEXTLB (MMI0 sa=0x12/0x16/0x1A), PEXTUW/PEXTUH/PEXTUB
+ * (MMI1 funct=0x28, sa=0x12/0x16/0x1A - the first codegen this
+ * project has emitted for the MMI1 funct value), PCPYLD (MMI2
+ * funct=0x09, sa=0x0E), PCPYUD/PCPYH (MMI3 funct=0x29, sa=0x0E/0x1B).
+ * PEXTLW/PEXTUW/PEXTLH/PEXTUH reuse Round 918's "read every source
+ * lane into scratch first, write rd only after" alias-safe pattern
+ * via mmi_w_off/mmi_h_off. PEXTLB/PEXTUB need 16 independent source
+ * bytes (8 from Rt, 8 from Rs interleaved) - more than the 8 scratch
+ * GPRs - so they reuse PPACB's 16-byte r1-relative stack-scratch-
+ * buffer pattern verbatim, just with different source-lane indices
+ * (n vs n+8). PCPYLD/PCPYUD are simple 128-bit half-swaps between rs
+ * and rt (out.ud1=rs.ud0/out.ud0=rt.ud0, and the mirror for UD), and
+ * PCPYH broadcasts Rt's lane-0 half-word across result lanes 0-3 and
+ * Rt's lane-4 half-word across lanes 4-7 (Rs unused) - both build a
+ * fully local `out` before the single gpr[rd] assignment in the real
+ * ee_core.c bodies, so alias safety is automatic by construction and
+ * needed no special discipline in the codegen. Verification
+ * (r919_mmi_merge_verify.c, 73/73 checks covering all 9 opcodes with
+ * normal-case, rd==0 poison, and rd==rs/rd==rt alias sub-tests) found
+ * two harness-only bugs, not codegen bugs, matching Rounds 917-918's
+ * pattern exactly: (1) td_lane_b's byte-in-word extraction shift was
+ * (3-(n&3))*8 when it needed to be (n&3)*8 - the harness's own
+ * big-endian rd32/wr32 (Round 918's fix) already accounts for the
+ * byte-reversal that mmi_b_off's 3-k addressing performs, so applying
+ * 3-k again in td_lane_b double-reversed it; (2) td_pcpyld/td_pcpyud
+ * passed their hi/lo word values to td_set_word in an order that
+ * silently swapped which physical word slot (LO vs HI, or LO1 vs
+ * HI1) received which value. Both fixed directly in the test-double
+ * reference functions; the actual dynarec codegen for all 9 opcodes
+ * was correct from the first draft, confirmed by all 73 checks
+ * passing on the very next run with zero changes to ppc_dynarec.c.
+ * Full 10-harness regression suite unchanged (13/13, 17/17, 19/19,
+ * 35/35, 19/19, 27/27, 25/25, 20/20, 12/12, 13/13); clean devkitPPC
+ * Wii cross-build (0 warnings), elf 3,443,896/dol 561,504
+ * (+109,856/+7,648 over Round 918 - the largest single-round delta of
+ * the MMI arc so far, consistent with 9 new opcodes spanning 4
+ * distinct funct dispatch blocks including a brand-new MMI1 block).
+ * Status: task #904 (Round 919) CLOSED. Next: task #905 (Round 920:
+ * JIT MMI HI/LO-pair access - PMFHI/PMFLO/PMTHI/PMTLO/PMFHL/PMTHL).
  */
 
 typedef struct {

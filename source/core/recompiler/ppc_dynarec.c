@@ -4709,7 +4709,130 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
             emit(ctx, enc_addi(1, 1, 16));
             return 0;
         }
-        return -1; /* other MMI0 sub-opcodes (PCGTW/PMAXW/PEXTLW/... etc): not yet JIT-compiled */
+        /* Round 919 (task #904): MMI0's extend-low family - PEXTLW
+         * (sa=0x12), PEXTLH (sa=0x16), PEXTLB (sa=0x1A) - the sibling
+         * ops that sit right next to PPACW/PPACH/PPACB in ee_core.c's
+         * own sa-switch (grep-confirmed at lines 9394/9410/9430,
+         * interleaved 0x12/0x13, 0x16/0x17, 0x1A/0x1B pairs). Where
+         * PPACx takes even-indexed lanes to pack two halves into one
+         * register, PEXTLx does the reverse: it INTERLEAVES the low
+         * half of Rt with the low half of Rs, alternating one lane
+         * from each source per output lane. Real bodies: PEXTLW
+         * out={Rt.w0,Rs.w0,Rt.w1,Rs.w1}; PEXTLH out={Rt.h0,Rs.h0,
+         * Rt.h1,Rs.h1,Rt.h2,Rs.h2,Rt.h3,Rs.h3}; PEXTLB out.b[2n]=
+         * Rt.b[n], out.b[2n+1]=Rs.b[n] for n=0..7. Same mmi_w_off/
+         * mmi_h_off/mmi_b_off-addressed plain load/store codegen as
+         * PPACx, same alias-safe "read every source lane into scratch
+         * first, write rd only after all reads done" discipline;
+         * PEXTLW/PEXTLH fit in the 8 scratch GPRs directly, PEXTLB
+         * reuses PPACB's 16-byte stack scratch-buffer pattern verbatim
+         * (just with a different source-to-slot mapping). */
+        if (sa == 0x12u) { /* PEXTLW */
+            emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, mmi_w_off((int)rt, 0)));
+            emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, mmi_w_off((int)rs, 0)));
+            emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, mmi_w_off((int)rt, 1)));
+            emit(ctx, enc_lwz(SCRATCH_D, CTX_REG, mmi_w_off((int)rs, 1)));
+            if (rd != 0) {
+                emit(ctx, enc_stw(SCRATCH_A, CTX_REG, mmi_w_off((int)rd, 0)));
+                emit(ctx, enc_stw(SCRATCH_B, CTX_REG, mmi_w_off((int)rd, 1)));
+                emit(ctx, enc_stw(SCRATCH_C, CTX_REG, mmi_w_off((int)rd, 2)));
+                emit(ctx, enc_stw(SCRATCH_D, CTX_REG, mmi_w_off((int)rd, 3)));
+            }
+            return 0;
+        }
+        if (sa == 0x16u) { /* PEXTLH */
+            static const int src_lane4[4] = { 0, 1, 2, 3 };
+            int scratch8[8] = { SCRATCH_A, SCRATCH_B, SCRATCH_C, SCRATCH_D,
+                                 SCRATCH_E, SCRATCH_F, SCRATCH_G, SCRATCH_H };
+            for (int k = 0; k < 4; k++) {
+                emit(ctx, enc_lhz(scratch8[k * 2], CTX_REG, mmi_h_off((int)rt, src_lane4[k])));
+                emit(ctx, enc_lhz(scratch8[k * 2 + 1], CTX_REG, mmi_h_off((int)rs, src_lane4[k])));
+            }
+            if (rd != 0) {
+                for (int k = 0; k < 8; k++)
+                    emit(ctx, enc_sth(scratch8[k], CTX_REG, mmi_h_off((int)rd, k)));
+            }
+            return 0;
+        }
+        if (sa == 0x1Au) { /* PEXTLB */
+            emit(ctx, enc_addi(1, 1, -16));
+            for (int n = 0; n < 8; n++) {
+                emit(ctx, enc_lbz(SCRATCH_A, CTX_REG, mmi_b_off((int)rt, n)));
+                emit(ctx, enc_stb(SCRATCH_A, 1, (int16_t)(n * 2)));
+                emit(ctx, enc_lbz(SCRATCH_A, CTX_REG, mmi_b_off((int)rs, n)));
+                emit(ctx, enc_stb(SCRATCH_A, 1, (int16_t)(n * 2 + 1)));
+            }
+            if (rd != 0) {
+                for (int k = 0; k < 16; k++) {
+                    emit(ctx, enc_lbz(SCRATCH_A, 1, (int16_t)k));
+                    emit(ctx, enc_stb(SCRATCH_A, CTX_REG, mmi_b_off((int)rd, k)));
+                }
+            }
+            emit(ctx, enc_addi(1, 1, 16));
+            return 0;
+        }
+        return -1; /* other MMI0 sub-opcodes (PCGTW/PMAXW/... etc): not yet JIT-compiled */
+    }
+
+    if (op == 0x1Cu && funct == 0x28u) {
+        /* Round 919 (task #904): MMI1's extend-high family - PEXTUW
+         * (sa=0x12), PEXTUH (sa=0x16), PEXTUB (sa=0x1A), grep-confirmed
+         * at ee_core.c lines ~9625/9635/9647 (MMI1 = funct 0x28, per
+         * the naming correction already documented in this file's
+         * Round 915 comment). Same interleave shape as PEXTLx just
+         * above, but sourced from the UPPER half of each register
+         * instead of the lower half: PEXTUW out={Rt.w2,Rs.w2,Rt.w3,
+         * Rs.w3}; PEXTUH out={Rt.h4,Rs.h4,Rt.h5,Rs.h5,Rt.h6,Rs.h6,
+         * Rt.h7,Rs.h7}; PEXTUB out.b[2n]=Rt.b[n+8], out.b[2n+1]=
+         * Rs.b[n+8] for n=0..7. This is the first MMI1 (funct=0x28)
+         * codegen in this dynarec - no prior block existed for this
+         * funct value, so this is a new top-level `if` rather than an
+         * addition to an existing one. */
+        if (sa == 0x12u) { /* PEXTUW */
+            emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, mmi_w_off((int)rt, 2)));
+            emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, mmi_w_off((int)rs, 2)));
+            emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, mmi_w_off((int)rt, 3)));
+            emit(ctx, enc_lwz(SCRATCH_D, CTX_REG, mmi_w_off((int)rs, 3)));
+            if (rd != 0) {
+                emit(ctx, enc_stw(SCRATCH_A, CTX_REG, mmi_w_off((int)rd, 0)));
+                emit(ctx, enc_stw(SCRATCH_B, CTX_REG, mmi_w_off((int)rd, 1)));
+                emit(ctx, enc_stw(SCRATCH_C, CTX_REG, mmi_w_off((int)rd, 2)));
+                emit(ctx, enc_stw(SCRATCH_D, CTX_REG, mmi_w_off((int)rd, 3)));
+            }
+            return 0;
+        }
+        if (sa == 0x16u) { /* PEXTUH */
+            static const int src_lane4[4] = { 4, 5, 6, 7 };
+            int scratch8[8] = { SCRATCH_A, SCRATCH_B, SCRATCH_C, SCRATCH_D,
+                                 SCRATCH_E, SCRATCH_F, SCRATCH_G, SCRATCH_H };
+            for (int k = 0; k < 4; k++) {
+                emit(ctx, enc_lhz(scratch8[k * 2], CTX_REG, mmi_h_off((int)rt, src_lane4[k])));
+                emit(ctx, enc_lhz(scratch8[k * 2 + 1], CTX_REG, mmi_h_off((int)rs, src_lane4[k])));
+            }
+            if (rd != 0) {
+                for (int k = 0; k < 8; k++)
+                    emit(ctx, enc_sth(scratch8[k], CTX_REG, mmi_h_off((int)rd, k)));
+            }
+            return 0;
+        }
+        if (sa == 0x1Au) { /* PEXTUB */
+            emit(ctx, enc_addi(1, 1, -16));
+            for (int n = 0; n < 8; n++) {
+                emit(ctx, enc_lbz(SCRATCH_A, CTX_REG, mmi_b_off((int)rt, n + 8)));
+                emit(ctx, enc_stb(SCRATCH_A, 1, (int16_t)(n * 2)));
+                emit(ctx, enc_lbz(SCRATCH_A, CTX_REG, mmi_b_off((int)rs, n + 8)));
+                emit(ctx, enc_stb(SCRATCH_A, 1, (int16_t)(n * 2 + 1)));
+            }
+            if (rd != 0) {
+                for (int k = 0; k < 16; k++) {
+                    emit(ctx, enc_lbz(SCRATCH_A, 1, (int16_t)k));
+                    emit(ctx, enc_stb(SCRATCH_A, CTX_REG, mmi_b_off((int)rd, k)));
+                }
+            }
+            emit(ctx, enc_addi(1, 1, 16));
+            return 0;
+        }
+        return -1; /* other MMI1 sub-opcodes (QFSRV/PADDUW/... etc): not yet JIT-compiled */
     }
 
     if (op == 0x1Cu && funct == 0x09u) {
@@ -4780,6 +4903,29 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
             }
             return 0;
         }
+        /* Round 919 (task #904): PCPYLD (sa=0x0E) - copies Rs's low
+         * 64 bits (ud0) into rd's HIGH 64 bits (ud1), and Rt's low 64
+         * bits (ud0) into rd's own low 64 bits (ud0). Real body (grep-
+         * confirmed ee_core.c line 9698): `out.ud1 = gpr[rs].ud0;
+         * out.ud0 = gpr[rt].ud0;` - builds a local `out` struct first,
+         * so it's naturally alias-safe (no read-after-write hazard
+         * even when rd aliases rs/rt) without needing PPACx's explicit
+         * read-everything-first discipline; a straight 4-word copy via
+         * REG_HI/REG_LO/REG_HI1/REG_LO1 offsets, same shape as the
+         * AND/XOR block just above. */
+        if (sa == 0x0Eu) {
+            emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_HI((int)rs)));
+            emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_LO((int)rs)));
+            emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_HI((int)rt)));
+            emit(ctx, enc_lwz(SCRATCH_D, CTX_REG, REG_LO((int)rt)));
+            if (rd != 0) {
+                emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_HI1((int)rd)));
+                emit(ctx, enc_stw(SCRATCH_B, CTX_REG, REG_LO1((int)rd)));
+                emit(ctx, enc_stw(SCRATCH_C, CTX_REG, REG_HI((int)rd)));
+                emit(ctx, enc_stw(SCRATCH_D, CTX_REG, REG_LO((int)rd)));
+            }
+            return 0;
+        }
 
         uint32_t helper_addr;
         if (sa == 0x0Cu)      helper_addr = ADDR_EE_JIT_PMULTW;
@@ -4829,7 +4975,47 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
             }
             return 0;
         }
-        return -1; /* other MMI3 sub-opcodes (PMTHI/PMTLO/PCPYUD/... etc): not yet JIT-compiled */
+        /* Round 919 (task #904): PCPYUD (sa=0x0E) - the upper-half
+         * counterpart of MMI2's PCPYLD above: copies Rs's HIGH 64 bits
+         * (ud1) into rd's low 64 bits (ud0), and Rt's high 64 bits
+         * (ud1) into rd's own high 64 bits (ud1). Real body (grep-
+         * confirmed ee_core.c line 9999): `out.ud0 = gpr[rs].ud1;
+         * out.ud1 = gpr[rt].ud1;` - same local-struct alias-safety and
+         * same 4-word-copy shape as PCPYLD, just sourced from HI1/LO1
+         * instead of HI/LO. */
+        if (sa == 0x0Eu) {
+            emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_HI1((int)rs)));
+            emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_LO1((int)rs)));
+            emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, REG_HI1((int)rt)));
+            emit(ctx, enc_lwz(SCRATCH_D, CTX_REG, REG_LO1((int)rt)));
+            if (rd != 0) {
+                emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_HI((int)rd)));
+                emit(ctx, enc_stw(SCRATCH_B, CTX_REG, REG_LO((int)rd)));
+                emit(ctx, enc_stw(SCRATCH_C, CTX_REG, REG_HI1((int)rd)));
+                emit(ctx, enc_stw(SCRATCH_D, CTX_REG, REG_LO1((int)rd)));
+            }
+            return 0;
+        }
+        /* Round 919 (task #904): PCPYH (sa=0x1B) - broadcasts Rt's
+         * halfword lane 0 across all 4 lanes of rd's low 64 bits, and
+         * Rt's halfword lane 4 across all 4 lanes of rd's high 64
+         * bits (Rt only, Rs unused). Real body (grep-confirmed
+         * ee_core.c line 10041): reads lane_h(Rt,0) and lane_h(Rt,4)
+         * once each, then writes each across 4 output lanes via
+         * mmi_h_off(rd, n) for n=0..3 and n=4..7 respectively - only 2
+         * loads needed regardless of how many lanes get written. */
+        if (sa == 0x1Bu) {
+            emit(ctx, enc_lhz(SCRATCH_A, CTX_REG, mmi_h_off((int)rt, 0)));
+            emit(ctx, enc_lhz(SCRATCH_B, CTX_REG, mmi_h_off((int)rt, 4)));
+            if (rd != 0) {
+                for (int n = 0; n < 4; n++)
+                    emit(ctx, enc_sth(SCRATCH_A, CTX_REG, mmi_h_off((int)rd, n)));
+                for (int n = 4; n < 8; n++)
+                    emit(ctx, enc_sth(SCRATCH_B, CTX_REG, mmi_h_off((int)rd, n)));
+            }
+            return 0;
+        }
+        return -1; /* other MMI3 sub-opcodes (PMTHI/PMTLO/PINTEH/... etc): not yet JIT-compiled */
     }
 
     if (op == 0x1Cu && (funct == 0x34u || funct == 0x36u || funct == 0x37u ||

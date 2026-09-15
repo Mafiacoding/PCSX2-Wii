@@ -41057,3 +41057,106 @@ than an in-sandbox file copy; Round 925's underlying "why no GS
 output" investigation (PMODE-gate finding, GT3/Tekken disc-boot walls)
 remains the substantive open thread for the next round to continue
 once the user has tried the disc-boot path themselves.
+
+## Round 927 (task #887): resumed the pre-JIT GT3 freeze investigation (Rounds 882-885) against the current (post-JIT) tree - freeze confirmed still real and reproducible, calling function identified as SIF-RPC-shaped code via real debug strings
+
+Following the user's live Dolphin disc-boot test (which independently
+reproduced this project's own documented "GT3 never configures GS
+display" finding from Round 925), this round resumed task #865/#867's
+open thread - the pc=0x8000FD74 permanent-park poll Rounds 882-884
+found and Round 885 flagged as needing reconciliation - to check
+whether it's still the real terminal blocker against the CURRENT tree
+(which now includes the full JIT implementation, Round 924b's
+correctness harness, and everything else shipped since Round 885).
+
+**Method.** Built `/tmp/r927_gt3_freeze_trace.c`, a read-only
+diagnostic driver loading `checkpoints/gt3_round861_fresh_chain.ckpt`
+against the current tracked source, then running a fine-grained
+(chunk=50) 2000-sample window to detect any PC movement, then dumping
+EE RAM around whatever `$ra` is left holding for offline disassembly.
+
+**Result 1 - the checkpoint file's on-disk content is (as Round 885
+already flagged) an earlier save than what Rounds 882-884 analyzed**:
+this load shows `total_instr=4,079,995,711 pc=0x0000023c ra=0x8000dbcc`
+- the `ra=0x8000dbcc` value exactly matches Round 878-879's "zero-fill
+POST block re-entry point," confirming this checkpoint currently holds
+a state from inside that earlier-documented restart cycle, not the
+billions-of-instructions-later frozen state Round 884 described.
+
+**Result 2 - from this earlier state, the SAME freeze is reached
+almost immediately.** Within the very first 50-instruction sample, pc
+moved from `0x0000023c` to `0x8000fd6c` (the entry of the exact same
+poll routine Round 884 disassembled: `0x8000FD6C: lui s0,0xB000 / ori
+s0,s0,0xF000`) and then stayed there for the rest of the 2000-sample
+window (no further transitions logged). The dumped `$ra=0x80012614`
+matches Round 884's finding **exactly**, bit for bit - this confirms
+the freeze is not an artifact of one particular checkpoint save; it is
+a real, stable, reproducible resting point of the current tree,
+reached quickly from a materially earlier point in the same boot.
+
+**Result 3 - decoded the calling function, found real evidence of its
+identity.** Disassembled EE RAM 0x80012310-0x800126A0 (the caller
+around `ra=0x80012614`) with `tools/round655-ee-disasm`. The call site
+itself:
+
+```
+0x800125B0-0x80012608: four separate conditional branches (checking
+    *(0x80024228), s0+0x4030, s5+0x4038, s4+0x4044 - fixed per-channel/
+    per-port state fields at regular 8-byte-ish offsets) that ALL
+    converge on the same target:
+0x8001260C: jal 0x8000FD30   <- the poll routine, called UNCONDITIONALLY
+0x80012610: nop                 regardless of which branch path was taken
+0x80012614: lw v0,16468(s7)  <- ra: what runs immediately after it returns
+```
+
+Every branch in this block re-converges on the same `jal`, so
+`0x8000FD30`'s poll is not gated behind any of these conditions - it
+always executes once this code region is reached. Extracted the real
+debug strings referenced by this same function's `jal 0x8000E6F8`
+calls (a string-literal debug-print helper, resolved via
+`tools/round655-ee-disasm` immediate-argument decoding) by dumping the
+literal string table at `0x80016800` from the SAME checkpoint:
+**"send req err", "recv err", "send err"** - wording that matches real
+ps2sdk `sifcmd.c`'s own SIF-RPC error strings almost verbatim. This is
+strong, source-grounded evidence (not a guess) that the enclosing
+function is the BIOS's real low-level SIF RPC send/receive client -
+the per-channel offsets being checked (`s0+0x4030`, `s5+0x4038`,
+`s4+0x4044`, etc.) are consistent with SIF queue/channel bookkeeping
+fields, not something this project's own HLE code writes (this is
+genuine disassembled BIOS ROM content, at a BIOS kernel address, not
+our C source).
+
+**Synthesis / current best understanding**: GT3's checkpoint chain
+reaches, and then never leaves, a spin-wait inside the real BIOS's own
+SIF-RPC transport code, waiting on bit 1 of physical EE RAM address
+`0x0000F000` (Round 884's finding, re-confirmed unchanged this round -
+that address currently just holds ordinary code bytes, not a real
+status flag, because nothing in the current boot path writes there).
+Given the enclosing function's now-evidenced identity as a SIF-RPC
+send/receive routine, the leading hypothesis for next round: this poll
+is checking a **real SIF driver's own in-RAM channel-busy/ready flag**
+(a small kernel-reserved data structure real ps2sdk's SIF driver keeps
+in low EE RAM, separate from actual SIF0/SIF1 hardware MMIO at
+`0x1000F200+`), which real BIOS init code writes once during early SIF
+setup - a write this project's emulated boot path is either skipping,
+or computing at the wrong address for. This reframes the search from
+"what hardware register is missing" (Round 884's framing) to "what
+early-SIF-init code writes a ready-flag into low EE RAM, and does our
+emulated boot actually reach and execute it" - a concrete, narrower
+next step, not yet answered here.
+
+**Not yet done / explicit next steps for the following round**: (1)
+search the BIOS ROM (and this project's boot trace) for the real SIF
+driver's own low-RAM init routine that should write the channel-ready
+flag physical `0x0000F000` polls; (2) determine whether our emulated
+boot ever calls it, and if not, why; (3) cross-reference real ps2sdk
+`sifcmd.c`/`libsif` source (already incorporated per Round 395/491) for
+the exact in-RAM struct layout this matches; (4) only once the real
+write path is identified, decide whether this is a genuine emulator
+modeling gap or an unsatisfiable-in-our-boot-order wait.
+
+No source changed this round - purely diagnostic (read-only checkpoint
+load + RAM dump + offline disassembly). Regression suite and Wii
+cross-build correctly skipped. Scratch tools
+(`/tmp/r927_gt3_freeze_trace.c`) not committed, per this project's
+scratch-tool convention.

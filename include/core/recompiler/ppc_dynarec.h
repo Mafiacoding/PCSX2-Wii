@@ -785,6 +785,35 @@
  * (+13,304/+1,664 over Round 914). Status: task #900 (Round 915)
  * CLOSED. Next: task #901 (Round 916: JIT MMI2's logical family -
  * PAND/POR/PXOR/PNOR).
+ *
+ * Round 916 (task #901) update: JIT'd the MMI logical family -
+ * PAND/PXOR (real MMI2, funct=0x09, sa=0x12/0x13) and POR/PNOR (real
+ * MMI3, funct=0x29, SAME sa=0x12/0x13 values - a genuine real-hardware
+ * quirk confirmed directly against ee_core.c's case 0x09/case 0x29
+ * bodies, not a naming coincidence). Unlike Round 915's multiply/
+ * divide family, these four ops are pure bitwise word operations with
+ * no cross-word carry and no edge cases, so they were translated as
+ * INLINE PPC750 codegen rather than a C-function trampoline: each op
+ * decomposes into 4 independent 32-bit word operations (REG_HI/
+ * REG_LO/REG_HI1/REG_LO1) via lwz rs-word, lwz rt-word, and/xor/or/nor,
+ * stw to rd-word (skipped when rd==0, matching real hardware's $zero-
+ * class no-write-back behavior for rd=0 in this GPR128 slot scheme).
+ * Reused the enc_and/enc_or/enc_xor/enc_nor encoders already present
+ * since Round 881. PAND/PXOR were inserted at the top of the existing
+ * funct==0x09 (MMI2) dispatch block, ahead of the Round 915 muldiv
+ * sa-based selection; POR/PNOR required a new funct==0x29 (MMI3)
+ * dispatch block, previously entirely unaddressed. Verified via a new
+ * 16-check harness (r916_mmi_logical_verify.c) built on r893's shared
+ * ppcsim base - no new PPC opcode decode was needed since lwz/stw/and/
+ * xor/or/nor were already simulated by earlier harnesses; only new test
+ * vectors were added, covering mixed-bit patterns across all 4 words,
+ * rd==0 poison checks, PXOR self-XOR-yields-zero, and PNOR's all-zero-
+ * yields-all-ones case. 16/16 passed on the first run; full 10-harness
+ * regression suite unchanged (13/13, 17/17, 19/19, 35/35, 19/19, 27/27,
+ * 25/25, 20/20, 12/12, 13/13); clean devkitPPC Wii cross-build (0
+ * warnings), elf 3,315,476/dol 552,192 (+4,976/+544 over Round 915).
+ * Status: task #901 (Round 916) CLOSED. Next: task #902 (Round 917:
+ * JIT the MMI shift family - PSLLH/PSRLH/PSRAH/PSLLW/PSRLW/PSRAW).
  */
 
 typedef struct {

@@ -4670,12 +4670,44 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
          * directly through the ctx pointer) - same "SW-style" simpler
          * frame as the plain-write trampolines above, no r15 (saved
          * ctx) needed, only r14 (saved LR) crosses the call. */
+        /* Round 916 (task #901): PAND (sa=0x12) / PXOR (sa=0x13) - full
+         * 128-bit bitwise AND/XOR, checked first (before the Round 915
+         * muldiv sentinel selection below) since these are plain
+         * inline codegen, not trampoline calls. Real ee_core.c bodies:
+         * `if (rd) { gpr[rd].ud0 = gpr[rs].ud0 OP gpr[rt].ud0;
+         * gpr[rd].ud1 = gpr[rs].ud1 OP gpr[rt].ud1; }` - a per-bit op
+         * with no cross-word carry, so it decomposes cleanly into four
+         * independent 32-bit word operations (REG_HI/REG_LO for ud0,
+         * REG_HI1/REG_LO1 for ud1), same word-slot addressing Round
+         * 914's MMI0 family already established (just without that
+         * round's lane-permutation indirection - AND/XOR/OR/NOR don't
+         * reorder bits across word boundaries, so the four words can
+         * be processed in any order and REG_HI(r)/REG_LO(r)/REG_HI1(r)/
+         * REG_LO1(r) can be used directly). Always computed, store
+         * skipped when rd==0 (same convention as Round 914). */
+        if (sa == 0x12u || sa == 0x13u) {
+            int16_t offs[4] = { REG_HI(rs), REG_LO(rs), REG_HI1(rs), REG_LO1(rs) };
+            int16_t offt[4] = { REG_HI(rt), REG_LO(rt), REG_HI1(rt), REG_LO1(rt) };
+            int16_t offd[4] = { REG_HI(rd), REG_LO(rd), REG_HI1(rd), REG_LO1(rd) };
+            for (int w = 0; w < 4; w++) {
+                emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, offs[w]));
+                emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, offt[w]));
+                if (sa == 0x12u)
+                    emit(ctx, enc_and(SCRATCH_A, SCRATCH_A, SCRATCH_B));
+                else
+                    emit(ctx, enc_xor(SCRATCH_A, SCRATCH_A, SCRATCH_B));
+                if (rd != 0)
+                    emit(ctx, enc_stw(SCRATCH_A, CTX_REG, offd[w]));
+            }
+            return 0;
+        }
+
         uint32_t helper_addr;
         if (sa == 0x0Cu)      helper_addr = ADDR_EE_JIT_PMULTW;
         else if (sa == 0x0Du) helper_addr = ADDR_EE_JIT_PDIVW;
         else if (sa == 0x1Cu) helper_addr = ADDR_EE_JIT_PMULTH;
         else if (sa == 0x1Du) helper_addr = ADDR_EE_JIT_PDIVBW;
-        else return -1; /* other MMI2 sub-opcodes (PMFHI/PMADDW/PAND/... etc): not yet JIT-compiled */
+        else return -1; /* other MMI2 sub-opcodes (PMFHI/PMADDW/... etc): not yet JIT-compiled */
 
         emit(ctx, enc_addi(1, 1, -32));
         emit(ctx, enc_stw(14, 1, 8));
@@ -4690,6 +4722,35 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
         emit(ctx, enc_lwz(14, 1, 8));
         emit(ctx, enc_addi(1, 1, 32));
         return 0;
+    }
+
+    if (op == 0x1Cu && funct == 0x29u) {
+        /* Round 916 (task #901): MMI3 - POR (sa=0x12) / PNOR (sa=0x13).
+         * Same per-word bitwise decomposition as PAND/PXOR just above;
+         * PNOR is `~(a|b)` on each of ud0/ud1, so it's an enc_nor per
+         * word rather than enc_or followed by a separate complement -
+         * PPC750 has a native nor instruction, matching this exactly.
+         * Real ee_core.c bodies confirmed at ee_core.c's `case 0x29:
+         * MMI3` block, sa 0x12/0x13 (grep-verified this round; distinct
+         * from MMI2's own sa=0x12/0x13, which are PAND/PXOR - same sa
+         * values, different funct/meta-group, real hardware quirk). */
+        if (sa == 0x12u || sa == 0x13u) {
+            int16_t offs[4] = { REG_HI(rs), REG_LO(rs), REG_HI1(rs), REG_LO1(rs) };
+            int16_t offt[4] = { REG_HI(rt), REG_LO(rt), REG_HI1(rt), REG_LO1(rt) };
+            int16_t offd[4] = { REG_HI(rd), REG_LO(rd), REG_HI1(rd), REG_LO1(rd) };
+            for (int w = 0; w < 4; w++) {
+                emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, offs[w]));
+                emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, offt[w]));
+                if (sa == 0x12u)
+                    emit(ctx, enc_or(SCRATCH_A, SCRATCH_A, SCRATCH_B));
+                else
+                    emit(ctx, enc_nor(SCRATCH_A, SCRATCH_A, SCRATCH_B));
+                if (rd != 0)
+                    emit(ctx, enc_stw(SCRATCH_A, CTX_REG, offd[w]));
+            }
+            return 0;
+        }
+        return -1; /* other MMI3 sub-opcodes (PMTHI/PMTLO/PCPYUD/... etc): not yet JIT-compiled */
     }
 
     /* Unsupported: remaining REGIMM sub-opcodes (BLTZAL/BGEZAL/-ALL,

@@ -39899,3 +39899,66 @@ PLZCW/MFHI1/MTHI1/MFLO1/MTLO1/MULT1/MULTU1/DIV1/DIVU1/etc.) all remain
 unimplemented in the JIT. Next: task #901 (Round 916: JIT the
 PAND/POR/PXOR/PNOR logical family, spanning MMI2 sa=0x12/0x13 and
 MMI3 sa=0x12/0x13).
+
+## Round 916: JIT MMI logical family - PAND/PXOR/POR/PNOR (task #901)
+
+PAND (real MMI2, funct=0x09, sa=0x12) and PXOR (MMI2, sa=0x13) live in
+ee_core.c's `case 0x09:` block; POR (real MMI3, funct=0x29, sa=0x12)
+and PNOR (MMI3, sa=0x13) live in `case 0x29:` - the SAME sa values
+reused across two different funct groups, confirmed directly against
+the real interpreter source rather than assumed from naming symmetry.
+All four have identical real semantics: `gpr[rd].ud0 = gpr[rs].ud0 OP
+gpr[rt].ud0; gpr[rd].ud1 = gpr[rs].ud1 OP gpr[rt].ud1;` (skipped when
+rd==0), where OP is `&`, `^`, `|`, or `~(a|b)` respectively.
+
+Unlike Round 915's multiply/divide family, these are pure bitwise
+word operations - no cross-word carry, no lane permutation, no
+overflow/divide-by-zero edge cases - so they were translated as
+INLINE PPC750 codegen rather than a C-function-call trampoline. Each
+op decomposes cleanly into 4 independent 32-bit word operations via
+the existing REG_HI/REG_LO/REG_HI1/REG_LO1 offset macros: lwz the
+rs-word, lwz the rt-word, and/xor/or/nor them, stw the result to the
+rd-word (the stw is skipped entirely when rd==0, matching this
+project's established GPR128-slot convention of never writing $zero's
+storage). This reused the enc_and/enc_or/enc_xor/enc_nor encoders
+already present since Round 881 - no new encoder functions were
+needed.
+
+Codegen placement: PAND/PXOR were inserted at the top of the existing
+`funct==0x09u` (MMI2) dispatch block, checked before the Round 915
+muldiv sa-based dispatch so they take priority for their own sa
+values (0x12/0x13) without disturbing PMULTW/PDIVW/PMULTH/PDIVBW's
+sa 0x0C/0x0D/0x1C/0x1D dispatch below them. POR/PNOR required a new
+`funct==0x29u` (MMI3) dispatch block - MMI3 was previously entirely
+unaddressed by the JIT.
+
+Verification: new host-native harness r916_mmi_logical_verify.c,
+built on r893_ld_sd_verify.c's shared ppcsim base. No new PPC opcode
+decode was required - lwz/stw/and/xor/or/nor were already simulated
+by earlier harnesses (r881's and/xor/nor path, r893's lwz/stw path) -
+so this round's harness only needed new test vectors: mixed-bit
+patterns across all 4 words for PAND, an rd==0 poison check, PXOR's
+self-XOR-yields-zero identity, POR's general-case pattern, and
+PNOR's all-zero-inputs-yields-all-ones case plus its own rd==0 poison
+check. 16/16 checks passed on the first run under ASan/UBSan, 0 leaks.
+
+Regression-checked against all 10 still-present prior harnesses
+(r893/894/895/896/897/898/900/902/903/904: 13/13, 17/17, 19/19, 35/35,
+19/19, 27/27, 25/25, 20/20, 12/12, 13/13) - no regressions, no compile
+warnings.
+
+Wii build: pcsx2-wii.elf 3,315,476 bytes / .dol 552,192 bytes
+(+4,976 elf / +544 dol over Round 915), 0 warnings/errors (devkitPPC
+8.1.0).
+
+Status: task #901 (Round 916) CLOSED - the MMI logical family
+(PAND/PXOR/POR/PNOR) is JIT'd. task #886 remains open: MMI0's
+remaining sub-opcodes, MMI1 (funct 0x28, entirely unaddressed),
+MMI2's remaining sub-opcodes (PMFHI/PMFLO/PCPYLD/PSLLVW/PSRLVW/PINTH/
+PEXEH/PREVH/PEXEW/PROT3W/PMADDW/PMSUBW/PMADDH/PHMADH/PMSUBH/PHMSBH/
+etc. - PAND/PXOR now closed out), MMI3's remaining sub-opcodes
+(PMTHI/PMTLO/PCPYUD/etc. - POR/PNOR now closed out), and the
+top-level direct-funct MMI opcodes (MADD/MADDU/PLZCW/MFHI1/MTHI1/
+MFLO1/MTLO1/MULT1/MULTU1/DIV1/DIVU1/etc.) all remain unimplemented
+in the JIT. Next: task #902 (Round 917: JIT the MMI shift family -
+PSLLH/PSRLH/PSRAH/PSLLW/PSRLW/PSRAW).

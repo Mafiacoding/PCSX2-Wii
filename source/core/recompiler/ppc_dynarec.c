@@ -4982,6 +4982,32 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
             return 0;
         }
 
+        /* Round 921 (task #906): PROT3W (sa=0x1F) - rotates word lanes
+         * 0,1,2 of Rt left by one (lane 3 is copied to itself, i.e.
+         * left unchanged); Rs is unused. Real body (grep-confirmed
+         * ee_core.c lines 9828-9837): builds a local `out` first
+         * (out.lane0=Rt.lane1, out.lane1=Rt.lane2, out.lane2=Rt.lane0,
+         * out.lane3=Rt.lane3) then assigns gpr[rd]=out in one shot -
+         * same alias-safe-by-construction shape as PEXEW/PCPYLD/etc
+         * above, so this codegen reads all 4 of Rt's words into
+         * scratch registers FIRST (even though only 3 physically
+         * move; lane3 is a self-copy that's cheapest to just re-emit
+         * uniformly) before writing any of rd's words - correct even
+         * when rd aliases rt. */
+        if (sa == 0x1Fu) {
+            emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, mmi_w_off((int)rt, 1)));
+            emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, mmi_w_off((int)rt, 2)));
+            emit(ctx, enc_lwz(SCRATCH_C, CTX_REG, mmi_w_off((int)rt, 0)));
+            emit(ctx, enc_lwz(SCRATCH_D, CTX_REG, mmi_w_off((int)rt, 3)));
+            if (rd != 0) {
+                emit(ctx, enc_stw(SCRATCH_A, CTX_REG, mmi_w_off((int)rd, 0)));
+                emit(ctx, enc_stw(SCRATCH_B, CTX_REG, mmi_w_off((int)rd, 1)));
+                emit(ctx, enc_stw(SCRATCH_C, CTX_REG, mmi_w_off((int)rd, 2)));
+                emit(ctx, enc_stw(SCRATCH_D, CTX_REG, mmi_w_off((int)rd, 3)));
+            }
+            return 0;
+        }
+
         uint32_t helper_addr;
         if (sa == 0x0Cu)      helper_addr = ADDR_EE_JIT_PMULTW;
         else if (sa == 0x0Du) helper_addr = ADDR_EE_JIT_PDIVW;
@@ -5307,6 +5333,57 @@ int ppc_dynarec_translate_one(ppc_codegen_ctx_t *ctx, uint32_t mips_instr)
             emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, mmi_w_off((int)rs, n)));
             emit(ctx, enc_stw(SCRATCH_A, CTX_REG, offd[n]));
         }
+        return 0;
+    }
+
+    /* Round 921 (task #906): MFHI1 (funct=0x10) / MTHI1 (0x11) /
+     * MFLO1 (0x12) / MTLO1 (0x13) - "pipe 1" HI/LO single-GPR-half
+     * moves. Real bodies (grep-confirmed ee_core.c lines 9257-9260,
+     * using this project's own GPR(x)=gpr[x].ud0 / real hi/lo.ud1
+     * convention): `if (rd) GPR(rd) = st->hi.ud1;` (MFHI1), `st->
+     * hi.ud1 = GPR(rs);` (MTHI1, unconditional - no rd field at all
+     * on real hardware), and the LO-pipe mirrors for MFLO1/MTLO1.
+     * Each of these moves exactly ONE 64-bit half (either gpr[x].ud0,
+     * or hi/lo.ud1) - NOT the full 128-bit register like Round 920's
+     * PMFHI/PMFLO/PMTHI/PMTLO did - so this is a cheaper 2-word
+     * (REG_HI+REG_LO worth of bits, addressed via the pseudo-
+     * register's REG_HI1/REG_LO1 slots since that's where "ud1" lives
+     * per the established HI_IDX/LO_IDX layout) copy rather than a
+     * 4-word one. gpr[x]'s own OTHER half (ud1 for MFHI1/MFLO1's
+     * destination gpr[rd], or the pipe's ud0 for MTHI1/MTLO1's
+     * destination) is deliberately left untouched, matching the real
+     * single-half-assignment bodies exactly - no full-128-bit
+     * clobber. */
+    if (op == 0x1Cu && funct == 0x10u) { /* MFHI1: gpr[rd].ud0 = hi.ud1 */
+        if (rd != 0) {
+            emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_HI1(HI_IDX)));
+            emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_LO1(HI_IDX)));
+            emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_HI((int)rd)));
+            emit(ctx, enc_stw(SCRATCH_B, CTX_REG, REG_LO((int)rd)));
+        }
+        return 0;
+    }
+    if (op == 0x1Cu && funct == 0x11u) { /* MTHI1: hi.ud1 = gpr[rs].ud0 */
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_HI((int)rs)));
+        emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_LO((int)rs)));
+        emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_HI1(HI_IDX)));
+        emit(ctx, enc_stw(SCRATCH_B, CTX_REG, REG_LO1(HI_IDX)));
+        return 0;
+    }
+    if (op == 0x1Cu && funct == 0x12u) { /* MFLO1: gpr[rd].ud0 = lo.ud1 */
+        if (rd != 0) {
+            emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_HI1(LO_IDX)));
+            emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_LO1(LO_IDX)));
+            emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_HI((int)rd)));
+            emit(ctx, enc_stw(SCRATCH_B, CTX_REG, REG_LO((int)rd)));
+        }
+        return 0;
+    }
+    if (op == 0x1Cu && funct == 0x13u) { /* MTLO1: lo.ud1 = gpr[rs].ud0 */
+        emit(ctx, enc_lwz(SCRATCH_A, CTX_REG, REG_HI((int)rs)));
+        emit(ctx, enc_lwz(SCRATCH_B, CTX_REG, REG_LO((int)rs)));
+        emit(ctx, enc_stw(SCRATCH_A, CTX_REG, REG_HI1(LO_IDX)));
+        emit(ctx, enc_stw(SCRATCH_B, CTX_REG, REG_LO1(LO_IDX)));
         return 0;
     }
 

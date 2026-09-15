@@ -40304,3 +40304,63 @@ Status: task #905 (Round 920) CLOSED. Next: task #906 (Round 921:
 JIT MMI remaining opcodes - QFSRV/PLZCW/PROT3W etc, close out task
 #886, transition to task #887: post-JIT GS display wiring and GT3
 progress).
+
+## Round 921: JIT MMI pipe-1 HI/LO moves + PROT3W (task #906) - closes
+task #886's MMI opcode subset arc
+
+Five opcodes: MFHI1/MTHI1/MFLO1/MTLO1 (top-level funct=0x10-0x13) and
+PROT3W (MMI2 sa=0x1F).
+
+MFHI1/MFLO1/MTHI1/MTLO1 are the EE's "pipe 1" HI/LO single-GPR-half
+moves - distinct from Round 920's PMFHI/PMFLO/PMTHI/PMTLO, which
+moved the FULL 128-bit register. These move exactly one 64-bit half:
+`if (rd) GPR(rd) = st->hi.ud1;` for MFHI1 (gpr[rd].ud0 = hi.ud1,
+leaving gpr[rd].ud1 alone), and the three mirror-image bodies for
+MTHI1/MFLO1/MTLO1. Because only one half moves each way, the codegen
+is a cheap 2-word copy (using the HI_IDX/LO_IDX pseudo-register's
+REG_HI1/REG_LO1 slots, since that's where "ud1" physically lives in
+this project's established word-slot layout) rather than Round 920's
+4-word copy - and critically, the OTHER half of both source and
+destination is left completely untouched, matching the real
+single-half-assignment interpreter bodies exactly. MFHI1/MFLO1 guard
+the write on rd!=0; MTHI1/MTLO1 are unconditional, since real
+hardware doesn't even give these two an rd field.
+
+PROT3W (MMI2 sa=0x1F) rotates Rt's word lanes 0, 1, 2 left by one
+(lane 3 is a no-op self-copy); grep-confirmed real body builds a
+local `out` struct first before a single gpr[rd] assignment - same
+alias-safe-by-construction shape as PEXEW/PCPYLD/PCPYUD above it in
+ee_core.c - so this codegen reads all 4 of Rt's words into scratch
+registers up front, before writing any of rd's words, making it
+correct even when rd aliases rt (verified with a dedicated rd==rt
+alias test in the harness, not just asserted).
+
+Verification (r921_pipe1_prot3w_verify.c, 18/18 checks) found one
+harness-only bug on the first run: 4 of the PROT3W test's hardcoded
+expected-value constants had the source register's ud1/lo1 word
+values (0x33333333 and 0x44444444) transposed relative to which lane
+they actually corresponded to - a transcription error made while
+writing the check() calls, not a dynarec codegen bug. This was
+confirmed cleanly: every MFHI1/MTHI1/MFLO1/MTLO1 check, and the two
+PROT3W checks that happened to use non-swapped constants (lane0/
+lane2), all passed on the very first run with zero changes to
+ppc_dynarec.c - only the 4 mislabeled PROT3W constants (2 in the
+main test, 2 in the rd==rt alias test) needed correcting.
+
+Full 10-harness regression suite unchanged (13/13, 17/17, 19/19,
+35/35, 19/19, 27/27, 25/25, 20/20, 12/12, 13/13). Clean devkitPPC Wii
+cross-build (0 warnings), elf 3,469,992/dol 564,448 (+9,856/+736 over
+Round 920).
+
+Status: task #906 (Round 921) CLOSED. This closes out task #886's
+full MMI (EE multimedia/SIMD) opcode subset arc spanning Rounds
+914-921: add-sub, multiply-divide, logical, shift, pack-unpack,
+merge/extend, HI/LO-pair access, pipe-1 moves, and PROT3W are all now
+JIT-compiled. A handful of genuinely rare/complex MMI opcodes remain
+un-JIT'd by design (MADD/MADDU/MADD1/MADDU1 pipe multiply-accumulate,
+MULT1/MULTU1/DIV1/DIVU1 pipe-1 multiply/divide, PLZCW priority-
+encoder, QFSRV 256-bit funnel shift) - these fall back to the
+interpreter correctly (translate_one returns -1) and can be picked up
+in a future round if profiling ever shows them as hot. Next: task
+#887 (post-JIT: resume GS display wiring - Round 29 notes - and GT3
+progress).

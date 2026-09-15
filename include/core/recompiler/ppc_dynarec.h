@@ -1026,6 +1026,46 @@
  * Status: task #905 (Round 920) CLOSED. Next: task #906 (Round 921:
  * JIT MMI remaining opcodes - QFSRV/PLZCW/PROT3W etc, close out task
  * #886, transition to task #887).
+ *
+ * Round 921 (task #906): MFHI1/MTHI1/MFLO1/MTLO1 (top-level
+ * funct=0x10/0x11/0x12/0x13) and PROT3W (MMI2 sa=0x1F). MFHI1/MFLO1/
+ * MTHI1/MTLO1 are the EE's "pipe 1" HI/LO single-GPR-HALF moves -
+ * grep-confirmed against ee_core.c (using this project's own
+ * GPR(x)=gpr[x].ud0 convention): `if (rd) GPR(rd) = st->hi.ud1;`
+ * (MFHI1) and its three siblings. Each moves exactly ONE 64-bit half
+ * (gpr[x].ud0, or the pipe's .ud1), unlike Round 920's PMFHI/PMFLO/
+ * PMTHI/PMTLO which moved the full 128 bits - so this codegen is a
+ * cheaper 2-word copy (addressed via the HI_IDX/LO_IDX pseudo-
+ * register's REG_HI1/REG_LO1 slots, since that's where "ud1" lives
+ * in the established word-slot layout) that deliberately leaves the
+ * other half of both source and destination untouched, matching the
+ * real single-half-assignment bodies exactly. MFHI1/MFLO1 guard on
+ * rd!=0; MTHI1/MTLO1 are unconditional (no rd field on real
+ * hardware). PROT3W (MMI2 sa=0x1F) rotates Rt's word lanes 0,1,2 left
+ * by one (lane 3 unchanged); grep-confirmed real body builds a local
+ * `out` first before the single gpr[rd] assignment (same alias-safe
+ * shape as PEXEW/PCPYLD above it), so this codegen reads all 4 of
+ * Rt's words into scratch registers before writing any of rd's -
+ * correct even when rd aliases rt (verified explicitly with an
+ * rd==rt alias test).
+ *
+ * Verification (r921_pipe1_prot3w_verify.c, 18/18 checks) found one
+ * harness-only bug on the first run: 4 of the PROT3W expected-value
+ * constants had the source register's ud1/lo1 word values (0x333...
+ * and 0x444...) swapped in the check() calls' hardcoded expectations
+ * - a test-authoring transcription error, not a dynarec bug. All 4
+ * MFHI1/MTHI1/MFLO1/MTLO1 checks and the alias-safety PROT3W checks
+ * passed cleanly on the very first run with zero source changes,
+ * confirming the swapped constants (not the codegen) were at fault;
+ * fixed by correcting the 4 affected constants directly. Full
+ * 10-harness regression suite unchanged (13/13, 17/17, 19/19, 35/35,
+ * 19/19, 27/27, 25/25, 20/20, 12/12, 13/13); clean devkitPPC Wii
+ * cross-build (0 warnings), elf 3,469,992/dol 564,448 (+9,856/+736
+ * over Round 920).
+ *
+ * Status: task #906 (Round 921) CLOSED, closing out task #886's MMI
+ * opcode subset arc (Rounds 914-921). Next: task #887 (post-JIT:
+ * resume GS display wiring and GT3 progress).
  */
 
 typedef struct {

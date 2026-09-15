@@ -40466,3 +40466,124 @@ coverage (the 10 intentionally-deferred MMI opcodes are the most
 concrete remaining target), or pivot to task #887 (GS display wiring/
 GT3 progress) per the user's standing dual-track interest - both
 remain open.
+
+## Round 923 (task #913): real-workload JIT coverage survey - real JP BIOS + real GT3 disc boot
+
+**Why.** Round 922 fixed the JIT's runtime-dispatch gate so that all of
+Rounds 908-921's codegen (most VU0 opcodes, the full MMI family) is
+finally reachable on real GEKKO hardware - but "reachable and passes
+isolated unit tests" is a different claim from "actually helps during
+a real boot". The user asked directly: run the real boot on the real
+BIOS and the real GT3 disc, and report what's actually happening, so
+the next JIT round can be prioritized with real evidence instead of
+guesswork.
+
+**Method.** Executing genuine PPC750 machine code natively on this
+x86_64 sandbox is unsafe/undefined (the same host-safety reason
+ee_jit.c's real body is `#ifdef GEKKO`-gated), so full dual-execution
+correctness verification (run the JIT for real, diff against the
+interpreter) isn't possible here. What IS safely measurable on host is
+*coverage*: for every real EE instruction word the interpreter fetches
+during a genuine boot, speculatively call the same
+`ppc_dynarec_translate_one()` the real JIT would call (pure codegen
+into a scratch, reused `ppc_codegen_ctx_t` - never executed, so this
+is exactly as host-safe as Round 922's own verification harness) and
+count how often it succeeds. That fraction is the true real-workload
+JIT-eligible-instruction rate - a meaningfully different (and more
+useful) number than "how many opcodes are supported in the abstract".
+
+Built entirely in an untracked `/tmp/r923_scratch` copy of the repo
+(never touches the tracked tree): added two global counters and a
+lazily-initialized reused `ppc_codegen_ctx_t` to `ee_core.c`, hooked in
+immediately before the existing `ee_jit_try_execute_one()` call site in
+`ee_step()` (so it sees exactly the same instruction stream the real
+JIT gate does, at zero risk since translate_one() never executes
+anything), and wrote `tools/round923-jit-coverage/survey_driver.c`
+(mirrors the project's own established `chain_driver.c` checkpoint-
+chaining pattern from Round 729/750, extended with a "none" disc_path
+for a diskless run and printing the new counters). Compiled against
+the full source tree (same `find source ...` derivation tests/
+run_test.sh uses, plus `ppc_dynarec.c`+`ee_jit.c` explicitly since this
+tool calls `ppc_dynarec_translate_one()` directly - the only difference
+from a normal test build). Ran against the real JP BIOS
+(`scph10000.bin`) and the real uploaded GT3 disc image, both diskless
+and disc-boot, via checkpoint-chained `start`/`continue` invocations
+(same pattern used throughout this project's GT3 survey history) to
+fit the sandbox's ~150s per-call wall-clock cap.
+
+**Results - diskless JP BIOS boot.** Two chained windows, ~400,000,000
+raw EE instructions fetched each (real BIOS boot-animation/idle-loop
+code, `pc` cycling through the well-known `0x8000CC80-0x8000F86C`
+OSDSYS-dispatcher range documented across dozens of earlier rounds):
+window 1 `jit_fetch_total=399,999,999 jit_eligible=397,804,953`
+(**99.45%**), window 2 `jit_fetch_total=400,000,000
+jit_eligible=400,000,000` (**100.00%**). Combined: ~800M real EE
+instructions sampled, ~99.7% JIT-eligible. This is a very high, very
+stable number - the real BIOS boot's hot loop is now overwhelmingly
+within the JIT's supported opcode set.
+
+**Results - real GT3 disc boot.** First window (fresh cold boot,
+50,000,000-slice budget = 400,000,000 raw-instruction ceiling, but the
+disc-boot path only reached `total_instr=38,865,331` before the slice
+cap repeatedly interrupted mid-exception-dispatch): `jit_fetch_total=
+38,865,422 jit_eligible=36,361,411` (**93.56%**) - still high, though
+visibly lower than the BIOS's near-100%, consistent with disc-boot
+code exercising a wider opcode mix (real CDVD/SIF dispatch, COP0
+exception paths that are correctly never JIT-supported by design - see
+ee_jit.h's own module comment). Second chained window
+(continue, 60,000,000-slice budget): `jit_fetch_total=0
+jit_eligible=0`, `pc` frozen bit-for-bit at `0x80000200` (the EE
+general-exception vector) across the entire window while the IOP
+continued toggling between `0x80000080`/`0x00155910`. This is EE
+fetching *zero* instructions for 60M slices, not low JIT coverage - it
+means `ee_step()` itself isn't being reached for the EE core in this
+window, i.e. a full EE-side scheduling stall. This is not a new
+finding: it lines up exactly with this project's own already-
+documented GT3 IOP-side wall (task #733's Round 750-767 arc: the real
+IOP SYSMEM/EXCEPMAN module-loader stall and Round 751's real, correct-
+per-real-hardware slow T3/HBLNK timer wait that EE ends up blocked
+behind). Re-diagnosing that stall is explicitly out of scope for this
+coverage survey - it's a pre-existing, already-root-caused condition,
+not something this round's instrumentation discovered.
+
+**What this answers for the user.** The JIT's *coverage* of real
+workloads is genuinely excellent right now - essentially all of a real
+BIOS boot's hot-path instructions, and the large majority of GT3's
+early disc-boot instructions, are within `translate_one()`'s supported
+set. That means the ~10 intentionally-deferred MMI opcodes and the
+COP0-exclusion-by-design gap identified in this session's earlier
+"how far is JIT working" estimate are NOT currently the bottleneck for
+real-workload coverage - they're a small tail, not the bulk of what
+real code executes. The real, much bigger open question this survey
+deliberately did NOT answer is semantic *correctness*: does the JIT's
+generated PPC code, when it actually runs on real GEKKO hardware,
+produce bit-identical results to the interpreter for these real
+instruction streams? That needs a genuine on-Wii dual-execution test
+(or a full ppcsim-based diff, more invasive than this round's pure-
+codegen probe) and remains unverified. Given (a) coverage is already
+very high and (b) the interpreter fallback path means an uncovered
+opcode is a performance gap, not a correctness risk, while (c) an
+UNDETECTED correctness bug in a covered opcode Would silently corrupt
+real hardware execution, semantic on-target correctness verification -
+not further opcode-set expansion - is now the highest-value next step
+for task #913. Task #887 (GS display wiring/GT3 progress) remains a
+valid parallel track per the user's standing dual-track interest, and
+is now somewhat less urgently gated on "does the JIT even reach real
+game code" than before this survey, since it clearly does.
+
+**No tracked-source change.** All instrumentation and the survey
+driver live only in `/tmp/r923_scratch` and `/tmp/r923_bios_survey`
+(the compiled binary) - never copied into `include/`/`source/`/
+`tools/` in the tracked repo. Regression suite and Wii cross-build
+correctly skipped (docs-only round, consistent with Round 729/746/750
+precedent for scratch-tool survey rounds). The real BIOS image, the
+real GT3 ISO, and both checkpoint files (`/tmp/r923_bios.ckpt`,
+`/tmp/r923_gt3.ckpt`) stayed in `/tmp/` scratch only and were never
+committed or rsynced, per the project's standing leak-prevention rule
+(confirmed via leak-check before this round's commit).
+
+Status: task #913 continues. Next concrete recommendation: pursue
+semantic correctness verification for the JIT's already-covered
+opcode set (highest-value per this round's coverage-vs-correctness
+finding above) rather than further coverage expansion, or pivot to
+task #887 - the user's call given both are now legitimately viable.

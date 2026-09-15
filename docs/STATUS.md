@@ -40828,3 +40828,133 @@ Status: task #913 continues - both halves of the user's "prep both"
 request are now answered with real positive results. No tracked
 source changed this round (user-reported test result, documentation
 only) - regression suite and Wii cross-build correctly skipped.
+
+**Correction (same session, user follow-up):** the user clarified
+"both builds look the same because there was no gs output" - i.e. the
+"both run fine" result was NOT a frame-for-frame visual match, it was
+"neither build showed anything on screen." The JIT-on/JIT-off no-
+crash comparison above is still valid and still real evidence (a
+codegen bug causing a crash/hang/corruption unique to the JIT-on
+build would still have been visible as a divergence even with no GS
+picture on either), but this round's "no breaks" language should not
+be read as "identical pixels" - there were no pixels either. This
+directly redirects the priority to task #887 (GS display wiring),
+addressed immediately below in the same session.
+
+## Round 925 (task #887, user-prioritized): why no GS output on Dolphin - host-native root-cause survey
+
+Direct response to the user's Round 924 test result ("no gs output")
+and explicit instruction to prioritize GS display wiring / GT3
+progress before returning to JIT work. This round is investigation
+only (host-native, scratch-only, `/tmp/r925_gsdisplay/replay_main_flow.c`)
+- no tracked source changed.
+
+**Method.** Built a host-native replica of `main.c`'s exact
+`run_real_boot_flow()` per-frame loop: `system_init()`, then repeated
+`system_run_interleaved(BOOT_CHUNK_SLICES=200000)` calls (one per
+"frame", exactly as the real `.dol` does once per `VIDEO_WaitVSync()`),
+checking the real `display_active` condition (`main.c` lines ~509-524:
+`PMODE` bit0/bit1 = circuit 1/2 enable) and `gs_decode_dispfb()`'s
+`bw_pixels` output after every frame - i.e. the EXACT condition that
+gates whether `gs_blit_psmct32_to_xfb()` (the only code path that
+would ever put a GS pixel on a real Wii/Dolphin's actual video output)
+fires for real. This is a materially different, stronger test than
+any prior round's host-native GS verification: Rounds 450/588/641/650/
+653/717/777 all verified picture content by directly reading GS video
+memory (`gs_mem_read_psmct32()`) and dumping it to PPM/PNG - which
+proves the emulated GS *memory* has real, structured pixel content,
+but never exercised or required the real hardware-accurate `PMODE`/
+`DISPFB` gating `main.c`'s actual video-output code depends on. This
+round is the first time that specific real-hardware gate has been
+checked end-to-end host-natively.
+
+**Finding 1 - diskless boot (what the user's Dolphin test almost
+certainly ran, since no `sd:/pcsx2/games/game.bin` was set up):**
+ran the diskless path for **1,055,999,045 instructions** (checkpoint-
+chained across several calls) - `PMODE` never left `0x00` (`EN1=0
+EN2=0`, i.e. `display_active` never becomes true) for the entire
+duration. `gs_blit_psmct32_to_xfb()` genuinely never fires on this
+path within over a billion real instructions. This directly and fully
+explains the user's "no gs output" result - it is not a crash, not a
+wiring bug in `gs_wii_output.c`/`main.c` (that code is real and
+correctly gated, see its own file contents), it is that the specific
+condition it waits for has not yet occurred in the current tree's
+diskless-boot model within this budget.
+
+**Context for Finding 1 - this may be real-hardware-accurate, not a
+regression.** Round 742 (live PCSX2 DebugServer, real reference
+emulator) already found the earlier "diskless BIOS never shows a
+picture" claim (Round 720) to be a wall-clock-budget artifact - real,
+disc-free PS2 hardware DOES eventually show its "press button" prompt
+screen, "just later than Round 720 waited for." Round 743-745's
+follow-up on real PCSX2 measured genuine boot activity (periodic
+XGKICKs) continuing out past 6.96 BILLION cycles on the disc-free
+path. So a diskless boot only reaching 1.06B instructions without a
+picture yet may simply mean it needs several billion more, consistent
+with real hardware's own slow disc-free idle/attract-mode timeline -
+not necessarily evidence of a bug in this project's own model.
+
+**Finding 2 - disc-boot path (GT3/Tekken) reproduces a known, already-
+documented early wall, unchanged from before.** With a real disc
+mounted (exactly `main.c`'s `iop_cdvd_mount_iso()` + `iop_cdvd_set_
+disc_present()` sequence), both GT3 and Tekken Tag Tournament Demo
+hit their own long-documented early stalls: GT3 at `total_instr=
+38,865,331` (matches Round 923's own independently-measured figure
+for this exact window, and the Round 750-767 "GT3 checkpoint chain
+arc" wall this project already spent ~18 rounds on), Tekken at
+`total_instr=41,868,632` (matches Round 567's documented `instr=
+41868665` finding almost exactly). Extending the GT3 checkpoint by a
+further 500 frames (800,000,000 more budgeted slices) produced **zero
+further instruction growth** - `total_instr` stayed pinned at exactly
+38,865,331. This is a plain `system_run_interleaved()` replica with no
+of the specialized diagnostic hooks (`GT3_SEM5_PROBE`, etc.) later
+GT3-specific rounds (814-829) added - so this result does NOT
+contradict Round 862's "GT3 confirmed NOT stuck" correction, which
+relied on watching thread/PC/RAM state directly rather than the raw
+`ee->instructions_executed` counter this round checked. It does mean
+a plain instruction-budget replica alone cannot see whatever periodic
+activity Round 862 found - a real, useful methodology note for any
+future round working this angle.
+
+**Why this matters for "GT3 progress" and GS display specifically.**
+The pre-Round-924 milestone this project already achieved once (Round
+444/445-era: real `SetGsCrt`/`PMODE=0x66` configured at just ~93.5M
+instructions with a disc mounted, per Rounds 444-475's extensive
+documentation) has NOT been re-confirmed reachable in the CURRENT
+tree - both discs tested this round hit their own early wall well
+before 93.5M instructions, so that specific old milestone could not
+even be attempted with this round's simple replica. Whether that
+Round-444-era PMODE milestone still holds in the current tree, once
+past the 38-42M-instruction wall (via Round 862's proven "keep
+watching, it's not really stuck" technique or the GT3-specific
+diagnostic hooks from Rounds 814-829), is the single most concrete
+open question this leaves for the next round.
+
+**Recommendation to the user (actionable now, independent of further
+emulator work).** If a real disc image IS available and can be placed
+at `sd:/pcsx2/games/game.bin` (or `.iso`) on the Wii/Dolphin virtual
+SD card, that is very likely to reach GS-display-relevant milestones
+in far fewer real instructions than the diskless path (93.5M vs. a
+still-unknown but apparently much-larger-than-1B number for diskless)
+- worth trying as a much faster way to get any picture at all on real
+Dolphin, even though this round found both readily-available test
+discs currently stall (at the instruction-counter level) before that
+point. This is offered as a testable next step, not a guarantee.
+
+**Classification and mandatory workflow scoping.** This is a pure
+investigation/survey round - no root cause was fixed, no source code
+changed (the scratch replica lives only in `/tmp/r925_gsdisplay/`,
+following this project's established convention for throwaway
+diagnostic drivers). Host-native regression suite and Wii cross-build
+are correctly skipped (nothing to rebuild). No leak-check needed
+beyond confirming no scratch files were committed (`git status`
+verified clean, checked below).
+
+Status: task #887 in progress - genuine, well-evidenced root cause
+found for "no GS output" on the diskless path (PMODE ungated, may
+simply need far more real instructions, matching real-hardware
+precedent from Round 742-745's live-PCSX2 findings); GT3/Tekken
+disc-boot paths reconfirmed to hit their known early walls, unchanged
+from prior documented findings, with the specific methodology gap
+(plain instruction-counter checks miss Round 862's "not really stuck"
+activity) now noted for the next round to work around.

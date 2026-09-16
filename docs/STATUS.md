@@ -43017,3 +43017,91 @@ same code region on both the diskless and GT3-disc-boot paths; (2) push both sur
 200,000,000 instructions to see if a further wall exists once both cores are this stable; (3) run the
 same survey against Tekken/KOF/MS3 to see if they show the same convergence onto this shared BIOS-
 kernel resting loop.
+
+## Round 947 (task #447/#536/#937, diagnosis-only, no fix shipped): the user's proposed EE-side Cause.BD fix is disproven by direct code inspection - the shared 0x8000CCxx-0x8000D0xx resting loop is the SAME already-closed, real, correct BIOS housekeeping dispatcher this project fully characterized around Round 313/314/555, now independently re-confirmed against the Round-945-fixed tree
+
+**User's Round 947 work order** (German, verbatim intent): hypothesized that the EE core has the same
+class of delay-slot-interrupt Cause.BD bug Round 945 just fixed on the IOP side, proposed a concrete
+`ee_trigger_hardware_interrupt()` patch for `ee_intc.c` that would capture the branch's own address and
+set Cause.BD when an interrupt lands in a delay slot, framed as "analog zum IOP-Fix aus Runde 945" and
+the presumed key to unblocking the `0x8000CCA0` resting loop.
+
+**Why the proposed fix was not implemented - checked before writing any code, not assumed.** Read
+`source/core/ee/ee_core.c`'s actual interrupt-dispatch machinery directly:
+- `ee_raise_exception()` (line 320) already implements Cause.BD correctly using the exact `0x80000000u`
+  bit - this is the very function Round 945's own IOP fix cited as its precedent, so the EE side was
+  never missing this mechanism.
+- More importantly, the EE's hardware-interrupt-check functions (`ee_check_timer_interrupt()`,
+  `ee_check_intc_interrupt()`, `ee_check_dmac_interrupt()`, lines 457-590) are **only ever called when
+  `st->branch_pending == 0`** - confirmed via both call sites (`ee_core.c` lines 4280 and 10539:
+  `if (!st->branch_pending) { ... ee_check_timer_interrupt(...); ee_check_intc_interrupt(...);
+  ee_check_dmac_interrupt(...); }`). This is a different but equally correct architectural solution to
+  the exact same real-hardware constraint Round 945 addressed on the IOP side: instead of capturing the
+  branch's address and setting Cause.BD after the fact (the IOP's approach, needed because the IOP
+  checked for interrupts unconditionally every step), the EE **defers the interrupt check entirely**
+  until a genuine, safe instruction boundary is reached - the function's own existing doc comment
+  (lines 440-455) explicitly documents this design and explains why it's safe: `ee_latch_timer_interrupt()`
+  (and the equivalent IP2/IP3 latch logic) already runs unconditionally on every single instruction,
+  including ones inside a branch/delay-slot pair, so the pending bit survives however long it takes to
+  reach the next safe boundary - nothing is ever lost. **This is not a newly-discovered fact this round;
+  it was already correct, already documented, and predates Round 945 entirely.** Implementing the user's
+  proposed patch would have been redundant at best (the mechanism it half-reinvents already exists in a
+  different, already-safe form) and risked introducing an actual regression by adding a second,
+  differently-shaped Cause.BD-setting path alongside the existing one.
+
+**Direct disassembly of the actual resting loop** (`tools/round947-loop-disasm/loop_disasm.c`, reusing
+this project's own already-verified `disasm_one()` body plus `ee_mem_read32()` against the exact
+checkpoints Round 946 saved at the diskless and GT3 resting points): the `0x8000CC68-0x8000D010` range
+is **not a stuck/blocked wait of any kind**. It is:
+- `0x8000CC68-0x8000CD40`: a small subroutine that reads `SIF_SMFLAG` (`0xB000F230`, the KSEG1
+  uncached mirror) twice with NOP padding between the reads and loops until two consecutive reads
+  agree - a standard hardware-debounce idiom guarding against reading a register mid-transition, not an
+  infinite spin (it returns as soon as the value is stable, which it always is in this project's
+  synchronous register model).
+- `0x8000CDF8-0x8000CE9C`: checks the debounced `SIF_SMFLAG` value's bit 30 (`0x40000000` - the exact
+  bit Round 940's synthetic force sets), then a real RAM flag at `0x80020CF0`, and dispatches into
+  further real code (a `jal 0x8000CD48` SIO2-register-touching call, or an indirect `jalr` through a
+  real function-pointer table at `0x80020D00`) only if both are set.
+- `0x8000CF88-0x8000D010`: a second dispatcher checking `RAM[0x80020CFC]` and DMAC/hardware-register
+  bits before looping back via `j 0x8000CDF8`/`j 0x8000CDF8`.
+
+**This exact code, these exact addresses, and this exact conclusion are already on record in this
+file**, most conclusively at the Round-555-era entry (grep-locatable via "completely ordinary, real,
+correct hardware idiom"): *"`0x8000CC68`-`0x8000CD40` is a small subroutine that reads SMFLAG twice with
+a short NOP delay... `0x8000CF88`-`0x8000D010`... is a real per-frame IOP/EE synchronization poll,
+firing constantly (14,931,398 times across a 1.12-billion-instruction survey - roughly once per 75 EE
+instructions) as ordinary housekeeping, not a blocked wait."* Round 313/314 additionally already
+live-verified on **real PCSX2 hardware** that `RAM[0x80020CFC]` and the related fast-exit-path register
+read as zero during genuinely healthy, actively-rendering real gameplay - i.e. a real PS2 sits in this
+exact same "all zero, nothing pending" state under completely normal operation.
+
+**What this round adds, honestly scoped**: not a new discovery, but (1) a direct refutation of the
+user's specific Cause.BD hypothesis via code citation rather than re-guessing, and (2) an independent
+re-confirmation that the already-closed Round 313/314/555 conclusion still holds, unchanged, against the
+Round-945-fixed tree at both the diskless and GT3 resting points - `RAM[0x80020CF0] = 0x00000000` and
+`RAM[0x80020CFC] = 0x00000000` in both checkpoints (`tools/round947-loop-disasm/gate_check.c`), matching
+the historical live-hardware baseline exactly. The 16-slot OSDSYS device table at `0x80020B60` (Round
+269's own citation) remains populated with real, plausible code addresses in both checkpoints too,
+confirming nothing regressed there either.
+
+**Net honest assessment**: the EE is not "stuck" in any pathological sense - it is correctly, repeatedly
+polling real, legitimately-empty event flags, exactly as real hardware does between genuine device
+events. Per Round 313/314's own still-valid, still-open recommendation, the real next investigative
+target (unchanged by this round, and NOT what the user's Round 947 hypothesis proposed) is task #221's
+scope: what real upstream IOP/SIF-side mechanism (embedded IOP IRX/ELF module handling, or - per Round
+946's own finding this session that `SIF_MSCOM` never changes post-boot - possibly simply "no real event
+has occurred yet because nothing has asked the IOP to do anything new") would ever cause
+`RAM[0x80020CF0]`/`RAM[0x80020CFC]` to become nonzero in the first place.
+
+**Verification**: no `source/`/`include/` file was modified this round (diagnosis-only, correctly
+matching this project's own established discipline against unverified/speculative fixes - most notably
+the Round 279/280 cautionary tale this file already documents, where a similar "just force the flag"
+shortcut had to be reverted after tracing its real consequences). Regression suite and Wii cross-build
+correctly skipped. New files: `tools/round947-loop-disasm/loop_disasm.c` and `gate_check.c` (diagnostic
+tools, reusing already-verified disassembler/checkpoint-load code, not participating in the tracked
+build).
+
+**Open items for a future round**: (1) task #221's original scope (embedded IOP IRX/ELF device-table
+module handling) as the concrete path to eventually populate `RAM[0x80020CF0]`/`RAM[0x80020CFC]` for
+real; (2) tasks #938/#939 (push both surveys further, check Tekken/KOF/MS3) remain open and unaffected
+by this round's finding.

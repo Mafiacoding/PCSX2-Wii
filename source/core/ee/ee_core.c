@@ -5543,6 +5543,22 @@ static int ee_step(void)
                                 } else {
                                     romname[0] = 0;
                                 }
+#ifdef R955_LOADFILE_NAME_TRACE
+                                /* Round 955 (task #947 continuation):
+                                 * diagnostic-only, zero-cost-when-unset
+                                 * log of the exact devname:romname
+                                 * every real LF_F_ELF_LOAD RPC_CALL
+                                 * requests - built to find out what
+                                 * SCPH-50004's BIOS is repeatedly
+                                 * (re-)requesting via the 13 identical
+                                 * LOADFILE RPC_CALLs Round 955's
+                                 * R933_RPCCALL_TRACE run captured (all
+                                 * from the same IOP pc=0x000839a8,
+                                 * same call_cd/recvbuf - a real retry
+                                 * pattern, not 13 different requests). */
+                                fprintf(stderr, "[R955EVT] LF_F_ELF_LOAD devname=\"%s\" romname=\"%s\"\n",
+                                        devname, romname);
+#endif
                                 if (romname[0] != 0) {
                                     uint32_t elf_epc = 0u, elf_gp = 0u;
                                     int r554_ok = 0;
@@ -5591,6 +5607,10 @@ static int ee_step(void)
                                         }
 #endif
                                     }
+#ifdef R955_LOADFILE_NAME_TRACE
+                                    fprintf(stderr, "[R955EVT] LF_F_ELF_LOAD result devname=\"%s\" romname=\"%s\" r554_ok=%d epc=0x%08x gp=0x%08x\n",
+                                            devname, romname, r554_ok, elf_epc, elf_gp);
+#endif
                                     if (r554_ok) {
                                         /* Real result data (t_ExecData-style epc/gp,
                                          * per the real, fetched _SifLoadElfPart()) is

@@ -43769,3 +43769,152 @@ has documented at length for the SCPH-10000 BIOS.
 **No source fix this round** (investigative only, `tools/` correctly
 excluded from Wii `SOURCES`, regression suite + Wii cross-build
 correctly skipped per the established tools-only-round convention).
+
+## Round 955 (task #948, SCPH-50004): dissected the 13x LOADFILE retry loop - the RPC completion IS delivered and OSDSYS genuinely executes (real decompression loop found); CDVD NVRAM-config burst confirmed one-time and unrelated; user's fresh SCPH-50004 .NVM/.MEC/.EROM uploads examined
+
+Direct continuation of Round 952's finding that `SIF_SID_LOADFILE`
+(0x80000006) is the only service ever bound during SCPH-50004's boot,
+re-bound and re-called 13 times identically. This round instruments
+and disassembles what actually happens on each of those 13 cycles,
+rather than treating the count alone as evidence of a stuck retry.
+
+**User-relayed proposal this round:** dissect the LOADFILE loop via
+`sif_cmd_iop_dump_bind_table()` (already shipped Round 952), check
+whether SCPH-50004 reads NVRAM/EEPROM config during the VBLANK burst,
+and whether the project's own NVRAM/config-block modeling is
+zero-filled in a way that could cause OSDSYS to loop forever waiting
+for valid settings. The user also uploaded three new companion files:
+`SCPH-50004_BIOS_V9_EUR_190.NVM` (1024 bytes), `.MEC` (4 bytes), and
+`.EROM` (3,145,728 bytes) - real PCSX2 BIOS-folder sidecar files this
+project had not previously had for this BIOS.
+
+**Instrumentation added (`source/core/ee/ee_core.c`, `#ifdef`-gated,
+zero-cost when unset, matching the existing `R933_RPCCALL_TRACE`/
+`R814_CLOSECONFIG_TRACE` convention):** `R955_LOADFILE_NAME_TRACE`,
+inserted right after the existing `devname`/`romname` RPC-payload
+parse and again right after the `r554_ok`/`elf_epc`/`elf_gp` result is
+computed - printing the exact requested path and whether
+`sif_loadfile_elf_load()`/`sif_loadfile_elf_load_disc()` reported
+success.
+
+**Finding 1 - all 13 requests are `rom0:OSDSYS`, and every single one
+SUCCEEDS.** Compiling with `-DR933_RPCCALL_TRACE -DR955_LOADFILE_NAME_TRACE`
+and re-running the 60,000,000-slice boot survey captured exactly:
+```
+[R955EVT] LF_F_ELF_LOAD devname="rom0" romname="OSDSYS"                              (x13)
+[R955EVT] LF_F_ELF_LOAD result devname="rom0" romname="OSDSYS" r554_ok=1 epc=0x00100008 gp=0x00000000  (x13)
+```
+`gp=0x00000000` is NOT a bug - `sif_loadfile_elf_load()`'s own
+existing comment (line ~2285) already cites this as real, hardcoded
+IOP-side `elf_load_all_section()` behavior. So the reply-delivery
+mechanism this project uses (`ee_mem_write32` into `call_recvbuf` +
+`ee_arm_rpc_call_pending()`) fires correctly and honestly on every one
+of the 13 cycles - there is no un-replied/dropped request here.
+
+**Finding 2 - the EE genuinely executes inside OSDSYS's own loaded
+code after the reply, disproving the "reply never consumed" hypothesis
+outright.** A new sampler (`tools/round955-loadfile-retry/analyze.c`)
+polls `ee->pc` every 5,000 slices and flags any value inside
+`0x00100000-0x00120000` (the standard PS2 user-ELF load address,
+matching the returned `epc=0x00100008`). Result: PC IS observed there
+- first at `ee_instr=34,959,967`, with 3,588 sampled hits continuing
+through at least `ee_instr=36,919,967` in a single 60,000,000-slice
+run. So after each successful LOADFILE reply, the calling code really
+does jump to OSDSYS's own entry point and execute real code there -
+the retry is not caused by a dropped/un-consumed RPC completion.
+
+**Finding 3 - that execution window is spent inside a genuine, correct
+byte-copy/decompression routine, not a crash.** A live disassembly
+dump (taken at the exact instant PC first entered the range, before
+any later phase could overwrite the memory - a static end-of-run dump
+of the same address range came back all-zero, showing this code
+region gets reclaimed/cleared later in the boot, a separate honest
+observation worth flagging for a future round) decodes
+`0x00100b30-0x00100c58` as a real byte-stream copy/unstuff loop:
+```
+0x00100be0: lbu  v0, 0(a1)        ; v0 = *a1
+0x00100be4: addiu a0, a0, -1      ; a0-- (remaining count)
+0x00100be8: addiu a1, a1, 1       ; a1++ (src ptr)
+0x00100bec: sb   v0, 0(s0)        ; *s0 = v0
+0x00100bf0: addiu s0, s0, 1       ; s0++ (dst ptr)
+0x00100bf4: bne  a0, zero, 0x00100be0
+```
+i.e. `while (a0-- != 0) *s0++ = *a1++;`, wrapped in a larger
+bit/byte-oriented control-flow structure (`0x00100b64-0x00100c38`)
+consistent with a literal-run copy inside an LZ-style decompressor -
+the same general class of routine this project's own Round 458/643/644
+findings already documented for OSDSYS's `0x00200C80-0x00200D4C`
+decompression loop on the older SCPH-10000 BIOS, here at a different
+address because SCPH-50004 is a different, newer BIOS image. Spending
+~2,000,000+ real EE instructions unpacking an embedded resource (UI
+font/background data) on boot is unremarkable, expected BIOS behavior
+- not evidence of a bug.
+
+**Finding 4 - the CDVD OPENCONFIG/READCONFIG/CLOSECONFIG burst (the
+user's NVRAM hypothesis) fires exactly ONCE, early, and is NOT
+re-triggered on each LOADFILE cycle.** Using the already-existing
+`iop_cdvd_get_scmd_call_count()`/`iop_cdvd_get_last_scmd_issued()`
+accessors (Round 732), the same survey shows:
+```
+[R955SCMD] ee_instr=240000 scmd_call_count 0 -> 12 last_scmd=0x41 (READCONFIG)
+[R955SCMD] ee_instr=280000 scmd_call_count 12 -> 13 last_scmd=0x43 (CLOSECONFIG)
+```
+- a single OpenConfig/ReadConfig(x11)/CloseConfig burst at
+`ee_instr≈240,000-280,000`, roughly 35,000,000 instructions BEFORE the
+first LOADFILE retry even starts (`ee_instr≈34,960,000`), and it never
+repeats across the remaining ~445,000,000 sampled instructions or the
+other 12 LOADFILE cycles. This directly weighs against the user's
+proposed causal chain (OSDSYS re-polling NVRAM once per LOADFILE
+cycle, looping because it gets zeros): the real config burst is a
+one-time CDVDMAN init event, structurally unrelated in both timing and
+repetition-count to the 13x LOADFILE pattern.
+
+**Finding 5 - the freshly-uploaded `.NVM` is a genuinely blank/
+never-configured template, matching PCSX2's own default-creation
+convention - it does not supply real factory config bytes, and this
+BIOS's own already-implemented `SCMD_READCONFIG` handler already
+honestly returns the same all-zero 16 bytes real PCSX2 would return
+for an equally-blank NVRAM (per `iop_cdvd.c`'s existing Round 261/294
+citation trail - "Honestly zero-filled - no real config block is
+modeled").** `xxd` on the uploaded 1024-byte `.NVM` shows every byte
+0x00 (confirmed for both the differently-named copy and the
+plain-named copy PCSX2 also wrote) - this is PCSX2's own "just
+created, never touched a settings menu" NVRAM shape, not a real
+factory-programmed dump with actual language/video-mode bytes. Since
+this project's CDVD S-command handler already reproduces that same
+all-zero shape (by design, not oversight) and Finding 4 shows the
+config burst is a one-time, non-repeating event unconnected to the
+13x LOADFILE cadence, the specific "OSDSYS loops because NVRAM reads
+zero" mechanism is not supported by this round's evidence. The `.MEC`
+(4 bytes: `03 06 02 00`, a real MechaCon region/version identifier)
+and `.EROM` (3 MB, matches the already-uploaded `.ROM1`+`.ROM2`
+extension-ROM content byte-for-byte at the start) were also confirmed
+present and consistent, but neither bears on the LOADFILE retry
+mechanism.
+
+**Synthesis:** the 13x `rom0:OSDSYS` LOADFILE cycle is a real,
+successful, repeatedly-completing load-and-execute sequence, not a
+stuck/un-replied request and not (per the evidence gathered this
+round) an NVRAM-driven validation loop. OSDSYS's own code genuinely
+runs after each load, spending its early window in an ordinary
+resource-decompression routine before something (not yet identified)
+returns control to EELOAD/the BIOS kernel and triggers the next
+reload. The open question for the next round is squarely: what does
+OSDSYS's own code do AFTER the decompression loop completes (~past
+`ee_instr≈37,000,000` in this window) that leads back to a fresh
+`rom0:OSDSYS` LOADFILE request 35-37 million instructions later -
+i.e. tracing forward from the end of the copy loop rather than backward
+from the LOADFILE call site, the mirror image of this round's approach.
+
+**Shipped this round:** `R955_LOADFILE_NAME_TRACE` diagnostic block in
+`source/core/ee/ee_core.c` (`#ifdef`-gated, disabled in every normal/
+Wii build - zero behavioral change), plus new investigative tool
+`tools/round955-loadfile-retry/analyze.c`.
+
+**Verification:** host-native regression suite - `test_ee_core`,
+`test_sif`, `test_ee_cdvd_ncmd_reentry`, `test_iop_cdvd`,
+`test_iop_core`, `test_dma_sif2` (the tests that directly link
+`ee_core.c`/`sif.c`/`iop_cdvd.c`, the three files whose call paths
+this round's diagnostic touches or reads) - all pass, 0 failures.
+devkitPPC Wii cross-build clean (45 source files, `pcsx2-wii.dol`
+produced). No regression.

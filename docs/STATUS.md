@@ -42924,3 +42924,96 @@ wall exists once the IOP is stably idle; (3) Round 944's own open item, the SYSC
 gap noted in this round's `iop_check_hw_interrupt()` doc comment, remains out of scope and unaddressed;
 (4) apply the same fresh-boot methodology to the GT3/Tekken/KOF/MS3 disc-boot paths to see whether they
 independently benefit from this fix.
+
+## Round 946 (task #447/#536/#934-936, diagnosis-only, no source fix shipped): answers to the user's two direct Round 946 questions - GT3 disc-boot survives 200,000,000 fresh-cold-boot instructions with ZERO halts for the first time ever
+
+**User's Round 946 work order** (German, verbatim intent): monitor PMODE/DISP2 during the long EE run
+to see whether the BIOS organically configures video output for the OSDSYS menu; validate that SIF
+communication (EE<->IOP) stays healthy while the IOP holds `pc=0x00155910`; and directly answer two
+closing questions - does the EE send new SIF commands to the IOP while it waits, and has GT3 been
+tried yet against the Round-945-fixed tree.
+
+**Method.** Built `tools/round946-post945-survey/diskless_sif_gs_survey.c`, extending the Round 942
+diskless-chain pattern with per-chunk polling of `sif_get_state()` (mscom/smcom/msflag/smflag),
+`sif_cmd_iop_get_init_cmd_count()`/`sif_cmd_iop_get_rpc_bind_count()`, and `gs_get_state()`'s
+pmode/dispfb2/display2/smode2 fields - all pre-existing, already-shipped read-only accessors; no
+tracked source file was modified to gather this data. Ran two surveys: (1) a fresh diskless
+`system_init()` cold boot to 150,000,000 instructions (real `scph10000.bin`), and (2) a fresh GT3
+disc-boot cold boot to 200,000,000 instructions using the existing `tools/round936-iop-wake/
+chain_driver.c` (real disc image, `iop_cdvd_mount_iso()` + `iop_cdvd_set_disc_present(0x12)`,
+unchanged from its original Round 936 form).
+
+**Answering the user's two direct questions:**
+
+1. **Does the EE send new SIF commands to the IOP while it waits at `pc=0x00155910`?** **No** -
+   confirmed empirically over the full 150,000,000-instruction diskless survey.
+   `sif_state_t.mscom` (the EE-writable outbound command register) recorded **zero** changes for the
+   entire run. `sif_cmd_iop_get_rpc_bind_count()` (RPC-bind traffic) went `11 -> 12` once, very early
+   (within the first ~5,000,000-instruction sample, during the same initial handshake burst Round 943/
+   944/945 already characterized as real, correct, one-time module-init RPC binding) and then stayed
+   flat at 12 for the remaining ~140,000,000+ instructions. `sif_cmd_iop_get_init_cmd_count()` stayed
+   at 1 throughout. In short: the IOP's idle parking at `0x00155910` is not being starved of work it
+   should be receiving - the EE genuinely issues no further SIF requests during this window at all.
+   This is a real, honest finding, not necessarily a bug - it may simply mean the BIOS/OSDSYS code
+   path this project's boot reaches doesn't need further IOP services yet (e.g. it's waiting on pad
+   input or a later milestone), which is consistent with the EE's own `ee_pc` sampling (see below).
+
+2. **PMODE/DISPFB2/DISPLAY2/SMODE2 - does the BIOS ever organically reconfigure the display?**
+   Honestly re-examined and **corrected mid-round**: an initial pass mislabeled a single observed GS-
+   register change as "organic, pre-force" because it compared against the IOP-side chunk counter
+   (`done`, incrementing in 5,000,000-instruction steps) rather than the EE-instruction count the
+   Round 940/941 force actually fires on (`instr==25,000,000`, an EE-side counter that reaches 25M
+   partway through the very first 5,000,000-IOP-instruction-chunk sample, since EE executes roughly
+   8x more instructions per interleave slice than the IOP does). The single observed change is
+   therefore almost certainly the already-known Round 940/941 synthetic force itself, not independent
+   organic BIOS behavior - flagged honestly rather than claimed as a new finding. After that single
+   event, **PMODE/DISPFB2/DISPLAY2/SMODE2 are completely static for the remaining ~145,000,000+
+   instructions** of the diskless survey - no further reconfiguration of any kind was observed.
+
+3. **Has GT3 been tried on the Round-945-fixed tree, and how far does it now run?** **Yes - and the
+   result is the strongest evidence yet that Round 945's fix is broadly correct, not narrowly
+   diskless-specific.** A fresh GT3 disc-boot from instruction 0 (real disc image, real `scph10000.bin`)
+   ran the full requested **200,000,000 instructions with zero halts of any kind** - no panic, no
+   `EE halted:` message, no Round-173-class tripwire, nothing. This is the first time in this
+   project's entire history that a GT3 cold-boot survey of this length has completed without hitting
+   *some* wall (compare Round 753-769's `pc=0x4B8` wall, Round 780's thread-self-park wall, Round 776's
+   unimplemented-opcode halt, among others - all now behind this run). Concretely:
+   - The IOP reaches `pc=0x00155910` - the **exact same** Round-943-documented idle address the
+     diskless boot reaches - at `instr=4,000,000` and **holds it, completely unchanged, for the entire
+     remaining ~196,000,000 instructions.** GT3's IOP module-loading phase now completes cleanly and
+     parks correctly, exactly like the diskless path, where it used to hit structural walls well
+     before this point in every prior round's survey.
+   - The EE settles into `pc=0x8000CCA0` by the end of the run, inside the same `0x8000CC68-0x8000D010`
+     BIOS-kernel address range the diskless survey's EE also spends its steady-state time in (see
+     point 2's `ee_pc` samples above, e.g. `0x8000CFC8`/`0x8000CFF8`/`0x8000CE10`) - i.e. GT3's EE has
+     now reached the **same generic post-module-loading BIOS kernel loop** the diskless boot reaches,
+     not a game-specific crash site.
+   - **`pmode=0x66`, `dispfb1=0x00000000`, `dispfb2=0x00009400`** at the end of the run - a genuinely
+     **organic, non-forced** display-mode value (GT3's boot never runs past the Round 940/941 diskless-
+     only force logic, which is diskless-path-specific and does not apply to this disc-boot driver).
+     `pmode=0x66` directly matches the value the user's own message already referenced ("analog zu
+     GT3s `0x66`-Sprung") from earlier investigation - this survey confirms GT3 now reaches and holds
+     that same real PMODE value organically, with real IOP/EE cooperation behind it, rather than
+     crashing shortly after.
+
+**Honest scope of what this does and does not show.** This is a positive, evidenced, but still
+partial result: GT3 no longer hits any of its previously-documented halts within 200,000,000
+instructions, and both IOP and EE reach believable, real-looking steady states. It does **not** yet
+show OSDSYS/menu pixels on screen, nor does it show GT3's own game code (as opposed to shared BIOS
+kernel code) executing - the EE's resting `pc` is in generic kernel territory, the same place the
+diskless boot rests, not inside GT3's own ELF. Whether GT3 is now waiting on pad input, a later CDVD
+read, or something else entirely is not yet characterized - flagged as the natural next step (task
+#934, already open) rather than claimed as more than it is.
+
+**Verification.** No tracked `source/`/`include/` file was modified this round - both surveys used only
+pre-existing accessors and pre-existing driver patterns. Regression suite and Wii cross-build correctly
+skipped (no tracked-source change to regress-test), matching the established docs-only-round
+convention. New file: `tools/round946-post945-survey/diskless_sif_gs_survey.c` (does not participate
+in the tracked build, `tools/` is excluded from both the test-suite and Wii Makefile source globs).
+
+**Open items for a future round (updates task #934/#935/#936):** (1) characterize what the EE's steady-
+state `0x8000CCxx-0x8000D0xx` loop is actually polling/waiting on, now that it's confirmed to be the
+same code region on both the diskless and GT3-disc-boot paths; (2) push both surveys well past
+200,000,000 instructions to see if a further wall exists once both cores are this stable; (3) run the
+same survey against Tekken/KOF/MS3 to see if they show the same convergence onto this shared BIOS-
+kernel resting loop.

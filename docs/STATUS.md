@@ -43173,3 +43173,84 @@ for the current resting loop; (2) the actual open question is unchanged from Rou
 OSDSYS code path would trigger the *next* SIF request (of any kind) after the current housekeeping
 steady state - still task #447's core open question; (3) tasks #938/#939 (push surveys further, check
 Tekken/KOF/MS3) remain open.
+
+## Round 949 (task #221/#447/#536, diagnosis-only, no fix shipped): user's MECHACON-ready-flag / periodic-SIO2-IP3 proposal checked against its own cited source and against this project's code - not implemented, both parts unevidenced
+
+The user proposed two IOP-side "hardware trigger" patches for Round 949,
+citing Woon Yung's real "Initializing the PS2/PSX" writeup
+(sites.google.com/view/ysai187) as the source:
+
+1. Force a "MECHACON boot-certification-complete" status bit in the
+   CDVD register block once module loading finishes.
+2. Add a new `iop_check_sio2_interrupt()` that unconditionally sets
+   IOP Cause bit 11 (IP3) every N `sched_ticks`, regardless of whether
+   any real SIO2 transfer was requested, to emulate "periodic
+   controller-poll interrupts."
+
+Both were checked against the cited source and the current tree before
+writing any code, per this project's standing rule of never
+implementing a user-proposed fix without first verifying its premise.
+
+**What the cited source actually says** (fetched and read in full this
+round): it is a real, legitimate writeup by a genuine FMCB/homebrew
+developer, but it describes **EE-side userland OSD-init code** - the
+sequence a *memory-card update program* (like FMCB) must itself call
+after EELOAD hands it control: `SifIopReset()`, `sceCdNotifyGameStart()`
+(enables the PSX "QUIT GAME" button), `sceCdBootCertify()` (validates
+the ROM/MECHACON binding, called from `rom0:ROMVER` content), etc. The
+article explicitly says boot certification is **optional and
+non-blocking even on real hardware**: *"Do not check for the result of
+this operation because early PlayStation 2 models do not support boot
+certification."* Nothing in the source describes a hardware register
+that toggles a "certification status" bit gating IOP module escalation,
+and nothing in it describes periodic SIO2 interrupts firing in the
+absence of an actual pad/mc transfer.
+
+**Code-grounded check performed this round** (read-only, no source
+changed): grepped the full tree for `MECHACON`/`mechacon` -> zero hits;
+no such register/module exists to "set a ready flag" on. Grepped for
+`sceCdBootCertify`/`BootCertify`/`NotifyGameStart` -> zero hits; this
+project doesn't implement that EE syscall (real Sony userland API, not
+an IOP hardware primitive) at all yet. Read `source/hw/iop_sio2.c`'s
+real, ps2tek-cited `OFF_CTRL` handler (lines ~438-451): activity
+(`mc_process_command()`) is already correctly gated on the real
+hardware "bit 0 starts the command transfer" semantics - i.e. this
+project's SIO2 model already only reacts to genuine transfers, which is
+the *correct* real-hardware behavior the proposal was trying to
+approximate via a periodic force.
+
+**New diagnostic (tools/round949-sio2-mechacon-check/sio2_check.c)**,
+run read-only against both Round 946 resting checkpoints
+(`/tmp/r946_diskless.ckpt`, `/tmp/r946_gt3.ckpt`, no state changed):
+
+```
+diskless: iop_sio2_get_pad_command_count()=0  cdvd_status=0x01  cdvd_ready=0x4a  scmd_call_count=13
+GT3:      iop_sio2_get_pad_command_count()=0  cdvd_status=0x0a  cdvd_ready=0x4a  scmd_call_count=13
+```
+
+`iop_sio2_get_pad_command_count()==0` in both confirms the user's
+underlying *observation* (SIO2 really is silent at the resting point)
+is correct - but it also shows *why* forcing an IP3 interrupt there
+would be fabricated: no real SIO2 CTRL-triggered transfer has ever been
+issued to complete, so an injected "transfer-complete" interrupt would
+correspond to no real transfer, i.e. exactly the "magic trigger"
+pattern already rejected in Round 945 (`iop_patch_sifman_descriptor()`)
+and Round 947 (`ee_trigger_hardware_interrupt()`). `scmd_call_count=13`
+identical across both runs confirms CDVD S-command negotiation already
+ran to completion identically in both boots, consistent with Round
+948's finding that the real, fixed IOP module set (including any
+boot-cert-adjacent CDVD negotiation) already finished before the
+current resting window - not that it's stalled mid-negotiation.
+
+**Conclusion**: neither proposed patch is implemented. Not because the
+underlying instinct (something SIO2/CDVD-side is quiet) is wrong - it's
+directionally correct and now has hard data behind it - but because the
+specific mechanism proposed (a fabricated periodic interrupt / a forced
+status-register bit with no real hardware register to back it) doesn't
+match either the cited source or this project's own SIO2 model. The
+real open question is unchanged from Round 948: what real EE-side
+OSDSYS code path would *itself* attempt a pad/mc poll or a further CDVD
+S-command next - i.e. is OSDSYS's own real code even trying to do this
+yet at this point in its control flow, which is answerable by
+disassembly/instrumentation of OSDSYS's own loaded code around the
+current resting PC, not by injecting synthetic hardware signals.

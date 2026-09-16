@@ -10616,11 +10616,55 @@ void ee_core_park_tick(ee_state_t *st)
          * actually pending. */
         uint32_t saved_status = st->cop0[12];
         st->cop0[12] |= 0x00000001u;
+        /* Round 942 (task #447/#536, real fix): this flag is normally
+         * reset to 0 at the top of every ee_step() call (line ~3644) -
+         * but ee_step()'s `if (st->idle) { ee_core_park_tick(...); ...;
+         * return 0; }` short-circuit (line ~3507) returns BEFORE that
+         * reset is ever reached, so on every idle tick this flag still
+         * held whatever value the LAST real (non-idle) step left it at.
+         * Reset it explicitly here so the check three lines below
+         * reflects only what THIS tick's own interrupt checks do. */
+        st->exc_raised_this_step = 0;
         ee_check_timer_interrupt(st, st->pc);
         ee_check_intc_interrupt(st, st->pc);
         ee_check_dmac_interrupt(st, st->pc);
         if (!st->exc_raised_this_step) {
             st->cop0[12] = saved_status;
+        } else {
+            /* Round 942 (task #447/#536, real fix - confirmed root
+             * cause of the exact freeze the user's own Round 941
+             * Dolphin test showed, instr=38,865,330, pc stuck at
+             * 0x80000200 forever): ee_check_*_interrupt() above just
+             * genuinely took a real interrupt WHILE THE EE WAS IDLE -
+             * ee_raise_exception() already redirected st->pc to the
+             * real vector (0x80000200) and set Status.EXL=1. Real
+             * hardware's WAIT instruction is defined to unconditionally
+             * exit and let the interrupt handler execute for real the
+             * instant this happens - but this project's idle short-
+             * circuit (ee_step(), `if (st->idle) {...return 0;}`)
+             * would otherwise keep calling ONLY this function forever
+             * afterward: ee_hle_thread_reschedule_kick() (called right
+             * after this function returns, from ee_step()'s idle
+             * branch) correctly declines to touch the schedule while
+             * Status.EXL/ERL is set (see reschedule()'s own
+             * "mid-exception(EXL/ERL)" deferral, ee_hle_thread.c) -
+             * which is the RIGHT call for the scheduler, but nothing
+             * else was clearing `idle`, so the vector's own real code
+             * (the fully-decoded, genuinely-populated PLZCW priority-
+             * encoder dispatcher this project's own Rounds 157-160/
+             * 16970 already confirmed is real, correct BIOS code) was
+             * NEVER ACTUALLY FETCHED/EXECUTED - a silent, permanent,
+             * 100%-CPU-frozen deadlock (empirically confirmed live via
+             * tools/round942-idle-exl-deadlock/microstep.c: pc AND
+             * instructions_executed both provably unchanged across
+             * 2000 consecutive raw ee_core_step() calls at this exact
+             * checkpoint). Fix: a genuine interrupt being taken is
+             * unambiguously "real work is about to happen" - exactly
+             * the same condition Round 855's own `st->idle = 0` at the
+             * top of the found-a-ready-thread branch (a few dozen
+             * lines below, ee_hle_thread.c) already treats as
+             * idle-clearing - so clear it here too. */
+            st->idle = 0;
         }
     }
 }

@@ -42319,3 +42319,161 @@ as resolved.
 
 No further source change this round; this is a documentation-only empirical follow-up to the
 Round 941 fix already committed in `de96f46`.
+
+## Round 942 (task #929/#930, task #447/#536 continuation): root-caused and fixed a
+silent, permanent EE scheduler deadlock - idle-thread mechanism never cleared
+`st->idle` after a genuine interrupt was taken while the EE core was idle,
+freezing the CPU forever at the real interrupt vector without ever fetching
+it. This appears to be a much earlier, previously-undiagnosed, and likely
+SHARED root cause underneath both the diskless BIOS "black screen" symptom
+(Round 939's converged 8.24B-instruction idle steady-state) and GT3's
+disc-boot freeze - not just a downstream symptom Round 940/941's synthetic
+PMODE/SMFLAG overrides were band-aiding.
+
+**How this was found.** Continuing the user's explicit instruction to focus on
+task #447/#536 and then boot GT3 fresh from instruction 0, this round ran a
+completely fresh (start-mode, instruction-0) GT3 disc-boot checkpoint chain
+using `tools/round729-gt3-discboot/chain_driver.c` against the pre-existing
+(pre-this-round) tree. Two independent 100M-then-50M-slice re-runs produced
+byte-for-byte identical `total_instr=38,865,330` - zero net progress despite
+two full chain invocations, a strong signal of a genuine permanent freeze
+rather than merely slow organic progress. A new diagnostic driver
+(`r942_microstep.c`, see below) loaded that exact checkpoint and single-stepped
+the EE core directly (`ee_core_step()`) 2000 times, printing `pc`/
+`instructions_executed` every step: both were provably, byte-for-byte frozen
+across all 2000 raw steps. `pc` sat at `0x80000200` - the EE's real interrupt
+vector, which this project's own much earlier Rounds 157-160/16970 already
+confirmed is real, fully-decoded, genuinely-populated BIOS code (a PLZCW
+priority-encoder-based interrupt dispatcher), not stub/dead code.
+
+**Root cause.** `ee_step()` (`source/core/ee/ee_core.c`, ~line 3507) has an
+idle short-circuit: `if (st->idle) { ee_core_park_tick(st);
+ee_hle_thread_reschedule_kick(st); return 0; }` - this returns immediately,
+skipping the real fetch/decode/execute pipeline and the
+`instructions_executed++` counter entirely. `ee_core_park_tick()` (same file,
+~line 10593) is called on every idle tick specifically to keep real hardware
+timing signals (VBLANK, timers, DMAC, INTC) flowing even while the core isn't
+fetching - and it correctly, genuinely fires
+`ee_check_timer_interrupt()`/`ee_check_intc_interrupt()`/
+`ee_check_dmac_interrupt()` each tick. The bug: when one of those checks
+genuinely fires a real interrupt while the EE is idle,
+`ee_raise_exception()` redirects `st->pc` to the real vector (`0x80000200`)
+and sets `Status.EXL=1` - real hardware's WAIT instruction is defined to
+unconditionally exit and let the handler run the instant this happens. But
+immediately afterward, back in `ee_step()`'s idle branch,
+`ee_hle_thread_reschedule_kick()` calls `reschedule()`
+(`source/core/ee/ee_hle_thread.c`, ~line 380), which correctly *defers*
+touching the schedule whenever `Status.EXL`/`ERL` is set (mid-exception) -
+the right call for the scheduler in isolation. But nothing else was ever
+clearing `st->idle` in this scenario, so `ee_step()`'s idle short-circuit
+kept firing on every subsequent call, and the interrupt-check functions
+correctly refuse to re-fire once `EXL=1` (their own `(IE|EXL|ERL|EIE)==
+(IE|EIE)` gate blocks them) - so `idle` never cleared and the vector's own
+real, correct code was **never fetched or executed at all**. A silent,
+permanent, 100%-CPU-frozen deadlock, invisible at the coarse 10M-slice
+checkpoint-chain granularity this project has mostly relied on (it looks
+exactly like "still running, just slow" until you diff two consecutive
+chain runs and see zero instruction delta).
+
+A separate lesson worth recording precisely because it produced a false
+negative mid-round: **a checkpoint captured by the OLD (buggy) binary, in a
+state where `idle=1` AND `EXL=1` are BOTH already set, cannot be "healed" by
+re-running it against the FIXED binary.** The fix's corrective logic (clear
+`idle` when a NEW interrupt fires) can never trigger on an already-EXL-stuck
+checkpoint, because no new interrupt can ever be taken while `EXL` is already
+1 (that is precisely what `EXL` means). Verification of an idle/EXL-class fix
+REQUIRES a genuinely fresh cold boot (instruction 0) with the fixed binary,
+not replay of a checkpoint that may already encode the buggy frozen state.
+Re-running the fix against the old poisoned checkpoint initially looked like
+"no effect" (2000/2000 steps still frozen) - correctly diagnosed as this
+methodological artifact, not a failed fix, before re-verifying properly.
+
+**The fix** (`ee_core_park_tick()`, `source/core/ee/ee_core.c`): the
+`exc_raised_this_step` flag that the three interrupt-check calls set is
+normally reset to 0 at the top of every *normal* (non-idle) `ee_step()` call
+(~line 3644) - but the idle short-circuit returns before ever reaching that
+reset, so during a run of idle ticks this flag silently carried over stale
+state from whatever the last real step (or last idle tick) left it at.
+`park_tick()` now explicitly resets it to 0 immediately before its own three
+interrupt checks, so it accurately reflects only what *this* tick's checks
+did; if any of them did raise a real interrupt (`exc_raised_this_step` now
+true), `st->idle` is explicitly cleared - exactly the same "a real interrupt
+firing means real work is about to happen" logic Round 855's own scheduler
+already applies at its own `st->idle = 0` clear-site (`ee_hle_thread.c`,
+found-a-ready-thread branch) - just extended to cover this second real path
+into non-idle execution that Round 855 didn't have visibility into.
+
+**Verification.** A fresh, genuinely-cold (instruction 0) GT3 disc-boot chain
+run with the fixed binary
+(`/tmp/r942gt3fresh <bios> <gt3.iso> /tmp/gt3_r942_freshfix.ckpt start 100000000`)
+produced:
+```
+[R729-CHAIN] ran 100000000 more, total_instr=789747959 pc=0x8000f864 halted=0
+tid=3 vu1_instr=0 vu1_tpc=0x0000 gif_path1=0 qw_seen=18997 pmode=0x66
+dispfb1=0x00000000 dispfb2=0x00009400
+```
+- ~20x further than the old permanent freeze (789,747,959 vs. the previously
+unbreakable 38,865,330), with `pc` genuinely advancing through varied real
+BIOS addresses across all ten 10M-slice inner chunks (not stuck repeating one
+value). Most significantly: **`pmode` organically reached `0x66`** - this is
+the exact real-hardware-confirmed value this project's own Round 212 captured
+directly from a real PCSX2 debugger session of GT3's actual BIOS splash
+screen (`EN1=0/EN2=1`, Circuit-2-only). This happened with ZERO involvement
+from Round 940/941's synthetic `system_r940_force_display_if_needed()`
+override (its own `if (gs->pmode != 0) return;` guard means it silently
+no-op'd here, since the real BIOS got there first) - the first time in this
+entire investigation that PMODE has been observed configuring itself
+organically to a real-hardware-matching value, on either the diskless or
+disc-boot path, without any synthetic override needing to fire.
+
+**Scope of what remains unconfirmed.** This round verified the fix removes
+the specific idle/EXL deadlock and lets a fresh GT3 boot progress ~20x
+further with organically-correct PMODE. It does NOT yet establish: how much
+further the fresh-boot chain goes with more budget beyond the 100M-slice
+window tested here; whether a new wall is hit past that point; what the IOP
+core's state is under the fix (previously permanently frozen at
+`pc=0x00155910` in every broken run, not yet re-checked); or whether the
+same fix similarly unblocks the diskless BIOS-only boot path (Round 939's
+8.24B-instruction converged idle state was not re-tested against this fix
+this round). These are the natural next steps and are left honestly open
+rather than assumed.
+
+**Verification workflow completed this round:**
+- Host-native regression suite: all 136 `tests/test_*.c` files, 0 failures
+  (`tests/run_test.sh --all` equivalent, run in resumable/parallel batches).
+- devkitPPC Wii cross-build: clean, 0 warnings, 0 errors,
+  `pcsx2-wii.dol` produced successfully.
+- Diagnostic tooling used this round: `r942_microstep.c` (single-step
+  EE-core proof of the frozen `pc`/`instructions_executed`, before and after
+  the fix) - a scratch driver, not yet promoted into a tracked `tools/`
+  subdirectory.
+
+**Addressing the user's mid-round alternative proposal** (an OSDSYS
+state-injection hook force-writing the Browser dispatch field at
+`0x001C0450` from 5 to 8 on a real Wii/GameCube button press, plus a
+"device changed" flag at `0x001C0440+0x1BA0`, to try to force OSDSYS's menu
+to escalate): that mechanism operates entirely at the OSDSYS
+application-level state machine, several layers above where this round's
+deadlock actually lives. The idle/EXL freeze happens inside the EE
+scheduler/interrupt-dispatch core itself - before ANY OSDSYS application
+code, disc-browser logic, or `0x1C0450`-class state field could ever be
+reached or matter, on both the diskless and disc-boot paths alike. Had the
+state-injection hook been implemented without this fix, it would have had no
+effect: the CPU executing OSDSYS's own code was never the bottleneck in the
+frozen runs - the CPU wasn't running *any* code, including OSDSYS's. The
+hook remains a reasonable, well-evidenced idea in isolation (it was based on
+this project's own real, live-hardware-captured Round 606 finding of the
+genuine `0x1C0450` 5<->8 transition on a real Circle/Cross press) and may
+still be worth revisiting later if OSDSYS's Browser thread is ever confirmed
+reached-but-stuck at that specific gate - but it was not the right next step
+given what this round found underneath it.
+
+The user's second point - that OSDSYS's menu text may use 4-bit/8-bit CLUT
+(PSMT4/PSMT8) palette textures that this project's GS-to-Wii-GX rendering
+backend doesn't yet convert - remains a good, still-open, unverified lead.
+It was not investigated this round (this round's fresh-boot progress
+reached real BIOS/kernel code, not yet OSDSYS's own font-rendering code), but
+it is a plausible and worth revisiting once boot progress reaches the point
+where OSDSYS is actually attempting to draw text.
+
+No regressions. Committed alongside this STATUS.md update.

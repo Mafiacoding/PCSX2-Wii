@@ -41977,6 +41977,68 @@ this specific gap.
 reasons). Regression suite and Wii cross-build correctly skipped per established convention for
 docs-only rounds with no source diff.
 
+## Round 939 (task #924, per Round 938's redirect): diskless BIOS boot pushed to 8.24 BILLION instructions - PMODE never configures, and unlike Round 925's optimistic reading, this is now evidenced as a genuine steady-state idle, not "just needs more time"
+
+**Goal.** Round 925 found diskless boot's PMODE stuck at 0x00 through 1,055,999,045 instructions,
+and speculated (citing Round 742-745's live-PCSX2 finding of continuing real disc-free BIOS
+activity out past 6.96 billion cycles) that this might simply need far more instructions to reach
+real hardware's eventual "press button" attract-mode screen. This round tested that hypothesis
+directly by checkpoint-chaining the diskless path (mirrors the Round 936 chain_driver.c pattern;
+new tool `tools/round939-diskless-pmode/chain_driver.c`) far past that reference point.
+
+**Method.** `system_init()` with deliberately no `iop_cdvd_mount_iso()` call (exactly main.c's own
+diskless fallback), then repeated `system_run_interleaved()` calls chained via
+`checkpoint_save`/`checkpoint_load` in 60,000,000-unit budget increments (each producing roughly
+480,000,000 real EE instructions, consistent with the documented 8:1 EE:IOP interleave ratio),
+sampling PMODE/DISPFB1/DISPFB2/DISPLAY1/DISPLAY2 plus EE/IOP pc every increment.
+
+**Result.** Ran to **8,239,999,045 total EE instructions** - beyond both Round 925's 1.06B-instruction
+survey and the 6.96-billion-cycle real-hardware reference point this round's own hypothesis was
+based on. `PMODE` read exactly `0x00` (`DISPFB1`/`DISPFB2` both `0x00000000`) at every single
+sampling point across the entire run - the display circuit never activates.
+
+**Stronger finding than "just needs more time": the CPUs are not making periodic real progress
+either.** Across all 11 sampled checkpoints spanning the full 7.76-billion-instruction extension,
+EE pc was observed ONLY at addresses `0x8000cc70`-`0x8000d010` - a single, already-long-documented
+~1KB address range (Round 928 independently identified this exact span,
+`0x8000cc6c-0x8000d010`, as "the long-established real OSDSYS idle/animation-dispatch loop", first
+characterized as far back as Rounds 269-272/424/429/528-529/594-622). IOP pc was even more static:
+**exactly `0x00155910` at every single one of the 11 samples**, with zero variation whatsoever
+across the entire 7.76-billion-instruction window. This is a materially different signature than
+"slow organic progress that just needs patience" - it is a fully converged, stable idle
+steady-state on both processors, with neither one ever leaving its resting address for billions of
+instructions. Real hardware's disc-free attract-mode (per Round 743-745's own citation) involves
+periodic XGKICKs and other activity continuing across billions of cycles - a CPU that is genuinely
+"slowly getting somewhere" would be expected to show at least some variation in its own resting pc
+over a comparable window, not perfect, unbroken stasis.
+
+**Revised conclusion.** Round 925's "may just need more instructions, matching real hardware's slow
+disc-free timeline" hypothesis is not supported by this round's data. The diskless boot path has
+reached a genuine, stable idle equilibrium in the existing OSDSYS animation-dispatch loop - both EE
+and IOP are correctly idling (not crashing, not corrupted, not thrashing), but nothing internal to
+the current tree ever gives either processor a new reason to leave that loop and proceed toward
+display configuration. This reframes the diskless GS-display gap the same way Round 936-938 just
+reframed the GT3 disc-boot gap: not an interrupt/scheduler/timing bug, and not something a longer
+run will resolve on its own, but a missing "what should escalate the OSDSYS idle animation loop
+into display setup" question - the same open question this project's own history (Rounds 424,
+481-501, 594-622, 716) has repeatedly investigated and repeatedly found no organic answer to
+within the current tree, now further reinforced by this round's 8.24-billion-instruction ceiling
+test. No new source-level bug was found or fixed this round; per the same anti-fabrication
+discipline applied in Round 938, no speculative "force it to escalate" shortcut was added.
+
+**What would move this forward (not attempted this round, next steps):** (1) real BIOS
+disassembly of what condition real Sony firmware uses to escalate the disc-free idle/animation
+loop into attract-mode display setup - the same class of missing ground truth Round 938 identified
+for the SIF_SMFLAG bit-30 question; or (2) live-hardware/live-PCSX2 access to observe the real
+transition directly (this project's own established, previously successful methodology for
+exactly this kind of "what should happen next" question, e.g. Rounds 604-608's OSDSYS Browser
+breakthrough).
+
+**Mandatory workflow scoping.** Pure investigation, no tracked source changed (only the new
+`tools/round939-diskless-pmode/chain_driver.c` scratch tool, following this project's established
+convention for this class of throwaway checkpoint-chain driver). Regression suite and Wii
+cross-build correctly skipped - nothing to rebuild.
+
 **Mandatory workflow status this round:** compile-checked both touched files clean (`-Wall
 -Wextra`, no new warnings) - full regression suite skipped per explicit user instruction this
 round (change is diagnostic-only, `#ifdef`-gated, zero behavioral impact when undefined). devkitPPC

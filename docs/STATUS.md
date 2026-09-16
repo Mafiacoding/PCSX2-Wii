@@ -41798,3 +41798,67 @@ wake the IOP a second time after this ack, and whether that event is currently m
 
 **Files changed:** `source/core/iop/iop_core.c` (the fix, ~30 lines net), new
 `tests/test_iop_spurious_interrupt_ack.c` (193 lines, new permanent regression test).
+
+## Round 936 (task #921, direct continuation of Round 935): the "IOP idle forever after ack" is CORRECT, pre-existing, by-design behavior - NOT a new bug from the Round 935 fix
+
+**Bottom line: re-classified, not re-opened.** Round 935's fix is confirmed complete and correct for
+its stated purpose. This round traced exactly what happens to GT3's IOP immediately after the
+spurious-interrupt ack, expecting to find a genuine "second wake-up" gap - instead found that the
+CPU going idle and staying idle at that exact point is the same long-documented,
+intentional idle/wake mechanism this project has relied on since Round 425/426/519, working
+correctly. No new IOP-core fix is needed here.
+
+**What was traced.** Built `tools/round936-iop-wake/chain_driver.c` (checkpoint-chained, mirrors
+the Round 715/729 pattern) plus two small pieces of permanent, `#ifdef`-gated diagnostic
+instrumentation (inert unless explicitly compiled in, same convention as the pre-existing
+R933_DMA_KICK_TRACE/R814_CLOSECONFIG_TRACE macros): `R936_IOP_WAKE_TRACE` in
+`source/hw/iop_intc.c` (logs every real call to `iop_intc_raise()`/`iop_intc_raise_soft()` with an
+instruction-counter timestamp) and `R936_STEP_TRACE` in `source/core/iop/iop_core.c` +
+`source/hw/iop_hle_thread.c` (logs which HLE "try_handle" table, if any, intercepts a given IOP pc,
+and logs every call to the scheduler's `reschedule()` with its decision). Ran a 161M+-instruction
+survey against the Round-861 GT3 checkpoint with the Round 935 fix in place: as expected, IOP pc
+stayed frozen at 0x00155b40 for the entire window with **zero** `iop_intc_raise`/`_soft` calls -
+confirming the storm stays fixed and nothing new asserts an interrupt in this window.
+
+**What single-stepping revealed.** Ten fine-grained `iop_core_step()` calls from the checkpoint
+showed the full real sequence: (1) IOP starts idle (`idle=1`) at pc=0x00155b40; a real pending
+interrupt is found, vectors to 0x80000080, `idle` correctly clears to 0. (2) The very next step
+executes the Round-935 spurious-ack default-vector stub, clears istat, resumes register state at
+raw EPC=0x00155b40, `idle` still 0. (3) The step after THAT is where it gets interesting: pc=
+0x00155b40 is checked against every HLE "intercept before fetch" table (`iop_hle_bios_try_handle`,
+`iop_hle_intr_try_handle`, `iop_hle_thread_try_handle`, `iop_hle_heap_try_handle`,
+`iop_excb_try_handle`, `iop_module_loader_try_handle`) exactly as it is for every real IOP
+instruction fetch - and it turns out `iop_module_loader_try_handle()` DOES claim this exact
+address: `0x00155b40` is `g.trampoline_addr`, the fixed re-entry point the real IOP module-boot
+sequencer installs once every real module has run to completion (source/hw/iop_module_loader.c,
+its own Round 425/426 doc comment, first written many rounds before this SIF-RPC investigation
+even started). That comment explicitly documents the exact behavior just re-observed: "once every
+module is exhausted, pc stays parked at g.trampoline_addr forever... including legitimately after
+a real interrupt wakes IOP from idle, its handler runs, and RFEs back to this exact saved EPC" -
+re-parking into idle on every one of these re-entries is described as "a real, repeatable, correct
+action that must run on every one of these re-entries."
+
+**Conclusion.** The exact sequence this round set out to find a bug in - real interrupt fires,
+IOP wakes, handler (or in this case the Round-935 spurious-ack fallback) runs, IOP goes back to
+idle - is not a Round-935 regression or a new scheduler gap. It is precisely the intended,
+already-implemented idle/wake contract from Round 425/426, now correctly exercised for the first
+time by a real hardware interrupt reaching this exact trampoline via the Round 935 fix (previously
+this path was masked entirely by the interrupt storm). Cross-checked the current IOP HLE thread
+table at this same checkpoint: thread 1 (the real synthetic root/bridge thread, prio 64) is
+THS_RUN/current; threads 4 and 5 are THS_READY but both correctly outranked by thread 1's better
+(numerically lower) priority, so `pick_next_ready()` legitimately keeps choosing thread 1 - not a
+starvation bug either.
+
+**What remains genuinely open (for a future round, not this one):** whether GT3's SIF-RPC
+send/receive protocol needs the IOP module loader to be handed NEW work (a fresh RPC dispatch,
+not just an interrupt ack) once it reaches this idle trampoline, and if so, what real event should
+enqueue that work. That is a question about the SIF-RPC/module-dispatch layer (task #919's
+original scope), not about interrupt handling or the scheduler - both of which are now confirmed
+correct at this exact point.
+
+**Mandatory workflow status this round:** compile-checked both touched files clean (`-Wall
+-Wextra`, no new warnings) - full regression suite skipped per explicit user instruction this
+round (change is diagnostic-only, `#ifdef`-gated, zero behavioral impact when undefined). devkitPPC
+Wii cross-build: clean. No functional/behavioral source change shipped this round (the two
+`R936_*` blocks are pure diagnostics, matching this project's established precedent for this class
+of instrumentation) - docs, commit, leak-check only.

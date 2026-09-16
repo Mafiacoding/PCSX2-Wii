@@ -2,6 +2,9 @@
  * iop_hle_thread.c - see include/core/hw/iop_hle_thread.h for the
  * full design rationale, citations, and sentinel-address map.
  */
+#ifdef R936_STEP_TRACE
+#include <stdio.h>
+#endif
 #include <string.h>
 #include "core/hw/iop_hle_thread.h"
 
@@ -254,6 +257,9 @@ static int pick_next_ready(void)
 static void reschedule(iop_state_t *st)
 {
     int next = pick_next_ready();
+#ifdef R936_STEP_TRACE
+    fprintf(stderr, "[R936STEP] reschedule() called, cur=%d next=%d\n", g.current_thread_id, next);
+#endif
     if (next == 0) {
         /* Nothing at all is ready (everything WAIT/DORMANT/SUSPEND) -
          * fall back to this project's existing, already-established

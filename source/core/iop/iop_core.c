@@ -948,10 +948,18 @@ static int iop_step(void)
      * natively and control is redirected straight to the return
      * address, so this step is complete without any real MIPS
      * instruction being fetched/decoded. */
+#ifdef R936_STEP_TRACE
+    if (iop_hle_bios_try_handle(st, pc)) {
+        fprintf(stderr, "[R936STEP] pc=0x%08x handled by iop_hle_bios_try_handle\n", pc);
+        st->instructions_executed++;
+        return 0;
+    }
+#else
     if (iop_hle_bios_try_handle(st, pc)) {
         st->instructions_executed++;
         return 0;
     }
+#endif
 
     /* Round 109 (task #172/#247/#249 continuation): the clean-room
      * RegisterIntrHandler/RegisterExceptionHandler handler-
@@ -959,10 +967,18 @@ static int iop_step(void)
      * finished" return trampoline - see core/hw/iop_hle_intr.h for
      * the full design. Checked in the same "intercept before fetch"
      * spot as the A0/B0/C0 table just above. */
+#ifdef R936_STEP_TRACE
+    if (iop_hle_intr_try_handle(st, pc)) {
+        fprintf(stderr, "[R936STEP] pc=0x%08x handled by iop_hle_intr_try_handle\n", pc);
+        st->instructions_executed++;
+        return 0;
+    }
+#else
     if (iop_hle_intr_try_handle(st, pc)) {
         st->instructions_executed++;
         return 0;
     }
+#endif
 
     /* Round 389: real THREADMAN thread scheduler/semaphore HLE - see
      * core/hw/iop_hle_thread.h. Same "intercept before fetch" spot as
@@ -971,10 +987,18 @@ static int iop_step(void)
      * file's own header comment) before returning, so st->pc may end
      * up pointing at a completely different thread's own resumed
      * code, not just the syscall's own $ra. */
+#ifdef R936_STEP_TRACE
+    if (iop_hle_thread_try_handle(st, pc)) {
+        fprintf(stderr, "[R936STEP] pc=0x%08x handled by iop_hle_thread_try_handle\n", pc);
+        st->instructions_executed++;
+        return 0;
+    }
+#else
     if (iop_hle_thread_try_handle(st, pc)) {
         st->instructions_executed++;
         return 0;
     }
+#endif
 
     /* Round 421 (task #160, docs/STATUS.md Round 420 root cause):
      * real SYSMEM heap-management export gates (AllocSysMemory/
@@ -986,27 +1010,51 @@ static int iop_step(void)
      * real, un-coordinated SYSMEM ROM code whose heap arena collides
      * with this project's own separate module-loading bump_alloc()
      * arena. */
+#ifdef R936_STEP_TRACE
+    if (iop_hle_heap_try_handle(st, pc)) {
+        fprintf(stderr, "[R936STEP] pc=0x%08x handled by iop_hle_heap_try_handle\n", pc);
+        st->instructions_executed++;
+        return 0;
+    }
+#else
     if (iop_hle_heap_try_handle(st, pc)) {
         st->instructions_executed++;
         return 0;
     }
+#endif
 
     /* Round 168: real ExCB-chain dispatch return trampoline - see
      * core/hw/iop_excb.h's "ROUND 168 UPDATE" comment. Same
      * "intercept before fetch" spot as the RegisterIntrHandler
      * trampoline just above. */
+#ifdef R936_STEP_TRACE
+    if (iop_excb_try_handle(st, pc)) {
+        fprintf(stderr, "[R936STEP] pc=0x%08x handled by iop_excb_try_handle\n", pc);
+        st->instructions_executed++;
+        return 0;
+    }
+#else
     if (iop_excb_try_handle(st, pc)) {
         st->instructions_executed++;
         return 0;
     }
+#endif
 
     /* Real IOP module/IRX boot sequencer trampoline (task #92) -
      * see core/hw/iop_module_loader.h. Checked right after the A0/
      * B0/C0 BIOS trap, same "intercept before fetch" convention. */
+#ifdef R936_STEP_TRACE
+    if (iop_module_loader_try_handle(st, pc)) {
+        fprintf(stderr, "[R936STEP] pc=0x%08x handled by iop_module_loader_try_handle\n", pc);
+        st->instructions_executed++;
+        return st->halted ? 1 : 0;
+    }
+#else
     if (iop_module_loader_try_handle(st, pc)) {
         st->instructions_executed++;
         return st->halted ? 1 : 0;
     }
+#endif
 
     /* Round 129 (task #172/#196, 169th finding, real fix): synthetic
      * default/spurious-interrupt-return stub. Real MIPS/R3000A

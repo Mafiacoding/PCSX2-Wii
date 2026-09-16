@@ -5,6 +5,9 @@
  */
 #include "core/hw/iop_intc.h"
 #include <string.h>
+#ifdef R936_IOP_WAKE_TRACE
+#include <stdio.h>
+#endif
 
 #define IOP_INTC_ISTAT 0x1F801070u
 #define IOP_INTC_IMASK 0x1F801074u
@@ -23,6 +26,10 @@ void iop_intc_raise(int irq)
 {
     if (irq < 0 || irq > 31)
         return;
+#ifdef R936_IOP_WAKE_TRACE
+    extern unsigned long long g_r936_instr_counter;
+    fprintf(stderr, "[R936WAKE] iop_intc_raise irq=%d instr=%llu\n", irq, g_r936_instr_counter);
+#endif
     g_intc.istat |= (1u << irq);
 }
 
@@ -39,6 +46,10 @@ void iop_intc_raise_soft(int irq)
 {
     if (irq < 32 || irq > 63)
         return;
+#ifdef R936_IOP_WAKE_TRACE
+    extern unsigned long long g_r936_instr_counter;
+    fprintf(stderr, "[R936WAKE] iop_intc_raise_soft irq=%d instr=%llu\n", irq, g_r936_instr_counter);
+#endif
     g_intc.istat_hi |= (1u << (irq - 32));
 }
 

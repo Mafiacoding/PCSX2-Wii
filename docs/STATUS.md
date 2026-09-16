@@ -43105,3 +43105,71 @@ build).
 module handling) as the concrete path to eventually populate `RAM[0x80020CF0]`/`RAM[0x80020CFC]` for
 real; (2) tasks #938/#939 (push both surveys further, check Tekken/KOF/MS3) remain open and unaffected
 by this round's finding.
+
+## Round 948 (task #221/#447/#536/#940, diagnosis-only, no fix shipped): answers to the user's two Round 948 questions - IOP module loading is real ROMDIR-parsed content, not HLE-faked; the one known on-demand-module gap (CLEARSPU) already fired-and-passed early in boot and is not what's currently gating the resting loop
+
+**User's Round 948 work order** (German, verbatim intent): investigate the IOP-side module-escalation
+mechanism directly - is `rom0:`/IRX handling full HLE filesystem interception or real IOP-kernel ROM
+parsing, and is there log evidence of a failed named-module lookup (e.g. "sifcmd"/"iopboot") right
+before the IOP reaches idle; check `LoadStartModule`'s HLE hooks and the CDVD filesystem dispatch on the
+IOP side for why no SIF transfer to the EE is triggered.
+
+**Answering the user's two direct questions:**
+
+1. **Full HLE filesystem interception, or real ROM parsing?** **Real parsing**, not HLE-faked stub
+   responses. `source/hw/iop_module_loader.c`'s `locate_and_parse_romdir()` finds the real `ROMDIR`
+   signature inside the actual loaded BIOS image bytes and walks its real 16-byte-entry table
+   (`romdir_find()` looks modules up by their real Sony names) - this is the same real on-disk BIOS
+   ROMDIR format Round 374/375's own ps2sdk/psdevwiki citations already established. Each module's real
+   embedded ELF/COFF bytes are then loaded and relocated via this project's own `iop_elf.c` (the same
+   loader whose relocation correctness Round 403/758 already verified in depth), and every module's real
+   entry point is genuinely executed to completion by the IOP interpreter - not stubbed. The fixed set
+   includes the real, actual Sony `MODLOAD` module itself (`iop_core.c` line 1502's own module-name list:
+   "SSBUSC, DMACMAN, THREADMAN, VBLANK, IOMAN, MODLOAD, ROMDRV, IGREETING") - i.e. the genuine IOP module
+   loader/dispatcher code is present and has already run in IOP RAM by the time the IOP reaches
+   `pc=0x00155910`, matching real hardware's own ~30-module BIOS-only boot list (already cross-checked
+   against real hardware in Round 336).
+
+2. **Log evidence of a failed named-module lookup right before idle?** **No - and there wouldn't be,
+   because that's not the actual mechanism.** The IOP doesn't get stuck mid-search for "one more module"
+   and fail; it genuinely, correctly finishes loading and running every module in the real, fixed
+   BIOS-embedded set (confirmed via `iop_module_loader.c`'s own completion-path logging, e.g. line 1366's
+   `"%u/%u real modules loaded, %u run to completion"` message) and then legitimately, correctly goes
+   idle - this is by-design real behavior, not a failure.
+
+**The one genuine, already self-documented gap found this round** (not previously connected to this
+specific investigation): `ee_core.c` (~line 5592-5640) already implements the EE-side handler for
+OSDSYS's real `SIF_SID_LOADFILE`/`LF_F_MOD_LOAD` RPC call - live-captured via PCSX2 debugging (task
+#198-201) requesting the real, genuine on-demand BIOS module `"rom0:CLEARSPU"` (a real Sony module that
+clears SPU2 sound RAM early in boot, confirmed via its real documented purpose). The existing code's own
+comment is explicit and honest: *"This project does NOT yet actually load/execute CLEARSPU's real IOP
+code... an honest, explicitly-labeled gap."* This is the genuine on-demand (not front-loaded/ROMDIR-set)
+IOP module-execution path the user's Round 948 hypothesis was reaching for - and it is real, not
+imagined. Confirmed `CLEARSPU` is NOT among `iop_module_loader.c`'s fixed `modlist[]` set, i.e. it truly
+is a separate, later, on-demand-only load path distinct from the ROMDIR-driven boot-time set covered by
+point 1 above.
+
+**Why this is not what's currently gating the shared `0x8000CCxx` resting loop, honestly scoped.** The
+CLEARSPU `LF_F_MOD_LOAD` call fires once, early in boot (per its own citation, "early in boot, before the
+logo/menu is shown") - well before the diskless/GT3 surveys' resting point. Round 946's own direct
+measurement this session already established that `SIF_MSCOM` (the EE's outbound SIF command register)
+records **zero changes** across the entire 150,000,000+/200,000,000+-instruction post-boot survey window,
+and RPC-bind traffic (`sif_cmd_iop_get_rpc_bind_count()`) is flat after the same early handshake burst.
+Put together: the CLEARSPU request already fired-and-received-its-(stubbed)-reply before this window
+began, and **no further `LF_F_MOD_LOAD`/`LOADFILE` request of any kind has been issued since** - not
+because the IOP-side dispatch for it is broken (it isn't reached at all currently), but because nothing
+in the EE's currently-reached OSDSYS code path has decided to ask for another module yet. This is the
+same, already-extensively-investigated task #447 question (what real OSDSYS code path/condition would
+trigger the *next* SIF request at all), not a new IOP-loader defect - the IOP module-loading
+infrastructure itself (both the real ROMDIR-driven boot set and, partially, the on-demand `LF_F_MOD_LOAD`
+path) is confirmed working as designed for everything it has actually been asked to do so far.
+
+**Verification**: no `source/`/`include/` file was modified this round (diagnosis-only). Regression suite
+and Wii cross-build correctly skipped, no tracked-source change to regress-test.
+
+**Open items for a future round**: (1) the CLEARSPU `LF_F_MOD_LOAD` gap remains real and worth closing
+eventually (implementing genuine on-demand IOP module execution) but is confirmed off the critical path
+for the current resting loop; (2) the actual open question is unchanged from Round 313/314/947: what real
+OSDSYS code path would trigger the *next* SIF request (of any kind) after the current housekeeping
+steady state - still task #447's core open question; (3) tasks #938/#939 (push surveys further, check
+Tekken/KOF/MS3) remain open.

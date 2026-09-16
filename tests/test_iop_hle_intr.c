@@ -175,7 +175,7 @@ int main(void)
         st->pc = 0x00160000u;
         st->next_pc = 0x00160004u;
 
-        iop_check_hw_interrupt(st, 0x00160004u);
+        iop_check_hw_interrupt(st, 0x00160004u, 0u);
 
         CHECK(st->pc == 0x00140000u, "interrupt redirected straight into registered handler, not fixed vector");
         CHECK(st->gpr[4] == 0xCAFEBABEu, "handler called with real RegisterIntrHandler arg in $a0");
@@ -201,7 +201,7 @@ int main(void)
         st->pc = 0x00160000u;
         st->next_pc = 0x00160004u;
 
-        iop_check_hw_interrupt(st, 0x00160004u);
+        iop_check_hw_interrupt(st, 0x00160004u, 0u);
 
         CHECK(st->pc == 0x80000080u, "no handler registered -> unchanged fixed-vector default behavior");
         CHECK(st->cop0[14] == 0x00160004u, "EPC still set exactly as before this round");
@@ -233,7 +233,7 @@ int main(void)
         st->pc = 0x00190000u;
         st->next_pc = 0x00190004u;
 
-        iop_check_hw_interrupt(st, 0x00190004u);
+        iop_check_hw_interrupt(st, 0x00190004u, 0u);
 
         CHECK(st->pc == 0x00180000u, "soft-range irq redirected straight into registered handler, not fixed vector");
         CHECK(st->gpr[4] == 0xD00DFEEDu, "soft-range handler called with real RegisterIntrHandler arg in $a0");
@@ -275,7 +275,7 @@ int main(void)
         st->cop0[12] = 0x1u | IOP_STATUS_IM2;
         st->pc = 0x001C0000u;
         st->next_pc = 0x001C0004u;
-        iop_check_hw_interrupt(st, 0x001C0004u);
+        iop_check_hw_interrupt(st, 0x001C0004u, 0u);
 
         CHECK(st->pc == 0x001A0000u, "hw range (irq 0) takes priority over pending soft range (irq 0x2A)");
         CHECK((iop_intc_get_state()->istat_hi & (1u << (0x2A - 32))) != 0, "soft-range irq 0x2A left pending, untouched, since hw range was serviced first");

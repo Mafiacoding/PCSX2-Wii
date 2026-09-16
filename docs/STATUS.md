@@ -42792,3 +42792,135 @@ at the start of the straight-line walk into the SIFMAN descriptor region - the a
 unidentified root cause; (2) the `0x4B8`-class open recommendation (accept vs. fabricate) now
 applies equally to this new occurrence; (3) all of Round 943's still-open items (timer 5 overflow
 semantics, full-boot-progress re-verification) remain open and unaffected by this round.
+
+## Round 945 (task #447/#536/#933, IOP delay-slot-interrupt EPC fix - resolves Round 944's `pc=0x178A8` halt): real root cause found via back-trace, fix implemented and verified end-to-end
+
+**User's Round 945 work order** (German, verbatim intent in chat): back-trace the real caller into the
+SIFMAN descriptor walk starting around `pc~0x17780+` to find what upstream `jr`/`j`/fall-through
+actually put PC at the start of the straight-line walk Round 944 diagnosed; separately, the user
+proposed a candidate fix, `iop_patch_sifman_descriptor()`, which would patch the SIFMAN module
+descriptor's `+0x14` field directly once a `get_iop_ram_ptr()` helper located a hardcoded "magic"
+trigger value.
+
+**Why the user's proposed fix was not implemented as-is.** Three concrete problems, found before any
+code was written: (1) `get_iop_ram_ptr()` does not exist anywhere in this tree - there is no direct
+raw-pointer accessor into IOP RAM, only `iop_mem_read*`/`iop_mem_write*`; inventing one just for this
+patch would be exactly the kind of untested, unverified scaffolding this project's anti-fabrication
+rule forbids. (2) The `+0x14` offset into the descriptor was never independently verified against the
+real, disassembled descriptor layout Round 944 already extracted (`0x177D0`="IOP_SIFmanager" string,
+`0x17870`=back-pointer, `0x17874`/`0x17878`=version/flag fields, `0x17888`=entry/next-descriptor
+field) - patching an unverified offset risks corrupting a real, correctly-loaded Sony data structure.
+(3) A hardcoded "magic value" trigger is a guess, not a measurement - exactly the class of fix this
+project's standing discipline (Rounds 753-763's `0x4B8` investigation, most recently) explicitly
+rejects in favor of finding the actual upstream instruction that misbehaves. Rather than patch data
+never verified to be wrong, this round did the back-trace the user also asked for, and it led to a
+completely different, better-evidenced root cause upstream of the descriptor entirely - the descriptor
+itself was never the problem.
+
+**The back-trace.** Extended `tools/round944-iop-halt-178a8/analyze.c` to walk backward from the three
+real `jal 0x000177A8`/`jal 0x000177B0`/`jal 0x000177B8` call sites Round 944 already found at
+`0x16ADC-0x16B00`, and to instrument every hardware-interrupt check (`iop_check_hw_interrupt()`) with
+the exact `pc`/`next_pc` pair active at the moment of the check. Re-ran the Round 943-fixed tree from a
+fresh `system_init()` cold boot with this instrumentation. Result: a real hardware interrupt (irq=0,
+VBLANK_START - the same source Round 943's fix made correctly periodic again) was recognized by
+`iop_check_hw_interrupt()` at the **exact instant** the IOP had just executed `j 0x001078E4` at
+`pc=0x000177B8` (the third of the three real stub-table jumps Round 944 identified) but had **not yet
+executed its delay-slot instruction** at `0x000177BC`. `st->next_pc` at that moment held `0x001078E4`
+(the correctly-computed jump target) - but the pre-Round-945 `iop_check_hw_interrupt(st, next_pc)`
+call always captured `st->next_pc` as EPC, i.e. it captured the delay slot's address
+(`0x000177BC`), not the branch instruction's own address, and never set `Cause.BD`. The exception
+handler's restore path then resumed execution at `pc=0x000177BC` - **silently discarding the pending
+jump to `0x001078E4`** - which is exactly the delay-slot address the user's own `saved_epc=0x000177bc`
+observation (cited in their Round 945 message) already pointed at, and the `saved_ra=0x00016b08` value
+they separately reported matches this trace's own `$ra` at the call site exactly. The user's instinct
+that this exact call sequence was where things went wrong was correct; the specific mechanism (delay-
+slot-interrupt EPC loss, not a `+0x14` descriptor value) is what the back-trace actually found.
+
+**Root cause, precisely stated.** This project's IOP core never modeled the standard MIPS-I/R3000A
+branch-delay-slot exception rule: when a hardware interrupt is recognized after a branch/jump has
+computed its target but before the delay-slot instruction executes, real hardware sets `EPC` to the
+branch instruction's own address (not the delay slot) and sets `Cause.BD=1`, so the exception handler's
+return re-fetches and re-executes the whole branch+delay-slot pair atomically. This project's EE core
+(`source/core/ee/ee_core.c`'s `ee_raise_exception()`) already implements this correctly, using bit
+`0x80000000u` for `Cause.BD` - the IOP side had never received the equivalent fix. Falling through into
+`0x000177BC` instead of re-taking the jump to `0x001078E4` walks PC directly into the SIFMAN module-
+descriptor/string/jump-stub-table region Round 944 fully decoded, eventually reaching genuinely-empty
+trailing RAM and firing the Round-173 tripwire at `0x178A8` - i.e. this delay-slot bug is the actual
+upstream cause of Round 944's halt, not a defect in the SIFMAN descriptor data itself (which Round 944
+already confirmed is real, correctly-loaded, non-garbage Sony content).
+
+**Fix implemented** (`source/core/iop/iop_core.c`):
+- New constant, same bit position as the EE core's already-shipped, already-correct precedent:
+  ```c
+  #define IOP_CAUSE_BD   0x80000000u  /* MIPS-I Cause.BD, same convention as ee_core.c */
+  ```
+- `iop_check_hw_interrupt()` signature changed from `(iop_state_t *st, uint32_t next_pc)` to
+  `(iop_state_t *st, uint32_t epc, uint32_t cause_bd)` - EPC and Cause.BD are now caller-supplied
+  instead of the function always assuming "the next not-yet-executed instruction":
+  ```c
+  st->cop0[13] = (st->cop0[13] & ~(0x7Fu | IOP_CAUSE_BD)) | cause_bd;
+  st->cop0[14] = epc; /* EPC */
+  ```
+- `iop_step()`'s call site now detects whether the just-executed instruction was itself a taken
+  branch/jump (`st->next_pc != fallthrough_pc + 4u`, where `fallthrough_pc` is captured at function
+  entry before the opcode switch runs - true exactly when `BRANCH_TO()` fired this step, since that
+  macro is the only thing that moves `next_pc` off its default value) and supplies the branch
+  instruction's own address plus `Cause.BD=1` when so; otherwise behavior is unchanged
+  (`epc=st->pc`, `Cause.BD=0`):
+  ```c
+  int delay_slot_pending = (st->next_pc != fallthrough_pc + 4u);
+  if (delay_slot_pending)
+      iop_check_hw_interrupt(st, this_pc, IOP_CAUSE_BD);
+  else
+      iop_check_hw_interrupt(st, st->pc, 0u);
+  ```
+- The idle-check call site in `iop_core_step()` is unaffected in behavior (`Cause.BD` always 0 there,
+  since the IOP isn't mid-fetch/decode while idle) - only updated for the new signature.
+- No changes were needed to either exception-return path (the Round 131/175 default-vector fallback or
+  the Round 423 `iop_hle_intr.c` trampoline restore) - both already do `pc=EPC; next_pc=EPC+4`, which
+  correctly re-fetches and re-executes the branch+delay-slot pair from scratch once EPC correctly
+  points at the branch itself.
+
+**Verification:**
+- Compiles clean (`gcc -O2 -Wall -Wextra -c`), no new warnings.
+- `tests/test_iop_hle_intr.c`: 4 direct call sites to the now-3-argument function needed a `, 0u` third
+  argument (all four are ordinary non-delay-slot dispatch/priority/fallback tests, so `cause_bd=0u` is
+  the architecturally correct, intent-preserving value for each) - mechanical consequence of the
+  signature change, not a logic bug. Fixed; test passes (0 failures).
+- Full host-native regression suite: **136/136 tests pass**, no other regressions.
+- devkitPPC Wii cross-build: clean, 0 warnings, 0 errors, `pcsx2-wii.elf`/`pcsx2-wii.dol` produced.
+- **Fresh diskless cold-boot re-run** (`system_init()` from instruction 0 against the fixed tree, real
+  `scph10000.bin` JP BIOS, no checkpoint reuse): ran **60,000,000 instructions in six 10M-instruction
+  chunks with zero halts of any kind.** The `pc=0x178A8` halt that fired reliably on every prior fresh
+  boot since Round 944 (well before the ~2.46M-IOP-instruction mark it used to occur at) **did not
+  recur at all** across this entire run. The IOP reached and held `pc=0x00155910` - the exact address
+  Round 943 already identified as the correct, deliberate "all real modules exhausted, now idle,
+  waiting for VBLANK to wake" resting point - while the EE side kept making continuous real forward
+  progress each chunk (`ee_pc` advanced from `0x8000CDF8` to `0x8000CE04` to `0x8000CE10` to
+  `0x8000CE1C` to `0x8000CE48` to `0x8000CEA0`, `ee_instr` growing from 79,999,045 to 479,999,045,
+  `idle=0` throughout - not frozen). This is the intended combined effect of Round 943's VBLANK-wake
+  fix and this round's delay-slot fix working together: the IOP now correctly finishes its real module
+  work and parks cleanly, instead of derailing into SIFMAN descriptor data and hitting the Round-173
+  tripwire partway through.
+
+**Scratch driver used:** `/tmp/r945_diskless_fixed` (compiled from the existing Round 942
+`r942_diskless_plain.c` chain driver, unmodified, against the newly-fixed tracked tree) - not promoted
+to `tools/`, since it is identical in content to the already-promoted Round 942 driver and only the
+underlying `iop_core.c` differs.
+
+**Answering the user's two closing questions with real post-fix evidence:**
+- Whether the fix eliminates the `pc=0x178A8` halt: **yes, confirmed empirically** - 60M instructions,
+  zero recurrence, versus reliable recurrence well under 3M IOP-instructions on every prior run.
+- Whether IOP module loading now completes and the IOP reaches its correct idle/VBLANK-wait state:
+  **yes** - `iop_pc=0x00155910` (Round 943's documented idle trampoline address) is reached and held
+  cleanly, with the EE continuing to run in parallel, matching the intended steady state Round 943's
+  fix targeted but could not fully verify on its own (Round 943's own fresh-boot re-run hit the
+  still-unfixed `0x178A8` wall first, before this round's fix existed).
+
+**Open items for a future round:** (1) characterize what the EE side is actually doing during its slow
+`0x8000CDF8`-`0x8000CEA0` creep over the 50M-instruction window - is it a real polling/wait loop, or
+substantive kernel work; (2) push the diskless boot well past 60M instructions to see whether a further
+wall exists once the IOP is stably idle; (3) Round 944's own open item, the SYSCALL-sibling delay-slot
+gap noted in this round's `iop_check_hw_interrupt()` doc comment, remains out of scope and unaddressed;
+(4) apply the same fresh-boot methodology to the GT3/Tekken/KOF/MS3 disc-boot paths to see whether they
+independently benefit from this fix.

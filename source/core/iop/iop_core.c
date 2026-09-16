@@ -605,6 +605,20 @@ static void halt(const char *reason)
  * clear it. */
 #define IOP_CAUSE_IP2  0x400u
 #define IOP_STATUS_IM2 0x400u
+/* Round 945 (task #447/#536/#933, pc=0x178A8 IOP-halt root-cause fix):
+ * standard MIPS-I Cause register bit 31, "Branch Delay" - set by real
+ * hardware whenever an exception's EPC points at a branch/jump
+ * instruction rather than the instruction that would have executed
+ * next, so the exception handler's ERET/RFE re-fetches and
+ * re-executes the whole branch+delay-slot pair atomically instead of
+ * silently discarding the pending branch. Same bit position this
+ * project's own EE core (source/core/ee/ee_core.c, ee_raise_exception())
+ * already uses and has shipped correctly for the R5900 side - this is
+ * the IOP/R3000A-side application of the identical, already-proven
+ * convention, not a new invention. See iop_check_hw_interrupt()'s own
+ * updated comment below for the full citation trail and the concrete
+ * empirical trace that proved this gap was live (not just theoretical). */
+#define IOP_CAUSE_BD   0x80000000u
 
 /* Round 22 (see docs/STATUS.md): confirmed, while investigating why
  * Status.IEc never has any observable effect, that this check simply
@@ -616,13 +630,58 @@ static void halt(const char *reason)
  * non-latching; second, if Cause.IP2 AND Status.IM2 AND Status.IEc
  * (bit 0) are all set, a real Interrupt exception (Cause.ExcCode=0)
  * is raised, vectored exactly like the existing SYSCALL case (Status.
- * BEV-dependent vector, same KU/IE mode-stack push formula). Same
- * documented simplification as SYSCALL: this project's IOP
- * interpreter doesn't track branch-delay-slot state at all, so EPC is
- * always set to the next not-yet-executed instruction's own address,
- * never this_pc-4/Cause.BD - a real interrupt landing exactly on a
- * branch's delay slot is not modeled, same honest gap already
- * documented for SYSCALL. */
+ * BEV-dependent vector, same KU/IE mode-stack push formula).
+ *
+ * Round 945 (task #447/#536/#933, pc=0x178A8 IOP-halt root-cause fix):
+ * this function used to always be handed `next_pc` = "the next
+ * not-yet-executed instruction's own address" with no delay-slot
+ * tracking at all - the exact gap this comment used to flag as an
+ * honest, documented simplification, mirroring SYSCALL's own
+ * still-unaddressed instance of the same gap. That simplification
+ * stopped being harmless the moment a concrete, reproducible failure
+ * was traced to it: a real GT3 diskless-boot checkpoint-chain halt at
+ * pc=0x000178A8 (Round 944's own disassembly of the SIFMAN module
+ * descriptor/string data at that address) was root-caused, via a
+ * two-stage branch-history + interrupt-restore instrumentation pass
+ * (not present anywhere in the tracked tree before this round), to
+ * exactly this gap: a real hardware interrupt (irq=0, VBLANK_START)
+ * was recognized and dispatched at the EXACT instant the IOP had just
+ * executed `j 0x001078E4` at pc=0x000177B8 (one of the three
+ * legitimate jump-stub table entries Round 944 already decoded there)
+ * but had NOT yet executed that jump's own delay-slot instruction at
+ * 0x000177BC. The old code captured EPC=0x177BC (the delay slot)
+ * instead of the architecturally-correct EPC=0x177B8 (the branch
+ * itself, with Cause.BD=1) - so when the interrupt handler returned
+ * (via the already-correct Round 423 IOP_HLE_INTR_HANDLER_RETURN_
+ * TRAMPOLINE restore path in source/hw/iop_hle_intr.c, which does
+ * `pc=saved_epc; next_pc=saved_epc+4`), execution silently resumed at
+ * raw 0x177BC instead of re-fetching the branch+delay-slot pair, the
+ * pending jump to 0x1078E4 was discarded, and PC fell through
+ * sequentially into the SIFMAN descriptor/string data and then
+ * genuinely-empty RAM, triggering the Round-173 tripwire halt.
+ *
+ * Fix: this function now takes the pre-computed EPC and Cause.BD bit
+ * directly from its caller (iop_step() detects whether `this_pc` was
+ * itself a taken branch/jump this exact step - see the call site's
+ * own comment below for the detection logic - and passes EPC=this_pc/
+ * BD=IOP_CAUSE_BD in that case instead of EPC=the delay-slot address/
+ * BD=0). No change is needed to either restore path (this project's
+ * own Round 131 default-vector fallback below, or iop_hle_intr.c's
+ * Round 423 trampoline restore) - both already do `pc=EPC;
+ * next_pc=EPC+4`, which correctly re-fetches and re-executes the
+ * whole branch+delay-slot pair from scratch when EPC points at the
+ * branch itself, naturally re-establishing the pending jump via a
+ * fresh BRANCH_TO() call during that re-execution. This mirrors the
+ * ALREADY-CORRECT, already-shipped Cause.BD handling this project's
+ * own EE/R5900 core (source/core/ee/ee_core.c's ee_raise_exception(),
+ * `st->cop0[14] = this_pc - 4u;` / `st->cop0[13] |= 0x80000000u;`)
+ * has used all along - the identical bit position (0x80000000u,
+ * IOP_CAUSE_BD above) and the identical "EPC=branch instruction, not
+ * delay slot" convention, just applied to the sibling R3000A core for
+ * the first time. The SYSCALL case (line ~1422 below) has the exact
+ * same theoretical gap but no concrete failure has been traced to it
+ * yet - left unchanged and still honestly flagged there, out of scope
+ * for this fix. */
 /* Task #216 (splash-screen blocker investigation, continued from
  * #214/#215): real IOP hardware exposes its own VBLANK interrupt,
  * distinct from the EE's already-modeled VBLANK (see ee_core.c's
@@ -738,7 +797,7 @@ static void iop_check_vblank(iop_state_t *st)
 static uint32_t g_iop_spurious_istat_mask = 0;
 static uint32_t g_iop_spurious_istat_hi_mask = 0;
 
-static void iop_check_hw_interrupt(iop_state_t *st, uint32_t next_pc)
+static void iop_check_hw_interrupt(iop_state_t *st, uint32_t epc, uint32_t cause_bd)
 {
     iop_intc_state_t *intc = iop_intc_get_state();
 
@@ -763,8 +822,12 @@ static void iop_check_hw_interrupt(iop_state_t *st, uint32_t next_pc)
     if (!(st->cop0[12] & 0x1u)) /* Status.IEc */
         return;
 
-    st->cop0[13] = (st->cop0[13] & ~0x7Fu); /* Cause.ExcCode = 0 (Interrupt) */
-    st->cop0[14] = next_pc; /* EPC */
+    /* Round 945: Cause.ExcCode=0 (Interrupt) and Cause.BD together -
+     * see this function's own doc comment above for the full citation
+     * trail on why BD/epc are now caller-supplied instead of always
+     * being the plain "next not-yet-executed instruction" address. */
+    st->cop0[13] = (st->cop0[13] & ~(0x7Fu | IOP_CAUSE_BD)) | cause_bd;
+    st->cop0[14] = epc; /* EPC */
     st->cop0[12] = (st->cop0[12] & ~0x3Fu) | ((st->cop0[12] & 0x0Fu) << 2); /* Status stack push */
     st->exception_pending = 1; /* task #156 - see iop_core.h's field comment */
 
@@ -1983,12 +2046,30 @@ static int iop_step(void)
     /* Round 22: real hardware-interrupt delivery, checked at the end
      * of every real (non-HLE-trap) instruction step - see
      * iop_check_hw_interrupt()'s own comment above for the full
-     * citation trail. Uses st->pc (already advanced to the next
-     * not-yet-executed instruction by this function's own prologue,
-     * and possibly redirected by a branch/jump this same step) as
-     * EPC, matching this project's existing SYSCALL exception's
-     * "no delay-slot tracking" simplification. */
-    iop_check_hw_interrupt(st, st->pc);
+     * citation trail.
+     *
+     * Round 945: detect whether `this_pc` (the instruction just
+     * executed above) was itself a taken branch/jump this exact step.
+     * `fallthrough_pc` was captured at this function's own prologue as
+     * st->next_pc's value BEFORE the switch ran (this_pc+4, i.e. what
+     * st->next_pc would still be if nothing branched); every real
+     * taken branch/jump site goes through the BRANCH_TO() macro, which
+     * overwrites st->next_pc with the real target - so
+     * st->next_pc != fallthrough_pc + 4 (this_pc+8) exactly
+     * characterizes "this_pc was a taken branch/jump, and st->pc
+     * (still just this_pc+4, the not-yet-executed delay slot) is a
+     * pending delay slot with a real branch behind it". In that case,
+     * the correct real-hardware EPC is the branch instruction itself
+     * (this_pc) with Cause.BD set, not the delay-slot address -
+     * otherwise (the overwhelmingly common case), behavior is
+     * unchanged from before this round: EPC=st->pc, BD=0. */
+    {
+        int delay_slot_pending = (st->next_pc != fallthrough_pc + 4u);
+        if (delay_slot_pending)
+            iop_check_hw_interrupt(st, this_pc, IOP_CAUSE_BD);
+        else
+            iop_check_hw_interrupt(st, st->pc, 0u);
+    }
 
     st->instructions_executed++;
     return 0;
@@ -2078,7 +2159,12 @@ int iop_core_step(void)
      * installed before returning. */
     if (g_iop.idle) {
         uint8_t pending_before = g_iop.exception_pending;
-        iop_check_hw_interrupt(&g_iop, g_iop.pc);
+        /* Round 945: no delay-slot concept applies to the idle-check
+         * path (the IOP isn't mid-fetch/decode here at all), so
+         * Cause.BD is always 0 - unchanged behavior from before this
+         * round. See iop_check_hw_interrupt()'s own doc comment above
+         * for the full citation trail on why the signature changed. */
+        iop_check_hw_interrupt(&g_iop, g_iop.pc, 0u);
         if (!pending_before && g_iop.exception_pending)
             g_iop.idle = 0; /* a real interrupt just vectored us - resume real execution next call */
         return 0;

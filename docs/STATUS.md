@@ -41699,3 +41699,102 @@ correct MIPS-I-only opcode table) to determine whether the IOP is genuinely exec
 code there (in which case identify what it's doing and why it never proceeds to set SMFLAG
 bit 30) or whether this is a genuine wild-jump/corruption bug in this project's IOP
 core/module loader.
+
+## Round 935 (task #919+#920, per user's "start the fix even if it takes more rounds" instruction): REAL FIX SHIPPED - GT3's SIF-RPC disc-boot freeze root-caused and fixed at the IOP interrupt-return layer
+
+**Bottom line: the deterministic, self-sustaining IOP interrupt storm that permanently froze
+GT3's IOP at pc=0x00155B40 (diagnosed in Round 934/935's earlier work) is now fixed, verified
+against the real GT3 checkpoint, and covered by a new permanent regression test. Full
+mandatory workflow (136-test host-native regression suite, devkitPPC Wii cross-build, docs,
+commit) completed this round.**
+
+**Root cause (confirmed).** `iop_check_hw_interrupt()` in `source/core/iop/iop_core.c`
+raises a real MIPS interrupt exception whenever `istat & imask` (or `istat_hi & imask_hi`)
+is nonzero and IEc/IM2 are set, then tries the two real dispatch mechanisms
+(`iop_hle_intr_dispatch_interrupt()` for the RegisterIntrHandler table,
+`iop_excb_dispatch_interrupt()` for the older ExCB chain) for every pending+unmasked bit. If
+NEITHER mechanism can service the interrupt for ANY pending bit - i.e. a hardware source is
+asserting but nothing in this project's tree has registered a real handler for it - control
+falls through to the fixed default vector (0x80000080, since Status.BEV=0 in GT3's boot
+context). `iop_step()`'s "Round 129" default-vector stub (added long before this round to
+model the fact that this RAM-resident vector is genuinely all-zero in this clean-room
+implementation) resumes the interrupted instruction at EPC for any non-synchronous ExcCode -
+but **never cleared the real `intc->istat`/`istat_hi` hardware bits that caused the
+interrupt**. Since GT3's boot context has at least one hardware interrupt source (SIF0
+DMA-completion, both the raw line bit 3 and the soft line bit 42/IOP_IRQ_DMA_SIF0, plus
+VBLANK_START bit 0) asserting with no real handler installed, this produced an infinite,
+deterministic loop: interrupt fires -> no real handler -> fall through to vector -> resume at
+EPC without clearing istat -> interrupt fires again on the very next check, forever. Measured
+directly against the real GT3 checkpoint before the fix: 1,666,667 exceptions over 5,000,000
+IOP steps, with the IOP's EPC frozen at exactly 0x00155b40 for the entire run - a hard,
+reproducible signature of the storm.
+
+This is exactly the same pattern this project's OTHER interrupt-completion path already gets
+right: `IOP_HLE_INTR_HANDLER_RETURN_TRAMPOLINE` in `source/hw/iop_hle_intr.c` clears
+`intc->istat &= ~(1u << g.dispatched_irq)` (or the `istat_hi` equivalent) when a REAL
+registered handler finishes servicing an interrupt. The Round-129 default-vector stub was the
+one place that never got the equivalent ack, because at the time it was written there was no
+real hardware source hitting that path yet.
+
+**The fix.** Two new file-static globals in `iop_core.c`, `g_iop_spurious_istat_mask` (low
+range, bits 0-31) and `g_iop_spurious_istat_hi_mask` (soft range, bits 32-63), record the
+EXACT pending+unmasked bit(s) that failed BOTH real dispatch mechanisms, set inside
+`iop_check_hw_interrupt()` immediately before the final vector fallback (the low-range value
+is the full `istat & imask` snapshot at entry; the soft-range value is the single lowest
+soft bit that was tried and failed, matching the existing "try lowest bit only" soft-range
+dispatch policy). The default-vector stub in `iop_step()` then consumes and clears exactly
+these bits out of `intc->istat`/`intc->istat_hi` before resuming execution at EPC - mirroring
+the trampoline's already-correct pattern, but deliberately NOT a blind full-register clear:
+IRQs serviced by a real handler return early from `iop_check_hw_interrupt()` and never touch
+these globals, so the fix is completely inert for the (already-correct) real-handler-dispatch
+path. This was explicitly verified by a dedicated regression-test case (Case 3 below).
+
+**Verification, in order:**
+
+1. **Compile check.** `gcc -O2 -Wall -Wextra` on `iop_core.c` standalone: clean, no new
+   warnings introduced (only one pre-existing, unrelated `-Wmisleading-indentation` note at
+   an unrelated line, unchanged by this fix).
+2. **Direct checkpoint evidence.** Re-ran the exact exception-counting driver used to
+   originally diagnose the storm against the real GT3 checkpoint: exceptions per 5,000,000
+   IOP steps dropped from 1,666,667 (pre-fix) to exactly 1 (post-fix) - the storm is
+   eliminated.
+3. **Longer organic follow-up (honest negative result also recorded).** An 8,000,000-call
+   `system_run_interleaved(1)` survey (~64M EE instructions) confirmed the storm stays fixed
+   throughout - the IOP's pc never bounces back to 0x80000080 - but ALSO showed the IOP goes
+   fully idle after the single ack and does not receive any further wake-up event in that
+   particular window, so GT3's SIF-RPC send does not yet organically complete end-to-end even
+   with this fix in place. This is a separate, deeper gap not yet investigated, and is
+   explicitly flagged as open below rather than glossed over.
+4. **New permanent regression test: `tests/test_iop_spurious_interrupt_ack.c`** (22
+   `CHECK()` assertions, all passing). Three cases: (a) a single unhandled low-range IRQ is
+   acked and cleared on the very next `iop_core_step()`, with forward progress (pc advancing,
+   `exception_pending` staying 0) confirmed for several steps afterward; (b) a combined
+   low-range (bits 0+3) + soft-range (bit 42) unhandled-IRQ pattern - matching GT3's exact
+   real bit shape (VBLANK_START + SIF0-DMA raw line + IOP_IRQ_DMA_SIF0 soft line) - is acked
+   and cleared together in one shot; (c) a REAL registered handler (via
+   `iop_hle_intr_try_handle(..., IOP_HLE_INTR_REGISTER_INTR_HANDLER)`) for a different IRQ
+   dispatches straight to the handler address and never touches either spurious-ack global,
+   proving the fix doesn't disturb the already-correct real-handler path.
+   **Negative-control check**: `git stash push -- source/core/iop/iop_core.c` (keeping the
+   new test file, reverting only the fix) makes this test fail to even COMPILE
+   (`'g_iop_spurious_istat_mask' undeclared`), proving the test is genuinely fix-specific and
+   not vacuously true. `git stash pop` restored the fix and the test was re-confirmed passing.
+5. **Full host-native regression suite: 136/136 tests pass**, zero failures (verified via a
+   resumable batch-runner across the full suite; different test files report success via
+   varying literal strings - "0 check(s) failed", "0 failures", "ALL CHECKS PASSED
+   (0 failures)", "Total failures: 0" - all cross-checked, none showing an actual failure).
+6. **devkitPPC Wii cross-build: clean.** (One environment-only hiccup this round, unrelated
+   to source: the sandbox's devkitPPC `cc1` couldn't find `libmpfr.so.4` via its default
+   search path even though the file exists at `$DEVKITPPC/lib/libmpfr.so.4` - fixed by adding
+   that directory to `LD_LIBRARY_PATH` before invoking `make`. Purely a sandbox/environment
+   quirk, not a code issue; noted here in case a future round hits the same thing.)
+
+**Explicitly still open (not solved this round, correctly not claimed as fixed):**
+GT3's IOP goes idle after this single ack rather than storming, but no NEW wake-up event was
+observed to fire in the 64M-instruction follow-up window, so full SIF-RPC send completion is
+still unresolved. Next round's target: determine what real hardware event (a subsequent
+DMA-completion interrupt, a timer tick, a different IOP thread becoming ready, etc.) should
+wake the IOP a second time after this ack, and whether that event is currently modeled at all.
+
+**Files changed:** `source/core/iop/iop_core.c` (the fix, ~30 lines net), new
+`tests/test_iop_spurious_interrupt_ack.c` (193 lines, new permanent regression test).

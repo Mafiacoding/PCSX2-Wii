@@ -672,6 +672,57 @@ static void iop_check_vblank(iop_state_t *st)
         iop_intc_raise(IOP_INTC_IRQ_VBLANK_END);
 }
 
+/* Round 935 (task #919, GT3 disc-boot SIF-RPC freeze root-cause fix):
+ * when iop_check_hw_interrupt() falls all the way through to the fixed
+ * default vector (0x80000080/0xBFC00180) because NO real handler -
+ * neither the RegisterIntrHandler table nor the older ExCB mechanism -
+ * is registered for ANY currently pending+unmasked IRQ (low range or
+ * soft range), the interrupt source bit(s) that caused this exact
+ * fallback are recorded here. iop_step()'s "Round 129/131 default/
+ * spurious-interrupt-return stub" (the `pc == 0x80000080u &&
+ * st->exception_pending` block below) consumes and clears these
+ * recorded bits out of the real intc->istat/istat_hi hardware
+ * registers when it resumes the interrupted instruction for the
+ * Interrupt-exception-class case.
+ *
+ * This mirrors the ALREADY-CORRECT, already-shipped precedent in
+ * source/hw/iop_hle_intr.c's IOP_HLE_INTR_HANDLER_RETURN_TRAMPOLINE
+ * completion path, which does `intc->istat &= ~(1u <<
+ * g.dispatched_irq)` (or the istat_hi equivalent) before resuming -
+ * that path acknowledges the source bit whenever a REAL handler
+ * finishes servicing it. The spurious-fallback stub was the one
+ * sibling code path that modeled "no real handler exists for this
+ * IRQ" without ever performing the equivalent acknowledgment,
+ * because - unlike the trampoline case - it never had a specific
+ * `dispatched_irq` value recorded to acknowledge.
+ *
+ * Root-caused via direct instrumentation against a real GT3 disc-boot
+ * checkpoint (r931_gt3_progress.ckpt): with nothing in that boot
+ * context ever registering a handler for the genuine SIF0 DMA-
+ * completion interrupt (both the raw master line, bit 3, and the
+ * correct per-channel soft line, bit 42 / IOP_IRQ_DMA_SIF0), the old
+ * code resumed the interrupted instruction at EPC without ever
+ * clearing intc->istat/istat_hi - so the identical interrupt refired
+ * the instant Status.IEc was restored, re-vectoring back to the same
+ * fixed default vector with the same EPC forever. A fine-grained
+ * per-step trace (/tmp/r935_fine.c) and a 5,000,000-step exception-
+ * counting trace (/tmp/r935_exc_trace.c) both confirmed a
+ * deterministic, self-sustaining 3-step storm (idle -> exception-fire
+ * -> resume-without-ack -> re-idle), with the IOP's pc permanently
+ * stuck at 0x00155b40 and ZERO forward progress of any kind - which is
+ * why no real IOP code ever ran far enough to set the EE-visible
+ * SIF_SMFLAG bit 30 that GT3's real BIOS SIF-cmd dispatcher
+ * (0x8000FBA0) waits on before performing the actual SIF-RPC DMA kick.
+ *
+ * Only the SPECIFIC bit(s) that were pending+unmasked AND failed both
+ * real dispatch mechanisms this exact tick are recorded/cleared - not
+ * a blind full-register clear - so IRQs that DO have a real handler
+ * registered are entirely unaffected (they already return early via
+ * iop_hle_intr_dispatch_interrupt()/iop_excb_dispatch_interrupt()
+ * above and never reach this fallback path at all). */
+static uint32_t g_iop_spurious_istat_mask = 0;
+static uint32_t g_iop_spurious_istat_hi_mask = 0;
+
 static void iop_check_hw_interrupt(iop_state_t *st, uint32_t next_pc)
 {
     iop_intc_state_t *intc = iop_intc_get_state();
@@ -809,7 +860,14 @@ static void iop_check_hw_interrupt(iop_state_t *st, uint32_t next_pc)
          * before) - it only stops a real, ready handler for a
          * higher-numbered bit from being starved forever by a lower-
          * numbered bit that has no real handler at all yet. */
-        uint32_t pending = intc->istat & intc->imask;
+        /* Round 935: snapshot the full low-range pending+unmasked
+         * mask BEFORE the loop below starts clearing bits out of
+         * the local `pending` copy, so that if the loop exhausts
+         * every bit without a single real dispatch succeeding, the
+         * exact set of bits responsible can be recorded for the
+         * iop_step() spurious-interrupt stub to acknowledge. */
+        uint32_t low_pending_snapshot = intc->istat & intc->imask;
+        uint32_t pending = low_pending_snapshot;
         while (pending) {
             uint32_t lowest_bit = pending & (~pending + 1u); /* isolate lowest set bit */
             uint32_t irq = 0;
@@ -840,6 +898,7 @@ static void iop_check_hw_interrupt(iop_state_t *st, uint32_t next_pc)
          * successfully), but a low-range irq that fails BOTH
          * dispatch mechanisms no longer blocks the soft range from
          * getting its own, independent chance at the same tick. */
+        uint32_t failed_soft_bit_mask = 0;
         {
             uint32_t soft_pending = intc->istat_hi & intc->imask_hi;
             if (soft_pending) {
@@ -849,8 +908,28 @@ static void iop_check_hw_interrupt(iop_state_t *st, uint32_t next_pc)
                     return;
                 if (iop_excb_dispatch_interrupt(st, 32u + bit)) /* Round 168 - see above */
                     return;
+                /* Round 935: reaching here means the single soft-range
+                 * bit consulted above (the real-hardware-priority lowest
+                 * pending+unmasked one) failed BOTH dispatch mechanisms
+                 * too - record it so it doesn't storm the same way the
+                 * low range's exhausted bits would. */
+                failed_soft_bit_mask = 1u << bit;
             }
         }
+
+        /* Round 935 (task #919): every low-range bit that was
+         * pending+unmasked at loop entry (low_pending_snapshot) has now
+         * failed both real dispatch mechanisms - the `while (pending)`
+         * loop above only returns early on success, so falling out of
+         * it (and past the soft-range block, which likewise only
+         * returns early on success) means NOTHING serviced any of
+         * these bits this tick. Record them (plus any single failed
+         * soft bit) for iop_step()'s spurious-interrupt-return stub to
+         * acknowledge/clear out of the real intc->istat/istat_hi
+         * registers before resuming - see this function's own leading
+         * comment block for the full root-cause citation. */
+        g_iop_spurious_istat_mask = low_pending_snapshot;
+        g_iop_spurious_istat_hi_mask = failed_soft_bit_mask;
     }
 
     uint32_t vector = (st->cop0[12] & 0x400000u) ? 0xBFC00180u : 0x80000080u; /* Status.BEV */
@@ -1005,7 +1084,37 @@ static int iop_step(void)
         } else {
             /* Interrupt (ExcCode==0) or any other restartable class -
              * unchanged Round 129 behavior: resume the interrupted
-             * instruction itself. */
+             * instruction itself.
+             *
+             * Round 935 (task #919) fix: before resuming, acknowledge/
+             * clear the SPECIFIC intc->istat/istat_hi bit(s) that
+             * iop_check_hw_interrupt() recorded as having caused this
+             * exact fallback dispatch (see that function's own leading
+             * comment block and g_iop_spurious_istat_mask/
+             * g_iop_spurious_istat_hi_mask for the full citation and
+             * root-cause trail). Without this, a real interrupt source
+             * with no registered handler anywhere (the confirmed GT3
+             * disc-boot case: a genuine SIF0 DMA-completion IRQ, raw
+             * line bit 3 AND soft line bit 42, with zero handlers
+             * registered) refires the instant Status.IEc is restored
+             * below, re-vectoring to this identical fixed vector with
+             * the identical EPC forever - a permanent, self-sustaining
+             * storm with zero forward progress, exactly the mechanism
+             * this project's own already-correct
+             * IOP_HLE_INTR_HANDLER_RETURN_TRAMPOLINE path (source/hw/
+             * iop_hle_intr.c) already avoids for the "real handler ran"
+             * case by clearing intc->istat/istat_hi on completion. Only
+             * the exact bit(s) recorded this tick are cleared - never a
+             * blind full-register clear - so IRQs that DO have a real
+             * handler registered are entirely unaffected (they dispatch
+             * and `return` above, never setting these masks at all). */
+            if (g_iop_spurious_istat_mask || g_iop_spurious_istat_hi_mask) {
+                iop_intc_state_t *intc = iop_intc_get_state();
+                intc->istat &= ~g_iop_spurious_istat_mask;
+                intc->istat_hi &= ~g_iop_spurious_istat_hi_mask;
+                g_iop_spurious_istat_mask = 0;
+                g_iop_spurious_istat_hi_mask = 0;
+            }
             st->pc = epc;
             st->next_pc = epc + 4u;
         }

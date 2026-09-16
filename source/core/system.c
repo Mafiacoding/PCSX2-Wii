@@ -138,13 +138,45 @@ static void system_r940_force_display_if_needed(ee_state_t *ee)
     if (gs->pmode != 0)
         return; /* real BIOS already configured display itself - do not stomp it */
 
-    gs->pmode    = 0x03u;             /* enable GS circuit 1 + circuit 2 */
+    /* Round 941 (task #925 continued, real-hardware evidence from the
+     * user's own Dolphin run of the Round 940 JIT-on build): the
+     * debug HUD correctly reported "configured by BIOS/game" and EE
+     * instructions were well past this threshold, yet Dolphin's own
+     * D3D12 stats showed Draw calls: 0 and the screen stayed black.
+     * Root cause, found by reading main.c's real blit call site
+     * (run_real_boot_flow(), ~line 509): `int en1 = pmode & 0x1;` /
+     * `active_dispfb = en1 ? gs->dispfb1 : gs->dispfb2;` - EN1 is
+     * PREFERRED over EN2 whenever both are set (an intentional,
+     * real-hardware-accurate choice from Round 212's own fix, cited
+     * right above that code: "EN1 preferred if both are somehow set,
+     * matching real hardware's Circuit-1-is-primary convention").
+     * Round 940 set PMODE=0x03, enabling BOTH EN1 and EN2, but only
+     * ever wrote DISPFB2/DISPLAY2 (Circuit 2) - DISPFB1/DISPLAY1 were
+     * left at their real, never-configured value of 0. So main.c's
+     * circuit-selection logic picked Circuit 1 (EN1 set) every time,
+     * decoded DISPFB1=0 via gs_decode_dispfb() into bw_pixels=0 (see
+     * gs_wii_output.c: fbw_field = (dispfb>>9)&0x3F, 0 when dispfb is
+     * 0), and main.c's `if (bw_pixels > 0)` guard silently skipped
+     * the entire gs_blit_psmct32_to_xfb() call - GS memory was never
+     * blitted to the screen at all, regardless of what Schritt 3
+     * wrote into Circuit 2. This fully explains the user's exact
+     * symptom (HUD says "configured", draw calls/pixels are zero)
+     * without needing to touch gs_wii_output.c or invent any new
+     * hypothesis. Fix: force PMODE=0x02 (EN2 only, EN1 left 0) -
+     * this is not a new guess, it is the exact real-hardware
+     * convention this project already confirmed and documented in
+     * Round 212 (real PCSX2 debugger screenshot of the GT3 BIOS
+     * splash showing PMODE=0x66, EN1=0/EN2=1, DISPFB2 populated,
+     * DISPFB1 zero) - so this fix makes the synthetic override match
+     * the one real-hardware PMODE pattern this project has direct
+     * evidence for, instead of an arbitrary "enable both" guess. */
+    gs->pmode    = 0x02u;             /* enable GS circuit 2 ONLY (matches Round 212's real-hardware-confirmed EN1=0/EN2=1 pattern) */
     gs->smode2   = 0x3u;               /* INT=1 (interlace), FFMD=1 (frame mode) */
     gs->dispfb2  = 0x1400u;            /* FBP=0, FBW=10 (640/64), PSM=0 (PSMCT32) */
     gs->display2 = 0x001bf27f0003227cull; /* DX=636 DY=50 MAGH=0 MAGV=0 DW=639 DH=447 */
-    system_safe_printf("\n[R940-FORCE] instr=%llu: BIOS never configured PMODE - "
-           "forcing PMODE=0x03/SMODE2=0x3/DISPFB2=0x%04x/DISPLAY2=0x%016llx "
-           "(Round 940 synthetic diagnostic override, NOT real hardware fidelity)\n",
+    system_safe_printf("\n[R941-FORCE] instr=%llu: BIOS never configured PMODE - "
+           "forcing PMODE=0x02 (Circuit2-only, Round 941 fix)/SMODE2=0x3/DISPFB2=0x%04x/DISPLAY2=0x%016llx "
+           "(Round 940/941 synthetic diagnostic override, NOT real hardware fidelity)\n",
            (unsigned long long)ee->instructions_executed, (unsigned)gs->dispfb2,
            (unsigned long long)gs->display2);
 }

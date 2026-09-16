@@ -42173,3 +42173,119 @@ the real BIOS's own configuration path entirely, at a fixed instruction-count th
 values the real BIOS never actually computed. Anyone continuing this project's work later should
 treat both hooks as instrumented, load-bearing scaffolding for a specific debugging goal, not as
 genuine SIF-RPC or SetGsCrt/display-init emulation.
+
+## Round 941 (task #925 continued, real-hardware evidence from the user): fixed the Circuit-1-vs-Circuit-2 blit routing bug that made Round 940's forced PMODE produce zero draw calls and a black screen on real Dolphin - **Draw calls: 0** root cause found and fixed, GS-memory-content question still open
+
+### Context
+
+The user built and ran Round 940's JIT-on `pcsx2-wii.dol` on real Dolphin (title bar:
+"Dolphin 2606a | JIT64 DC | Direct3D 12 | HLE") and reported back with two screenshots and the
+caption "its seems configured but it still black we now could hunt the issue". The debug console
+text rendered correctly and reported:
+
+- `EE instructions executed: 38865330 halted=0` (well past Round 940's 25,000,000-instruction
+  forced-display threshold)
+- `GS display: configured by BIOS/game - showing real GS memory below` (i.e. `display_active` was
+  true - Round 940's forced PMODE write did fire and was observed by main.c's own check)
+- Dolphin's own Statistics overlay (D3D12 backend) showed **Draw calls: 0**, and every other
+  draw-related stat (pshaders/vshaders/dlists/Primitives/XF loads/CP loads/BP loads/EFB
+  peeks/pokes/Draw dones) also at 0 - only texture-upload and vertex/index/uniform streaming
+  byte-counters were nonzero.
+- The screen itself was still black (with some overlapping/garbled debug-console text visible -
+  that overlap is a separate, not-yet-investigated cosmetic issue in the direct-XFB console
+  writer, unrelated to this round's fix; see "Honest scope note" below).
+
+This is real, new debug data - exactly the outcome the user's whole Round 940 strategy was
+designed to produce ("Jedes einzelne Pixel ... liefert uns mehr Debug-Daten als 8 Milliarden
+Instruktionen im tiefen Schwarz"). It proved PMODE reaching nonzero is NOT sufficient by itself to
+produce a picture - something between "PMODE configured" and "GS memory blitted to the screen"
+was silently failing.
+
+### Root cause found
+
+Read `source/main.c`'s real boot-flow blit call site (`run_real_boot_flow()`, ~line 509-524):
+
+```c
+int en1 = (gs->pmode & 0x1u) != 0;
+int en2 = (gs->pmode & 0x2u) != 0;
+int display_active = en1 || en2;
+if (display_active) {
+    uint64_t active_dispfb = en1 ? gs->dispfb1 : gs->dispfb2;
+    uint32_t bp_words, bw_pixels;
+    decode_dispfb(active_dispfb, &bp_words, &bw_pixels);
+    if (bw_pixels > 0) {
+        ... gs_blit_psmct32_to_xfb(...) ...
+    }
+}
+```
+
+This is deliberate, real-hardware-accurate logic from **Round 212**'s own fix (see that round's
+citation right above this code): Circuit 1 (`EN1`) is preferred over Circuit 2 (`EN2`) whenever
+both are set, "matching real hardware's Circuit-1-is-primary convention" - based on a real PCSX2
+debugger screenshot of the GT3 BIOS splash showing `PMODE=0x66` (EN1=0/EN2=1) with only
+Circuit 2's registers populated.
+
+Round 940's forced-display hook wrote `PMODE=0x03`, which sets **both** EN1 and EN2 - but it only
+ever wrote `DISPFB2`/`DISPLAY2` (Circuit 2). `DISPFB1`/`DISPLAY1` were left at their real,
+never-configured value of 0 (the real BIOS's own long-standing "DISPLAY1 never written" pattern,
+tracked since this project's 94th/126th/223rd findings). So main.c's circuit-selection logic saw
+`en1 == true` and picked **Circuit 1** every time - `decode_dispfb(gs->dispfb1 == 0, ...)`
+(`gs_wii_output.c`'s `gs_decode_dispfb()`: `fbw_field = (dispfb >> 9) & 0x3F` = 0 when `dispfb`
+is 0) yielded `bw_pixels == 0`, and the `if (bw_pixels > 0)` guard silently skipped the entire
+`gs_blit_psmct32_to_xfb()` call - every single frame, regardless of what Round 940 wrote into
+Circuit 2.
+
+This fully explains the user's exact symptom (HUD says "configured", draw calls/pixels are zero)
+without needing to touch `gs_wii_output.c` or invent any new hypothesis.
+
+### Fix
+
+`source/core/system.c`'s `system_r940_force_display_if_needed()` (renamed in-comment to reflect
+the Round 941 correction, function name kept for git-history continuity): changed the forced
+`PMODE` value from `0x03` (both circuits) to **`0x02`** (Circuit 2 only, `EN1` left 0). This is
+not a new guess - it is the exact real-hardware convention this project already confirmed and
+documented in Round 212 (`PMODE=0x66`, EN1=0/EN2=1), so the synthetic override now matches the one
+real-hardware PMODE pattern this project has direct evidence for, instead of an arbitrary
+"enable both circuits" choice. `SMODE2`/`DISPFB2`/`DISPLAY2` values are unchanged from Round 940.
+The forced-write log tag was updated from `[R940-FORCE]` to `[R941-FORCE]` to distinguish builds.
+
+### What this fix does and does not resolve
+
+With this fix, once the forced-display hook fires, `main.c` will now correctly select Circuit 2
+and call `gs_blit_psmct32_to_xfb()` with `bw_pixels = 640` (from `DISPFB2`'s `FBW=10` field), so
+the blit will actually execute every frame instead of being silently skipped. This is a genuine,
+evidenced fix, not a guess.
+
+What is **not** yet established: whether real GS local memory at `DISPFB2`'s configured `FBP=0`
+actually contains any meaningful pixel content. Round 939 found the diskless boot converges to an
+idle steady state with PMODE staying 0 across 8.24 BILLION instructions - i.e. no real GS/GIF draw
+activity was ever observed in that specific boot path either. GS local memory (`gs_mem.c`,
+written only via `gs_mem_write_psmct32()`/GIF-packet processing, entirely separate from the
+direct-to-xfb debug console text) may therefore still be all-zero at the configured framebuffer
+address, in which case the screen would still render black after this fix - but for a fully
+diagnosed, expected reason (empty GS framebuffer content) rather than a silent routing bug that
+skips the blit call entirely. Distinguishing "blit runs but reads zeros" from "blit doesn't run at
+all" is exactly the kind of new debug data a fresh real-hardware/Dolphin run of this fix should
+produce, continuing the user's own stated methodology.
+
+### Honest scope note
+
+Both the overlapping/garbled debug-console text visible in the user's screenshots (likely stale
+content from the direct-XFB console writer never being cleared between different printf'd
+screens - `draw_boot_progress_hud()`/`run_real_boot_flow()`'s early-boot log lines apparently
+persisting alongside later ones) and the game/BIOS-image-content question above are explicitly
+OUT of scope for this round's fix - only the Circuit-1-vs-Circuit-2 routing bug was fixed here.
+Neither is fabricated as resolved by this change.
+
+### Mandatory workflow status
+
+- Host-native regression suite: **skipped this round per explicit user instruction** ("skip the
+  regression this round"). The change is a single-constant edit (`0x03u` -> `0x02u`) plus a
+  comment/log-tag update inside an already-tested function (`system_r940_force_display_if_needed`,
+  itself untouched in control flow); `gcc -fsyntax-only` was run and is clean. No test file
+  references the forced PMODE value (verified via grep), so no test file needed updating either.
+  The regression suite should still be run before the next round that touches this file, per the
+  project's standing mandatory workflow.
+- Wii cross-build: clean, zero warnings/errors (`LD_LIBRARY_PATH` workaround from Round 940 still
+  required in this sandbox for `cc1`/libmpfr).
+- Verified fresh `.dol`/`.elf` timestamps confirm the rebuild picked up the change.

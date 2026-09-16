@@ -286,6 +286,16 @@ uint32_t ee_core_get_addintc_log_count(void);
 int ee_core_get_addintc_log_entry(uint32_t idx, uint32_t *cause, uint32_t *handler_addr,
                                    uint32_t *next, uint32_t *call_pc);
 
+/* Round 957 (task #950, SCPH-50004 forward-trace): plain running counter
+ * of every real, SUCCESSFUL rom0:-device LF_F_ELF_LOAD RPC_CALL reply
+ * this project's own sif_loadfile_elf_load() delivers (i.e. incremented
+ * exactly where ee_arm_rpc_call_pending(call_cd) fires for that case).
+ * Same always-on-counter convention as iop_cdvd_get_scmd_call_count() -
+ * cheap, not gated behind an #ifdef, not part of savestate (diagnostic
+ * only). Lets a driver detect "next LOADFILE reply just fired" without
+ * needing a separate #ifdef-gated stderr trace parsed out-of-band. */
+uint64_t ee_core_get_loadfile_reply_count(void);
+
 /* Single-step entry point, for the interleaved EE/IOP scheduler
  * in core/system.h. See its definition in ee_core.c for details. */
 int ee_core_step(void);

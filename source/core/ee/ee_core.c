@@ -687,6 +687,13 @@ static uint32_t g_addintc_log_count = 0; /* total calls seen, may exceed CAP */
 
 uint32_t ee_core_get_addintc_log_count(void) { return g_addintc_log_count; }
 
+/* Round 957 (task #950): plain running counter, incremented at the one
+ * real site (below, the LF_F_ELF_LOAD success branch) where this
+ * project delivers a genuine LOADFILE RPC_CALL reply. See ee_core.h's
+ * declaration comment for why this isn't gated behind an #ifdef. */
+static uint64_t g_loadfile_reply_count = 0;
+uint64_t ee_core_get_loadfile_reply_count(void) { return g_loadfile_reply_count; }
+
 int ee_core_get_addintc_log_entry(uint32_t idx, uint32_t *cause, uint32_t *handler_addr,
                                    uint32_t *next, uint32_t *call_pc)
 {
@@ -5621,6 +5628,7 @@ static int ee_step(void)
                                         ee_mem_write32(st, call_recvbuf + 0u, elf_epc);
                                         ee_mem_write32(st, call_recvbuf + 4u, elf_gp);
                                         ee_arm_rpc_call_pending(call_cd);
+                                        g_loadfile_reply_count++; /* Round 957 (task #950) */
                                     }
                                     /* sif_loadfile_elf_load() returning 0 (ROMDIR
                                      * miss / bad ELF) is left un-replied - an honest

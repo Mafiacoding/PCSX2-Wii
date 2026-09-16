@@ -43992,3 +43992,103 @@ forward-trace from the end of the decompression loop
 unpacking completes that leads back to a fresh `rom0:OSDSYS` LOADFILE
 request ~35-37 million instructions later - the real, evidenced
 continuation of this investigation.
+
+## Round 957 (task #950): forward-traced the full inter-LOADFILE window with real disassembly - confirms Round 956's rejection empirically, no exception/reset anywhere in the path
+
+Direct continuation of Round 955/956's open question, using the real,
+evidenced next step instead of the declined watchdog proposal.
+
+**New instrumentation (always-on, not gated - same convention as
+`iop_cdvd_get_scmd_call_count()`):** `g_loadfile_reply_count` +
+`ee_core_get_loadfile_reply_count()` (`ee_core.c`/`ee_core.h`),
+incremented at the exact site `ee_arm_rpc_call_pending(call_cd)` fires
+for a successful `LF_F_ELF_LOAD`. This replaces stderr-log-parsing
+with a queryable counter, letting a driver detect "a LOADFILE reply
+just fired" precisely.
+
+**New tool** (`tools/round957-forward-trace/analyze.c`): watches
+`ee_core_get_loadfile_reply_count()`, opens a "window" the instant
+reply #1 fires, then records every NEWLY-entered PC (bounded dedup
+hash-set, same technique as Round 815's `r815_mark_new_pc()`) until
+reply #2 fires - i.e., the complete real code path for one full
+inter-LOADFILE cycle. It also explicitly checks, on every sampled PC,
+whether execution ever lands on either of this project's own two real
+synchronous-fault exception vectors (`0x80000000` TLB-refill,
+`0x80000180` general - both computed by `ee_raise_exception()`,
+`ee_core.c` ~line 321-359, ported from PCSX2's `cpuException()`). The
+routine interrupt vector (`0x80000200`) is deliberately excluded from
+this check since VBLANK and other ordinary interrupts fire through it
+constantly and would prove nothing about a "watchdog reset".
+
+**Measured, on real SCPH-50004 execution:**
+
+- Reply #1 fired at ee_instr=30,543,976; reply #2 fired at
+  ee_instr=69,215,939 - a real, measured gap of **38,671,963
+  instructions**, in the same ballpark as the user's claimed
+  "35-37 million instructions" (slightly higher, but the right order
+  of magnitude - the user's timing description was roughly accurate
+  even though the underlying causal mechanism they proposed was not,
+  per Round 956).
+- **Zero hits on either synchronous exception vector across the
+  entire 38.6M-instruction window.** This is now an empirical
+  confirmation, not just a citation-based one: whatever causes the
+  next LOADFILE request, it is provably NOT a CPU exception, TLB
+  fault, or reset event on the EE side anywhere in this window.
+- 116 distinct new code addresses visited. Disassembling the actual
+  resident code at the key clusters (dumped live via a second small
+  driver, `tools/round957-forward-trace` companion dump, against real
+  RAM content at ee_instr~69,216,000) shows a plain, ordinary
+  sequence of ALREADY-FAMILIAR kernel primitives, not anything novel:
+  - `0x00082008-0x0008202c`: a real bounded loop incrementing v0 from
+    0x00091200 to 0x000955A4 in steps of 16 - an ordinary memory-range
+    scan/init, in the same `0x0008xxxx` kernel-dispatch region this
+    project already extensively disassembled across Rounds 429-437
+    (a different, older BIOS build, at the same fixed low kernel
+    address - consistent with this being shared EE-kernel code, not
+    BIOS-version-specific).
+  - `0x8000dbe0-0x8000dbf4`: `lw v0,0(a0); andi v0,v0,4; ...; beq
+    v0,zero,loop` - a real hardware-register busy-wait, polling bit 2
+    of MMIO register `0x1000F000` until it clears. An ordinary
+    hardware synchronization poll, not an exception path.
+  - `0x80005768-0x80005780`: `lw v1,0(a1); ...; sw v1,0(a2); bne...` -
+    a plain word-copy loop (memcpy-style), ordinary data movement.
+  - `0x8000e5c0-0x8000e610`: a bounded loop calling a subroutine
+    (`jal 0x80000c40`) then iterating a fixed count - consistent with
+    a bzero/memset-class kernel primitive.
+  - `0x800136a0-0x800136e4`: another real register-diff poll (`beq
+    v0,a1,0x800136c0` spinning until a value stops matching
+    `0xFFFF8000`), ending in an `sb`/return - this is the LAST new
+    address recorded before reply #2 fires, i.e. this routine (or its
+    caller) is what actually re-issues the LOADFILE call.
+  - Before all of the above: `0x00100b6c-0x00100cc8`, matching Round
+    955's already-documented decompression loop almost exactly (same
+    OSDSYS text range, confirms the window opens right where
+    expected).
+
+**Synthesis.** The complete inter-LOADFILE path is: OSDSYS's real
+decompression loop finishes -> control returns into ordinary,
+already-familiar EE-kernel housekeeping code (memory scan, hardware
+register poll, memcpy, delay loop, another register-diff poll) -> a
+low-kernel routine re-issues the `rom0:OSDSYS` `LF_F_ELF_LOAD` call.
+Nothing in this path is an exception, a timeout, or a reset - it is
+plain sequential/branching kernel code performing ordinary tasks. This
+both directly confirms Round 956's citation-based rejection of the
+user's "SIF-queue-ACK/kernel-watchdog-timeout" proposal with hard
+execution evidence, and gives a concrete, real address
+(`0x800136a0-0x800136e4`, and its as-yet-unidentified caller) as the
+next investigative target if the "why does EELOAD/OSDSYS periodically
+reissue LOADFILE at all" question is pursued further - though per
+Round 955/956/957's combined findings, this loop increasingly looks
+like real, correct, if slow, BIOS/EELOAD behavior rather than a bug
+this emulator needs to "fix".
+
+**Shipped this round:** `ee_core_get_loadfile_reply_count()` (always-on
+counter + getter, `ee_core.c`/`ee_core.h`) and
+`tools/round957-forward-trace/analyze.c` (new host-native survey tool).
+
+**Verification:** `test_ee_core`, `test_sif`,
+`test_ee_cdvd_ncmd_reentry`, `test_iop_cdvd`, `test_iop_core`,
+`test_dma_sif2` all pass, 0 failures. devkitPPC Wii cross-build clean
+(`pcsx2-wii.dol` produced, no warnings/errors). No regression - the
+only tracked-source change is a plain, always-cheap counter increment
+at one existing call site.

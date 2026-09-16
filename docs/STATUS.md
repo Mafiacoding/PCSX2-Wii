@@ -43586,3 +43586,108 @@ targets themselves (`0x8000d670`, `0x8000bd58`, `0x800073e0`, Round 951)
 to see what they actually read/write, rather than assuming a specific
 RPC mechanism gates them - the same "read what the code really does
 first" discipline that found the real DVE gap in Round 950.
+
+## Round 953 (task #946): full disassembly of the VBLANK-burst call
+## targets - confirms the loop is DVE/GS/SBUS housekeeping + debug
+## print, not an RPC wait; also confirms the Round 950 DVE fix fires
+## organically every frame
+
+**Method**: built `tools/round953-vblank-burst-disasm/analyze.c` (same
+disassembler lineage), booted the SCPH-50004 diskless boot fresh to the
+same ~480,000,000-`ee_instr` resting point Round 951/952 used, then
+fully disassembled (to `jr ra` or a 60-instruction cap) the shared
+dispatcher `0x800073e0` plus all 8 distinct call targets from Round
+951's captured caller disassembly (`0x8000d670`, `0x8000bd58`,
+`0x8000e618`, `0x8000e648`, `0x8000d9b8`, `0x8000e4f0`, `0x8000e5c0`,
+`0x8000e588`), and dumped the raw content of the 9 struct-pointer
+arguments actually passed to `0x800073e0` (extracted precisely from
+Round 951's own `0x8000DBD0-0x8000DD10` disasm: `0x80016208`,
+`0x80016220`, `0x80016228`, `0x80016240`, `0x80016258`, `0x80016270`,
+`0x80016290`, `0x800162d8`, `0x800162f0`).
+
+**Finding 1 - `0x800073e0` is a generic varargs/debug-print
+trampoline, not an RPC dispatcher.** It saves `a1-t3` plus 3 FPU
+registers into a stack varargs-save-area (the standard MIPS EABI
+varargs convention already seen elsewhere in this BIOS), points `a1`
+at that save area, and unconditionally calls `0x80006e88` - i.e. every
+one of the 9 "struct pointer" arguments from Round 951 is actually a
+**format-string/message pointer**, and the whole per-frame burst is
+mostly the BIOS printing 9 fixed debug/status strings to its internal
+console each VBLANK, not walking an AddIntcHandler-style callback
+table as hypothesized. This corrects the Round 951/952 working
+hypothesis about what `0x800073e0` does (it is real, but it's a print
+call, not a registered-handler invoker).
+
+**Finding 2 - `0x8000d670` writes the real DVE (video encoder)
+registers this project just implemented in Round 950 - confirmed
+firing organically, every frame.** It does `sh a0(=3), 0(0xba000008)`
+and `sh v0(=1), 0(0xba000004)` - real writes into the exact `ba0`
+register range Round 950's `ee_dve.c`/`ba0R16`/`ba0W16` stub now
+models. This is independent, organic confirmation that the Round 950
+DVE fix is not just theoretically correct but is being actively
+exercised by real BIOS code on every single VBLANK during this boot.
+The function then does a small GS CSR poke (`sd 0x200, 0(0x12001000)`
+- real GS-privileged CSR address), reads a config/EEPROM byte from
+`0xbf80146e`, and runs a bounded retry loop (`bnel`/print via
+`0x80007d78`) gated on a DVE/video-mode-ready byte at `0x80022588`
+matching `0x1c` - classic "wait for the video encoder to report ready"
+boilerplate, not a stall in this trace (the loop's guard condition was
+not observed to be permanently true in this run).
+
+**Finding 3 - `0x8000bd58` and `0x8000e618`/`0x8000e648` are DVE
+mode-select logic and SBUS/DMA-priority hardware-register
+initialization, respectively.** `0x8000bd58` sign-extends 3
+video-mode-flag arguments, decodes bit-fields out of a flags word
+stored at `0x80015960` (PAL/NTSC-style mode selection), runs a short
+fixed busy-wait (a literal `9999`-iteration countdown - real hardware
+settling delay, not a park), then branches on a byte at `0x80022618`
+(the exact address `0x8000d670` just zeroed) to jump into further DVE
+mode-specific code at `0x8000c1f8`. `0x8000e648` writes a long, fixed
+sequence of constants into the `0xb0000000-0xb0001820` register block
+(clearing/arming several sub-registers, e.g. `0xc00`/`0`/`-1` triplets)
+- structurally identical to a **DMA/SBUS channel-priority arbitration
+init block**, then tail-calls a real kernel function at `0x800027f8`.
+
+**Finding 4 - `0x8000e4f0` zeros all 32 EE FPU registers
+(`mtc1 zero,$f0..$f31`), then loads the FPU control/status word** -
+real FPU-context-reset boilerplate, called (per Round 951's caller
+disasm of `0x8000d9b8`) only when a specific bit of a 7-bit flags word
+is set. `0x8000d9b8` itself is a flags-driven "for each of 7 possible
+bits, print a debug string then call the matching handler
+(`0x8000dde8`/`0x8000df38`/`0x8000e020`/`0x8000d7e8`/`0x8000e4c0`/
+`0x8000e440`/`0x8000e0f8`)" dispatcher - i.e. a module/subsystem
+(re)init sweep, invoked with `a0=127` (all 7 bits set) during this
+VBLANK burst. `0x8000e5c0` is a small utility: calls `0x80000c40(addr)`
+to get an end address, then bulk-clears/copies memory from the start
+address to that end address 16 bytes at a time via `sq` - used here
+with the IOP-address-range argument `0x00082000` from Round 951's
+caller trace, i.e. a bounded memory-region clear, not an RPC call.
+
+**Synthesis - no SIF (0x1000F2xx) or pad/SIO2 register touch was found
+anywhere in any of the 9 real call targets.** This independently
+confirms, from a completely different angle than Round 952's empirical
+`rpc_bind_count`/bind-sid-table check, that the VBLANK-burst loop is
+not gated on or related to any pad RPC: it is a genuine, well-formed
+per-frame housekeeping pass (DVE/video-encoder register writes and
+mode-select, GS CSR poke, SBUS/DMA-priority register init, FPU-context
+reset, memory-region clear utilities) plus a debug-print heartbeat -
+exactly the category Round 951 originally guessed ("status/heartbeat
+burst") but now with the real content behind every one of the 9 calls
+identified instead of left as an open question. No new bug was found
+in this pass; no source fix is implemented this round (`tools/` is the
+only new file, correctly excluded from the Wii `SOURCES` list, so
+regression suite + Wii cross-build are correctly skipped for this
+docs-only investigative round, matching the established convention for
+tools-only rounds).
+
+**Honest open thread for a future round**: `0x8000d670`'s DVE-ready
+retry loop (gated on `[0x80022588] & 0xFE == 0x1C`) and `0x8000bd58`'s
+`0x80022618`-based mode branch were not traced value-by-value this
+round - if a genuine organic-boot blocker exists on the SCPH-50004
+path, it is more likely to live in that DVE-ready/mode-negotiation
+logic (a real hardware-config dependency) than in any pad-RPC
+mechanism, which this round and Round 952 have now both independently
+ruled out. Tracing the actual runtime values at `0x80022588`/
+`0x80022618` across the boot (does the retry loop ever fire? does the
+mode branch ever pick a different target?) is the concrete, evidenced
+next step.

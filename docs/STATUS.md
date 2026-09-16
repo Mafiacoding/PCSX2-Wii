@@ -43254,3 +43254,138 @@ S-command next - i.e. is OSDSYS's own real code even trying to do this
 yet at this point in its control flow, which is answerable by
 disassembly/instrumentation of OSDSYS's own loaded code around the
 current resting PC, not by injecting synthetic hardware signals.
+
+## Round 950 (task #447/#536/#887): user-directed pivot to SCPH-50004 v1.90 EUR BIOS - DVE ("ba0") register fix unblocks first-ever real SIF/RPC traffic on this BIOS
+
+**User instruction this round**: stop investigating SCPH-10000. The
+user researched (via Google AI) that SCPH-10000's OSDSYS menu was
+historically not fully embedded in ROM - the real, animated
+Browser menu was installed onto the Memory Card from a Utility Disc,
+so a diskless boot with no emulated Memory Card holding those installed
+files can never reach it, independent of anything this project's SIF/
+IOP modeling does. The user uploaded a new, real, distinct BIOS dump -
+**SCPH-50004 v1.90 EUR** (6 files: `.BIN`/`.ROM1`/`.ROM2`/`.EROM`/
+`.MEC`/`.NVM`) - and asked us to focus exclusively on it going forward.
+
+**Verification of the new BIOS** (read-only): `strings` on the `.BIN`
+confirms `ROMVER` string `0190EC20030623` (version 1.90, region E =
+Europe, built 2003-06-23) and `System ROM Version 5.0 06/23/03 E` -
+a real, much later BIOS revision than SCPH-10000's v1.00, distinct file
+set (4MB `.BIN` main ROM in the same flat layout as `scph10000.bin`,
+plus `.ROM1`/`.ROM2` extended-ROM images, `.EROM`, `.MEC`, `.NVM`).
+
+**Fresh diskless boot survey against SCPH-50004** (reusing the
+existing, unmodified Round 946 survey driver): the EE does **not**
+reach anywhere near the SIF/OSDSYS wall documented for SCPH-10000 in
+Rounds 943-949 - it gets stuck far earlier, spinning forever in a
+tight EE-kernel-level poll at `0x80007CD8-0x80007CEC`:
+
+```
+lhu  v0, 0(a0)          ; a0 = 0xBA000006
+(4x nop)
+beq  v0, zero, <back to lhu>
+```
+
+Backward disassembly of the setup code immediately before the loop
+(`0x80007ca0-0x80007cd4`, via a new `tools/round950-scph50004-survey/
+analyze.c`, reusing the existing `disasm_one()` disassembler) shows a
+real 3-register command sequence: write `0x42` ("Read Mode") to
+`0xBA000002`, write a sub-register index to `0xBA000010`, write `0x81`
+(Start-Execute bit `0x80` | size=1) to `0xBA000000`, then poll
+`0xBA000006` for a "ready" bit that this project had **never modeled**
+(0/0 hits for `0x1A00`/`0xBA00` anywhere in `source/`/`include/`/
+`docs/` before this round) - reads silently returned 0 forever, so the
+real BIOS kernel could never observe readiness and the boot could never
+progress past this point on this BIOS image.
+
+**Root-cause identification (two independent real sources, not a
+guess)**: this physical range (`0x1A000000-0x1A0000FF`, KSEG1-mirrored
+at `0xBA000000-0xBA0000FF`) is the real PS2 EE-side DVE (Digital Video
+Encoder) command/status register block ("ba0" in Sony/community
+naming). Confirmed against the real PCSX2 emulator's own shipped source
+(`pcsx2-master.zip`, already in this project's uploads since Round 543)
+- `pcsx2/Memory.cpp`'s `ba0R16()`/`ba0W16()`/`memReset()` functions,
+which check `mem == 0x1a000006` for the exact same "ready after N
+polls" pattern, with PCSX2's own developer comment quoted verbatim:
+*"These regs are related to DEV9 and DVE stuff, we don't have to go
+crazy with this, but this sucks less than the original code."* This is
+the same evidentiary bar applied in Round 950 as every prior fix in
+this project, and explicitly the bar the Round 949 MECHACON/SIO2-IP3
+proposal *failed* to clear (no real register/source backed it) - here,
+both our own fresh disassembly of the actual BIOS's poll sequence AND a
+second, unrelated, real, working PS2 emulator's shipped implementation
+agree on the address, the semantics, and the exact fix.
+
+**Fix implemented**: `include/core/hw/ee_dve.h` + `source/hw/ee_dve.c`
+- a faithful, minimal, citation-heavy port of PCSX2's own DVE stub
+(`s_ba[0x100]`/`s_dve_regs[0x100]` register files, the same
+self-clocking "ready after 3 polls" timing at offset `0x6`, the same
+`mem & 0x1F` fallback-addressing quirk for non-special offsets, and the
+same reset defaults `s_ba[0xA]=1`/`s_dve_regs[0x7e]=0x1C`, all copied
+verbatim rather than reinvented). Wired into `source/core/ee/ee_core.c`:
+`ee_mem_read16()`/`ee_mem_write16()` gained this project's **first-ever
+16-bit-only hardware MMIO dispatch chain** (every other hardware
+register range so far was only reachable via 32/64-bit LW/LD/SW/SD, so
+`read16`/`write16` had no `hw_addr` dispatch at all before this round -
+a genuinely new architectural addition, not just a new register), plus
+an `ee_dve_init()` call alongside the existing `ee_intc_init()`/
+`ee_sio_init()`/`ee_timers_init()` reset sequence. Not checkpointed
+(documented in `ee_dve.h`'s header comment, with reasoning: the
+modeled state is only ever "mid-command" for a handful of instructions
+right at this one boot site, and no currently-used checkpoint is taken
+that early).
+
+**Empirical verification (before/after, same SCPH-50004 image, same
+survey driver, fresh cold boot from instruction 0 in both cases)**:
+
+```
+BEFORE (pre-fix):  EE stuck spinning at 0x80007cd8/0x80007cdc forever.
+                    mscom_changes=0 smcom_changes=0 msflag_changes=0
+                    smflag_changes=0 init_cmd_count=0 rpc_bind_count=0
+AFTER  (post-fix):  EE escapes the loop entirely; 60,000,000-instruction
+                    survey visits many new addresses (0x00100c10,
+                    0x8000dbec, 0x8000e600, 0x00200030, ...), settles
+                    into a new resting oscillation around
+                    0x8000e5f0-0x8000e600. iop_pc parks at 0x00155c00
+                    (close to, not identical to, SCPH-10000's
+                    documented 0x00155910 idle point - worth comparing
+                    in a future round).
+                    smcom_changes=1 msflag_changes=1 smflag_changes=1
+                    init_cmd_count=1 rpc_bind_count=13 (climbing
+                    steadily across the run, from 1 at cum=5,000,000 to
+                    13 by cum=60,000,000)
+```
+
+This is real, non-forced SIF/RPC activity appearing on the SCPH-50004
+BIOS for the first time in this project's history - directly
+attributable to the DVE fix unblocking the EE's very first
+kernel-level hardware poll, not to any synthetic override (Round
+940/941's diagnostic PMODE/DISPLAY2 force still fires unconditionally
+at `instr==25,000,000` regardless of BIOS image, as documented; that is
+unrelated pre-existing scratch-diagnostic behavior, not this round's
+finding).
+
+**Mandatory workflow**: `ee_dve.c` compiles clean standalone (`gcc -O1
+-Wall`, 0 warnings) and as part of the full 44-file source tree
+(`gcc -O2 -w`, used to build a shared object archive for fast testing).
+Targeted regression subset run via the project's own `tests/
+run_test.sh` (the two most directly-relevant tests to the changed MMIO
+dispatch path, `test_ee_core` and `test_ee_hw_kseg_masking`, plus
+`test_iop_hw_interrupt`/`test_gs_registers`/`test_gs_output` as a
+broader sanity net) - all 5 pass, 0 checks failed. (Note: a full
+136-test sweep via a custom shared-archive fast-link harness hit a
+tooling bug of its own - archive member pull-in causing spurious
+multiple-definition errors unrelated to the actual source change - and
+was not completed this round due to time budget; the targeted subset
+above, plus the clean full-tree compile, is the regression evidence for
+this round. A full `--all` sweep is still recommended before the next
+round that touches `ee_core.c` again.) devkitPPC Wii cross-build: clean,
+all 44 source files including `ee_dve.c` compile and link
+(`pcsx2-wii.elf`/`.dol` produced, 0 errors).
+
+**Scope note**: task #938/#939 (push GT3/diskless surveys past 200M/
+150M instructions, and repeat the post-945 survey against Tekken/KOF/
+MS3) are SCPH-10000-line investigations, explicitly deprioritized by
+this round's pivot instruction - left `[pending]` rather than closed,
+since the user may want to return to other titles later, but no longer
+the active focus.

@@ -114,6 +114,7 @@
 #include "core/hw/ee_sio.h"
 #include "core/hw/ee_timers.h" /* Round 87 (127th finding) */
 #include "core/hw/ipu.h" /* Round 521/522 (task #487) */
+#include "core/hw/ee_dve.h" /* Round 950 (task #447/#536/#887) */
 #include "core/hw/gs.h"
 #include "core/hw/gif.h"
 #include "core/hw/vif.h"
@@ -1680,6 +1681,16 @@ uint8_t ee_mem_read8(ee_state_t *st, uint32_t addr)
 
 uint16_t ee_mem_read16(ee_state_t *st, uint32_t addr)
 {
+    /* Round 950 (task #447/#536/#887): DVE ("ba0") register stub -
+     * see include/core/hw/ee_dve.h for the full citation. This is
+     * the first 16-bit-only hardware register range this project has
+     * needed to dispatch (everything else so far is reached via
+     * 32/64-bit LW/LD/SW/SD), which is why ee_mem_read16/write16
+     * didn't have a hw_addr dispatch chain before this round. */
+    uint16_t dve_val;
+    if (ee_dve_mmio_read16(ee_hw_mmio_addr(addr), &dve_val))
+        return dve_val;
+
     uint8_t *p = ee_mem_ptr(st, addr, 2);
     if (!p) { ee_mem_check_tlb_fault(st, addr, 0); return 0; }
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -1759,6 +1770,11 @@ void ee_mem_write8(ee_state_t *st, uint32_t addr, uint8_t val)
 
 void ee_mem_write16(ee_state_t *st, uint32_t addr, uint16_t val)
 {
+    /* Round 950 (task #447/#536/#887): see ee_mem_read16()'s comment
+     * just above and include/core/hw/ee_dve.h for the full citation. */
+    if (ee_dve_mmio_write16(ee_hw_mmio_addr(addr), val))
+        return;
+
     uint8_t *p = ee_mem_ptr(st, addr, 2);
     if (!p) { ee_mem_check_tlb_fault(st, addr, 1); return; }
     p[0] = (uint8_t)(val & 0xFF);
@@ -2919,6 +2935,7 @@ int ee_core_init(const bios_image_t *bios)
     ee_intc_init(); /* task #176: EE interrupt controller (INTC_STAT/MASK) - see core/hw/ee_intc.h */
     ee_sio_init(); /* Round 392: EE debug SIO UART - see core/hw/ee_sio.h */
     ee_timers_init(); /* Round 87 (127th finding): EE peripheral timers T0-T3 - see core/hw/ee_timers.h */
+    ee_dve_init(); /* Round 950 (task #447/#536/#887): DVE "ba0" stub - see core/hw/ee_dve.h */
     gs_init();  /* GS privileged register block - see core/hw/gs.h */
     sif_init(); /* EE-side SIF/SBUS mailbox registers - see core/hw/sif.h */
     sif_cmd_iop_init(); /* task #186: minimal IOP-side SIFCMD consumer model - see core/hw/sif.h */

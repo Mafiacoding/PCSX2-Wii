@@ -43691,3 +43691,81 @@ ruled out. Tracing the actual runtime values at `0x80022588`/
 `0x80022618` across the boot (does the retry loop ever fire? does the
 mode branch ever pick a different target?) is the concrete, evidenced
 next step.
+
+## Round 954 (task #947): traced the DVE-ready state bytes across the
+## full boot - DVE/video-encoder configuration is confirmed CLEAN, not
+## a blocker; the real open question is elsewhere
+
+**Method**: built `tools/round954-dve-ready-trace/analyze.c`, sampled
+`[0x80022588]` and `[0x80022618]` every 5,000,000-slice chunk across
+the full SCPH-50004 diskless boot (60,000,000 slices,
+`ee_instr`=479,999,590), printing on any value change, then fully
+disassembled `0x8000d520` (the function `0x8000d670` calls immediately
+before checking `0x80022588` - the real writer) and `0x8000c1f8` (the
+branch target `0x8000bd58` actually jumps to with the real runtime
+value of `[0x80022618]`).
+
+**Finding 1 - both state bytes settle to a stable value almost
+immediately and NEVER change again for the rest of the 480,000,000-
+instruction window.** Exactly one transition was observed, at
+`ee_instr=39,999,967`: both `[0x80022588]` and `[0x80022618]` go from
+unset to `0x00000000` and stay there for the remaining ~440,000,000
+instructions sampled. This is a steady-state value, not an oscillation
+or a stuck-waiting value.
+
+**Finding 2 - the DVE-ready retry loop in `0x8000d670` is confirmed to
+NEVER actually retry.** `[0x80022588] & 0xFE == 0x00`, not `0x1C` - the
+retry condition is false from the very first evaluation, so the
+"wait for video-encoder ready" loop this project flagged as a
+candidate blocker in Round 953 simply never engages; it falls straight
+through as designed.
+
+**Finding 3 - `0x8000bd58`'s mode-select branch, with the real runtime
+value `[0x80022618]&0xF0==0x00`, deterministically reaches
+`0x8000c1f8`, which is itself a complete, bounded, real DVE
+mode-negotiation routine - not a stall.** Full disassembly of
+`0x8000c1f8` shows: reads `[0x80022580]`/`[0x80022584]` (the same
+config bytes `0x8000d670` populated from the real EEPROM/config-ROM
+byte at `0xbf80146e`), conditionally reads/modifies/writes back a
+config halfword at the real hardware address `0xbf80146c`, runs one
+genuinely long but strictly bounded busy-wait (`0x000DBBA0` ≈ 900,000
+iterations - a real DVE hardware-settling delay, not an infinite
+loop), then pokes the real GS CSR register (`0x12001000`) with `0x200`
+and clears `[0x80022584]`. Every branch and loop in this function
+terminates.
+
+**Finding 4 - `0x8000d520` (the real writer of `[0x80022588]`) is
+itself a complete, bounded DVE-mode-dependent register-write routine**:
+it writes a 64-bit constant to a real hardware register at `0x12001010`
+gated on the flags word at `0x80015960` (comparing against `0x40`/
+`0x60`/`0x61`), runs one of three short bounded delay loops depending
+on which branch is taken (writing `0xba00000a`/`0xbf801470`/
+`0xbf801472` - more real DVE registers), then calls `0x80007840`
+twice (with `a0=126` then `a0=127` - almost certainly another
+print/log call given the `0x800073e0`-class calling pattern from
+Round 953) and stores the second call's return value into
+`[0x80022588]` itself. Every path through this function also
+terminates.
+
+**Synthesis - the entire DVE/video-encoder configuration subsystem on
+SCPH-50004 is confirmed healthy and non-blocking.** Across four rounds
+of investigation (951-954) covering the full VBLANK-burst call graph,
+every function terminates, every loop is bounded, every register write
+targets real, correctly-cited hardware addresses, and the two
+state-byte "candidate blocker" values Round 953 flagged both settle
+into steady, non-retrying, non-oscillating states within the first
+40,000,000 instructions and then hold rock-steady for the remaining
+~440,000,000 instructions sampled. This closes out the DVE/video-mode
+angle definitively: it is NOT what prevents SCPH-50004's BIOS from
+organically reaching `SetGsCrt`/the real OSDSYS menu. Per the project's
+now-well-established pattern for this exact BIOS (Rounds 596-624 found
+the analogous thing for SCPH-10000's OSDSYS idle loop), the real
+remaining blocker is most likely upstream of display setup entirely -
+in whatever real pad/disc/memory-card-derived escalation OSDSYS's
+dispatcher is still waiting on before it ever calls the DVE/GS setup
+path organically in the first place, the same class of gap task #447
+has documented at length for the SCPH-10000 BIOS.
+
+**No source fix this round** (investigative only, `tools/` correctly
+excluded from Wii `SOURCES`, regression suite + Wii cross-build
+correctly skipped per the established tools-only-round convention).

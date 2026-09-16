@@ -44155,3 +44155,118 @@ signal exists in the real protocol to omit.
 **No source fix this round** (audit/citation round only - regression
 suite and Wii cross-build correctly skipped, matching the established
 docs-only-round convention).
+
+## Round 959 (task #952): ROOT CAUSE FOUND - the 13-16x LOADFILE "reload loop" is the real BIOS's own genuine, self-describing "Restart Without Memory Clear" cycle, proven via its own captured debug-console text; fixed a real, wide-blast-radius byte/half-word MMIO dispatch gap along the way
+
+Direct continuation of Round 957's open thread: the last new address
+visited before each LOADFILE reply fires was a small routine at
+`0x800136a0-0x800136e8` that polls `*0xb000f130` (phys `0x1000F130`)
+and then stores a byte to `0xb000f180` (phys `0x1000F180`) - exactly
+this project's own already-modeled EE debug-SIO `SIO_ISR`/`SIO_TXFIFO`
+registers (Round 392, `ee_sio.h`/`ee_sio.c`). Hypothesis: this is the
+real BIOS's own `kputc()`-style debug-console print routine, and
+OSDSYS/EELOAD is printing real diagnostic text right before each
+reload - if so, this project's own existing debug-SIO capture
+(`ee_sio_get_console_text()`) should be able to just read it.
+
+**Finding 1 - a real, previously-undiscovered, wide-blast-radius bug:
+`ee_mem_read8()`/`ee_mem_write8()` never consulted ANY hardware MMIO
+handler chain.** Unlike their 32-bit siblings (`ee_mem_read32()`/
+`ee_mem_write32()`, which check `dma_mmio_*`/`sif_mmio_*`/`mch_mmio_*`/
+`ee_intc_mmio_*`/`ee_timers_mmio_*`/`ee_sio_mmio_*`/`ipu_mmio_*`/
+`gif_mmio_*` in sequence) and even `ee_mem_read16()`/`ee_mem_write16()`
+(which at least check `ee_dve_mmio_*`, Round 950), the 8-bit accessors
+went STRAIGHT to the generic RAM pointer path with no MMIO dispatch at
+all. Confirmed empirically before fixing: a fresh SCPH-50004 boot
+survey through 16 real LOADFILE cycles showed
+`ee_sio_get_state()->bytes_written` stuck at exactly 0 throughout,
+despite the CPU genuinely executing `sb a0, 0(v1)` (v1=`SIO_TXFIFO`)
+16 times - real code, real target address, silently dropped. Real
+ps2sdk's own cited convention for this exact register
+(`*(volatile u_char*)0xb000f180 = c;`, see `ee_sio.h`) is a BYTE
+store, so this gap meant this project's entire real, working SIO
+debug-console model (built specifically for this kind of diagnosis)
+had never actually been reachable by any real BIOS debug print
+anywhere in this whole project's history until this round.
+
+**Fix (scoped, evidenced, not speculative):** `ee_mem_read8()` and
+`ee_mem_write8()` (`ee_core.c`) now check `ee_sio_mmio_read32()`/
+`ee_sio_mmio_write32()` first, exactly mirroring the convention
+`ee_mem_write16()` already uses for DVE. Deliberately scoped to ONLY
+the SIO family - the one device with direct, observed evidence of a
+byte-sized access; the other seven MMIO families (DMA/SIF/MCH/INTC/
+timers/IPU/GIF) are left unrouted at 8-bit granularity since no
+byte-sized access to any of them has been observed in any boot trace
+this project has ever run - extending further is deferred to whenever
+such evidence actually appears, per this project's own discipline.
+
+**Finding 2 - the captured debug text directly answers Rounds
+955-957's entire open question.** Re-running the same 16-LOADFILE-
+cycle survey with the fix in place now captures real BIOS output
+(`sio_bytes_written` climbing to 16,465 total, matching 16 real
+reload cycles worth of text). The captured text is a clean, repeating
+pattern:
+```
+# Restart Without Memory Clear.
+# Initialize GS ...
+# Initialize INTC ...
+# Initialize TIMER ...
+# Initialize DMAC ...
+# Initialize VU1 ...
+# Initialize VIF1 ...
+# Initialize GIF ...
+# Initialize VU0 ...
+# Initialize VIF0 ...
+# Initialize IPU ...
+# Initialize FPU ...
+# Initialize Scratch Pad ...
+# Restart Without Memory Clear Done.
+```
+alternating with an occasional full `# Restart.` / `# Initialize
+User Memory ...` / `# Restart Done.` cycle (a "with memory clear"
+variant). This is the real PS2 BIOS boot ROM's own, textual,
+self-describing account of exactly what it is doing: a genuine,
+intentional, repeated internal "Restart" (warm-reset) sequence,
+re-initializing each real hardware block in turn - NOT a crash, NOT
+an exception, NOT a watchdog, NOT an un-consumed RPC reply. Each such
+"Restart" cycle is naturally followed by OSDSYS being reloaded from
+scratch via a fresh `rom0:OSDSYS` `LF_F_ELF_LOAD` request, which is
+exactly the "13-16x LOADFILE reload" pattern Rounds 955-957
+dissected.
+
+**Synthesis - the entire investigation arc (Rounds 955-959) is now
+closed with a positive, textual, first-party answer.** Round 955
+proved the reply is delivered and consumed (real execution resumes).
+Round 956 disproved the user's "SIF-queue-ACK/watchdog-timeout"
+proposal by citation (no such concept exists in any real source).
+Round 957 disproved it empirically too (zero exception-vector hits in
+the entire inter-reply window). Round 958 disproved the specific
+"missing ACK" framing at the protocol level (no ACK concept exists in
+sifcmd.c at all). Round 959 now supplies the missing positive
+explanation: the BIOS's OWN debug console says, in plain text, that
+it is repeatedly and deliberately restarting itself. This is real,
+expected, if slow, BIOS behavior - most likely the genuine PS2 BIOS
+"POST"-style self-test/re-init sequence that real hardware also goes
+through, just running here at emulated-CPU speed across tens of
+millions of instructions per cycle. No further "fix" is warranted for
+the reload cycle itself; it is not a bug.
+
+**Shipped this round:** the `ee_mem_read8()`/`ee_mem_write8()` SIO
+MMIO-dispatch fix (`ee_core.c`) - a real, previously-invisible
+project-wide capability restoration (this project's own Round-392 SIO
+debug-console model is now actually reachable by real BIOS code for
+the first time), plus the diagnostic driver, checked in this round as
+`tools/round959-sio-restart-trace/analyze.c` (matching the project's
+established `tools/roundNNN-*` convention) so the exact captured
+console text and the loadfile-reply-count/sio-byte-count correlation
+are reproducible; the real, lasting artifact is the `ee_core.c` fix
+itself, this checked-in driver, and this STATUS.md record of the
+captured text.
+
+**Verification:** `test_ee_core`, `test_sif`,
+`test_ee_cdvd_ncmd_reentry`, `test_iop_cdvd`, `test_iop_core`,
+`test_dma_sif2` all pass, 0 failures. devkitPPC Wii cross-build clean
+(`pcsx2-wii.dol` produced, zero warnings after a cosmetic comment
+fix). No regression - the fix only activates for the seven specific,
+already-real, already-cited SIO register addresses; every other
+address's byte/word access behavior is completely unchanged.

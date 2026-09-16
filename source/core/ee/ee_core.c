@@ -1680,6 +1680,27 @@ static inline uint32_t ee_hw_mmio_addr(uint32_t addr)
 
 uint8_t ee_mem_read8(ee_state_t *st, uint32_t addr)
 {
+    /* Round 959 (task #952, SCPH-50004): real BIOS/ps2sdk debug-console
+     * code accesses SIO_TXFIFO/SIO_ISR/etc (0x1000F1xx) via byte-sized
+     * LB/LBU and SB, not word-sized LW/SW (matches real ps2sdk's own
+     * cited convention, "*(volatile u_char*)0xb000f180 = c;" - see
+     * ee_sio.h). Before this round, ee_mem_read8()/ee_mem_write8()
+     * (unlike their 32-bit siblings) never consulted ANY hardware MMIO
+     * handler chain, so every byte-sized hardware register access
+     * silently fell through to the generic RAM path - a real, empirically
+     * confirmed gap (see ee_mem_write8() below and Round 957's own
+     * observed pc=0x800136e4 "sb a0,0(v1)" writing to SIO_TXFIFO 16
+     * times across a boot survey, with ee_sio_get_state()->bytes_written
+     * staying stuck at 0 throughout). Scoped to the one device family
+     * with direct, observed evidence of a byte-sized access (SIO) -
+     * other hw mmio_read32 families (DMA/SIF/MCH/INTC/timers/IPU/GIF)
+     * are left unrouted here since no byte-sized access to any of them
+     * has been observed in this project's boot traces; extending this
+     * further belongs in a future round if/when such evidence appears. */
+    uint32_t sio_val;
+    if (ee_sio_mmio_read32(ee_hw_mmio_addr(addr), &sio_val))
+        return (uint8_t)(sio_val & 0xFFu);
+
     uint8_t *p = ee_mem_ptr(st, addr, 1);
     if (p) return *p;
     ee_mem_check_tlb_fault(st, addr, 0);
@@ -1770,6 +1791,14 @@ uint64_t ee_mem_read64(ee_state_t *st, uint32_t addr)
 
 void ee_mem_write8(ee_state_t *st, uint32_t addr, uint8_t val)
 {
+    /* Round 959 (task #952): see ee_mem_read8()'s comment above for the
+     * full citation - this is the write-side half of the same real,
+     * evidenced gap. ee_sio_mmio_write32() already only extracts the
+     * low byte for SIO_TXFIFO (see ee_sio.c), so passing a zero-extended
+     * byte value here is correct without any further translation. */
+    if (ee_sio_mmio_write32(ee_hw_mmio_addr(addr), (uint32_t)val))
+        return;
+
     uint8_t *p = ee_mem_ptr(st, addr, 1);
     if (p) { *p = val; return; }
     ee_mem_check_tlb_fault(st, addr, 1);

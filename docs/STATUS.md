@@ -41856,6 +41856,66 @@ enqueue that work. That is a question about the SIF-RPC/module-dispatch layer (t
 original scope), not about interrupt handling or the scheduler - both of which are now confirmed
 correct at this exact point.
 
+## Round 937 (task #922, direct continuation of Round 936): the EE-side blocker is a missing feature, not a bug - structurally confirmed nothing in this tree can ever set SIF_SMFLAG bit 30
+
+**Bottom line.** Round 934 already identified *empirically* (a 24M-instruction organic trace) that
+GT3's real BIOS-side SIF-cmd dispatcher (0x8000FBA0) checks bit 30 (`0x40000000`) of the real
+hardware register SIF_SMFLAG (0x1000F230) and takes the "nothing to do" branch on all 41,096
+observed invocations because that bit is never set. This round closes that question
+*structurally*, by exhaustively auditing every writer of `g_sif.smflag` in the current tree
+(`source/hw/sif.c`) and every call site of `sif_iop_mmio_write32()` (the one function through
+which real IOP-side code could ever influence that register). Result: there are exactly three
+write sites total, and NONE of them ever includes bit 30:
+
+- `sif_mmio_write32()`'s `SIF_SMFLAG` case (`sif.c:136`) - this is the EE's own write-1-to-clear
+  path (`g_sif.smflag &= ~value`), i.e. it only ever removes bits, never sets bit 30.
+- `sif_iop_mmio_write32()`'s `case 0x30` (`sif.c:363-367`) - a plain overwrite (`g_sif.smflag =
+  value`) plus the Round 317 SBUS-interrupt-on-0->1-transition side effect. This is the correct,
+  real MMIO entry point IOP-side code would use - but grepping every call site
+  (`source/core/iop/iop_core.c:330` is the sole generic dispatcher entry, and
+  `source/hw/iop_module_loader.c:1312` is the sole caller that actually reaches it) shows the one
+  real caller only ever ORs in `SIF_STAT_SIFINIT` (`0x00010000`) - never bit 30.
+- `sif_ee_tick()`'s delayed BOOTEND-reassertion (`sif.c:445-447`, Round 441) - ORs in
+  SIFINIT/CMDINIT/BOOTEND (bits 16-18) only, matching the three real, publicly-documented
+  ps2sdk `SIF_STAT_*` values (cross-checked again this round against `iop/include/sifman.h`, no
+  new information beyond Round 934's own citation).
+
+**Conclusion: this is not a bug in existing code, and not something Round 935/936's interrupt-
+layer fixes could ever have touched.** Bit 30 is (per Round 934's research) a Sony BIOS-internal
+SIF-cmd-dispatch convention outside the public ps2sdk vocabulary - the real hardware behavior it
+signals is "the IOP-side SIF command-processing module (real Sony `sifcmd.c`'s IOP half, i.e. a
+real, runtime SIF-RPC command *dispatcher* loop, as opposed to the one-shot boot-time
+SIFINIT/CMDINIT/BOOTEND handshake this tree already models) has processed/queued a real command
+and the EE should proceed." This tree has no such runtime IOP-side SIF-cmd dispatch loop at all -
+`source/hw/sif.c`'s own header comment (task #186, cited again in Round 934) explicitly scopes the
+existing code as "a minimal IOP-side SIFCMD consumer model" (RPC bind/init tracking only, see
+`g_iop_cmd_rpc_bind_cd`/`g_bind_sid_table_*`), not a full command-processing engine. So the EE's
+BIOS dispatcher spinning forever on bit 30 is the direct, expected, structurally-guaranteed
+consequence of a genuinely *missing feature* (a real runtime SIF-RPC command-dispatch mechanism
+on the IOP HLE side), not a regression, not an interrupt/scheduler gap, and not something the
+Round 935/936 fixes left incomplete - those fixes correctly resolved everything in their own,
+narrower scope (the interrupt storm, and the idle-after-ack behavior).
+
+**Reframing task #919/#920's original scope.** The "real IOP-side RPC handling" task (#919,
+closed in Round 933 for the specific server-ID/fno GT3's boot requests) covered request-level
+RPC dispatch (recognizing a specific `SIF_CMD_RPC_BIND`/`SIF_CMD_RPC_CALL` target and replying).
+This round's finding is one layer below that: even a fully correct RPC *reply* never gets a
+chance to run, because the generic per-tick SIF-cmd-dispatch gate the real BIOS checks before
+even looking at RPC-specific state (bit 30 of SMFLAG) is never raised in the first place. Building
+a real fix here means implementing (a) whatever real IOP-side condition should periodically OR
+bit 30 into SMFLAG through the existing, correct `sif_iop_mmio_write32(0x1D000030, ...)` entry
+point - most plausibly, modeling a minimal always-resident "SIFCMD IOP thread/tick" (mirroring
+real ps2sdk's `iop/sifcmd.c` and Round 396's own already-incorporated reference source for that
+exact file) that periodically re-asserts bit 30 whenever it has (or would have) real per-tick work
+to report, rather than a one-shot boot-time flag. This is new functionality, not a one-line fix,
+and is the concrete, evidenced next-round target.
+
+**Explicitly not done this round:** no source change - this is a structural/audit confirmation of
+Round 934's empirical finding, closing the "is this a bug we can just fix" question with a
+definitive no. Per this project's own established convention for docs-only investigation rounds
+(Round 934/463-465/etc.), the regression suite and Wii cross-build are correctly skipped -
+`git status --short` is clean before this STATUS.md write.
+
 **Mandatory workflow status this round:** compile-checked both touched files clean (`-Wall
 -Wextra`, no new warnings) - full regression suite skipped per explicit user instruction this
 round (change is diagnostic-only, `#ifdef`-gated, zero behavioral impact when undefined). devkitPPC

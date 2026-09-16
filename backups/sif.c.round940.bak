@@ -100,33 +100,7 @@ int sif_mmio_read32(uint32_t addr, uint32_t *out)
         case SIF_MSCOM:  *out = g_sif.mscom;  return 1;
         case SIF_SMCOM:  *out = g_sif.smcom;  return 1;
         case SIF_MSFLAG: *out = g_sif.msflag; return 1;
-        case SIF_SMFLAG:
-            /* Round 940 (task #925, explicit user directive - "Schritt
-             * 1: Der chirurgische SMFLAG Bit 30 Injektions-Hook"):
-             * DELIBERATE SYNTHETIC DIAGNOSTIC OVERRIDE, NOT REAL
-             * HARDWARE MODELING. Round 937 structurally confirmed bit
-             * 30 (0x40000000) of SIF_SMFLAG can never be set by this
-             * tree (no IOP-side code path sets it - it would require a
-             * real Sony-proprietary SIF-RPC handshake this project
-             * does not implement). Round 940's fresh disassembly of
-             * the live GT3 BIOS dispatcher at 0x8000FBA0 confirms the
-             * real BIOS polls exactly this bit before calling the
-             * real SIF2-DMA-kick function at 0x8000FAF0. Per the
-             * user's explicit instruction we unconditionally force bit
-             * 30 on every EE-side read, to fake completion of that
-             * handshake and observe whether the real BIOS dispatch
-             * path unblocks. Round 940 ALSO found, in the SAME
-             * disassembly session, a second independent gate the
-             * dispatcher checks before it will call the kick function:
-             * *(0x80023EF8) != 0 - currently 0 in every observed
-             * checkpoint, so this hook alone is evidence-predicted to
-             * be insufficient by itself (real BIOS still takes the
-             * 0x8000FBE8 fallback). See Round 940 STATUS.md for the
-             * full honest before/after trace. Left unconditional (no
-             * build flag) per the user's explicit "erzwingen" (force)
-             * directive. */
-            *out = g_sif.smflag | 0x40000000u;
-            return 1;
+        case SIF_SMFLAG: *out = g_sif.smflag; return 1;
         case SIF_CTRL:
             /* Real PCSX2 HwRead.cpp: return psHu32(SBUS_F240) | 0xF0000102 */
             *out = g_sif.ctrl | 0xF0000102u;

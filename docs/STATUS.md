@@ -42045,3 +42045,131 @@ round (change is diagnostic-only, `#ifdef`-gated, zero behavioral impact when un
 Wii cross-build: clean. No functional/behavioral source change shipped this round (the two
 `R936_*` blocks are pure diagnostics, matching this project's established precedent for this class
 of instrumentation) - docs, commit, leak-check only.
+
+## Round 940 (task #925, explicit user directive - "Wir bauen in dieser Runde einen Hard-Override fuer SIF_SMFLAG Bit 30 und fixen das Interrupt-Acknowledge im SIF0-Fallback"): implemented the user's 3-step forced-breakthrough plan - SMFLAG bit-30 hard-override, interrupt-storm-risk audit, and forced PMODE/DISPLAY2 override - **both hooks are DELIBERATE SYNTHETIC DIAGNOSTIC OVERRIDES, explicitly NOT real hardware modeling**
+
+**Context/goal.** The user rejected further JIT work and gave a direct, three-step battle plan to
+force a graphical breakthrough on real Wii/Dolphin hardware by deliberate, clearly-labeled forced
+hacks (not real hardware fidelity), reasoning that any visible pixel output - even wrong/fake - is
+more useful debug data than continuing to run billions of blind instructions against the
+converged idle steady-state Round 939 documented. The user also asked directly: "Welchen
+Dateinamen hat Claude fuer eure SIF-Register-Emulation vergeben?" - answer: **`source/hw/sif.c`**,
+specifically `sif_mmio_read32()`'s `case SIF_SMFLAG:` (previously line 103).
+
+**Schritt 1 - SMFLAG bit-30 hard-override (`source/hw/sif.c`, `sif_mmio_read32()`).** Before
+touching anything, this round did a fresh, real disassembly of the live GT3 BIOS dispatcher region
+(`/tmp/r819_disasm` + `/tmp/eedisasm`, this project's own existing checkpoint-load-and-disassemble
+tools, against `/tmp/r936_gt3.ckpt`) to confirm Round 934/937's prior citation with actual bytes,
+not memory. Confirmed: the real BIOS SIF-RPC dispatcher at `0x8000FBA0` polls exactly `SIF_SMFLAG`
+bit 30 (`0x40000000`) before calling the real SIF2-DMA-kick function at `0x8000FAF0` (which
+programs real DMAC channel 7 at `0x1000C800` and kicks it via CHCR=`0x100`), and that the real BIOS
+itself clears bit 30 afterward via `sw s0,0(v0)` at `0x8000FBDC` (v0=SMFLAG) - confirming this
+project's own SMFLAG write-1-to-clear semantics (`sif_mmio_write32()`'s `case SIF_SMFLAG:`) are
+already correct and needed no changes. Per the user's exact instruction, `sif_mmio_read32()`'s
+`SIF_SMFLAG` case now unconditionally ORs in bit 30 on every EE-side read:
+```c
+case SIF_SMFLAG:
+    *out = g_sif.smflag | 0x40000000u;
+    return 1;
+```
+This is left unconditional (no build flag), exactly as the user's "erzwingen" (force) directive
+specified, with a long in-source comment citing this round and the anti-fabrication caveat below.
+
+**Important new finding this round: bit 30 alone is NOT sufficient to reach the real dispatch
+path.** The same disassembly session found the `0x8000FBA0` dispatcher has a SECOND, independent
+gate: `lw a1,16120(v0); beq a1,zero,0x8000FBE8` - i.e. it also requires `*(0x80023EF8) != 0`. This
+field is plain EE RAM (not an MMIO register), and reads `0x00000000` in every checkpoint this
+project has observed, including fresh boots. Forcing bit 30 via the MMIO hook cannot make this RAM
+field nonzero (nothing but the BIOS's own further-unimplemented SIF-RPC payload logic would
+legitimately set it), so the real BIOS is expected to keep taking the `0x8000FBE8` fallback path
+even with Schritt 1 in place. This is reported honestly rather than silently worked around -
+Schritt 1 is real, working infrastructure exactly as the user specified, but by itself does not
+change the real BIOS's control flow, which is exactly the evidence-based reason Schritt 3 below is
+necessary to satisfy the user's actual goal (visible pixels).
+
+**Schritt 2 - SIF0-fallback interrupt-acknowledge fix: investigated, found NOT APPLICABLE to this
+codebase's current design, so NOT implemented (anti-fabrication discipline, matching Round 938's
+precedent of declining an unevidenced fix).** The user's concern was a Round-935-class EE-side
+interrupt storm once Schritt 1 lets the EE attempt the SIF2 DMA kick. Traced the full real call
+chain: `dma_channel_signal_done()` (`source/hw/dma.c`, the function that would fire on a SIF2
+completion) only ever does `g_dma.d_stat |= (1u << channel)` - a pure DMAC_STAT status-bit set. It
+contains no call to `ee_intc_raise()` anywhere, and grepping all of `ee_core.c`/`ee_intc.c` for the
+handful of causes this project actually raises (`EE_INTC_IRQ_GS=0`, `SBUS=1`, `VBLANK_START=2`,
+`VBLANK_END=3`) confirms no EE_INTC cause is wired to DMAC channel completion at all in the current
+tree - it's purely a polled status register, not a vectored interrupt source. This means there is
+currently no "unregistered SIF0/DMA interrupt fallback path" for an unhandled interrupt to storm
+through on the EE side (unlike the real Round 935 IOP-side bug, which involved the IOP's own
+istat/istat_hi ack logic, a genuinely different subsystem). Implementing a write-1-to-clear guard
+for a call path that provably does not exist in this tree would be exactly the kind of unevidenced
+"fix" this project's own established convention (Round 775/938) says to decline. `ee_intc_mmio_write32()`'s
+existing `EE_INTC_STAT` case already implements real write-1-to-clear semantics
+(`g_intc.stat &= ~value`) for whenever a genuine DMAC-completion-to-EE_INTC wire is added in a
+future round - no change needed there either.
+
+**Schritt 3 - forced PMODE/DISPLAY2 override (`source/core/system.c`, `system_run_interleaved()`).**
+Given the Schritt-1-insufficient finding above, and per the user's own explicit fallback
+instruction, this round implements the forced graphics-initialization hack directly in the shared
+scheduler loop (`system_run_interleaved()`, used by both the test drivers AND the real
+Wii/Dolphin `main.c` path - not a test-only shortcut). Once `ee->instructions_executed` exceeds
+25,000,000 (`SIF_R940_FORCE_DISPLAY_THRESHOLD`, inside the user's stated 20-30M range) and PMODE is
+still `0x00` (checked immediately before writing, so a BIOS that DOES configure display itself
+first is never overwritten - the hook is a no-op in that case), a new
+`system_r940_force_display_if_needed()` function hard-writes:
+- `PMODE = 0x03` (circuits 1+2 enabled, exactly as requested)
+- `SMODE2 = 0x3` (INT=1 interlace, FFMD=1 frame mode)
+- `DISPFB2 = 0x1400` (FBP=0, FBW=10 i.e. 640px/64, PSM=0/PSMCT32)
+- `DISPLAY2 = 0x001bf27f0003227c` (DX=636 DY=50 MAGH=0 MAGV=0 DW=639 DH=447 - standard
+  ps2sdk/PCSX2-documented 640x448 NTSC layout, derived and verified independently in this round,
+  not copied from an unverified source)
+
+This fires exactly once (a `static int forced_once` guard), is fully unconditional/always-compiled
+per the user's "erzwingen" directive, and is documented in-source with an extensive comment citing
+this exact round, the user's instruction, and the honest caveat that this is a synthetic override
+with no claim of real hardware fidelity.
+
+**Empirical verification (host-native, this round).** Built a fresh link of the real
+`system_run_interleaved()` plus the full tree (including the JIT recompiler files, which
+`tests/run_test.sh`'s glob excludes but a full functional driver needs) and re-ran Round 939's own
+`tools/round939-diskless-pmode/chain_driver.c` from a cold diskless boot against the real
+`scph10000.bin` (GT3-era JP BIOS) for a 30,000,000-instruction budget:
+```
+[R940-FORCE] instr=25000000: BIOS never configured PMODE - forcing PMODE=0x03/SMODE2=0x3/DISPFB2=0x1400/DISPLAY2=0x001bf27f0003227c (Round 940 synthetic diagnostic override, NOT real hardware fidelity)
+[R939-MILESTONE] PMODE went nonzero at instr=5000000! pmode=0x03
+[R939-CHAIN] ... pmode=0x03 dispfb1=0x00000000 dispfb2=0x00001400
+```
+(chain_driver.c's own budget counter restarts per checkpoint-chain call, hence "instr=5000000" in
+its own local counter matching the global forced-write point.) Confirms the hook fires exactly
+where expected and that PMODE/DISPFB2/DISPLAY2 read back correctly through the SAME code path
+`gs_wii_output.c` (the real Wii/Dolphin framebuffer-open logic) consumes - i.e. this should now
+cause libogc's own display-open logic to see a valid PMODE on real hardware/Dolphin, satisfying the
+user's stated goal even though this is explicitly not a claim that the real BIOS ever does this
+itself.
+
+**Mandatory workflow status this round.** Backed up `source/hw/sif.c` and `source/hw/gs.c` to
+`backups/sif.c.round940.bak` / `backups/gs.c.round940.bak` before editing, per this project's
+Round-779 standing rule. Host-native regression suite: all **136/136 tests pass** (one pre-existing
+test, `test_sif.c`'s SMFLAG-readback check, was updated to expect the new forced bit 30 in its
+expected value, with an in-test comment explaining why - the underlying write-1-to-clear storage
+semantics it verifies are unchanged; ~3 other tests were initially misclassified as FAIL by this
+round's own batch-runner script due to a success-message-format detection bug in the *test runner*,
+not the code under test - corrected and re-verified as genuine passes). devkitPPC Wii cross-build:
+clean, zero warnings, `pcsx2-wii.dol`/`pcsx2-wii.elf` both produced successfully (the sandbox's
+devkitPPC toolchain had an unrelated broken `LD_LIBRARY_PATH` for `libmpfr.so.4` this round,
+worked around by pointing it at devkitPPC's own bundled copy of that exact library - not a code
+issue). Functional verification: see the empirical host-native run above, confirming both the
+SMFLAG-bit-30-forced-read (via test_sif) and the forced PMODE/DISPLAY2 override (via the
+chain_driver re-run) behave exactly as designed.
+
+**Honest scope note (please read before assuming this "fixes" anything about real BIOS fidelity).**
+None of this round's three steps make the emulator more accurate to real PS2 hardware - the
+opposite, in fact: Schritt 1 and Schritt 3 are both intentional, clearly-labeled lies told to the
+emulated BIOS/GS state specifically to produce visible output for debugging, exactly as the user
+requested and reasoned about. Schritt 1 alone (per the newly-found second dispatcher gate) does not
+and is not expected to change the real BIOS's control flow at all - it is real, correct
+infrastructure that simply isn't sufficient by itself given how little of the real SIF-RPC payload
+protocol this project implements. Schritt 3 is the part that actually produces the user's stated
+goal (a nonzero PMODE reaching the real Wii/Dolphin GS-output path), and it does so by bypassing
+the real BIOS's own configuration path entirely, at a fixed instruction-count threshold, with
+values the real BIOS never actually computed. Anyone continuing this project's work later should
+treat both hooks as instrumented, load-bearing scaffolding for a specific debugging goal, not as
+genuine SIF-RPC or SetGsCrt/display-init emulation.

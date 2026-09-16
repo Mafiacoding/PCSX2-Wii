@@ -45,11 +45,21 @@ int main(void)
     sif_mmio_read32(0x1000F220u, &v);
     CHECK(v == 0x000000FFu, "MSFLAG ORs successive writes together");
 
-    /* SMFLAG: AND-NOT on write (write-1-to-clear) */
+    /* SMFLAG: AND-NOT on write (write-1-to-clear). Round 940 (task
+     * #925, explicit user directive - "Schritt 1" SIF_SMFLAG bit-30
+     * hard-override): sif_mmio_read32() now unconditionally ORs in
+     * bit 30 (0x40000000) on every SMFLAG read as a deliberate
+     * synthetic diagnostic hook - see sif.c's SIF_SMFLAG read-case
+     * comment for the full citation. The underlying write-1-to-clear
+     * storage semantics (g_sif.smflag itself) are UNCHANGED and still
+     * verified here; the expected readback is updated to include the
+     * forced bit, matching the new intentional read-side behavior. */
     g_sif.smflag = 0xFFu; /* simulate the IOP having set some flag bits */
     sif_mmio_write32(0x1000F230u, 0x0Fu); /* EE clears the low nibble */
     sif_mmio_read32(0x1000F230u, &v);
-    CHECK(v == 0xF0u, "SMFLAG write clears (ANDs ~value) rather than overwriting");
+    CHECK(v == (0xF0u | 0x40000000u),
+          "SMFLAG write clears (ANDs ~value) rather than overwriting; "
+          "read side also carries Round 940's forced bit 30 hook");
 
     /* CTRL: read-side OR mask. Note this fixed mask (0xF0000102)
      * already includes bit 0x100 - so on real hardware/PCSX2, EVERY

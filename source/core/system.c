@@ -8,6 +8,7 @@
 #include "core/system.h"
 #include "core/ee/ee_core.h"
 #include "core/iop/iop_core.h"
+#include "core/hw/gs.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <unistd.h>
@@ -90,6 +91,64 @@ void system_rebind_iop_bridge(void)
     ee_core_set_iop_write8_bridge(iop_core_get_state(), system_iop_write8_adapter);
 }
 
+/* Round 940 (task #925, explicit user directive - "Schritt 3: Die
+ * ultimative Fallback - Die PMODE/DISP2 Gewaltsimulation"):
+ * DELIBERATE SYNTHETIC DIAGNOSTIC OVERRIDE, NOT REAL HARDWARE
+ * MODELING OR A CLAIM THAT THE REAL BIOS EVER DOES THIS. Round 939
+ * showed PMODE staying 0x00 across an 8.24-BILLION-instruction
+ * diskless boot (converged idle steady-state, not slow organic
+ * progress). Round 940's fresh BIOS disassembly additionally found
+ * that even with Schritt 1's SIF_SMFLAG bit-30 hook forcing the
+ * dispatcher's first gate, a second independent gate
+ * (*(0x80023EF8) != 0, real EE RAM content) still blocks the real
+ * SIF2 dispatch path in every observed checkpoint - so the real
+ * BIOS is not expected to configure PMODE/DISPLAY2 itself within any
+ * reasonable instruction budget on the current tree. Per the user's
+ * explicit instruction ("Wenn das BIOS PMODE nicht anfasst, tun wir
+ * es im Emulator-Code selbst"), once the EE has executed more than
+ * SIF_R940_FORCE_DISPLAY_THRESHOLD instructions AND PMODE is still
+ * unconfigured (0), we hard-write PMODE=0x03 (circuits 1+2 enabled),
+ * SMODE2=0x3 (interlace+frame-mode bits set) and standard/plausible
+ * NTSC 640x448 values into DISPFB2/DISPLAY2, purely so libogc's own
+ * display-open logic on real Wii/Dolphin has a nonzero PMODE to
+ * react to and SOMETHING (BIOS/OSDSYS content, garbage, or a flat
+ * color field) reaches the screen - any visible pixel is more debug
+ * data than more billions of instructions of confirmed black screen.
+ * This only fires ONCE, and never overwrites a PMODE the real BIOS
+ * configured on its own (checked immediately before writing) - if
+ * the SIF hooks above (or a future real fix) ever let the BIOS reach
+ * its own real SetGsCrt/PMODE write first, this block is a silent
+ * no-op forever after. Left unconditional/always-compiled (no build
+ * flag) per the user's explicit "erzwingen" (force) directive - see
+ * Round 940 STATUS.md for the full before/after evidence and the
+ * exact register-value derivation (DX=636 DY=50 MAGH=0 MAGV=0
+ * DW=639 DH=447, the standard ps2sdk/PCSX2 640x448 NTSC layout). */
+#define SIF_R940_FORCE_DISPLAY_THRESHOLD 25000000ull
+
+static void system_r940_force_display_if_needed(ee_state_t *ee)
+{
+    static int forced_once = 0;
+    if (forced_once)
+        return;
+    if (ee->instructions_executed < SIF_R940_FORCE_DISPLAY_THRESHOLD)
+        return;
+
+    gs_state_t *gs = gs_get_state();
+    forced_once = 1; /* only ever attempt this once, regardless of outcome */
+    if (gs->pmode != 0)
+        return; /* real BIOS already configured display itself - do not stomp it */
+
+    gs->pmode    = 0x03u;             /* enable GS circuit 1 + circuit 2 */
+    gs->smode2   = 0x3u;               /* INT=1 (interlace), FFMD=1 (frame mode) */
+    gs->dispfb2  = 0x1400u;            /* FBP=0, FBW=10 (640/64), PSM=0 (PSMCT32) */
+    gs->display2 = 0x001bf27f0003227cull; /* DX=636 DY=50 MAGH=0 MAGV=0 DW=639 DH=447 */
+    system_safe_printf("\n[R940-FORCE] instr=%llu: BIOS never configured PMODE - "
+           "forcing PMODE=0x03/SMODE2=0x3/DISPFB2=0x%04x/DISPLAY2=0x%016llx "
+           "(Round 940 synthetic diagnostic override, NOT real hardware fidelity)\n",
+           (unsigned long long)ee->instructions_executed, (unsigned)gs->dispfb2,
+           (unsigned long long)gs->display2);
+}
+
 int system_run_interleaved(uint64_t max_slices)
 {
     ee_state_t  *ee  = ee_core_get_state();
@@ -103,6 +162,8 @@ int system_run_interleaved(uint64_t max_slices)
         }
         if (!iop->halted)
             iop_core_step();
+
+        system_r940_force_display_if_needed(ee);
 
         if (ee->halted && iop->halted) {
             system_safe_printf("\n[+] system_run_interleaved: both cores halted after %llu slice(s)\n",

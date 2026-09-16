@@ -42289,3 +42289,33 @@ Neither is fabricated as resolved by this change.
 - Wii cross-build: clean, zero warnings/errors (`LD_LIBRARY_PATH` workaround from Round 940 still
   required in this sandbox for `cc1`/libmpfr).
 - Verified fresh `.dol`/`.elf` timestamps confirm the rebuild picked up the change.
+
+### Round 941 addendum: empirical verification of the fix + GS-memory-content check (docs-only, no further source change)
+
+Built a small host-native diagnostic driver (`tools/round941-gsmem-dump/dump_driver.c`, not part of
+the tracked build) that reproduces the exact diskless-boot scenario past the 25,000,000-instruction
+forced-display threshold, then dumps every pixel of GS local memory at Circuit 2's configured
+framebuffer (`FBP=0`, `FBW=640px`, `640x448` area) to directly check what content (if any) the
+now-fixed blit path is actually reading.
+
+Result: **`[R941DUMP] total pixels=286720 nonzero=0 (0.0000%)`** - GS local memory at the
+configured framebuffer address is confirmed 100% zero. This matches Round 939's finding (no real
+GS/GIF draw activity observed in this specific diskless boot path) and confirms the earlier
+prediction in this section: the Round 941 routing fix is working correctly (the blit now executes
+every frame instead of being silently skipped), but there is genuinely no real pixel content for
+it to read yet.
+
+The user then tested the Round 941 build on real Dolphin and reported real progress: sparse
+colored dots/"stars" visible on the screen for the first time, while Dolphin's own D3D12
+"Draw calls" stat stayed at 0 (expected and unrelated - this project's blit writes directly to the
+Wii's XFB via `DCFlushRange()`, never through GX draw calls, so that stat has nothing to do with
+this rendering path). Given the direct host-native proof that GS memory at the relevant address is
+entirely zero, those colored dots **cannot** be coming from the GS-memory-content path fixed this
+round - the most likely explanation is a Dolphin-side artifact (e.g. its deflicker/interlace-merge
+filter interacting with the forced `SMODE2` `INT=1` interlace bit, or scaling/antialiasing noise
+around the direct-XFB debug-console text), not signal from the emulated PS2 GS pipeline. This is
+stated honestly as an open, unconfirmed hypothesis - not verified this round - rather than claimed
+as resolved.
+
+No further source change this round; this is a documentation-only empirical follow-up to the
+Round 941 fix already committed in `de96f46`.

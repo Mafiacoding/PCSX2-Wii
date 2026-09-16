@@ -44092,3 +44092,66 @@ counter + getter, `ee_core.c`/`ee_core.h`) and
 (`pcsx2-wii.dol` produced, no warnings/errors). No regression - the
 only tracked-source change is a plain, always-cheap counter increment
 at one existing call site.
+
+## Round 958 (task #951): audited real IOP-side sceSifSetRpcQueue/sceSifRegisterRpc against this project's implementation - confirms NO "ACK" concept exists in the real protocol at all, and closing this gap would not currently change any observable behavior
+
+Follow-up to Round 956's Check 3 (the real IOP-side SIF RPC
+queue-registration gap this project's own implementation has, found
+while fact-checking the user's watchdog proposal). Read the real,
+already-uploaded `sifcmd.c` (IOP-side `IOP_SIF_rpc_interface`) in full
+to determine two things: whether any real "queue-registration ACK"
+concept exists at all (directly relevant to the user's declined Round
+956 proposal), and whether modeling this project's own IOP-side gap
+would change any currently-observable behavior.
+
+**Finding 1 - no ACK concept exists in the real protocol, at all.**
+`sceSifSetRpcQueue(qd, key)` and `sceSifRegisterRpc(sd, command, func,
+buff, cfunc, cbuff, qd)` are both 100% local IOP-side linked-list
+bookkeeping under `CpuSuspendIntr`/`CpuResumeIntr` - `SetRpcQueue`
+zeroes and appends `qd` onto the global `rpc_common.queue` list;
+`RegisterRpc` fills a `sceSifServeData` struct and links it onto
+`qd->link`. Neither function sends any SIF command, DMA transfer, or
+packet to the EE side. The ONLY real IOP->EE traffic anywhere in this
+file is the BIND-reply (`0x80000008`, after the EE's own
+`0x80000009` BIND request) and the CALL-reply (also `0x80000008`,
+after the EE's own `0x8000000A` CALL request) - both triggered by the
+EE CLIENT's action, never by IOP-side registration. This is a second,
+independent, stronger confirmation (on top of Round 956's "the word
+'watchdog' appears zero times" finding) that the user's "missing
+SIF-queue-registration ACK" claim has no basis: there is no such ACK
+message in the real protocol for anything to fail to send. The real
+hazard class in this area is an ordering race (a BIND arriving before
+the matching RegisterRpc has run, so `search_svdata()` returns a null
+server) - a completely different failure mode from a "missing ACK".
+
+**Finding 2 - closing this project's own real IOP-side gap would not
+currently change any observable behavior.** The real IOP-side
+queue/register/loop machinery (`sceSifSetRpcQueue` +
+`sceSifRegisterRpc` + `sceSifGetNextRequest` + `sceSifRpcLoop`) exists
+so a real IOP kernel can run multiple concurrent, arbitrary RPC
+servers (FILEIO, PADMAN, MCSERV, etc.), generically dispatched by
+`fno` via a per-queue FIFO and thread-wakeup-on-enqueue
+(`iWakeupThread(qd->key)`). This project instead special-cases the
+one RPC number its entire boot trace has ever needed
+(`LF_F_ELF_LOAD`), served directly from `ee_core.c`'s EE-side
+bind/call/reply shortcut (Round 933's own citation). Nothing in the
+current SCPH-50004 (or any other) boot trace performs a second,
+distinct, concurrently-registered IOP-side RPC server whose dispatch
+would depend on real FIFO/queue-list structures - so implementing
+them now would add fidelity without changing anything this project
+can currently observe or test.
+
+**Verdict: correctly declined, not implemented.** Per this project's
+own standing discipline (only implement fixes with real evidence of
+an observable gap, not machinery for its own sake), this round adds
+no tracked-source change. The real gap is now clearly documented and
+scoped: it would become worth closing specifically if/when a future
+round needs to model a SECOND concurrently-registered IOP-side RPC
+service (e.g. real PADMAN/MCSERV server loops) whose dispatch
+genuinely depends on this queue/list mechanism - not before, and not
+because of any ACK-signal omission, since Finding 1 shows no such
+signal exists in the real protocol to omit.
+
+**No source fix this round** (audit/citation round only - regression
+suite and Wii cross-build correctly skipped, matching the established
+docs-only-round convention).

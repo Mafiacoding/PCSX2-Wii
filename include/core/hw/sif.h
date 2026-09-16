@@ -543,5 +543,10 @@ uint32_t sif_cmd_iop_get_rpc_bind_count(void);
 
 void sif_cmd_iop_track_bind_sid(uint32_t cd_ptr, uint32_t sid);
 uint32_t sif_cmd_iop_lookup_bind_sid(uint32_t cd_ptr); /* returns 0 if not found */
+/* Round 952 (task #945): dumps the whole bind-sid table (both arrays,
+ * up to SIF_CMD_BIND_SID_TABLE_SIZE=8 entries) for offline/diagnostic
+ * inspection - see the citation next to sif_cmd_iop_dump_bind_table()'s
+ * definition in sif.c. Returns the table's fixed capacity. */
+uint32_t sif_cmd_iop_dump_bind_table(uint32_t *out_cd, uint32_t *out_sid, uint32_t max);
 
 #endif

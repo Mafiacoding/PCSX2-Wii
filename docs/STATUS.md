@@ -43493,3 +43493,96 @@ content) once the boot reaches `instr>=25,000,000` - this is expected
 given Finding 1 and not a new regression. To test: place
 `SCPH-50004_BIOS_V9_EUR_190.BIN` inside the emulated SD card image at
 `sd:/pcsx2/bios/SCPH50004.bin` before loading the `.dol` in Dolphin.
+
+## Round 952 (task #945): fact-checked the user-relayed pad-RPC
+## PMODE-fix proposal against real sources - declined (Round-949-class)
+
+**The proposal, verbatim substance**: the user relayed a detailed,
+externally-styled write-up claiming the EE polls a padman/sio2man RAM
+state field during the Round 951 VBLANK burst, and that OSDSYS defers
+`SetGsCrt` because the IOP-side pad reply is empty. Proposed fix:
+`hle_sif_handle_pad_request()` in a new `source/core/sif/sif_rpc.c`,
+intercepting `server_id==0x80000005`, fabricating pad-init/pad-read RPC
+responses, and writing a hardcoded RAM address `0x00020000+0x4054` to
+signal RPC success. Explicit instructions to implement, cold-boot test,
+run the full regression suite + Wii build if it worked, and report
+whether `rpc_bind_count` exceeds 13.
+
+**Method (same evidentiary discipline as Round 949's MECHACON
+decline)**: checked the proposal's specific numeric claims against (a)
+this project's own already-shipped, ps2sdk-cited `SIF_SID_*` table
+(`include/core/hw/sif.h` lines 532-539, task #202/79th finding), and
+(b) empirical `rpc_bind_count`/bind-sid-table behavior during an actual
+SCPH-50004 diskless boot, via a new `tools/round952-padrpc-factcheck/
+analyze.c` survey tool plus a small new diagnostic accessor,
+`sif_cmd_iop_dump_bind_table()` (`source/hw/sif.c`/`include/core/hw/
+sif.h`), added to inspect the existing (Round-663-era) 8-entry
+cd_ptr->sid bind table live.
+
+**Finding 1 - the claimed `server_id==0x80000005` does not match any
+real PS2 SIF service cited anywhere in this project.** This project's
+own `sif.h` table, sourced directly from the real, uploaded ps2sdk tree
+(`ee/rpc/pad/src/libpad.c`), already documents PADMAN's REAL service
+IDs as `SIF_SID_PAD_BIND_ID1_OLD=0x8000010F` and
+`SIF_SID_PAD_BIND_ID2_OLD=0x8000011F` - shipped since Round 663/666,
+over a hundred rounds before this proposal arrived. `0x80000005` also
+doesn't match any of this project's other 9 real, cited sids
+(LOADFILE=6, IOPHEAP=3, FILEIO=1, MCSERV=0x400, SPU2DRV=0x601,
+CDVD_INIT=0x592, CDVD_SCMD=0x593, CDVD_NCMD=0x595,
+CDVD_DISKREADY=0x59A). No source (ps2sdk, real PCSX2, service manuals)
+defines a real PS2 SIF service at `0x80000005` - it is not a real,
+citable constant.
+
+**Finding 2 - empirically, PADMAN is never bound at all during this
+SCPH-50004 boot window.** Ran the new survey tool for 60,000,000
+slices (`ee_instr` reaching 479,999,590) and watched
+`rpc_cmd_iop_get_rpc_bind_count()` plus the live bind-sid table:
+`rpc_bind_count` climbs steadily to exactly **13** by the end of the
+window - the same number the user's proposal itself asked about
+("Erhöht sich der rpc_bind_count über die 13 hinaus?"), confirming this
+specific data point is real and shared, not fabricated. But dumping the
+bind-sid table shows **every single one of those 13 binds is the SAME
+real service, `SIF_SID_LOADFILE` (0x80000006)** - OSDSYS's own,
+already-documented (task #202, `ee_core.c` line ~2461: "all re-binding
+the SAME sid=0x80000006") periodic LOADFILE re-bind, not a new pad
+bind. `pad_bind_seen=0` for the entire run: PADMAN is never bound once.
+
+**Synthesis**: the proposal's entire causal chain - EE blocked waiting
+on an IOP reply to an outstanding PADMAN RPC during the VBLANK burst -
+is empirically impossible in this project's current state: there is no
+outstanding PADMAN bind for any IOP-side handler to reply to in the
+first place, and the one service ID the proposal names does not
+correspond to any real PS2 SIF service this project (or the real
+ps2sdk source) has ever found evidence for. This is the same class of
+disproof as Round 949's MECHACON/SIO2-IP3 decline: a plausible-sounding,
+detailed technical write-up whose specific cited constants do not
+survive a check against this project's own real, already-fetched
+source material. Per the project's standing anti-fabrication rule, the
+proposed fix (`hle_sif_handle_pad_request()` intercepting
+`server_id==0x80000005`, writing `0x00020000+0x4054`) is **not
+implemented** - it would be adding unevidenced, made-up behavior on top
+of a correctly-modeled real subsystem.
+
+**What WAS shipped this round**: only the diagnostic accessor
+`sif_cmd_iop_dump_bind_table()` (declared in `sif.h`, defined in
+`sif.c`) - a small, real, useful addition (dump the existing bind-sid
+table for offline inspection) that required no invented behavior and is
+independently useful for any future SIF-RPC investigation. Everything
+else this round was investigation and a new tool
+(`tools/round952-padrpc-factcheck/analyze.c`), not a behavioral change.
+
+**Verification**: `test_iop` (links `sif.c` along with 20 other IOP
+source files) - 4/4 checks pass, 0 failed, after the `sif.c`/`sif.h`
+change (`test_sif`/`test_ee` targets in `tests/README.md` have pre-
+existing stale link commands unrelated to this round - same known gap
+as task #554, not re-fixed here to stay in scope). devkitPPC Wii
+cross-build: clean, 0 errors, all 45 source files compiled including
+the modified `sif.c`, `pcsx2-wii.dol`/`.elf` produced.
+
+**Recommended next evidenced step** (not this round): if VU1/EE-side
+FIO_F_OPEN/PADMAN activity is ever going to be investigated further for
+SCPH-50004, the next honest step is disassembling the VBLANK-burst call
+targets themselves (`0x8000d670`, `0x8000bd58`, `0x800073e0`, Round 951)
+to see what they actually read/write, rather than assuming a specific
+RPC mechanism gates them - the same "read what the code really does
+first" discipline that found the real DVE gap in Round 950.

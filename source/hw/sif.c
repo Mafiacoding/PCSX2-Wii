@@ -546,3 +546,20 @@ uint32_t sif_cmd_iop_lookup_bind_sid(uint32_t cd_ptr)
     }
     return 0u;
 }
+
+/* Round 952 (task #945): diagnostic dump of the whole cd_ptr->sid
+ * bind-sid table (see sif.h's citation above sif_cmd_iop_track_bind_sid()
+ * for the real-protocol grounding). Used to fact-check a user-relayed
+ * proposal claiming PADMAN's real SIF service_id is 0x80000005 and that
+ * it should be intercepted in a new server_id-based RPC handler - this
+ * lets a survey tool see every real sid this project's own boot trace
+ * has actually observed being bound, not just the running count. */
+uint32_t sif_cmd_iop_dump_bind_table(uint32_t *out_cd, uint32_t *out_sid, uint32_t max)
+{
+    uint32_t i, n = (max < SIF_CMD_BIND_SID_TABLE_SIZE) ? max : SIF_CMD_BIND_SID_TABLE_SIZE;
+    for (i = 0; i < n; i++) {
+        out_cd[i]  = g_bind_sid_table_cd[i];
+        out_sid[i] = g_bind_sid_table_sid[i];
+    }
+    return SIF_CMD_BIND_SID_TABLE_SIZE;
+}

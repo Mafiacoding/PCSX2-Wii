@@ -42674,3 +42674,121 @@ but not pursued, since it isn't the practical blocker; (3) once past whichever h
 the diskless/GT3 paths, re-verify whether the VBLANK-driven IOP wake actually lets real BIOS module
 code execute further (this round only proves the wake mechanism itself is now correct, not that
 it's sufficient alone for full boot progress).
+
+## Round 944 (task #447/#536/#932, diagnosis-only, no fix shipped): the new `pc=0x000178A8` halt
+is the SAME structural class as Rounds 753-763's already-closed `pc=0x4B8` wall - PC free-running
+through real, correctly-loaded Sony IOP kernel/module DATA (not code) until falling off the end
+into genuinely-unpopulated trailing RAM
+
+**User's Round 944 work order (verbatim intent, German original in chat)**: disassemble
+`pc=0x000178A8` and ~20 instructions before/after via a MIPS-I/R3000A disassembler to determine
+polling-loop vs. infinite trap; check whether it's a hard unconditional jump-to-self (kernel panic)
+or classic register-polling; report the exact register values (especially `$a0`-`$a3`/`$v0`) at the
+halt; compare against how Rounds 753-763 handled the same guard/message class.
+
+**Method**: built `tools/round944-iop-halt-178a8/analyze.c`, a direct checkpoint-load analysis tool
+that reuses this project's own already-verified R5900/MIPS-I disassembler body (`tools/round655-ee-
+disasm/disasm.c`'s `disasm_one()` and opcode tables, copied verbatim - the IOP/R3000A is a strict
+MIPS-I subset of what that table already covers, so reuse is safe and not re-derived/guessed).
+Loaded the exact halted checkpoint Round 943 produced (`/tmp/r943_fresh.ckpt`, a genuine fresh
+`system_init()` cold-boot run against the post-sched_ticks-fix tree, independently re-confirmed via
+`r943haltcheck` to still read `iop.halted=1 pc=0x000178a8` before use), dumped the full GPR/COP0
+register file, disassembled IOP RAM `0x17780-0x17920` around the halt PC, then walked backward from
+the halt to find where the last genuinely non-zero content ends, and finally disassembled a wider
+`0x16A80-0x177E4` window (including the code at `$ra=0x00016b08`, the live return address) to find
+the actual real caller.
+
+**Answering the user's two direct questions:**
+- **Register dump at the halt** (as requested): `$v0=0x00000000 $v1=0x00000000 $a0=0x00000001
+  $a1=0xfffffff6 $a2=0xfffdbfcf $a3=0x00000000`, full GPR file and `$sp=0x001fbfb0 $ra=0x00016b08`
+  recorded in STATUS.md/tool output for the record. COP0: `Status=0x00000401` (IEc=1, IM2=1 -
+  unchanged from Round 943's finding, same single real IM line), **`Cause=0x00000020`** (ExcCode=8,
+  Syscall - a REAL exception was taken, not zero/idle), `EPC=0x00017888`.
+- **"Ist es eine stinknormale Warteschleife, oder ein unbedingter Sprung auf sich selbst (Panic)?"**
+  **Neither.** There is no `bne`/`beq` polling loop anywhere near the halt PC, and there is no `j
+  0x178A8` self-jump either - the Round-173 guard's halt message itself is not a real instruction
+  being executed, it's this project's own diagnostic tripwire (`iop_core.c`, unchanged since Round
+  173/task #338) firing after 8 consecutive zero-valued word FETCHES starting at `0x1788C`. What
+  actually happened, precisely reconstructed from the trace: real code free-ran in a straight line
+  (Cause's BD bit is 0 - the SYSCALL-shaped word at `0x17888` was reached by plain sequential PC
+  advance, not as a branch-delay-slot target or a jump landing) straight through what turns out to
+  be a real, correctly-loaded, densely-populated Sony IOP kernel/module DATA region - NOT code -
+  until it hit the SYSCALL-shaped word at `0x17888` (raw value `0x0001788C`, decoding as `funct=
+  0x0C`/SYSCALL purely by bit-pattern coincidence: it's actually a data value, most likely this
+  structure's entry-point/next-pointer field). This raised a genuine R3000A Syscall exception
+  (`Cause.ExcCode=8`, matching `Cause=0x20` exactly), which Round 131/175's own already-existing,
+  already-correct default-vector recovery path (`iop_core.c` ~line 1103, the `pc==0x80000080 &&
+  exception_pending` block) handled cleanly per its documented EPC+4/`$v0=0` convention for non-
+  restartable synchronous exceptions (Syscall/Breakpoint/Trap/Reserved-Instruction all share this
+  path since Round 175/task #340) - resuming execution at `pc=EPC+4=0x1788C`. From there, IOP RAM is
+  genuinely, uniformly zero (verified: 64 consecutive zero words dumped from `0x178A8` onward), so
+  the interpreter fetched 8 straight NOPs and the Round-173 tripwire correctly, honestly fired at
+  `0x178A8` - exactly 8 words past `0x1788C`, exactly matching its own documented threshold.
+
+**What the "data" actually is - and why it's real, not garbage**: the wider disassembly (`0x16A80-
+0x177E4`) resolves this precisely, extending Round 934's ASCII findings with hard evidence:
+- `0x17780-0x17784`: the ASCII string **"intrman\0"** - the real Sony IOP interrupt-manager module's
+  own embedded name string.
+- `0x17788-0x177BC`: a real jump-stub table (`j 0x000000D0`/`j 0x000000D4`/`j 0x000000E8`/`j
+  0x000000EC` - this project's own already-modeled low BIOS-trap sentinels from task #179's iop_
+  core.h comment - plus `j 0x00107924`/`j 0x001078B8`/`j 0x001078E4`, three real, higher-address
+  module functions). **These three stubs at `0x177A8`/`0x177B0`/`0x177B8` are genuinely, correctly
+  CALLED** - the wider dump shows real code at `0x16ADC-0x16B00` issuing `jal 0x000177B0` / `jal
+  0x000177A8` / `jal 0x000177B0` / `jal 0x000177B8` in sequence, each of which lands on its stub,
+  jumps onward to the real module function, and (implicitly) returns - this is a working, correct
+  real call chain, not a bug.
+- `0x176A8-0x176B4`: the ASCII string **"sifman\0\0"** - SIFMAN's own name string, plus (`0x176B8`
+  onward) a table of mostly-identical pointer values (`0x00017748`, appearing at 6 of the ~15
+  entries) which is itself the address of a genuine minimal "do nothing, `jr ra` immediately" stub
+  at `0x17748-0x1774C` - the exact same real Sony convention Round 753 already identified for
+  EXCEPMAN's handler table (many unregistered slots all pointing at one shared default handler).
+- `0x177D0-0x177DC`: the ASCII string **"IOP_SIFmanager\0"** - a second, fuller SIFMAN identity
+  string, directly matching Round 934's original "sifman" fragment finding and now precisely
+  located and fully decoded.
+- `0x177E0-0x17868`: a dense table of literal hardware/RAM addresses (`0xBF801450`, `0xBF8010A0`,
+  `0xBD000000`+small offsets, etc. - real IOP KSEG1 hardware-register and KSEG1-RAM-mirror address
+  ranges, cross-checked against the genuine small accessor functions found at `0x17600-0x17698`,
+  e.g. `0x17624`: `lui v0,0xBD00 / lw v0,0(v0) / jr ra`, which read/write those exact same literal
+  addresses) - this project's `disasm_one()` decodes these words as `cache` instructions purely by
+  bit-pattern coincidence (op=0x2F); they are real address-table DATA, not executed `cache` ops.
+- `0x17870-0x17888`: a small trailing descriptor (`0x17870`=`0x000177D0`, i.e. a literal pointer
+  BACK to the "IOP_SIFmanager" string a few words above it; `0x17874`/`0x17878` look like version/
+  flag fields; `0x17888`=`0x0001788C`, most plausibly an entry-point or next-descriptor field) -
+  consistent with a real Sony `ModuleInfo_t`-style module descriptor (this project's own Round 375/
+  task #375 citation of ps2sdk's `loadcore.c`/`COFF.h` already documents this exact real on-disk/
+  in-RAM module-info convention).
+
+**Classification vs. Rounds 753-763's `pc=0x4B8` wall**: structurally identical. Both are real,
+correctly-loaded Sony BIOS/kernel content (there `EXCEPMAN`'s handler table, here `SIFMAN`'s module-
+descriptor+name-string+jump-stub-table region) being fetched as if it were executable code, with
+this project's own already-shipped exception-recovery machinery (Reserved-Instruction trap there,
+Syscall trap here - both routed through the identical Round 131/175 default-vector shortcut)
+correctly and harmlessly absorbing the coincidental instruction-shaped bit patterns, until PC falls
+off the true end of the real region into genuinely-never-written trailing RAM, where the Round-173
+tripwire correctly, honestly halts. Per Round 753-763's own hard-won, already-documented conclusion
+for the identical shape: **there is no evidenced, non-fabricated emulator fix available here** -
+making the walk stop earlier or land somewhere more useful would require either (a) locating and
+fixing a genuine caller-side control-flow bug that shouldn't be walking straight through this data
+in the first place (not pinpointed this round - the wider trace shows the stub-table CALLS around
+it are correct; what isn't yet found is which earlier instruction's `jr`/`j`/fall-through put PC at
+the start of this specific straight-line walk, since none of the three real `jal` calls found this
+round target the walked-through region directly), or (b) inventing real Sony low-kernel code content
+this project does not have and does not transcribe - the same clean-room constraint Round 760
+already articulated. Recommend to the user: a future round (Round 945) should back-trace further
+from `$ra=0x00016b08`'s own caller chain (not yet done this round) to find the real upstream jump/
+fall-through that starts the straight-line walk, the same way Round 754/755's live write-watch
+technique found the caller for the original `0x4B8` wall - OR accept this, like `0x4B8`, as this
+particular boot path's honest current terminus and redirect toward a different subsystem.
+
+**Verification**: no source file under `include/`/`source/` was modified this round (diagnosis-only,
+matching the discipline of Rounds 753/755/758/759 etc.) - host-native regression suite and devkitPPC
+Wii cross-build correctly skipped, no tracked-source change to regress-test. The one new file is
+`tools/round944-iop-halt-178a8/analyze.c` (diagnostic tool, promoted from scratch), which does not
+participate in the tracked build (`tools/` is excluded from `tests/run_test.sh`'s and the Wii
+Makefile's source globs, same as every prior round's `tools/roundNNN-*` diagnostic).
+
+**Open items for a future round**: (1) back-trace `$ra=0x00016b08`'s own caller to find what put PC
+at the start of the straight-line walk into the SIFMAN descriptor region - the actual, still-
+unidentified root cause; (2) the `0x4B8`-class open recommendation (accept vs. fabricate) now
+applies equally to this new occurrence; (3) all of Round 943's still-open items (timer 5 overflow
+semantics, full-boot-progress re-verification) remain open and unaffected by this round.

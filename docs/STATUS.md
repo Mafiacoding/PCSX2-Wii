@@ -43918,3 +43918,77 @@ Wii build - zero behavioral change), plus new investigative tool
 this round's diagnostic touches or reads) - all pass, 0 failures.
 devkitPPC Wii cross-build clean (45 source files, `pcsx2-wii.dol`
 produced). No regression.
+
+## Round 956 (task #949): fact-checked the user-relayed "SIF-queue-registration ACK / kernel watchdog timeout" proposal - no citation found anywhere, declined per this project's standing anti-fabrication discipline
+
+Immediately following Round 955, the user relayed a specific claim:
+that the 13x `rom0:OSDSYS` reload cycle is caused by "a missing
+acknowledge signal at SIF queue registration and an associated kernel
+watchdog timeout", fixable by "cleanly acknowledging the SIF RPC error
+status after decompression completes", and pointed to "the provided
+documentation" for implementation details. This is the same category
+of claim Rounds 949 and 952 already fact-checked and declined
+(MECHACON/SIO2-IP3, and `server_id==0x80000005`) - a plausible-sounding
+technical mechanism with no attached source. Per this project's
+standing discipline, any proposed fix must trace to either this
+project's own fresh disassembly or a real, citable source already in
+the uploads - so this was checked before touching any code.
+
+**Check 1 - no new documentation was actually attached to the
+message.** `ls -la` on the uploads folder shows no file newer than the
+SCPH-50004 `.NVM`/`.MEC`/`.EROM` set from the previous round; nothing
+matching "the provided documentation" exists to consult.
+
+**Check 2 - "watchdog" appears exactly once in this entire project's
+combined real-source corpus (uploads + tracked code), and it names a
+completely different, unrelated real mechanism.** A recursive
+case-insensitive search across every uploaded file (real ps2sdk
+archive sources, the SCPH-70000 service manual, BIOS dumps, etc.) for
+"watchdog"/"queue registration"/"SifRegisterQueue"/"sceSifQueue" found
+one hit: `sifcmd.c`'s real `sceSifSetRpcQueue()`/`sceSifRegisterRpc()`/
+`sceSifGetNextRequest()` functions - genuine RPC-server queue
+registration primitives, but with no watchdog/timeout concept
+anywhere near them. The word "watchdog" itself appears nowhere in any
+uploaded ps2sdk/PCSX2/service-manual source. Searching this project's
+own tracked tree for "watchdog" turns up exactly one real, already-
+cited concept: `ee_timers.c`'s `s_irq_bit[]` table comment, citing
+real PCSX2's `Hw.h` EE_INTC enum entry `VU0WATCHDOG=14` - the EE's
+VU0 co-processor watchdog interrupt, an entirely different subsystem
+(VU0 microprogram execution stalls) with no connection to SIF RPC,
+IOP kernel timeouts, or LOADFILE/OSDSYS reloading.
+
+**Check 3 - the real, cited `sceSifSetRpcQueue()`/`sceSifRegisterRpc()`
+IOP-side queue-registration mechanism this project DOES have real
+source for (`sifcmd.c`, already fetched) is not currently modeled on
+the IOP side of this project's own SIF implementation** (`include/core/hw/sif.h`
+only exposes EE-side bind/call counters, no IOP-side queue/serve-data
+structures). This is a genuine, real gap worth flagging for a future
+round - but it is a different, more modest claim than "missing ACK
+causes a kernel watchdog timeout", and nothing in Round 955's evidence
+(the reply IS delivered, OSDSYS DOES execute, the retry is a clean
+successful reload cycle, not an error/timeout path) supports a timeout
+narrative in the first place.
+
+**Verdict: declined.** No real source names a "kernel watchdog
+timeout" gating LOADFILE/OSDSYS reloads, no such mechanism exists in
+any of this project's own citation trail, and Round 955's own findings
+(clean, repeated SUCCESS on every LOADFILE cycle, real code execution
+after each reply) actively contradict a timeout/error-path
+explanation. Implementing a "SIF-RPC-Fehlerstatus"-acknowledge fix
+based on this proposal would be exactly the kind of unevidenced,
+invented "magic trigger" this project has explicitly and repeatedly
+declined to ship (Rounds 949, 952). The real IOP-side RPC
+queue-registration gap identified in Check 3 remains a legitimate,
+separately-trackable lead, decoupled from the fabricated watchdog
+framing.
+
+**No source fix this round** (fact-check only, no tracked source
+changed - regression suite and Wii cross-build correctly skipped per
+the established docs-only-round convention).
+
+**Recommended next step (unchanged from Round 955's own conclusion):**
+forward-trace from the end of the decompression loop
+(`0x00100c38` onward) to find what OSDSYS's own code does after
+unpacking completes that leads back to a fresh `rom0:OSDSYS` LOADFILE
+request ~35-37 million instructions later - the real, evidenced
+continuation of this investigation.

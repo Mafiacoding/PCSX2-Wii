@@ -42477,3 +42477,53 @@ it is a plausible and worth revisiting once boot progress reaches the point
 where OSDSYS is actually attempting to draw text.
 
 No regressions. Committed alongside this STATUS.md update.
+
+## Round 942b (task #447/#536, direct follow-up to Round 942): diskless BIOS boot
+re-tested against the idle/EXL fix - CONFIRMS the user's hypothesis that the same deadlock
+class was very likely the real root cause underneath Round 939's "converged idle steady-state"
+finding, not a separate/deeper "genuinely nothing left to do" state.
+
+**Method note:** the existing `tools/round939-diskless-pmode/chain_driver.c` survey driver breaks
+out of its loop the first time `gs->pmode != 0`, which happens deterministically at
+`instr=25,000,000` regardless of this fix (Round 940/941's synthetic force-display override fires
+unconditionally at that threshold whenever PMODE is still organically 0) - so that driver cannot
+by itself show whether the underlying idle/EXL mechanism also affects the diskless path. A plain
+continuation driver without that early break (`r942_diskless_plain.c`, scratch, not yet promoted
+into `tools/`) was used instead, logging `pc`/`instructions_executed`/`idle`/IOP `pc`/PMODE every
+10M-slice chunk with no early exit.
+
+**Result:** a fresh (instruction-0) diskless boot with the Round 942-fixed binary ran to
+`total_instr=2,799,999,045` (~2.8 billion) across several chained continuations, with
+`ee->idle=0` at every single sampled checkpoint and `ee->pc` genuinely, continuously varying
+across real BIOS/OSDSYS-decompressor address ranges the whole way (e.g.
+`0x8000CDFC -> 0x8000CE08 -> ... -> 0x8000F86C -> 0x8000CF90 -> ... -> 0x8000CC74 -> ... ->
+0x8000CFF8` and onward) - no stuck pc, no stuck instruction count, at any sampled point. This
+is qualitatively different from Round 939's own documented finding for the *same* diskless
+scenario on the pre-942 tree: PMODE staying at 0x00 across a full 8.24-billion-instruction run,
+explicitly characterized there as a "converged idle steady-state." Given that "idle steady-state"
+is externally indistinguishable from "the CPU is idle-looping and being kept nominally alive by
+`ee_core_park_tick()` without ever making real progress" - exactly the idle/EXL deadlock symptom
+this round's fix targets - this new result is strong (though not yet 100%-isolated, since no
+direct old-binary-vs-new-binary bisection was run this round) evidence that the diskless path's
+old "genuine idle" framing in §6b of the delivered task #447/#536 history document was itself
+likely an artifact of this same bug, not an independent, deeper finding about real BIOS behavior.
+
+**GT3 disc-boot chain also extended further this round** (continuing from Round 942's
+`/tmp/gt3_r942_freshfix.ckpt`): now at `total_instr=1,589,747,959` (~1.59B, up from Round 942's
+789.7M), still `pc` genuinely varying, still zero involvement from any synthetic override. PMODE
+has remained stable at `0x66` and DISPFB2 stable at `0x00009400` since it first organically
+appeared (~90-100M instructions) - no further GS-register transition observed yet toward whatever
+comes next in the real intro-render sequence within this budget.
+
+**Open item flagged, not yet investigated:** on BOTH the diskless and GT3 disc-boot paths, across
+this entire multi-billion-instruction span, the IOP core's `pc` has stayed completely frozen at
+`0x00155910` the whole time (i.e., only the EE side is confirmed unblocked by this round's fix;
+the IOP side's own state has not been re-examined at all since before Round 942 and may represent
+a separate, still-open blocker - real hardware precedent, per this project's own Rounds 742-745
+live-PCSX2 findings, is that a genuine disc-free boot continues showing periodic IOP activity out
+past several billion cycles, so an IOP frozen this long on our tree is worth treating as a
+real, distinct open question for a future round, not assumed benign).
+
+No source changes this round (docs/survey-only follow-up); no regression/Wii-build workflow
+needed. Diagnostic driver `r942_diskless_plain.c` remains a scratch file this round (not yet
+promoted to `tools/`).

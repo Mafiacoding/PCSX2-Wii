@@ -43389,3 +43389,107 @@ MS3) are SCPH-10000-line investigations, explicitly deprioritized by
 this round's pivot instruction - left `[pending]` rather than closed,
 since the user may want to return to other titles later, but no longer
 the active focus.
+
+## Round 951 (task #447/#536/#887/#944): SCPH-50004 diskless boot pushed to 1.2B EE instructions - EE reaches a correct, real, repeating VBLANK-driven per-frame loop; PMODE still NOT organic within this budget (honest negative, not a bug)
+
+**User's explicit three-part work order this round** (German): the newer BIOS should "eigentlich" (actually) end up touching PMODE
+itself and finally reach the boot menu now embedded in ROM; run Round
+951; do a diskless boot with the new BIOS; produce a new `.dol` for
+Dolphin testing if possible.
+
+**Method**: rebuilt `tools/round946-post945-survey/diskless_sif_gs_survey.c`
+against the Round 950 DVE-fixed tree and pushed the SCPH-50004 diskless
+boot from a fresh `system_init()` out to 150,000,000 slices
+(`ee_instr` counter reaches 1,199,998,939 - `EE_IOP_STEP_RATIO` means
+each slice advances the EE multiple real cycles). Built a new
+`tools/round951-scph50004-resting/analyze.c` (same disassembler lineage
+as Rounds 944/947/950) that boots fresh, runs to a given budget, then
+dumps EE/IOP/GS state plus disassembles the three addresses the EE
+oscillates between (`0x8000DBD0-0x8000DD10`, `0x8000E5E0-0x8000E610`,
+`0x00100B60-0x00100C90`) and an explicit fingerprint check comparing
+the live GS state against the exact Round 940/941 forced-override
+constants.
+
+**Finding 1 - PMODE is still the Round 940/941 synthetic force, not
+organic BIOS output.** The fingerprint check
+(`pmode==0x02 && dispfb2==0x1400 && display2==0x001bf27f0003227cull`)
+**MATCHES** at `ee_instr=1,199,998,939` - i.e. within this instruction
+budget, SCPH-50004's real BIOS/OSDSYS code has not itself called
+`SetGsCrt`/written PMODE; the value we observe is still the pre-existing
+diagnostic override that unconditionally fires once at `instr==
+25,000,000` if PMODE is still 0 (see `system.c`'s
+`system_r940_force_display_if_needed()`, unchanged this round). This
+directly answers (honestly, not optimistically) the user's opening
+question: no, organic PMODE has not yet been observed on this newer
+BIOS either, at least not within ~1.2 billion EE instructions of
+diskless boot.
+
+**Finding 2 - the IOP is genuinely, correctly idle - not stuck.**
+`iop->idle==1`, `iop->pc==0x00155C00` held constant across the entire
+150,000,000-slice window, and `iop->sched_ticks==150,000,000` (ticking
+normally - confirms Round 943's VBLANK-wake counter fix is still
+active and counting even while idle, exactly as designed). Per Round
+943's own citation (`iop_core.h`'s `idle` field doc comment), this is
+the documented, deliberate "every module exhausted, nothing left to
+run" park state - not a new bug, and not the same class of problem
+Round 950 fixed on the EE side.
+
+**Finding 3 - the EE's resting oscillation is a real, well-formed,
+repeating VBLANK_START wait-and-service loop, not a spin/hang.**
+Disassembly of `0x8000DBD0-0x8000DD10` shows the exact standard PS2
+idiom: `sw v1,0(v0)` with `v0=0x1000F000` (real EE `INTC_STAT`, a
+write-1-to-clear register) and `v1=4` acks INTC cause bit 2
+(**VBLANK_START**), then `lw v0,0(a0)` / `andi v0,v0,4` / `beq ...`
+polls the same register until VBLANK_START next fires. Once it fires,
+the code runs a burst of real subroutine calls (`0x8000d670`,
+`0x8000bd58`, nine calls into `0x800073e0` with different fixed offset
+arguments - a status/heartbeat-style burst, not a device-table walk,
+since the offsets are not monotonic), then the *exact same*
+ack-then-poll sequence repeats at `0x8000DCE0-0x8000DD10` (confirmed
+byte-identical to the first occurrence). This is a genuine, correct,
+per-frame (60Hz) BIOS/OSDSYS idle-tick loop - structurally the same
+category of finding as Rounds 596-624's extensively-documented
+SCPH-10000 OSDSYS idle loop (which also needed real pad/disc/
+memory-card-derived I/O to escalate past it, not further raw
+instruction budget). `0x8000E5E0-0x8000E610` and `0x00100B60-0x00100C90`
+are, respectively, a small real leaf helper (`sq`/loop-counter/`jr ra`
+return sequence - looks like a small bounded copy/init loop called
+from the burst above) and a large genuinely-empty (`nop`-filled, never
+populated) memory region the EE's PC only transiently touches for a
+single slice sample, not a real code path.
+
+**Synthesis / answer to the user's question**: the newer BIOS did NOT
+skip needing PMODE/display setup to come from somewhere - it has
+reached its own real, correct per-frame idle loop (unlike SCPH-10000,
+this loop is driven by a real VBLANK ack/wait, not the "OSDSYS not in
+ROM" issue the user's research identified), but escalating past this
+idle loop into whatever calls the real `SetGsCrt`/menu-draw path
+appears to need the same class of external stimulus (pad presence,
+disc presence, or memory-card content) that Rounds 596-624 already
+spent many rounds chasing for SCPH-10000's OSDSYS - this is a
+plausible, evidenced next hypothesis, not yet confirmed, and is the
+natural target for a future round rather than something fixed this
+round (no single evidenced register/protocol gap was found to
+"implement a fix" for - unlike Round 950's DVE case, forcing anything
+here without a concrete citation would repeat exactly the mistake the
+Round 949 MECHACON proposal was declined for).
+
+**No source fix implemented this round** - correctly skipped per the
+project's anti-fabrication discipline, since no specific evidenced gap
+(register, protocol, or missing dispatch) was found; this is a
+characterization/diagnosis round.
+
+**`.dol` build for Dolphin testing (task #944, user-requested)**:
+`source/main.c`'s real-BIOS boot path now tries `sd:/pcsx2/bios/
+SCPH50004.bin` FIRST (before the existing `SCPH39001.bin`/
+`SCPH10000.bin`/`bios.bin` fallbacks), matching the project's pivot to
+SCPH-50004 as the primary/focus BIOS. devkitPPC Wii cross-build: clean,
+0 errors, all 44 source files (including `ee_dve.c`) compiled,
+`pcsx2-wii.dol`/`pcsx2-wii.elf` produced. **What the user will see**:
+because PMODE is still the Round 940/941 *forced* diagnostic value
+(Finding 1 above), the screen will show the same synthetic
+debug-pattern frame documented in Round 941 (not real OSDSYS/menu
+content) once the boot reaches `instr>=25,000,000` - this is expected
+given Finding 1 and not a new regression. To test: place
+`SCPH-50004_BIOS_V9_EUR_190.BIN` inside the emulated SD card image at
+`sd:/pcsx2/bios/SCPH50004.bin` before loading the `.dol` in Dolphin.

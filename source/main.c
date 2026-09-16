@@ -393,7 +393,15 @@ static void run_real_boot_flow(void)
 
     if (!g_bios_ok) {
         memset(&g_bios, 0, sizeof(g_bios));
-        g_bios_ok = (bios_load("sd:/pcsx2/bios/SCPH39001.bin", &g_bios) == 0 ||
+        /* Round 951 (task #447/#536/#887): SCPH50004.bin tried FIRST -
+         * per the user's Round 950 pivot, this is now the project's
+         * primary/focus BIOS (SCPH-10000's OSDSYS was never fully in
+         * ROM to begin with - see docs/STATUS.md Round 950). Place the
+         * uploaded SCPH-50004_BIOS_V9_EUR_190.BIN at
+         * sd:/pcsx2/bios/SCPH50004.bin (Dolphin: inside the emulated
+         * SD card image) for this build to pick it up. */
+        g_bios_ok = (bios_load("sd:/pcsx2/bios/SCPH50004.bin", &g_bios) == 0 ||
+                     bios_load("sd:/pcsx2/bios/SCPH39001.bin", &g_bios) == 0 ||
                      bios_load("sd:/pcsx2/bios/SCPH10000.bin", &g_bios) == 0 ||
                      bios_load("sd:/pcsx2/bios/bios.bin", &g_bios) == 0);
     }

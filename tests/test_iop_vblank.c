@@ -23,7 +23,14 @@
  * module loader's `idle=1` shortcut kicks in, so no interrupt source
  * - however real and correctly modeled - can be taken at all under
  * the current model. This is honestly a raise-only unit test.
- */
+ *
+ * Round 943 (task #447/#536, IOP-freeze root-cause fix): iop_check_
+ * vblank()'s phase source changed from `instructions_executed` (which
+ * freezes solid while `idle` is set - see iop_core.h's `sched_ticks`
+ * field comment for the full root-cause writeup) to `sched_ticks` (a
+ * genuinely unconditional per-scheduler-tick counter). Updated below
+ * to drive the test via `sched_ticks` accordingly - the raise
+ * mechanism/timing constants being tested are unchanged. */
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -43,9 +50,9 @@ int main(void)
     iop_state_t st;
     memset(&st, 0, sizeof(st));
 
-    /* Phase 0 (instructions_executed == 0): VBLANK_START (bit 0)
+    /* Phase 0 (sched_ticks == 0): VBLANK_START (bit 0)
      * should raise, VBLANK_END (bit 11) should not. */
-    st.instructions_executed = 0;
+    st.sched_ticks = 0;
     iop_check_vblank(&st);
     iop_intc_state_t *intc = iop_intc_get_state();
     CHECK((intc->istat & 0x1u) != 0, "VBLANK_START (bit 0) raised at phase 0");
@@ -54,7 +61,7 @@ int main(void)
     /* Reset istat, check VBLANK_END at the documented 1/12-of-frame
      * offset. */
     intc->istat = 0;
-    st.instructions_executed = IOP_CYCLES_VBLANK_DURATION;
+    st.sched_ticks = IOP_CYCLES_VBLANK_DURATION;
     iop_check_vblank(&st);
     CHECK((intc->istat & 0x800u) != 0, "VBLANK_END (bit 11) raised at phase=duration");
     CHECK((intc->istat & 0x1u) == 0, "VBLANK_START (bit 0) NOT raised at phase=duration");
@@ -62,16 +69,16 @@ int main(void)
     /* Reset istat, check nothing raises at an arbitrary mid-frame
      * phase (no spurious raises). */
     intc->istat = 0;
-    st.instructions_executed = IOP_CYCLES_VBLANK_DURATION + 12345u;
+    st.sched_ticks = IOP_CYCLES_VBLANK_DURATION + 12345u;
     iop_check_vblank(&st);
     CHECK(intc->istat == 0, "no raise at an arbitrary non-boundary phase");
 
-    /* Reset istat, check the NEXT frame's phase-0 (instructions_
-     * executed == IOP_CYCLES_PER_FRAME_NTSC, i.e. wraps via modulo)
-     * raises VBLANK_START again - confirms periodicity across
-     * frames, not just a single first-frame check. */
+    /* Reset istat, check the NEXT frame's phase-0 (sched_ticks ==
+     * IOP_CYCLES_PER_FRAME_NTSC, i.e. wraps via modulo) raises
+     * VBLANK_START again - confirms periodicity across frames, not
+     * just a single first-frame check. */
     intc->istat = 0;
-    st.instructions_executed = (uint64_t)IOP_CYCLES_PER_FRAME_NTSC * 3u;
+    st.sched_ticks = (uint64_t)IOP_CYCLES_PER_FRAME_NTSC * 3u;
     iop_check_vblank(&st);
     CHECK((intc->istat & 0x1u) != 0, "VBLANK_START re-raises on frame 3's phase 0 (periodicity)");
 

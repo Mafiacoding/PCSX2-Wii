@@ -654,10 +654,25 @@ static void halt(const char *reason)
  * committed to elsewhere. VBLANK_END's offset reuses the same 1/12-
  * of-frame approximation ee_check_vblank() already uses and
  * documents at length (real NTSC vertical blanking is roughly 8.5%
- * of a frame). Ticked here off `instructions_executed`, the same
- * 1-instruction-=1-cycle simplification iop_timers_tick() and
- * ee_check_vblank() both already use and document - no new timing
- * model invented for this. */
+ * of a frame).
+ *
+ * Round 943 (task #447/#536, IOP-freeze root-cause fix): previously
+ * ticked here off `instructions_executed`, on the documented
+ * assumption that this gave the same "1-instruction=1-cycle,
+ * unconditional-even-while-idle" property iop_timers_tick()'s own
+ * per-timer `count++` already has. That assumption was WRONG:
+ * instructions_executed only increments inside iop_step()'s real
+ * fetch/decode/execute body (see that function), which the `idle`
+ * early-return in iop_core_step() skips entirely - so the instant
+ * the IOP went idle, this phase computation silently froze solid at
+ * whatever residual value it held, and could never again equal 0 or
+ * IOP_CYCLES_VBLANK_DURATION. Confirmed empirically against a real
+ * GT3/diskless-boot checkpoint parked at pc=0x00155910, idle=1: over
+ * 1,845,558 further iop_core_step() calls (more than 3 nominal
+ * VBLANK periods), istat/Cause never changed even once. Now reads
+ * `sched_ticks` instead - a field incremented unconditionally at the
+ * very top of every iop_core_step() call, See iop_core.h's own
+ * updated doc comment for the full citation. */
 #define IOP_CYCLES_PER_FRAME_NTSC  (4921488u / 8u)
 #define IOP_CYCLES_VBLANK_DURATION (IOP_CYCLES_PER_FRAME_NTSC / 12u)
 #define IOP_INTC_IRQ_VBLANK_START  0
@@ -665,7 +680,7 @@ static void halt(const char *reason)
 
 static void iop_check_vblank(iop_state_t *st)
 {
-    uint64_t phase = st->instructions_executed % IOP_CYCLES_PER_FRAME_NTSC;
+    uint64_t phase = st->sched_ticks % IOP_CYCLES_PER_FRAME_NTSC;
     if (phase == 0)
         iop_intc_raise(IOP_INTC_IRQ_VBLANK_START);
     else if (phase == IOP_CYCLES_VBLANK_DURATION)
@@ -1986,6 +2001,16 @@ int iop_core_step(void)
 {
     if (g_iop.halted)
         return 1;
+
+    /* Round 943 (task #447/#536, IOP-freeze root-cause fix): the one
+     * genuinely unconditional per-tick counter - incremented here,
+     * before anything else (including the `idle` early-return further
+     * down), so it keeps advancing even while the IOP core itself is
+     * parked. iop_check_vblank() below reads this instead of
+     * `instructions_executed` (which freezes while idle - see its own
+     * doc comment and iop_core.h's `sched_ticks` field comment for the
+     * full root-cause writeup). */
+    g_iop.sched_ticks++;
 
 #ifdef R814_CLOSECONFIG_TRACE
     /* Round 814: consume the post-SCMD_CLOSECONFIG-dispatch trace

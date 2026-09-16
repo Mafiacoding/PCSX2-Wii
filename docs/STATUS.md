@@ -42527,3 +42527,150 @@ real, distinct open question for a future round, not assumed benign).
 No source changes this round (docs/survey-only follow-up); no regression/Wii-build workflow
 needed. Diagnostic driver `r942_diskless_plain.c` remains a scratch file this round (not yet
 promoted to `tools/`).
+
+## Round 943 (task #447/#536, IOP-freeze root-cause fix - resolves Round 942b's "separate, still-open blocker")
+
+**User's explicit three-part work order this round** (German, verbatim in chat history):
+disassemble the frozen IOP `pc=0x00155910` and surrounding instructions to determine polling-loop
+vs. data/trap; check `iop_core.c` for an idle-flag-controlling mechanism analogous to
+`ee_core_park_tick()`; register-trace the IOP for 100 iterations at this address to see whether
+`$v0`/`$a0`/`$status` are static or dynamic - closing with two direct questions: "Ist es eine
+stinknormale Warteschleife (Polling)...?" and "Welche Werte stehen in den COP0-Statusregistern des
+IOP während dieses Stillstands?"
+
+**Investigation (all three parts of the work order, directly answered):**
+
+1. **Disassembly/characterization of `pc=0x00155910`.** Loaded the Round 942b diskless-boot
+   checkpoint (`total_instr=2,799,999,045`, IOP parked at this address) and dumped raw words
+   `pc-40..pc+40`. Decoded (little-endian): `0x001558f0: 0x636e7953` + `0x001558f4: 0x00004545`
+   = ASCII "Sync" + "EE" - matching the user's own Round 934 citation of "Sync"/"sifman"/
+   "loadcore" fragments near this region. **Answer to Q1: NO, it is not a polling loop.** The IOP
+   is not fetching/decoding/executing any instructions at this address at all - `iop_core.h`'s own
+   `idle` field doc comment (task #179, 54th finding) documents this exactly: once "every module is
+   exhausted" (real BIOS module list fully loaded and run to completion - confirmed via
+   `source/hw/iop_module_loader.c`'s completion path), the interpreter sets `idle=1` and
+   deliberately does NOT fetch/decode/execute at this synthetic, likely-zeroed trampoline address
+   (this project's own anti-fabrication discipline forbids inventing fictitious "idle loop"
+   instruction bytes real hardware might contain). This is a **deliberate, already-documented
+   design point**, not a bug in itself.
+
+2. **IOP idle-flag-controlling mechanism (analogue to `ee_core_park_tick()`).** Found at
+   `iop_core.c`'s `iop_core_step()` (lines ~2044-2058, unmodified this round):
+   ```c
+   if (g_iop.idle) {
+       uint8_t pending_before = g_iop.exception_pending;
+       iop_check_hw_interrupt(&g_iop, g_iop.pc);
+       if (!pending_before && g_iop.exception_pending)
+           g_iop.idle = 0; /* a real interrupt just vectored us - resume real execution next call */
+       return 0;
+   }
+   return iop_step();
+   ```
+   This is **already structurally correct** - unlike the pre-Round-942 EE bug, there is no missing
+   reset/stale-flag defect here. **Ursache A (user's hypothesis) is therefore NOT what's
+   happening**: the IOP's idle-clear logic was never broken.
+
+3. **Register-trace, 200 iterations at the frozen point.** `$v0`/`$a0`/`$a1`/`$ra`/Status/Cause
+   were **completely static** across all 200 single-steps (`iop_core_step()` calls) - `$v0`
+   =0x00000001, `$a0`=0x00017880 the whole time, `status=0x00000401`, `cause=0x00000000`, `pc`
+   never moved. **Answer to Q2: `Status=0x00000401` (bit0/IEc=1 = interrupts globally enabled,
+   bit10/IM2=1 = the ONE interrupt-mask line real IOP hardware needs, since all IOP INTC sources -
+   timer, DMA, SIF, CDVD, VBLANK - multiplex onto the single Cause.IP2 line via the I_STAT/I_MASK
+   MMIO registers, not individual COP0 IM bits), `Cause=0x00000000` (nothing pending on any
+   source).** This matched the "static/frozen, like the old EE bug" signature the user's Ursache A
+   hypothesis predicted - but the actual mechanism turned out to be different (see below).
+
+**Deeper investigation - the real root cause (beyond the user's three explicit steps):**
+
+Confirmed via `iop_check_hw_interrupt()` (source read, `iop_core.c:726`) that `Cause.IP2` is set
+purely from `intc->istat & intc->imask` (plus the `istat_hi`/`imask_hi` soft-IRQ range) - i.e. the
+real IOP INTC hardware model is correct and was NOT the defect. The actual question became: why
+does `intc->istat` never change, when `iop_check_vblank()` (a genuinely periodic, module-
+independent interrupt source - VBLANK fires every frame regardless of what any driver configured)
+is called **unconditionally, even while idle** (confirmed: it's called before the `idle` early-
+return in `iop_core_step()`)?
+
+Answer: `iop_check_vblank()` computed its frame-phase as `instructions_executed %
+IOP_CYCLES_PER_FRAME_NTSC`. `instructions_executed` is **only incremented inside `iop_step()`'s
+real fetch/decode/execute body** (confirmed: every increment site, `iop_core.c` lines 954-1978, is
+inside that function) - which the `idle` early-return skips entirely. So the instant the IOP went
+idle, this phase computation **froze solid** at whatever residual value it held, and could never
+again equal `0` (VBLANK_START) or `IOP_CYCLES_VBLANK_DURATION` (VBLANK_END). This is the exact
+opposite of the intended "unconditional, same rationale as `iop_timers_tick()`" design the
+function's own doc comment claimed - `iop_timers_tick()` actually achieves genuine unconditional
+ticking via its own directly-incremented per-timer `count++` (confirmed via `iop_timers.c`), NOT
+via `instructions_executed` - so the comment's analogy was imprecise in exactly the way that
+mattered.
+
+**Empirical confirmation:** ran a fresh 3-VBLANK-period (1,845,558 `iop_core_step()` calls) trace
+against the real frozen checkpoint (`intc: istat=0x00000800 imask=0x0001000d istat_hi=0x00000000
+imask_hi=0x00000c00`, `cop0: Status=0x00000401 Cause=0x00000000`, IOP `instructions_executed`
+frozen at 3,752,103 for the entire span) - zero istat/Cause changes observed the whole time.
+Decoded `imask=0x0001000d`: bit0 (VBLANK_START) IS unmasked, bit11 (VBLANK_END) is masked (matches
+`istat`'s lone pending-but-masked bit 11 - VBLANK_END had already fired once, harmlessly, before
+the freeze; VBLANK_START never got the chance because phase never returned to 0). Also confirmed
+IOP timers 0-4 are legitimately one-shot-fired-and-disabled (`INTR_ENABLE=0`, real hardware
+semantics, not a bug) and timer 5 is genuinely armed (`INTR_ENABLE=1`, `REPEAT_INTR=1`) but its
+`TARGET_FLAG` is already set (suppressing the target-match path) with a target far beyond the
+current count, leaving only a ~3.94-billion-tick-away 32-bit overflow as its own next possible
+fire point - not the practical fix here, but noted as a smaller lead for a future round if ever
+needed.
+
+**None of the user's three hypotheses (A/B/C) are quite what's happening**, and this is reported
+back honestly rather than force-fitting the evidence to match them:
+- **Ursache A** ("IOP-seitiger Status.EXL-Zwilling"): the IOP's idle-clear mechanism was already
+  structurally sound (see point 2 above) - this is NOT the same bug class as the pre-942 EE
+  deadlock.
+- **Ursache B** (missing SIF-side hardware polling loop, `lw`/`bne` spin): disproven directly -
+  the IOP isn't executing ANY code at the frozen point, hardware-polling or otherwise (see point 1).
+- **Ursache C** (`sifman`-load RPC deadlock, EE not acking IOP RAM release): not evidenced - the
+  actual mechanism is entirely IOP-internal (a frozen wall-clock breaking its own VBLANK source),
+  with no EE-side RPC/SIF payload involvement at all.
+
+**Fix implemented** (`include/core/iop/iop_core.h`, `source/core/iop/iop_core.c`): added a new
+`uint64_t sched_ticks` field to `iop_state_t`, incremented unconditionally at the very top of
+`iop_core_step()` (before the `idle` early-return, before anything else) - the one genuinely
+unconditional per-scheduler-tick counter. `iop_check_vblank()` now reads `sched_ticks` instead of
+`instructions_executed` for its phase computation. Both sites carry full citation-trail doc
+comments explaining the root cause for future rounds.
+
+**Verification:**
+- `tests/test_iop_vblank.c` updated (phase-source-only change, same raise-mechanism/timing
+  assertions) - all 6 checks pass.
+- Full host-native regression suite: **136/136 tests pass** (one pre-existing test,
+  `test_iop_vblank`, needed the phase-source update above; no other regressions).
+- devkitPPC Wii cross-build: clean, 0 warnings, 0 errors, `pcsx2-wii.dol` produced.
+- **Direct mechanism verification** (`tools/round943-iop-vblank-freeze/mechcheck.c`): reproduced
+  the exact frozen-checkpoint register/mask state synthetically (`idle=1`, `Status=0x00000401`,
+  `Cause=0`, `imask=0x0001000d`, `imask_hi=0x00000c00`) on a fresh `system_init()`, then drove real
+  `iop_core_step()` calls. Result: **the IOP now genuinely wakes from idle** at exactly
+  `sched_ticks=615186` (one full `IOP_CYCLES_PER_FRAME_NTSC` period after the synthetic freeze
+  point) via a real VBLANK_START-driven interrupt dispatch (`istat` becomes `0x00000801` - VBLANK_
+  END's pre-existing masked-pending bit 11 plus the new VBLANK_START bit 0; `Cause` becomes
+  `0x00000400`/IP2; `pc` vectors to the real default exception vector `0x80000080`). This is a
+  clean, deterministic reproduction of the exact real-world symptom and its resolution.
+- **Fresh diskless cold-boot re-run** (`system_init()` from instruction 0, not checkpoint-resumed -
+  the struct-size change makes old checkpoints from before this round incompatible, as expected):
+  reached `total_instr=1,200,000,000` before hitting a **different, already-documented** genuine
+  IOP halt (not idle) at `pc=0x000178A8`, `halt_reason="PC wandered into unpopulated low IOP kernel
+  memory 0x000178A8 (real thread-context gap - STATUS.md round 173)"`. This is an existing, known
+  halt class (see Rounds 753-763's extensive "Round 173-class gap" investigation and fixes,
+  previously chased mainly on the GT3 disc-boot path) - honestly flagged as a **separate, still-
+  open item for a future round**, not conflated with this round's VBLANK fix (which is independently
+  and directly verified above via the mechanism-level test). Because this halt occurs well before
+  the ~3.75M-IOP-instruction mark where the old `pc=0x00155910` freeze used to occur, this
+  particular fresh run cannot directly re-confirm the fix against a full organic re-run this round;
+  the direct mechanism test above is the decisive verification instead.
+
+**Scratch diagnostic drivers promoted to `tools/round943-iop-vblank-freeze/`:** `freeze_probe.c`
+(raw memory/register dump + 200-step trace at the frozen point), `intc_probe.c` (INTC istat/imask/
+timer-state survey across 3 VBLANK periods), `mechcheck.c` (the decisive direct-mechanism
+verification described above).
+
+**Open items for a future round:** (1) the newly-encountered `pc=0x000178A8` "Round 173-class" IOP
+halt on the diskless cold-boot path - not yet chased down for this specific address/context; (2)
+timer 5's real target/overflow semantics (`target=0xfffee000`, far beyond current count) - flagged
+but not pursued, since it isn't the practical blocker; (3) once past whichever halt currently gates
+the diskless/GT3 paths, re-verify whether the VBLANK-driven IOP wake actually lets real BIOS module
+code execute further (this round only proves the wake mechanism itself is now correct, not that
+it's sufficient alone for full boot progress).

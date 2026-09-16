@@ -35,6 +35,26 @@ typedef struct {
     uint8_t  halted;
     char     halt_reason[128];
 
+    /* Round 943 (task #447/#536, IOP-freeze root-cause fix): a genuinely
+     * unconditional per-scheduler-tick counter, incremented once at the
+     * very top of every iop_core_step() call (see that function) -
+     * BEFORE the `idle` early-return below, unlike `instructions_executed`
+     * above (which only increments inside iop_step()'s own real
+     * fetch/decode/execute body, and is therefore silently frozen for
+     * as long as `idle` stays set). iop_check_vblank() was written on
+     * the documented assumption that "ticked off instructions_executed"
+     * gives it the same unconditional-even-while-idle timing base that
+     * iop_timers_tick()'s own per-timer `count++` already has - but
+     * instructions_executed does NOT have that property, so VBLANK's
+     * phase computation silently froze solid the instant the IOP went
+     * idle, permanently breaking the one genuinely hardware-independent
+     * periodic wake source (confirmed empirically: 1,845,558 further
+     * iop_core_step() calls - over 3 nominal VBLANK periods - produced
+     * zero istat/Cause change on a real GT3/diskless-boot checkpoint
+     * frozen at pc=0x00155910, idle=1). iop_check_vblank() now reads
+     * `sched_ticks` instead - see its own updated doc comment. */
+    uint64_t sched_ticks;
+
     /* Task #179 continued: real IOP hardware never halts - after its
      * boot-time module list finishes running, the real IOP kernel's
      * thread scheduler always has at least an idle thread to fall

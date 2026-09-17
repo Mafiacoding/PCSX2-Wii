@@ -45016,3 +45016,59 @@ yet") is now STALE - it predates `source/hw/gs_mem.c`/`gif.c`/
 `gs_wii_output.c` and the 25+ GS feature tests and was never updated. Not
 fixed this round (doc-only, out of scope for this fact-check), flagged for
 a future small housekeeping round.
+
+## Round 966
+
+**Task (user correction, important):** all of Round 965's "diskless boot
+reaches pmode=0x66 / real menu" citations (Rounds 565/566/569/610/624) were
+run against the JP BIOS - and the "real OSDSYS reaches the interactive main
+menu with zero disc" result specifically required a live PCSX2 VM (real
+JP-BIOS hardware-in-the-loop), not this project's own host-native core.
+User correctly pointed out none of that transfers to SCPH-50004 (the PAL
+BIOS this whole GT3 investigation has used since Round 950's pivot, which
+has OSDSYS baked directly into its own ROM and needs no VM) and asked for
+a fresh, SCPH-50004-specific, host-native, truly diskless test.
+
+**Method.** New tool `/tmp/r966_scph50004_diskless.c` (scratch, not
+committed): `bios_load()` with SCPH-50004, `system_init()`, **no disc
+mount at all**, no checkpoint - starts from instruction 0, samples
+`gs_get_state()`'s pmode/dispfb1/display1/dispfb2/display2 every 10M-slice
+chunk out to 1.2B+ EE instructions.
+
+**Result - materially different from the JP-BIOS picture:**
+- PMODE stays exactly `0x0` (BIOS never touches it) until the pre-existing,
+  clearly-labeled `system_r940_force_display_if_needed()` synthetic
+  override (`source/core/system.c` ~line 128, `SIF_R940_FORCE_DISPLAY_
+  THRESHOLD=25000000`) fires at precisely `ee_instr=25,000,000` - a
+  deliberate, user-requested, one-shot diagnostic fallback the code itself
+  logs as **"NOT real hardware fidelity"** and only applies if the real
+  BIOS hasn't configured PMODE by that point.
+- After the forced write (`pmode=0x02`, `dispfb2=0x1400`,
+  `display2=0x1bf27f0003227c`), these values stay **frozen, unchanged**,
+  through the entire remaining survey (checked out to `ee_instr=
+  1,199,998,939` / 150M slices) - the real BIOS never takes ownership of
+  display config afterward either.
+- The BIOS is **not progressing toward a stable menu at all**: the trace
+  log shows it repeatedly performing full `# Restart.` / `# Restart
+  Without Memory Clear.` boot-init sequences over and over (dozens of
+  times across the survey window), i.e. it keeps resetting its own kernel
+  init path rather than advancing past boot toward OSDSYS's menu.
+- EE pc oscillates between real BIOS-kernel addresses in the
+  `0x8000E5xx`/`0x8000DBxx` range and the same `0x00100B68-0x00100C7C`
+  decompression-loop region Round 965 dumped from the GT3 checkpoint.
+  **Correction to Round 965's speculative attribution:** since this run
+  has no disc/game mounted at all, that decompressor loop cannot be GT3's
+  own asset unpacker - it must be OSDSYS's/BIOS's own decompressor
+  (plausibly font/graphics resource decompression), re-entered on every
+  restart cycle.
+
+**Honest disposition:** for SCPH-50004, specifically and freshly tested,
+diskless boot does NOT organically reach a stable PMODE/menu state the way
+the JP-BIOS history (Round 565 onward) does. What currently "displays"
+anything for this BIOS is the Round 940/941 synthetic force-override, not
+organic BIOS behavior - and the BIOS itself appears to be stuck in a
+repeating restart loop rather than converging on OSDSYS. This is a new,
+concrete, SCPH-50004-specific finding that supersedes any assumption
+carried over from the JP-BIOS results. No tracked-source fix implemented
+this round (fact-finding only); the restart-loop behavior is the new
+priority lead for task #887/937/938 on this BIOS.

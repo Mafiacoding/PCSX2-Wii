@@ -44565,3 +44565,156 @@ new scratch-turned-tracked diagnostic drivers committed under
 devkitPPC Wii cross-build correctly skipped (no `source/`/`include/`
 changes) - re-verified via `git status --short` showing only the two
 new `tools/` files as untracked before this commit.
+
+## Round 962 (task #887/937/938, user-directed 4-point follow-up to
+Round 961's "no registered VBLANK handler" framing): ROOT CAUSE FOUND
+AND FIXED - Round 961's finding was itself a checkpoint-serialization
+artifact; a genuine, previously-undiscovered gap in
+`source/core/checkpoint.c` (no block ever existed for
+`iop_hle_intr.c`'s handler-registration table) was silently resetting
+every real VBLANK/CDVD/DMA interrupt-handler registration back to
+"nothing registered" on every checkpoint resume, including the
+intermediate resumes used while building Round 960/961's own
+`gt3_round960_freshboot.ckpt`
+
+**User's directive this round** (German, verbatim intent, 4 points):
+(1) which real IOP-kernel syscall registers VBLANK handlers, and does
+it silently fail during boot; (2) use
+`sif_cmd_iop_dump_bind_table()` to check SIF mailbox state during the
+196 IOP wake cycles Round 961 found; (3) whether an HLE counterpart
+exists for MECHACON commands (the `"mecha command:%02x param:%02x"`
+debug string Round 961 found embedded in IOP rodata); (4) verify
+whether checkpoint.c's absence of an `iop_hle_intr` state block is
+masking a real VBLANK-handler registration that occurs during a
+genuine fresh cold boot, i.e. whether Round 961's "no handler
+registered" finding is a checkpoint-loading artifact rather than true
+fresh-boot behavior. Mid-round, the user sent an explicit correction:
+"er soll den scph 50004 nutzen und nicht den anderen bios" - all
+diagnostic runs described below use `SCPH-50004_BIOS_V9_EUR_190.BIN`,
+not the PAL "30004R V6" BIOS used by some earlier rounds' GT3
+documentation (that pre-existing PAL-BIOS convention is unaffected by
+this round's fix; this is purely a note on which BIOS this round's own
+runs used, per the user's explicit instruction).
+
+**Point 4 pursued first, since it gates the other three.** Built
+`tools/round729-gt3-discboot/r962_fresh_intr_trace.c`: a genuine
+`system_init()` fresh cold boot (NOT `checkpoint_load()`) against the
+real SCPH-50004 BIOS + GT3 disc, polling
+`iop_hle_intr_get_stats()`/`iop_hle_intr_get_intr_handler(irq)` for all
+64 irqs at 10,000,000-EE-instruction-slice intervals via
+`system_run_interleaved()`. Result, run to 1.2 billion EE instructions:
+real IOP module code DOES call `RegisterIntrHandler` for irq=0
+(VBLANK_START, handler=0x00012274), irq=11 (VBLANK_END,
+handler=0x0001232c), plus irq=2 (0x00130cc0), irq=16 (0x0011a4d0),
+irq=42 (0x00016c64), irq=43 (0x00018290) - all six registered by
+ee_instr~80,000,000 and never released. `real_handler_dispatches`
+climbs steadily and continuously from 41 to 591 over the run (growth
+consistent with periodic per-VBLANK-frame dispatch, not a one-shot
+fluke). This flatly contradicts Round 961's checkpoint-based
+observation of "no registered VBLANK handler found" - the real
+registration mechanism does not silently fail at all.
+
+**Root cause.** `source/core/checkpoint.c` was read in full this
+round: it saves/restores ~28 block tags covering every other IOP/EE
+hw-state struct (`DMA0`/`EINT`/`ESIO`/`ETMR`/`GIF0`/`GS00`/`GSM0`/
+`IDMA`/`IEXC`/`IBIO`/`IMOD`/`IINT`/`ITMR`/`ITHR`/`ICDV`/`IMLD`/`MCH0`/
+`SIF0`/`SIFX`/`VIF0`/`VIF1`/`VU10`/`EETH`/`IHP1`), but had NO block for
+`iop_hle_intr.c`'s own static state
+(`intr_handler_addr[]`/`intr_handler_arg[]`/`exc_handler_addr[]`/
+`default_exc_handler_addr`/the stats counters/`handler_completion_count[]`/
+in-flight dispatch-trampoline state). Every `checkpoint_load()` call
+was therefore silently wiping this table back to all-zero, regardless
+of what real module code had genuinely registered during the original
+cold boot. `gt3_round960_freshboot.ckpt` (the checkpoint both Round
+960 and 961 inspected) was itself built by chaining multiple
+`checkpoint_save()`/`checkpoint_load()` cycles together
+(`chain_driver.c`), so this gap meant every intermediate
+`checkpoint_load()` in that chain silently erased the real
+registrations Round 943-960's own boot had already made - by the time
+Round 961 inspected the final checkpoint, the table looked emptier
+than it ever genuinely was mid-boot. Same bug class this project has
+hit and fixed three times before for other opaque-state modules:
+Round 649's `GSM0` gap, Round 659's `ITHR` gap, Round 750's `ICDV`
+gap, Round 770's `IMLD` gap.
+
+**Fix shipped**, following the exact established opaque-blob pattern
+from those three prior fixes
+(`iop_hle_thread_get_checkpoint_blob()`/`iop_module_loader_get_checkpoint_blob()`/
+`sif_get_checkpoint_extra_blob()`): added
+`iop_hle_intr_get_checkpoint_blob(uint32_t *out_size)` to
+`include/core/hw/iop_hle_intr.h`/`source/hw/iop_hle_intr.c` (the
+file's entire static `g` struct is plain `uint32_t` fields only - no
+pointers, no malloc'd chains - so a raw pointer+size is a complete,
+safe blob), and wired a new `"IHLI"` block into both
+`checkpoint_save()` and `checkpoint_load()` in `checkpoint.c`,
+right after the existing `IINT` block.
+
+**Verification.** Built
+`tools/round729-gt3-discboot/r962_checkpoint_roundtrip_test.c`: boots
+to a point with real non-zero handler-table state, saves a checkpoint,
+re-inits fresh to confirm the table wipes to zero, loads the
+checkpoint back, and diffs every field - `[R962RT] PASS: all 6
+nonzero handlers + stats survived save/load round-trip intact`.
+Backed up all three modified files to
+`backups/round962_iop_hle_intr_checkpoint_fix/` before editing, per
+CLAUDE.md's standing rule. Both new source files compiled standalone
+with `-Wall`, zero warnings.
+
+**Host-native regression suite.** The full 136-file suite could not
+be completed within this session's ~175-second-per-call budget (noted
+honestly rather than fabricating a full-suite claim); ran the single
+most directly-relevant test (`test_iop_hle_intr` - exercises the exact
+modified file) plus `test_ee_core`, `test_system_handshake`,
+`test_iop_module_loader_bootinfo`, `test_iop_hle_exception_install`,
+and the first 12 alphabetical tests in `tests/` - all passed with 0
+failures. The dedicated round-trip tool above is arguably stronger,
+more targeted evidence for this specific fix than the general
+regression suite.
+
+**Wii cross-build.** `make clean && make` against the full modified
+tree (devkitPPC toolchain at
+`/sessions/sharp-youthful-pascal/devkitpro/devkitPPC`; this session
+also had to add that toolchain's own `lib/` to `LD_LIBRARY_PATH` for
+`cc1` to find `libmpfr.so.4` - a sandbox-environment quirk, not a
+project bug) compiled clean end to end, including both modified files
+(`checkpoint.c`, `iop_hle_intr.c`), and linked `pcsx2-wii.dol`
+successfully.
+
+**Points 1-3 status.** Point 1 (which syscall registers VBLANK
+handlers, does it silently fail) is now definitively answered by the
+Point-4 finding above: `RegisterIntrHandler` (INTRMAN ordinal 4, via
+`iop_hle_intr.c`'s existing by-name import interception, Round
+109/113/347 lineage) is the real mechanism, and it does NOT silently
+fail - it was checkpoint*loading* that was silently discarding its
+results, now fixed. Point 2 (SIF mailbox/bind-table state during the
+196 wake cycles) was NOT executed this round - the investigation
+pivoted to the checkpoint-gap thread once discovered, since it
+directly explains and supersedes the premise of "the wake cycles do
+nothing" (they're not doing nothing; real handlers ARE registered and
+dispatching). This is flagged as a still-open candidate next step, not
+closed as answered. Point 3 (MECHACON HLE counterpart) remains
+answered from before this round's summary boundary: no dedicated
+MECHACON HLE implementation exists in this tree (only Round 949/952's
+fact-checking references it) - not re-investigated this round since
+nothing new bears on it.
+
+**What remains open.** The exact real-module identity behind the six
+newly-confirmed handler addresses (0x00012274 VBLANK_START,
+0x0001232c VBLANK_END, 0x00130cc0 irq=2, 0x0011a4d0 irq=16, 0x00016c64
+irq=42, 0x00018290 irq=43) has not been disassembled/attributed - a
+natural, evidence-grounded next step. The underlying task #887 goal
+(reproducing Round 942's documented organic `pmode=0x66` milestone on
+the current tree) is unaffected by this round's fix in itself; this
+round corrects the emulator's checkpoint-infrastructure correctness
+and the accuracy of prior rounds' checkpoint-based observations, but
+does not by itself change GT3's forward boot progress, since the real
+handlers were always being registered and dispatching correctly on a
+fresh boot - only the checkpoint-inspection tooling was blind to it.
+
+**Mandatory workflow completed**: host-native regression subset (all
+passed) + dedicated round-trip verification tool (PASS) + Wii
+cross-build (clean) + this `docs/STATUS.md` entry + git commit + leak
+check, all done this round. No `.ckpt` files touched, committed, or
+distributed, per the standing leak-prevention rule - the round-trip
+test's scratch checkpoint was written only to a purely ephemeral
+`/tmp` path, never persisted or shared.

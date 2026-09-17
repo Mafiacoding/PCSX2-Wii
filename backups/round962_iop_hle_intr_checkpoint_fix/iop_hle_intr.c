@@ -72,19 +72,6 @@ void iop_hle_intr_init(void)
     memset(&g, 0, sizeof(g));
 }
 
-/* Round 962 (task #887/937/938): see iop_hle_intr.h's citation on
- * this function for the full checkpoint-serialization-gap rationale.
- * `g` is entirely plain uint32_t fields - no pointers, no malloc'd
- * chains - so a raw pointer+size is a complete, safe checkpoint
- * blob, exactly like iop_hle_thread_get_checkpoint_blob()/
- * iop_module_loader_get_checkpoint_blob()/sif_get_checkpoint_extra_
- * blob()'s own opaque-blob pattern. */
-void *iop_hle_intr_get_checkpoint_blob(uint32_t *out_size)
-{
-    if (out_size) *out_size = (uint32_t)sizeof(g);
-    return &g;
-}
-
 const iop_hle_intr_stats_t *iop_hle_intr_get_stats(void)
 {
     return &g.stats;

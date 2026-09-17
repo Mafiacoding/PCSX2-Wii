@@ -20,7 +20,6 @@
 #include "core/hw/iop_hle_thread.h"
 #include "core/hw/iop_module_loader.h"
 #include "core/hw/iop_intc.h"
-#include "core/hw/iop_hle_intr.h"
 #include "core/hw/iop_timers.h"
 #include "core/hw/iop_heap.h"
 #include "core/hw/iop_cdrom_legacy.h"
@@ -93,19 +92,6 @@ int checkpoint_save(const char *path)
     if (write_block(f, "IBIO", iop_hle_bios_get_state(), sizeof(*iop_hle_bios_get_state())) < 0) goto fail;
     if (write_block(f, "IMOD", iop_hle_modules_get_state(), sizeof(*iop_hle_modules_get_state())) < 0) goto fail;
     if (write_block(f, "IINT", iop_intc_get_state(), sizeof(*iop_intc_get_state())) < 0) goto fail;
-    /* Round 962 (task #887/937/938) fix: see iop_hle_intr.h's own
-     * iop_hle_intr_get_checkpoint_blob() citation - this module's
-     * static VBLANK/CDVD/DMA interrupt-handler registration table
-     * (RegisterIntrHandler results) was never captured by any block
-     * here before, silently resetting every real handler registration
-     * back to "nothing registered" on every single checkpoint resume -
-     * the exact same bug class as Round 649's GSM0 gap, Round 659's
-     * ITHR gap, Round 750's ICDV gap, and Round 770's IMLD gap. */
-    {
-        uint32_t ihli_size = 0;
-        void *ihli_blob = iop_hle_intr_get_checkpoint_blob(&ihli_size);
-        if (write_block(f, "IHLI", ihli_blob, ihli_size) < 0) goto fail;
-    }
     if (write_block(f, "ITMR", iop_timers_get_state(), sizeof(*iop_timers_get_state())) < 0) goto fail;
     /* Round 659: IOP HLE thread-scheduler state (source/hw/iop_hle_thread.c)
      * - see iop_hle_thread.h's iop_hle_thread_get_checkpoint_blob() header
@@ -272,13 +258,6 @@ int checkpoint_load(const char *path, const bios_image_t *ee_bios,
     EXPECT("IBIO", generic, sizeof(generic), &size); memcpy(iop_hle_bios_get_state(), generic, size);
     EXPECT("IMOD", generic, sizeof(generic), &size); memcpy(iop_hle_modules_get_state(), generic, size);
     EXPECT("IINT", generic, sizeof(generic), &size); memcpy(iop_intc_get_state(), generic, size);
-    {
-        uint32_t ihli_cap = 0;
-        void *ihli_dest = iop_hle_intr_get_checkpoint_blob(&ihli_cap);
-        EXPECT("IHLI", generic, sizeof(generic), &size);
-        if (size != ihli_cap) goto fail_close; /* struct-layout mismatch - fail safely, per this file's own documented contract */
-        memcpy(ihli_dest, generic, size);
-    }
     EXPECT("ITMR", generic, sizeof(generic), &size); memcpy(iop_timers_get_state(), generic, size);
     {
         uint32_t ithr_cap = 0;

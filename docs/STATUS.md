@@ -44718,3 +44718,105 @@ check, all done this round. No `.ckpt` files touched, committed, or
 distributed, per the standing leak-prevention rule - the round-trip
 test's scratch checkpoint was written only to a purely ephemeral
 `/tmp` path, never persisted or shared.
+
+## Round 963 (task #887/937/938, user-directed: "geh diese module an
+und disassemblier sie vielleicht steckt dort die loesung" - go after
+these modules and disassemble them, maybe the solution is in there):
+disassembled all 6 real interrupt-handler addresses Round 962 found
+registered on a genuine SCPH-50004+GT3 fresh cold boot; identified 4
+of the 6 with high confidence against this project's own existing
+citations, and surfaced one concrete, actionable new lead
+
+**Method.** Built `tools/round729-gt3-discboot/r963_handler_dump.c`:
+same fresh `system_init()` cold-boot methodology as `r962_fresh_intr_
+trace.c` (SCPH-50004 BIOS + GT3, no checkpoint), polls until all 6
+target irqs (0/2/11/16/42/43) have a registered handler (took only
+one 10,000,000-slice chunk, ee_instr=79,999,936 - matching Round 962's
+own finding), then dumps a 1040-byte raw IOP-RAM window (-16/+1024
+bytes) around each handler address. Fed each dump through the
+existing `tools/round655-ee-disasm/disasm.c` decoder (R3000A is a
+strict MIPS-I subset of the R5900 table it already covers - same
+reuse precedent as Round 944/961) to get real mnemonics.
+
+**Finding 1 - irq0 (VBLANK_START, 0x00012274) and irq11 (VBLANK_END,
+0x0001232c) are NOT device ISRs themselves.** Both disassemble to
+near-identical, small (~0x98-byte) functions that do nothing but walk
+a linked list embedded in their own argument struct (list head at
+`arg+8`, using the head field itself as the circular-list sentinel -
+the same real "container node" pattern ps2sdk's kernel headers use
+throughout, e.g. `iop_hle_thread.c`'s own already-modeled thread
+queues) and, for each node, call `node[+12](node[+16])` via a real
+`jalr ra, v0` - i.e. this is INTRMAN's own internal **chained-sub-
+handler dispatch trampoline**, not a specific driver's interrupt
+code. Real per-driver VBLANK callbacks would live in the list this
+function walks, not in the address our `RegisterIntrHandler`
+interception captured. This is a genuinely new, concrete lead: it
+means real driver code registers into VBLANK via a **second,
+lower-level mechanism this project hasn't modeled or even identified
+yet** (chaining into the list at `arg+8`), separate from the
+`RegisterIntrHandler` ordinal `iop_hle_intr.c` already intercepts by
+name. Finding and modeling that second mechanism is the natural next
+step, and is plausibly load-bearing for task #887's stalled organic
+PMODE/DISPLAY2 progress, since it's exactly the kind of "IOP has real
+work but nothing tells it to do it" gap this whole investigation
+thread (Round 936-962) has been chasing.
+
+**Finding 2 - irq2 (0x00130cc0) IS a genuine, real CDVDMAN low-level
+ISR.** Disassembly shows direct reads/writes to `0xBF402005`,
+`0xBF402006`, `0xBF402008` - the exact KSEG1-uncached-alias addresses
+of `IOP_CDVD_BASE` (0x1F402000, this project's own cited constant,
+`include/core/hw/iop_cdvd.h`) + offsets 5/6/8, landing squarely on
+this project's own already-modeled/cited `IOP_CDVD_OFF_NPARAM`
+(0x05) register and its neighbors. This confirms IRQ2's real handler
+is genuine Sony CDVDMAN code doing real hardware-register polling/
+ack, not a stub or dead path, and is consistent with the well-known
+real IOP INTC assignment of IRQ2 to CDVD.
+
+**Finding 3 - irq42/irq43 (0x00016c64/0x00018290) are the real
+`IOP_IRQ_DMA_SIF0`/`IOP_IRQ_DMA_SIF1` completion handlers**, exactly
+matching this project's own existing citation in `iop_intc.h`
+(`IOP_IRQ_DMA_SIF0=0x2A=42`, `IOP_IRQ_DMA_SIF1=0x2B=43`, from
+ps2sdk's `intrman.h` `enum iop_irq_list`). Disassembly shows real
+register writes at `0xBF801524`/`0xBF801528`/`0xBF80152C`, landing
+inside `iop_dma.c`'s own documented SIF0 DMA-channel register block
+(base `0x1F801520`, per `source/hw/iop_dma.c`'s own `s_ranges[]`
+table). This is real, working SIF0/SIF1 DMA-completion bookkeeping
+code, genuinely registered and (per Round 962) genuinely dispatching.
+
+**Finding 4 - irq16 (0x0011a4d0) touches struct offset 1116 (0x45C) -
+the exact same offset Round 406 already investigated** ("find why
+`thctx+0x45C` list head is never self-initialized"). This is a
+striking, directly-citable link to a much older open thread: it
+strongly suggests irq16's dispatch struct is THREADMAN's own internal
+thread-context table, making irq16 plausibly a THREADMAN-internal
+scheduler/rescheduling interrupt rather than a raw external hardware
+device ISR. Not conclusively identified this round (this project's
+own `iop_intc.h` doesn't yet document a name for irq16, and Round 406
+itself never fully resolved that offset's role) - flagged as a
+promising, evidence-linked lead for a future round rather than
+asserted as fact.
+
+**Interpretation for task #887.** The most actionable result is
+Finding 1: the VBLANK dispatch mechanism this project's `iop_hle_
+intr.c` models (`RegisterIntrHandler` interception) only captures
+INTRMAN's OWN one-time registration of its generic per-vector
+dispatcher - not the real, current content of the per-vector handler
+CHAIN that dispatcher walks. Whether GT3's own drivers (or the BIOS)
+have anything real chained into VBLANK right now is still unknown -
+this round did not (and, without first finding and instrumenting the
+real chain-add primitive, could not yet) inspect that list's live
+contents. That is the concrete, evidenced next step: find the real
+IOP-kernel function that adds a node to the list at `handler_arg+8`
+(almost certainly a second INTRMAN-internal API, not yet identified
+in this project's source or citations), instrument/intercept it the
+same way `iop_hle_intr.c` already intercepts `RegisterIntrHandler`,
+and check whether it is ever actually called during GT3's boot.
+
+**No tracked-source fix this round** - purely a disassembly/
+identification round, per the user's explicit request. One new
+scratch-turned-tracked diagnostic driver
+(`tools/round729-gt3-discboot/r963_handler_dump.c`) committed.
+Host-native regression suite and devkitPPC Wii cross-build correctly
+skipped (no `source/`/`include/` changes) - re-verified via `git
+status --short` showing only the one new `tools/` file untracked
+before this commit.

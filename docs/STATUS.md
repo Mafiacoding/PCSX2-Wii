@@ -45072,3 +45072,77 @@ concrete, SCPH-50004-specific finding that supersedes any assumption
 carried over from the JP-BIOS results. No tracked-source fix implemented
 this round (fact-finding only); the restart-loop behavior is the new
 priority lead for task #887/937/938 on this BIOS.
+
+## Round 967
+
+**Task (user-directed, task #961):** isolate the exact PC/caller that fires
+the SCPH-50004 restart-print messages Round 966 found, then patch the
+condition if it's a "BIOS penalizing an incomplete HLE reply." User
+supplied a concrete instrumentation sketch (log $ra/$pc where "# Restart"
+prints, then find/patch a BEQ/BNE checking a validation flag near the
+decompression code at 0x00100C7C).
+
+**Method.** All instrumentation this round is in a SCRATCH copy of
+`ee_core.c` (`/tmp/ee_core_r967.c`, per the standing backup-before-
+experimenting rule - tracked `source/core/ee/ee_core.c` was never touched),
+linked into disposable driver binaries. Three successive refinements:
+1. Hooked `ee_sio_mmio_write32()`'s call site in `ee_mem_write8()` (the real
+   byte-wide debug-SIO TXFIFO path Round 392 built) to log EE pc/ra for
+   every real debug-console byte write, keeping a small tail buffer and
+   firing once "Restart" appears in it. Found the byte-write call site is
+   always pc=0x800136e8 (the real BIOS's putchar), $ra alternating between
+   0x800073b0/0x80007370/0x80006e68 - all inside the BIOS's own generic
+   string-print helper, not the real external caller.
+2. Attempted a stack-slot read (`[sp+0x70]`) to unwind one level, but
+   disassembly of the surrounding code proved this offset is one of
+   printf()'s own vararg-spill slots (`sd a4,0x70(sp)`), not a saved-$ra
+   slot - a dead end, reported honestly rather than treated as a real
+   caller.
+3. **Decisive method:** disassembled the real printf()-style function
+   itself (`0x800073e0`, real "addiu sp,sp,-0x90" vararg-spilling
+   prologue, confirmed via its own `sd/ld ra,0x0(sp)` save/restore pair)
+   and hooked `ee_step()` directly: whenever `st->pc == 0x800073e0`
+   (printf's real entry, before anything overwrites $ra), log the EE $ra
+   register (the actual real caller, unambiguous - no stack-frame
+   guessing needed) and dump the real format-string bytes from $a0.
+
+**Result.** Captured the full, real sequence of printf() call sites during
+a fresh SCPH-50004 diskless boot, deduplicated by caller address. The two
+addresses the user asked for:
+- **`0x8000dbb8`** - real BIOS code that calls `printf("# Restart.")`
+- **`0x8000dcc8`** - real BIOS code that calls `printf("# Restart Without Memory Clear.")`
+
+Both are genuine EE-kernel-space (KSEG0) BIOS addresses, confirmed live
+from the actual SCPH-50004 ROM.
+
+**The user's proposed mechanism does not match what's actually there.**
+Disassembling the ~160 bytes immediately preceding each of these two call
+sites (`0x8000db38-0x8000dbb8` and `0x8000dc48-0x8000dcc8`) shows a
+completely linear, unconditional sequence: `jal <subroutine>; lui a0,0x8001;
+jal 0x800073e0 (printf); ...` repeated for "# Initialize INTC...", "#
+Initialize TIMER...", ..., "# Initialize FPU...", "# Initialize Scratch
+Pad...", ending in the restart-message printf call - **with zero branch
+instructions (no BEQ/BNE/conditional of any kind) anywhere in this window**.
+This is simply the BIOS's own cold/warm-init banner-printing sequence,
+executed straight through every time it's entered. There is no "validation
+flag check right there" to patch, and no `$v0` return value being tested
+near the restart print itself - the user's proposed `BEQ/BNE` patch site
+does not exist in the real ROM at this location. **The actual decision to
+(re-)enter this init sequence happens further up the call chain**, at
+whatever real code calls this entire cold-init routine - not inside it.
+
+**Disposition.** No tracked-source fix implemented (correctly, since no
+evidenced bug was found at the site the user's hypothesis pointed to) - a
+patch here would just be editing straight-line printf calls, which cannot
+be "wrong" in the way the hypothesis assumed. The real next step (task
+#961 continuation) is to apply the exact same "$ra at real function entry"
+technique one level higher - to the entry point of the cold-init routine
+itself (somewhere above `0x8000db38`, based on the "Initialize DMAC..."
+call site at `ra=0x8000d9e0` seen in the very first, non-restart boot
+sequence) - to find who invokes it repeatedly. Also flagged as a real
+possibility worth checking before assuming "bug": genuine PS2 hardware
+does have documented auto-restart-on-timeout behavior (e.g. IOP/MECHACON
+handshake failing within a timeout window during early boot), so this
+loop is not automatically a modeling defect - it needs to be compared
+against that real behavior class before any fix is attempted, per the
+standing anti-fabrication discipline.

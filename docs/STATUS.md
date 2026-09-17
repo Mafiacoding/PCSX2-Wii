@@ -44270,3 +44270,139 @@ captured text.
 fix). No regression - the fix only activates for the seven specific,
 already-real, already-cited SIO register addresses; every other
 address's byte/word access behavior is completely unchanged.
+
+## Round 960 (task #887, user-directed "GS display wiring - SCPH-50004 first, then GT3"): SCPH-50004's LOADFILE-restart cycle is NOT bounded at 13x (corrects Round 955) and never organically touches PMODE/DISPFB/DISPLAY; GT3's persisted checkpoint is discovered STALE (pre-dates Round 942's idle/EXL fix) and a fresh cold-boot chain against the current tree finds a real, unaddressed IOP freeze that blocks Round 942's own documented organic-PMODE milestone from reproducing
+
+**Part A - SCPH-50004.** Direct continuation of Round 959: with the
+BIOS's own "Restart Without Memory Clear" text now understood as the
+real explanation for the LOADFILE reload cycle, this round asks the
+next honest question - does the real BIOS's own "# Initialize GS ..."
+restart step, or anything after it, ever organically write PMODE/
+DISPFB1/DISPLAY1/DISPFB2/DISPLAY2 (the registers that actually gate a
+picture reaching the screen), and does the reload cycle ever actually
+end?
+
+New tool `tools/round960-scph50004-gs-organic-survey/analyze.c`
+replicates `system_run_interleaved()`'s own EE_IOP_STEP_RATIO=8
+interleave loop directly (bypassing that function's own "hit slice
+cap" diagnostic print, which would otherwise flood stdout and make
+the survey I/O-bound instead of compute-bound at this poll
+granularity) and diffs the full `gs_state_t` byte-for-byte after
+every single interleave slice - fine enough that no register write,
+however short-lived, can be missed. Run to 800,000,000 EE
+instructions (23 restart cycles observed, ~8.7M instr/s
+throughput):
+
+- **`SMODE1` genuinely IS written organically, every single restart
+  cycle**, toggling one bit (`0x740814504` <-> `0x740834504`) for
+  ~24-40 instructions immediately after each "# Initialize GS ..."
+  console line, then reverting - a real hardware self-test
+  read-back pattern (write a bit, verify it stuck, clear it), not a
+  bug and not display-related.
+- **`PMODE`/`DISPFB1`/`DISPLAY1`/`DISPFB2`/`DISPLAY2` are NEVER
+  organically touched, across all 23 observed restart cycles and
+  800,000,000 instructions.** This is a materially finer-grained,
+  longer-running re-confirmation of Round 951's same finding, now
+  with per-slice (not periodic-sampling) certainty.
+- **The restart cycle is NOT bounded at "13x"**, contradicting Round
+  955's own characterization (which was based on a single
+  60,000,000-instruction window). This survey observed 23 completed
+  `LF_F_ELF_LOAD`/reload cycles by 800,000,000 instructions with no
+  sign of slowing or stopping - each cycle costs ~34-35,000,000
+  instructions, consistent with Round 957's own measured
+  38,671,963-instruction inter-reply gap. Round 955's "13x" was
+  simply however many cycles fit in that round's own smaller test
+  budget, not a real, hardware-meaningful bound. Corrected here.
+
+No tracked-source fix this round for SCPH-50004 (correctly skipped -
+this is a survey/re-confirmation, not a new gap with an evidenced
+fix). The open question (why does the restart cycle never terminate
+and hand off to a persistent OSDSYS execution the way real hardware
+must eventually do, even with no disc inserted) remains for a future
+round; the leading candidate, per Round 942's finding on the GT3 side
+below, is that this project's own scheduler/interrupt-idle
+infrastructure has a still-undiscovered stall class specific to this
+newer BIOS, similar in spirit to (but not proven identical to) the
+class Round 942 already found and fixed once for the older BIOS/GT3
+disc-boot path.
+
+**Part B - GT3.** Per the user's explicit "und danach gt3" direction
+and reminder not to forget the checkpoint. Attempted to continue the
+existing persisted checkpoint (`checkpoints/gt3_round861_fresh_chain.
+ckpt`, `total_instr=4,079,995,711`) with the current (Round-959-fixed)
+tree via the existing `tools/round729-gt3-discboot/chain_driver.c`.
+
+**Finding 1 - that checkpoint is STALE and must not be used as a
+continuation basis.** Round 861 (the checkpoint's own origin) predates
+Round 942's idle/EXL scheduler-deadlock fix. Round 942's own
+STATUS.md entry explicitly warns: "a checkpoint captured by the OLD
+(buggy) binary, in a state where idle=1 AND EXL=1 are both already
+set, cannot be 'healed' by re-running it against the FIXED binary."
+Confirmed empirically this round: continuing `gt3_round861_fresh_
+chain.ckpt` for a further 10,000,000 slices (80,000,000 EE
+instructions) against the current tree produced ZERO change in
+`gs->pmode`/`dispfb2` (stuck at the Round 940/941 synthetic forced
+values, `0x02`/`0x1400`) and the current thread id stayed `1`
+throughout - textbook symptoms of the pre-942 frozen state Round 942
+itself documented, exactly as its own methodology warning predicts.
+This checkpoint should be retired; it does not reflect the current
+tree's real capability.
+
+**Finding 2 - a genuinely fresh cold boot (instruction 0) against the
+current tree does NOT reproduce Round 942's own documented
+`pmode=0x66` organic milestone within 1,439,998,498 instructions
+(180,000,000 slices), and finds a real, currently-unresolved IOP
+freeze.** Round 942 itself only ever persisted its fresh-boot
+checkpoint to a scratch `/tmp/gt3_r942_freshfix.ckpt` path - never
+promoted into the tracked `checkpoints/` directory - so no verified-
+fresh, post-942-fix GT3 checkpoint has existed in this project's
+persisted state since that round. Starting completely fresh this
+round (`checkpoints/gt3_round960_freshboot.ckpt`, new) and chaining to
+1,439,998,498 instructions:
+```
+pmode=0x02 dispfb1=0x00000000 dispfb2=0x00001400   (unchanged across both chained runs)
+EE  pc=0x8000e53c (varying across the run - genuinely executing, not idle-stuck)
+IOP pc=0x00155b40 (IDENTICAL after both 720,000,000-instruction continuations)
+IOP $ra=0x00155b40 (equals its own pc - consistent with a tight self-referencing spin)
+SIF_MSCOM=0x00000000 SIF_SMCOM=0x000194d0 SIF_SMFLAG=0x40070000
+IOP INTC istat=0x00000000 imask=0x0001080d ictrl=0x00000000
+```
+The EE side is NOT frozen (its own `pc` genuinely varies, and the
+familiar SCPH-50004-style "# Restart Without Memory Clear" console
+text was observed during this same run, on the older PAL BIOS -
+independent confirmation that this "genuine repeated restart" BIOS
+behavior, root-caused in Round 959 for SCPH-50004, is not specific to
+that one BIOS image). The IOP side, however, is provably static -
+identical `pc` after two independent 720,000,000-instruction
+continuations is not "slow progress", it is a real stall. This
+matches Round 942b's own flagged-but-never-investigated open item
+("the IOP core's pc has stayed completely frozen... worth treating as
+a real, distinct open question for a future round, not assumed
+benign") almost exactly, just at a different resting address
+(`0x00155b40` here vs. `0x00155910` there - consistent with Round
+945's later delay-slot fix having moved, not removed, the stall).
+This IOP freeze is the most likely reason this run's PMODE never
+reaches Round 942's organic `0x66`: GT3's EE-side BIOS restart cycle
+plausibly depends on real IOP-delivered progress (a SIF reply, a
+disc-read completion, or similar) to ever escape into OSDSYS/game
+code, exactly the same structural dependency this round's Part A
+found for SCPH-50004's own restart cycle.
+
+No tracked-source fix this round for GT3 either - the IOP freeze's
+root cause (what `0x00155b40` actually is, and what real condition it
+is waiting on) has not yet been disassembled; per this project's
+standing anti-fabrication discipline, that is the honestly-flagged
+next step, not something to guess at. `checkpoints/gt3_round960_
+freshboot.ckpt` is persisted as the new, verified-fresh, current-tree
+GT3 checkpoint for that follow-up (never committed/rsynced - contains
+real BIOS/disc-derived RAM content per checkpoint.h's standing
+leak-prevention rule, same as every other checkpoint this project has
+ever produced). `checkpoints/gt3_round861_fresh_chain.ckpt` should be
+treated as stale/retired going forward.
+
+**Verification:** no `source/`/`include/` changes this round (both
+parts are survey/diagnostic-only - correctly no new fix to verify).
+`tools/round960-scph50004-gs-organic-survey/analyze.c` committed.
+devkitPPC Wii cross-build re-checked clean (0 warnings, `pcsx2-wii.dol`
+rebuilt fresh for delivery this round per the user's explicit
+reminder).

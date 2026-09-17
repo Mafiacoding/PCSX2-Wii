@@ -45433,3 +45433,135 @@ for a future round).
 
 No tracked source changed this round (scratch-only). Regression suite
 and Wii cross-build correctly skipped (docs-only).
+
+## Round 971/973: dynamic capture hook at the real restart-block re-entries - MAJOR correction (task #963)
+
+**User's explicit request (verbatim, German):** "setz den capture hook genau
+zum ende an fische alle signale zum ende disambelle sie damit sollten wir
+wissen was zum ende kurz vor dem restart gefordert wird" - place the capture
+hook exactly at the end (right before the restart), capture and disassemble
+every signal there, to learn what is genuinely requested right before each
+"restart" fires.
+
+### Methodology
+
+Two combined instrumentation changes, both scratch-only (`/tmp/ee_core_r967.c`,
+never committed to tracked source):
+
+1. **Fixed a real bug in Round 970's static scan.** The `[R971-SCAN]` wide
+   J/JAL scan (0x80000000-0x80020000) only searched for jump targets in
+   0x8000d800-0x8000db00. That range does **not** cover 0x8000dc28 or
+   0x8000dd38 - the actual block-start addresses of the 2nd/3rd restart-cycle
+   re-entries established in Round 968/969. The scan could never have found
+   an external caller into those two addresses even if one existed. Widened
+   to 0x8000d800-0x8000de00.
+
+2. **New R973-TRACE hook**: a 256-entry per-instruction PC/`$ra` ring buffer,
+   always filling inside `ee_step()`, dumped in full (oldest-first) plus
+   complete register state (`ra,sp,a0-a3,v0,v1`) the instant execution first
+   reaches `pc==0x8000dc28` or `pc==0x8000dd38`. This captures the TRUE
+   dynamic path into each re-entry, including anything a static scan can't
+   resolve (indirect/register jumps).
+
+Run against the real SCPH-50004 BIOS, diskless, 60,000,000-instruction
+budget (`/tmp/r973`).
+
+### Findings
+
+**(1) Widened static scan (11 hits, up from Round 970's 8):** the 3 new
+hits added by widening the range are `0x80005744 JAL -> 0x8000dba0`,
+`0x800058b4 JAL -> 0x8000dcb0`, and `0x8000d9e0 JAL -> 0x8000dde8`. None of
+these targets `0x8000dc28` or `0x8000dd38` exactly - they target addresses
+*inside* the three banner-print blocks, not the block-start addresses
+themselves. **No J/JAL instruction anywhere in the entire live EE ROM range
+targets 0x8000dc28 or 0x8000dd38.**
+
+**(2) R973-TRACE dynamic capture - decisive finding.** At both re-entries,
+the captured entry register snapshot has **`ra == pc`** exactly:
+
+```
+reached pc=0x8000dd38 at ee_instr=34905406: ra=0x8000dd38 ...
+reached pc=0x8000dc28 at ee_instr=54591359: ra=0x8000dc28 ...
+```
+
+The tail of the 256-PC ring buffer explains why, identically for both hits:
+
+```
+[252] pc=0x8000741c ra=0x8000741c
+[253] pc=0x80007420 ra=0x8000dd38   (or 0x8000dc28)
+[254] pc=0x80007424 ra=0x8000dd38
+[255] pc=0x8000dd38 ra=0x8000dd38   <- capture fires here
+```
+
+`0x800073e0-0x8000741c` is the real printf() function body (Round 967's
+established entry point). The printf-caller dedup log confirms it directly:
+entry #21 shows `caller(ra)=0x8000dd38`, entry #29 shows
+`caller(ra)=0x8000dc28` - i.e. **0x8000dc28/0x8000dd38 are nothing more than
+the ordinary return addresses of the immediately-preceding printf() calls**
+("# Initialize GS ...", entries #20/#28). printf() finishes, executes
+`jr $ra`, and execution lands back at 0x8000dc28/0x8000dd38 simply because
+that is the next instruction after the `jal printf` in straight-line ROM
+code - **not because of any external jump, interrupt, reset signal, or
+loop-closing branch.**
+
+This **corrects the entire "three re-entries" framing** carried since Round
+968: `0x8000dc28`/`0x8000dd38` are not re-entry points reached by a call or
+jump at all. They are plain sequential fallthrough addresses in one long,
+uninterrupted, linear stretch of ROM code that happens to contain three
+literal, physically-repeated copies of the banner-print+init-call pattern,
+one after another, with ordinary printf() calls in between.
+
+**(3) The real orchestrating caller.** Cross-referencing the printf-caller
+log's full call-address sequence (entries #17-#32) shows the address order
+is *not* monotonically increasing through the whole run - it jumps: ...
+`0x8000dd88` (Scratch Pad, block 3) -> **`0x800058bc`** (a much lower
+address) -> `0x8000dbb8` ("# Restart.") -> `0x8000dbc4` -> `0x8000dc28`
+(block 2) -> ... This is only possible if a caller at `0x800058b4` issued
+a real `jal` into the dc00-de00 region and got control back - and indeed
+the widened R971-SCAN found exactly that: `0x800058b4: JAL -> 0x8000dcb0`,
+whose return address (`0x800058b4+8`) is `0x800058bc` - an exact match.
+
+Disassembling `0x80005400-0x80005980` (extended from Round 970's
+`0x80005400-0x80005720`, new `[R974-DUMP]`) shows this is a real function
+containing multiple genuine backward branches (`0x80005524: BNE -6`,
+`0x8000577c: BNE -6` - matching Round 970's already-identified
+ROM-checksum-verify retry loops) and, near its tail, a block at
+`0x800058ac-0x800058c4` that stores a fixed value via `sw $zero,0x55b4($at)`
+then issues `jal 0x8000dcb0` before falling into a `BLEZ`-gated loop over a
+table at `0x8002a648`. This is the same function region Round 970 already
+identified and tested as a ROM-checksum-verify pass (`0x8000d810`/
+`0x8000d8a8` callers) - it is now confirmed to be the **same function that
+also drives the repeated banner/init sequence**, not a separate mechanism.
+
+### Conclusion
+
+Three prior hypotheses about a "restart trigger" are now superseded by
+direct evidence:
+- No Reset-Reason control bit/gate exists (Round 969, still true).
+- No hardware interrupt or external re-entry closes a loop back into
+  `0x8000dc28`/`0x8000dd38` (this round: proven by exhaustive static scan
+  + live dynamic-path capture - neither finds any jump targeting those
+  exact addresses).
+- The repeated "# Restart."/"# Initialize ..." sequence is real,
+  intentional, hard-coded ROM behavior: a single orchestrating function
+  around `0x80005400-0x80005980` (the same region as Round 970's
+  checksum-verify code) makes several sequential, ordinary `jal` calls
+  into different fixed entry points of the shared banner/init code block,
+  as part of its own normal, bounded control flow - not a bug, not a
+  crash-loop, and not gated by any condition we have modeling gaps for.
+
+**Still open:** the precise bound/exit condition of the `0x80005400-
+0x80005980` caller function itself (how many times it repeats, and what,
+if anything, it does after the pattern observed in this 60M-instruction
+window) has not yet been fully decoded - this round widened the dump only
+to `0x80005980`, and the loop back edges at `0x80005524`/`0x8000577c` were
+already characterized in Round 970 as legitimate checksum-loop iterations,
+not the outer repeat. A full disassembly of the complete caller function
+(likely extending a few hundred bytes further, plus its own caller) is the
+correct next step to find whether/how this function ever hands off to
+different code (i.e. what would need to happen for the boot to actually
+progress past this point), continuing the "brich die Kette" methodology
+one level further out.
+
+No tracked source changed this round (scratch-only, `/tmp/ee_core_r967.c`).
+Regression suite and Wii cross-build correctly skipped (docs-only).

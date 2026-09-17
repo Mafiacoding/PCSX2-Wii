@@ -45324,3 +45324,112 @@ value inside `0x8000d9b8` (already known fixed).
 
 No tracked source changed this round (scratch-only, `/tmp/ee_core_r967.c`).
 Regression suite and Wii cross-build correctly skipped (docs-only).
+
+## Round 970 (task #963 continued): broke the chain past 0x8000da00 - real kernel entry found, restart cycle is a distinct downstream phenomenon, not a local loop
+
+Per the user's explicit "brich die Kette" request, continued disassembling
+backward and forward from the Round 969 VBLANK-poll finding. All new
+addresses below are ee_mem_read32() reads of the live-loaded SCPH-50004
+BIOS via the emulator (not raw-file offsets, which do not correspond to
+the loaded/decoded layout - established methodology from Round 967).
+
+**Step 1: wide scan for the real caller of the 0x8000d800-0x8000db00
+region.** Scanned all of 0x80000000-0x80020000 for J/JAL instructions
+targeting into 0x8000d800-0x8000db00. Found exactly 8 hits: three are
+the already-known `db48/dc50/dd60 -> jal 0x8000d9b8` sites; the other
+five are real, previously-undiscovered callers:
+- `0x8000549c`/`0x80005670`: `jal 0x8000d810` (called TWICE, from two
+  separate points within the same function)
+- `0x800054c8`/`0x8000569c`: `jal 0x8000d8a8` (also called twice)
+- `0x80001038`: `jal 0x8000dad8` (called once)
+
+No JR/JALR (indirect jump) anywhere in 0x8000d000-0x8000e400 targets
+anything other than a plain `jr $31` (function return) - confirmed by
+listing all 20 JR/JALR instructions in that range; none is a computed
+jump table. So the repeat mechanism is not a local indirect branch
+either.
+
+**Step 2: disassembled 0x80000f80-0x80001100 (the 0x80001038 caller) -
+this is the real EE low-kernel bootstrap, not application code.**
+`0x80001000-0x80001024`: reads a word from EE Scratchpad RAM
+(`0x70003ff0`) and a word from the BIOS ROM header
+(`0xbfc001f8`) into two kernel globals (`0x80016e50`, `0x80016e40`),
+then sets up the kernel stack pointer (`sp = 0x80018E80`) - textbook
+real cold-reset bootstrap code, not something reachable more than once
+under normal operation. It then makes four sequential `jal` calls,
+the third of which (`0x80001038`) is `jal 0x8000dad8` - i.e., THIS is
+the one, true, single real entry into the whole "# Initialize
+GS/INTC/TIMER/.../Scratch Pad" cascade, called from the genuine
+one-time kernel bootstrap path, exactly where real BIOS boot should
+call it.
+
+**Step 3: confirmed this one-time call path is genuinely one-time, and
+is NOT the source of the repeating "# Restart" messages.** The
+existing printf-caller capture (Round 967's `$ra`-at-`0x800073e0`
+hook, 32-slot dedup) shows entry #17 as `caller(ra)=0x80001040
+fmt="# Initialize Done."` - `0x80001040` is exactly the return address
+set by the `jal 0x8000dad8` at `0x80001038` (`pc+8`), and it stays
+unmodified through the entire nested call chain into
+`0x8000dad8 -> ... -> printf`, meaning that whole chain is implemented
+as tail-jumps (`j`, not `jal`) all the way down - real, deliberately
+hand-written BIOS assembly, not a modeling artifact. Crucially, this
+`0x80001038`-initiated pass prints "# Initialize Done." and then
+returns cleanly to `0x80001040` to continue the kernel bootstrap
+(`jal`s at `0x80001040`/`0x8000106c`/`0x80001074`/`0x80001084`
+follow immediately, all real subsequent kernel init calls, no error
+path taken). This "Initialize Done." only ever appears ONCE in every
+printf-dedup log across this round's runs.
+
+**Step 4: the repeating "# Restart."/"# Restart Without Memory Clear."
+messages (Round 967's `0x8000dbb8`/`0x8000dcc8`) appear ONLY AFTER
+"# Initialize Done." in every captured log** (e.g. `/tmp/r972_out.log`:
+"Initialize Done." at printf-entry #17, first "# Restart Without
+Memory Clear." at #19) - i.e. the real, single, organic cold-boot
+completes successfully and reports success, and the repeating restart
+cycle is a SEPARATE, DOWNSTREAM phenomenon that starts only after that
+point, reached via the already-known `db48/dc50/dd60` call sites -
+which are NOT part of the `0x80001038` one-time bootstrap chain (they
+sit later in the ROM, in a physically different code region reached a
+different way). This directly refutes the framing (both mine in Round
+968 and the user's Round 969 hypothesis) that the whole thing is one
+tight boot-time retry loop - the real cold boot finishes cleanly once;
+something afterward (most likely OSDSYS's own normal post-boot logic,
+which real Sony BIOSes are documented to use for re-initializing
+hardware state when returning to the browser or after a failed
+operation - see Round 967's STATUS.md note on this) re-enters the
+shared init routine repeatedly for reasons not yet pinned down.
+
+**Step 5: the ROM-checksum hypothesis (also newly found and tested,
+not from the user) was checked and ruled out.** `0x8000d810`/
+`0x8000d8a8`, called from `0x80005400`-`0x800056a4` with
+`a0=0xBFC00000, a1=0xBFC10000` (the BIOS ROM's own uncached-mirror
+address range) twice each, look like real ROM checksum/verify passes
+(a genuine countdown loop with accumulation, `0x800054fc-0x8000151c`).
+Both associated error-print call sites (`0x800054b0`, `0x800054e0`)
+never appear in any printf-caller capture across this round's runs -
+so the checksum passes cleanly every time observed; this is not the
+trigger either.
+
+**Net effect on the open question.** Three real hypotheses (the user's
+"Reset-Reason control bit", a ROM-checksum retry, and my own Round
+968 "triplicated restart-stub" framing as the root loop) are now all
+disproven or superseded by direct disassembly. The real structure is:
+one genuine one-time cold-boot pass (0x80001038-driven, completes and
+prints "Initialize Done."), followed by a separate, still-unattributed
+mechanism that re-enters the shared init routine multiple times
+afterward. The correct next step is to find what calls `db48`/`dc50`/
+`dd60`'s ENCLOSING code (i.e. who jumps to the start of that
+db20-style block in the first place, post-"Initialize Done.") - this
+requires the same wide-scan technique applied AFTER the "Initialize
+Done." point in the instruction trace, not before it (this round
+scanned statically across the whole ROM, which found only the
+already-known one-time caller; the real downstream re-entry may be
+reached via a register-relative call whose target only resolves once
+OSDSYS-level code is loaded/running, which a static scan by definition
+cannot see - a live, later-triggered $ra capture at the exact moment
+of re-entry, similar to Round 968's technique but re-armed to keep
+capturing past the first hit instead of stopping, is the correct tool
+for a future round).
+
+No tracked source changed this round (scratch-only). Regression suite
+and Wii cross-build correctly skipped (docs-only).

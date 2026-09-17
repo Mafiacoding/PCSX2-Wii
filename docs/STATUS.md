@@ -45240,3 +45240,87 @@ beyond the real-PCSX2-source check above.
 
 No tracked source changed - regression suite and Wii cross-build
 correctly skipped this round (docs-only, per standing convention).
+
+## Round 969 (task #963): fact-check user's "Reset-Reason control bit" hypothesis + backward-disassemble the SCPH-50004 restart-loop preamble (docs-only)
+
+User proposed that the three Round 968 call sites gate on a Sony
+"Reset-Reason" field in KSEG0 RAM (cold-boot vs. soft-reset-after-IOP-
+reboot), citing two web sources, and asked for `$a0`-`$a3`/`$ra`
+instrumentation at the three block entries plus a follow-up trace.
+
+**Citations checked first, per standing discipline.** Fetched both
+URLs directly. The Reddit link (`r/batocera` "PS2 boot error please
+help") is blocked by this environment's web-fetch policy and, being a
+generic Batocera-frontend troubleshooting thread, is not a plausible
+source for Sony BIOS-kernel disassembly claims regardless. The
+Woon Yung / `sites.google.com/view/ysai187` page fetched successfully
+and is a real, legitimate homebrew-developer reference (libosdinit,
+used by FMCB) - but its content is about a *userspace* memory-card
+update program's own boot sequence (SifIopReset/SifIopSync, boot
+certification via `sceCdBootCertify`, OSD config load) called from an
+already-running EELOAD-loaded application. It says nothing about an
+internal "reset-reason" field the *BIOS's own* cold-init preamble
+reads to pick between restart and OSDSYS-escalation - the specific
+claim in the user's message is not actually supported by either cited
+source.
+
+**Real disassembly (not the literal proposed hook, which would have
+just re-confirmed already-known data) - a genuinely new, decisive
+finding instead.** Rather than trace `$a0`-`$a3` at `pc==0x8000db48`/
+`0x8000dc50`/`0x8000dd60` (already known fixed: Round 968 showed the
+flags argument there is a hardcoded immediate `0x7f`, not a loaded
+variable - repeating that hook adds no new information), extended the
+scratch hook to dump a much wider (0x120-byte) window *backward* from
+each duplicate block's real start (`block_start = caller - 0x30`,
+i.e. `0x8000db20`/`0x8000dc28`/`0x8000dd38`) and flag every branch/jump
+opcode found. This is the genuinely open question the user's own
+hypothesis was reaching for (what selects/repeats these blocks), just
+via the correct historical location rather than the block itself.
+
+Result: the ONLY branch instruction in any of the three back-windows
+is an identical `1040fffa` (`beq v0,zero,-6words`) sitting exactly
+0x34 bytes before each block start (`0x8000dbf4`, `0x8000dcf4`+4
+region, `0x8000dd04`) - and it is a completely ordinary, already-
+understood real hardware poll loop, not a reset-reason gate:
+
+    lui   v0, 0x1000
+    ori   a0, a0, 0xf000      ; a0 = 0x1000f000 (real EE INTC_STAT)
+    lw    v0, 0x0(a0)         ; <-- loop target
+    andi  v0, v0, 0x4         ; test bit 2 (VBLANK_START)
+    beq   v0, zero, -6words   ; loop back to the lw if not yet set
+    ...
+    sw    v1, 0x0(v0)         ; v1=4 -> ack VBLANK_START (write-1-clear)
+
+This is the exact same real EE INTC_STAT-poll-and-acknowledge pattern
+this project already found and cited independently in Round 703 (GT3
+thread 4's VBLANK spin, `0x1000f000`, bit 2 = VBLANK_START) - it is
+real, mundane display-vsync pacing between init stages, not a boot-
+cause/reset-reason check. No other conditional branch (`BEQ`/`BNE`/
+`BLEZ`/`BGTZ`/`REGIMM`) and no `JR`/`JALR` indirect dispatch appears
+anywhere else in any of the three 0x120-byte windows - every other
+instruction in view is unconditional (`JAL`/`J`/ALU/load-immediate).
+
+**Revised, more accurate picture of the whole sequence** (supersedes
+part of Round 968's framing): the three "duplicate blocks" are not
+isolated triplicated restart-entry stubs in isolation - they are each
+preceded by their own copy of a `[print "# Initialize DMAC/VU1/VIF1/
+GIF/VU0..." banners] -> [VBLANK-wait+ack] -> [print "# Initialize
+INTC/TIMER..." banners] -> [call 0x8000d9b8, flags=0x7f] -> [print
+"# Restart."/"# Restart Without Memory Clear."]` sequence, and this
+entire ~0x150-byte sequence itself is what's triplicated verbatim in
+ROM (not just the small db20-style sub-block found in Round 968).
+Round 967's two already-found restart-print addresses (`0x8000dbb8`,
+`0x8000dcc8`) sit immediately after the first two repetitions,
+confirming the same picture from the other end.
+
+**Still genuinely open** (not fabricated, not claimed solved): nothing
+in any of these three windows explains *why* the whole ~0x150-byte
+sequence repeats at all - the real decision to loop must live further
+back (before `0x8000da00`, the start of the first back-window) or
+further forward (after the third repetition), neither of which has
+been disassembled yet. This is the correct next target for a future
+round, not the VBLANK-poll loop (now ruled out) and not the flags
+value inside `0x8000d9b8` (already known fixed).
+
+No tracked source changed this round (scratch-only, `/tmp/ee_core_r967.c`).
+Regression suite and Wii cross-build correctly skipped (docs-only).

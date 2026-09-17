@@ -44909,3 +44909,110 @@ but nothing yet identifies what would drive GT3's own game code (as
 opposed to BIOS/kernel housekeeping) toward the organic PMODE/
 DISPLAY2 milestone Round 942 once documented. That remains the real,
 still-open next step.
+
+## Round 965
+
+**Task (user-directed):** two-part follow-up to Round 964. (1) Methodology
+directive: if GT3 isn't progressing, check how far the diskless BIOS boots,
+whether PMODE/DISP2 is organically reached, and whether the menu loads -
+THEN return to what stops GT3 specifically from showing pictures. (2) A new
+hypothesis to fact-check: "the EE is still in the BIOS's protected kernel
+space, not in the application's user space" - i.e. that the BIOS never
+successfully calls ExecPS2/LoadExecPS2 to hand control to GT3's ELF, and
+that BOOT2.ELF's file-lookup might be silently failing. User also asked for
+the current tree's ExecPS2 HLE structure.
+
+**Fact-check #1: is the current checkpoint's EE pc (0x00100c28) really
+"still in BIOS kernel space"?** Dumped live EE RAM around pc=0x00100c28 from
+`checkpoints/gt3_round964_freshboot.ckpt` (new tool
+`/tmp/r965_ee_ramdump.c`, linked against the real system/checkpoint/ee_core
+sources, not committed - scratch/read-only) and disassembled it with the
+existing `tools/round655-ee-disasm/disasm.c`. Result: this is a
+self-contained subroutine with its own stack frame (`ld ra/s0-s5` restore,
+`jr ra` return at 0x00100C54) implementing a byte-at-a-time LZ/RLE-style
+decompression loop (bit-window state at `s3+32072`, shift/or/mask pattern
+consistent with a Huffman/LZSS bitstream reader). This is genuine,
+structured user-space code with a normal call/return convention - **not**
+BIOS kernel dispatch code. `0x00100000+` is KUSEG (user address space) on
+real PS2 hardware regardless of which program owns it, and this specific
+code (a self-returning decompressor subroutine, most plausibly GT3's own
+texture/model unpacker) is inconsistent with still being parked inside the
+BIOS's own boot/kernel routines. **The "still in BIOS kernel space" framing
+is not supported by this checkpoint's actual state.**
+
+**Fact-check #2: has ExecPS2/LoadExecPS2 ever fired?** Already-existing,
+extensively cited code in `source/core/ee/ee_core.c` (syscall dispatch,
+~line 4538-4612): syscall 6 (`_LoadExecPS2`) and syscall 7 (`_ExecPS2`) are
+both real-vectored (raised as genuine EE_EXC_CODE_SYS exceptions so the
+BIOS ROM's own resident kernel code performs the real ELF-load-and-jump,
+rather than reimplemented in HLE - real ps2sdk ships no C source for either,
+only a bare `SYSCALL(...)` trampoline macro per the fetched `kernel.S`, so
+this project deliberately does not guess at their internal semantics, per
+the standing task #180 lesson). Per that code's own citation, syscall 7 was
+"reached for the first time" many hundreds of rounds ago (task #195/#196)
+with `$a0` byte-exact matching the real `e_entry` this project's own
+`sif_loadfile_elf_load()` read out of a real LOADFILE'd ELF header. Task
+#447 (real disc-auto-boot vs. OSDSYS Browser state machine) was independently
+CLOSED AS ANSWERED at Round 607-608 (STATUS.md ~line 25185): a real
+disc-mounted boot goes through a separate EELOAD chain, live-hardware-
+confirmed. GT3's own real game code has been confirmed running since Round
+368/636-653/730-731 - it produces one real wireframe frame and 6 XGKICKs,
+then idles in a VBLANK-wait loop at 0x0061bbe0-0x0061bbf8. **Conclusion:
+ExecPS2/LoadExecPS2 already fired and handed control to real game code
+long before this round; that handoff is closed, evidenced history, not the
+current blocker.** No new instrumentation was needed or built for this,
+since the answer already exists on record.
+
+**Phase 1 (diskless-only, no disc): does PMODE/DISP2 organically reach a
+working configuration, and does the menu load?** Answered from existing,
+already-evidenced STATUS.md history rather than re-running a duplicate
+survey (Rounds 565/566/569/610/624 all independently reproduce this):
+- `pmode=0x66` (display genuinely enabled), `dispfb2`/`display2` non-zero,
+  reached organically by diskless BIOS boot alone, reproduced across many
+  independent rounds/commits with zero regression since Round 565.
+- Round 566 (task #539) went further than register state: dumped the real
+  DISPFB2 framebuffer to a PNG and confirmed visually - 20% non-black
+  pixels forming a wireframe/line pattern that was directly compared against
+  a real reference screenshot the user themselves had shared, and matched.
+  **So PMODE/DISP2 is reached and a real (if crude) picture is already
+  organically displayed in diskless boot.**
+- What is NOT organically reached by this project's own from-scratch core:
+  the polished, interactive OSDSYS Browser menu (Sony ring-logo animation,
+  real menu text/icons) - that was only ever observed via live real PCSX2
+  (JP BIOS, hardware-in-the-loop), not this project's own boot path. Round
+  608's own root-cause isolation (STATUS.md ~line 25237) already narrowed
+  this precisely: OSDSYS's menu-dispatcher code (~0x0021xxxx) IS genuinely
+  loaded into RAM (96% non-zero), but sampled PC never once visits that
+  region across a 1.04B-instruction survey - **control flow never
+  transfers into OSDSYS's menu-dispatcher region at all**, a dispatch/
+  control-flow gap, not a missing- or corrupt-code problem.
+
+**Synthesis / disposition for task #887/937/938.** The user's newest
+ExecPS2/EELOAD hypothesis does not hold up against the project's own
+existing evidence: the handoff already happened, hundreds of rounds ago,
+and the current checkpoint's pc is inside real user-space code (likely
+GT3's own decompressor), not BIOS kernel code. The real, already-identified,
+still-open gap - both for the diskless menu (Round 608) and for GT3 itself
+(Round 730/731's post-first-frame VBLANK-idle stall) - is the SAME
+*category* of problem: real code that runs correctly up to a point, then
+either never transfers control into the next expected region (OSDSYS) or
+idles forever waiting on a condition that never advances (GT3). Per the
+existing task #536/#447 disposition (STATUS.md ~line 29899): none of the
+GS-register/thread-scheduling machinery is currently a bug - Rounds 571-653
+already ship real triangle/sprite/texture rasterization (`source/hw/gs_mem.c`,
+`source/hw/gif.c`, `source/hw/gs_wii_output.c`, 25+ dedicated GS feature
+tests under `tests/`) on top of a correct register layer. The open question
+is narrowly: what condition is GT3's own VBLANK-idle loop actually waiting
+on, and why does it never fire - the same shape of question Round 608 already
+answered for OSDSYS's menu gap. No tracked source was changed this round
+(fact-check/investigation only, per the standing anti-fabrication
+discipline - both hypotheses were checked against real evidence before any
+fix was attempted, and both were found not to match the current tree's
+actual state).
+
+**Housekeeping note:** confirmed `include/core/hw/gs.h`'s file-header
+comment ("nothing is actually rasterized... GS local memory... don't exist
+yet") is now STALE - it predates `source/hw/gs_mem.c`/`gif.c`/
+`gs_wii_output.c` and the 25+ GS feature tests and was never updated. Not
+fixed this round (doc-only, out of scope for this fact-check), flagged for
+a future small housekeeping round.

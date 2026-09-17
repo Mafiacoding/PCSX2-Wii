@@ -44820,3 +44820,92 @@ Host-native regression suite and devkitPPC Wii cross-build correctly
 skipped (no `source/`/`include/` changes) - re-verified via `git
 status --short` showing only the one new `tools/` file untracked
 before this commit.
+
+## Round 964 (task #887/937/938, user-directed fact-check of a
+proposed "RegisterVblankHandler" fix): hypothesis CONFIRMED as real
+Sony architecture, but DISPROVEN as the cause of anything currently
+broken - the VBLANK chain is genuinely populated and working exactly
+as the real module intends; no fix needed here
+
+**User's proposal.** The user supplied a hypothesis (in the style of
+another AI's suggestion) that the missing piece is an IOP-kernel
+`RegisterVblankHandler` syscall, guessed to live in `INTRMAN` around
+syscall number ~20, with hand-written pseudocode to intercept it.
+
+**Fact-check against a real, uploaded, dated source (not guessed).**
+`uploads/vblank.c` - a real, complete disassembly-derived
+reimplementation of Sony's actual "vblank"/"Vblank_service" IOP
+module, by "[RO]man", the exact same reverse-engineering author this
+project already trusts for the Round 259 EECONF.C citation - confirms
+the user's core idea is real, with corrected mechanics:
+`RegisterVblankHandler(int number, int priority, int(*func)(struct
+VBHS*), struct VBHS *this)` and `ReleaseVblankHandler` are real, but
+they are ordinals 8/9 of the **separate "vblank" module's own export
+table** (loaded @ 0x00011F00-0x00012900, matching Round 962/963's
+0x00012274/0x0001232c exactly), not an INTRMAN syscall - calls to it
+go through this project's already-existing by-name/by-ordinal
+inter-module jump-table linking mechanism, the same one `iop_hle_
+intr.c` already hooks for `RegisterIntrHandler`. The source's `start()`
+also confirms Round 963's disassembly finding byte-for-byte: it calls
+`RegisterIntrHandler(0,1,intrh_vblank,&v)`/`RegisterIntrHandler(11,1,
+intrh_evblank,&v)` ONCE (matching our own `iop_hle_intr.c` capturing
+exactly those two addresses), and `intrh_vblank`/`intrh_evblank`
+dispatch a `struct DCLL` chain with `function` at offset 12 and `this`
+at offset 16 - exactly the offsets Round 963's raw disassembly already
+derived independently, now confirmed via a real citable source rather
+than inference alone.
+
+**Direct empirical test (the decisive step).** Built `tools/round729-
+gt3-discboot/r964_vblank_chain_check.c`: fresh SCPH-50004+GT3 cold
+boot, single-steps IOP execution until `pc` genuinely hits
+`0x00012274`/`0x0001232c`, captures the real `$a0` (=`&v`, the live
+`struct VBHS` address - `0x000126f0` this run) at that exact moment,
+then reads `v.list0`/`v.list11`'s real content directly from emulated
+IOP RAM. Result:
+```
+v.list0:  NON-EMPTY - node=0x00012710 priority=128 function=0x000123b4 this=0x000126f0
+v.list11: NON-EMPTY - node=0x00012724 priority=128 function=0x000123fc this=0x000126f0
+```
+Both chains contain exactly ONE real, correctly-linked entry each -
+and disassembling `0x000123b4` (already captured in Round 963's
+dump window) confirms it byte-for-byte matches `vblank.c`'s own
+`vblankh_0` body (`iSetEventFlag(v->statusFlag,1)`;
+`iSetEventFlag(v->statusFlag,2)`; `iClearEventFlag(v->statusFlag,
+~(1|8))` - the disassembly's `addiu a1,zero,1` / `addiu a1,zero,2` /
+`addiu a1,zero,-10` (0xFFFFFFF6 = ~(1|8) in two's complement) line up
+exactly). `0x000123fc` is `vblankh_1` by the same pattern.
+
+**Conclusion: this is the "vblank" module registering its OWN two
+internal handlers into its OWN chain - real, correct, working exactly
+as Sony designed it** (feeding the module's `WaitVblankStart()`/
+`WaitVblankEnd()`/`WaitVblank()`/`WaitNonVblank()` event-flag API,
+which other code polls separately rather than chaining directly into
+list0/list11 itself). There is no gap, no silently-dropped
+registration, and nothing broken in this mechanism. The user's
+underlying architectural intuition (a second registration API exists,
+separate from `RegisterIntrHandler`) was correct and is now
+documented with a real citation - but it is NOT the cause of GT3's
+stalled task #887 progress, since the mechanism it describes is
+confirmed fully functional on the current tree.
+
+**No fix implemented - correctly so.** Implementing the user's
+proposed C code (a generic, uncited HLE intercept for a syscall number
+that doesn't actually exist in this form) would have been exactly the
+kind of unevidenced fabrication this project's standing discipline
+forbids, and the direct RAM check this round shows there is nothing
+to fix here regardless. Docs-only round; no tracked source changed.
+One new read-only diagnostic tool (`r964_vblank_chain_check.c`)
+committed, matching this session's established scratch-tool-to-
+tracked-tools convention. Host-native regression suite and Wii
+cross-build correctly skipped (no `source/`/`include/` changes).
+
+**Where task #887 actually stands now.** With the VBLANK-dispatch
+thread now closed as answered (both irq0/irq11 real handlers register
+correctly, dispatch correctly, and their own internal callback chains
+are correctly populated - Rounds 962-964), the open thread returns to
+Round 963's OTHER finding: irq2 (real CDVDMAN ISR) and irq42/irq43
+(real SIF0/SIF1 DMA-completion ISRs) are confirmed genuinely running,
+but nothing yet identifies what would drive GT3's own game code (as
+opposed to BIOS/kernel housekeeping) toward the organic PMODE/
+DISPLAY2 milestone Round 942 once documented. That remains the real,
+still-open next step.

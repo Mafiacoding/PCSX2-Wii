@@ -45146,3 +45146,97 @@ handshake failing within a timeout window during early boot), so this
 loop is not automatically a modeling defect - it needs to be compared
 against that real behavior class before any fix is attempted, per the
 standing anti-fabrication discipline.
+
+## Round 968 (task #962): fact-check user's 3-part timing/parent-caller proposal (SCPH-50004 restart loop, docs-only)
+
+User proposed a 3-part "complete solution" to the Round 966/967 SCPH-50004
+restart loop: (1) force extra synchronous IOP execution on every SIF
+register write during boot ("TIMING-BOOST"), (2) find the real parent
+caller (`$ra`) at the entry of the cold-init routine (`0x8000d9b8`), and
+(3) halve the rate at which COP0 Count increments (claiming real EE
+hardware advances Count once per 2 cycles, not once per instruction).
+Per the standing anti-fabrication discipline, each part was fact-checked
+against real evidence before touching any tracked source. No tracked
+source was changed this round - purely scratch instrumentation
+(`/tmp/ee_core_r967.c`, never committed) plus one real citation lookup.
+
+**Part 2 (parent caller) - answered with real disassembly.** Extended
+the scratch `ee_step()` hook to fire on `pc==0x8000d9b8` and dump the
+0x30-byte code window immediately before each real caller, plus decode
+the two `printf()` format-string addresses referenced there. Across a
+60M-instruction SCPH-50004 diskless run, the routine is entered from
+**three distinct ROM call sites** - `0x8000db48`, `0x8000dc50`, and
+`0x8000dd60` (captured returns: `0x8000db50` at instr=15,900,079,
+`0x8000dd68` at instr=34,907,838, `0x8000dc58` at instr=54,593,791) -
+not a single "the" parent caller as the user's question assumed. All
+three call sites are **byte-for-byte identical code**: each prints two
+fixed banner lines ("# Initialize INTC ...", "# Initialize TIMER ...",
+format strings at 0x80016228/0x80016240 in all three cases), calls two
+helper functions (targets 0x8000E618/0x8000E648/0x8000E4F0 depending on
+site, with a mask argument 0xffff on the first-encountered site and
+0xdffd on the other two), and then calls the shared full-reinit routine
+with **identical flags=0x7f (do everything) every time** - never a
+different flags value per site. This is genuine triplicated ROM
+init-preamble code (three real, separate physical copies in the BIOS
+image), not a single loop-back or a true per-restart-type flags switch.
+It directly explains Round 966/967's observed alternating "# Restart."
+/ "# Restart Without Memory Clear." log lines: each of the ~3 restart
+entry stubs independently reprints its own preamble, then funnels into
+the one shared 0x8000d9b8 routine with the same full flags mask, then
+(per Round 967) prints its own trailing restart banner afterward. There
+is no single "soft-reset trigger register/PC" to isolate here because
+control genuinely re-enters the BIOS's cold-boot code path multiple
+times from multiple legitimate entry points, consistent with a real
+BIOS retry/restart cycle rather than a single bug location.
+
+**Part 1 (SIF-write IOP timing boost) - declined, contradicted by
+existing citation.** `source/core/system.c` line 61 already defines
+`EE_IOP_STEP_RATIO 8`, explicitly cited (both in system.c's own comment
+and `include/core/system.h`) as matching the real EE:IOP clock ratio
+(294.912 MHz : 36.864 MHz = exactly 8:1). The user's proposed
+`ee_sif_write_trigger()` would force an extra `iop_core_step_multiple(50000)`
+burst on top of this already-accurate interleave ratio during the
+"critical boot phase" - i.e. it would make the IOP run far *more*
+real-equivalent cycles per EE cycle than real hardware ever does,
+which is a deviation from, not a fix toward, real hardware timing. No
+evidence (disassembly, register trace, or citation) was presented or
+found this round showing the restart loop is actually gated on IOP
+response latency in the first place. Declined; not implemented.
+
+**Part 3 (COP0 Count halving) - declined, refuted by real PCSX2
+reference source.** The user's specific claim was "real EE hardware
+increments COP0 Count only once per 2 EE cycles." Checked this against
+`pcsx2-master.zip`'s own `pcsx2/R5900.cpp` (already an established
+real-reference citation source in this project since Round 543) -
+function `_cpuTestTIMR()`, line 320:
+
+    cpuRegs.CP0.n.Count += cpuRegs.cycle - cpuRegs.lastCOP0Cycle;
+
+Real PCSX2 advances COP0 Count by the exact number of real EE cycles
+(`cpuRegs.cycle`, PCSX2's own per-cycle counter, not a per-instruction
+counter) elapsed since Count was last synced - a strict 1:1 Count-to-
+cycle ratio, not 1:2. This directly refutes the user's premise: there
+is no real-hardware "divide by 2" in COP0 Count's own advancement rate
+anywhere in the most authoritative real-emulator reference source this
+project has access to. (Separately, `docs/STATUS.md`'s existing,
+already-cited CLKS-based real-hardware modeling for the EE's *peripheral*
+T0-T3 timers - a different mechanism from COP0 Count/Compare - remains
+correct and untouched; that citation trail does not apply to COP0
+Count either way.) No change made to `ee_latch_timer_interrupt()`'s
+existing 1-per-instruction Count model; the user's proposed
+`ee_advance_timers()` cycles/2 change was not implemented since its
+premise is contradicted by the real reference source, not confirmed by
+it. (Note: this project's own "1 per instruction" is itself still an
+approximation relative to real hardware's "1 per cycle" - most EE
+instructions are not 1 cycle each on real hardware - but that is a
+pre-existing, already-scoped simplification, not the "divide by 2"
+the user proposed.)
+
+WebSearch was rate-limited for the remainder of this round (session
+quota, resets ~8am Europe/Berlin) after the above was already settled
+via the uploaded pcsx2-master reference source, so no additional public
+citation (e.g. MIPS R5900 architecture manual) was consulted this round
+beyond the real-PCSX2-source check above.
+
+No tracked source changed - regression suite and Wii cross-build
+correctly skipped this round (docs-only, per standing convention).

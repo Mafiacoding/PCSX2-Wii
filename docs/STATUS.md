@@ -44406,3 +44406,162 @@ parts are survey/diagnostic-only - correctly no new fix to verify).
 devkitPPC Wii cross-build re-checked clean (0 warnings, `pcsx2-wii.dol`
 rebuilt fresh for delivery this round per the user's explicit
 reminder).
+
+## Round 961 (task #887, user-directed follow-up: "disassemble
+pc=0x00155b40, don't forget it's DISP2"): MAJOR CORRECTION - Round
+960's "IOP frozen at pc=0x00155b40 across two 720,000,000-instruction
+continuations" finding was a coarse-sampling artifact of
+`chain_driver.c`'s 10,000,000-slice chunk granularity, not a real
+freeze; fine-grained per-step tracing proves Round 943's sched_ticks/
+VBLANK-wake fix is working perfectly, continuously, 240,000,000+
+sched_ticks deep into this exact GT3 checkpoint
+
+**User's explicit directive this round** (German, verbatim): "mach mit
+dem gs display wiring weiter... disassemblierung von IOP
+pc=0x00155b40, vergiss nicht es ist disp2" - disassemble the frozen IOP
+pc from Round 960, with an explicit reminder that any resulting fix
+must stay scoped to the real GS Circuit-2 (DISPFB2/DISPLAY2) display-
+wiring goal, not Circuit 1 (per Round 212/321's real-hardware-confirmed
+EN1=0/EN2=1 finding).
+
+**Method**: built two new host-native diagnostic drivers (both purely
+read-only, no tracked-source changes):
+- `tools/round729-gt3-discboot/r961_iop_freeze_dump.c`: loads Round
+  960's persisted `checkpoints/gt3_round960_freshboot.ckpt` (fresh
+  cold-boot, current Round-959-fixed tree, `total_ee_instr=
+  1,439,998,498`), dumps full IOP GPR/COP0 state, `idle`/`sched_ticks`
+  fields, and `iop_intc_state_t` (istat/imask/ictrl/istat_hi/imask_hi),
+  plus a raw IOP-RAM window around the frozen pc for offline
+  disassembly with the existing `tools/round655-ee-disasm/disasm.c`
+  decoder (R3000A is a strict MIPS-I subset of the R5900 table it
+  already covers, same reuse precedent as Round 944).
+- `tools/round729-gt3-discboot/r961_iop_finegrain.c`: loads the same
+  checkpoint, then single-steps `iop_core_step()` in a tight loop
+  (bypassing `system_run_interleaved()`'s noisy per-call print, same
+  fix Round 960 already applied for the same reason), logging every
+  transition of `idle` or `pc` with the exact `sched_ticks`/istat/
+  Cause context - fine enough granularity that no wake cycle, however
+  brief, can be missed.
+
+**Step 1 finding - the raw disassembly is misleading on its own.**
+Disassembling IOP RAM 0x155740-0x155940 with the R5900/MIPS-I decoder
+produces mostly garbage mnemonics ("mmi.0x33", "movz zero,zero,zero",
+unrecognized op.0x1D) that, read as raw ASCII bytes instead of
+instructions, spell out a real embedded debug format string:
+`"mecha command:%02x param:%02x"` - a genuine Sony MECHACON command-
+log string (matches the user's own Round 949 MECHACON/SIO2-IP3
+research thread), sitting in what is actually a rodata/jump-table
+region, not executable code. This confirmed the frozen `pc=0x00155b40`
+is NOT inside a real polling loop being disassembled as instructions -
+consistent with Round 943's own already-documented finding (STATUS.md,
+same address family, `pc=0x00155910`) that this whole region is the
+project's own synthetic idle-parking trampoline address, not real
+Sony code, and disassembling it as instructions was never going to be
+meaningful.
+
+**Step 2 finding - `r961_iop_freeze_dump.c`'s direct state dump.**
+`idle=1`, but critically **`sched_ticks=180,000,000` and actively
+incrementing** (not frozen) - Round 943's fix (a per-`iop_core_step()`-
+call unconditional counter, added specifically because the OLD phase
+source, `instructions_executed`, silently froze while idle) is
+observably alive at this depth. `Status=0x00000401` (IEc=1, IM2=1 -
+both conditions `iop_check_hw_interrupt()` requires), `Cause=0x00000000`,
+`istat=0x00000000`, `imask=0x0001080d` (bits 0/2/3/11/16 unmasked -
+VBLANK_START=bit0 and VBLANK_END=bit11 both unmasked, a small but real
+difference from Round 943's own captured `imask=0x0001000d`, i.e. bit11
+has since been unmasked by some real driver write - not investigated
+further this round, noted for the record). `exception_pending=0`,
+`EPC=0x00155b40`. Taken alone this snapshot is genuinely ambiguous -
+consistent with either "permanently stuck" or "correctly idling between
+periodic wake events, sampled between them" - which is exactly why
+Step 3 below (not a single snapshot) is the decisive evidence.
+
+**Step 3 finding - `r961_iop_finegrain.c` proves the wake/re-idle cycle
+is real, correct, and has been running the whole time.** Single-
+stepping from this exact checkpoint for 3,000,000 IOP steps (and
+separately, 60,000,000 steps to raise confidence to the same order of
+magnitude as Round 960's own 720,000,000-instruction/~90,000,000-slice
+continuations) shows a perfectly periodic 3-step wake cycle, repeating
+without degradation:
+```
+step=249497 sched_ticks=180249498 pc=0x00155b40->0x80000080 idle=1->0 istat=0x00000001 cause=0x00000400 exc_pending=1
+step=249498 sched_ticks=180249499 pc=0x80000080->0x00155b40 idle=0->0 istat=0x00000000 cause=0x00000400 exc_pending=0
+step=249499 sched_ticks=180249500 pc=0x00155b40->0x00155b40 idle=0->1 istat=0x00000000 cause=0x00000400 exc_pending=0
+```
+alternating `istat=0x00000001` (VBLANK_START, bit0) and
+`istat=0x00000800` (VBLANK_END, bit11) triggers, each exactly
+`IOP_CYCLES_PER_FRAME_NTSC` (615186) or `IOP_CYCLES_VBLANK_DURATION`
+(51265) `sched_ticks` apart from the previous one, matching
+`iop_check_vblank()`'s documented phase formula exactly. Each wake
+takes exactly 3 real `iop_core_step()` calls: (1) VBLANK edge raises
+`istat`, `iop_check_hw_interrupt()` (called from the `idle` branch,
+`iop_core.c` ~line 2160) sees `istat&imask` nonzero, sets
+`exception_pending=1`, clears `idle`, vectors pc to the real default
+exception vector `0x80000080`; (2) the real fetch/decode/execute path
+(`iop_step()`) runs exactly once at `0x80000080` - the generic default-
+vector "consume and RFE" stub Round 129/131 already built - and returns
+pc to the saved EPC, `0x00155b40`; (3) `iop_module_loader_try_handle()`
+(`source/hw/iop_module_loader.c`, Round 425/426's documented re-idle
+path: `if (g.idle_transition_done) { st->idle = 1; return 1; }`) sees
+`pc == g.trampoline_addr` again and immediately re-arms `idle=1`. Over
+the full 60,000,000-step run: **196 complete wake cycles, zero
+degradation, zero missed edges, sched_ticks advancing from
+180,000,000 to 240,000,000 with perfect linearity** - runtime 4.46s
+(no throughput cliff either).
+
+**Why Round 960 saw "no change ever" despite this.** Round 960's GT3
+Part B used `tools/round729-gt3-discboot/chain_driver.c`, which only
+inspects/reports state at 10,000,000-slice **chunk boundaries** (`while
+(done < budget) { system_run_interleaved(10000000); done += ...; }`).
+Each wake cycle here lasts exactly 3 steps out of every ~307,593-
+average-gap between edges - roughly a 1-in-100,000 chance of a
+10,000,000-slice-aligned sample landing inside one. Every single one of
+Round 960's coarse checkpoints was, unsurprisingly, taken during the
+"resting/idle" 99.999% of the cycle, making a perfectly healthy,
+continuously-cycling mechanism look permanently frozen. This is the
+same class of false-negative this project has corrected before (see
+Round 927/928's "coarse-sampling artifact" and Round 867-873's GT3
+"confirmed NOT stuck" corrections) - not a new bug, a re-confirmation
+that periodic-sampling surveys of this codebase need per-step
+verification before a "frozen forever" claim is trusted.
+
+**Corrected conclusion.** Round 943's IOP idle/VBLANK-wake fix is
+NOT broken and was never un-fixed - it is demonstrably still working
+correctly at 240,000,000+ sched_ticks (roughly 390 NTSC-frame periods)
+into this exact GT3 boot. The IOP is not "stuck" in any sense that
+would explain GT3's failure to reach Round 942's documented organic
+`pmode=0x66` milestone.
+
+**What remains genuinely open (the real, narrower gap).** Each wake
+cycle dispatches through the generic default exception vector and
+does nothing beyond immediately RFE-ing back - no specific VBLANK
+interrupt-service-routine ever runs, no CD command gets issued, no new
+work reaches the IOP, because (per this project's own extensive task
+#447 history) no module in this GT3 disc-boot context has a real,
+registered VBLANK handler at this point, and nothing on the EE side
+sends the IOP a fresh SIF-RPC request during this window either
+(Round 937/938 already investigated and partially addressed the SIF-
+RPC angle). The IOP behaving correctly is necessary but not sufficient
+for progress - real forward motion has to come from something ELSE
+giving the IOP new work, or from the EE side making progress
+independently. **Per the user's explicit DISP2 reminder**: this
+round's finding is entirely IOP-internal (VBLANK/idle scheduling) and
+does not touch GS state at all - real GS circuit access is EE-side
+only (Round 212/321), so no PMODE/DISPFB/DISPLAY change was made or
+would have been appropriate here. The actual organic-pmode gap (GT3
+still pinned at the Round 940/941 synthetic forced Circuit-2 override
+rather than reaching Round 942's documented organic `0x66`) remains
+open, now correctly re-scoped away from the disproven "IOP frozen"
+theory toward "what would give the IOP/EE new work during this
+window" as the next evidenced question.
+
+**No tracked-source fix this round** - `iop_core.c`'s idle/VBLANK/
+re-idle mechanism (Round 943/425/426) is confirmed CORRECT as-is;
+this round is a verification/correction of a prior round's own
+(mistaken) diagnostic conclusion, not a bug fix. `docs/STATUS.md`
+updated (this entry, correcting Round 960's Part B framing) and two
+new scratch-turned-tracked diagnostic drivers committed under
+`tools/round729-gt3-discboot/`. Host-native regression suite and
+devkitPPC Wii cross-build correctly skipped (no `source/`/`include/`
+changes) - re-verified via `git status --short` showing only the two
+new `tools/` files as untracked before this commit.

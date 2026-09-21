@@ -45660,3 +45660,101 @@ round). Task #962 ("find who calls the SCPH-50004 cold-init routine
 repeatedly") is now answered: OSDSYS's own real syscall-driven ExecPS2
 self-relaunch, confirmed via live $ra/Cause/Status capture, not an external
 caller or emulator bug.
+
+## Round 980 (task #963 continuation): real 256-instruction backward-trace + full-register capture at the ExecPS2(0x00200000) self-relaunch call - no failing CDVD/SIF/pad check found in this immediate window; corrects a third-party proposal's register convention
+
+User relayed a third-party (Gemini) proposal to build a backward-trace tool
+catching the exact moment OSDSYS issues its self-relaunch and to inspect
+which branch/memory read gates it, plus asked whether the OSDSYS menu
+needs a virtual memory card or CDVD-ready signal (noting the menu is
+BIOS-resident).
+
+### Correction to the proposed instrumentation before building it
+
+The proposed C snippet reads the syscall number from `GPR(2)` ($v0). This
+project's own real dispatcher (`ee_core.c` line 3898: `int32_t sysnum =
+(int32_t)GPR(3);`) uses $v1 (GPR 3), confirmed again by every real syscall
+stub disassembled this round (`addiu v1,zero,N; syscall; jr ra; nop`
+pattern at 0x001007e0 for FlushCache and 0x001001b0 for ExecPS2 itself).
+Built the real instrumentation against the confirmed register instead of
+the proposed (incorrect) one. This project's interpreter has no built-in
+instruction-history ring buffer - confirmed via grep before writing one -
+so a real 256-entry circular (pc, raw-opcode) buffer was added to a fresh
+scratch copy (`/tmp/ee_core_r980.c`), recording every executed instruction,
+with a trigger at the real dispatch JALR (pc=0x800002fc, $k0=0x80002f80,
+$a0=0x00200000) that dumps: full GPR(0-31) state, COP0 Cause/Status/EPC,
+memory around the lookup address found in the trace, and the full 256-deep
+backward instruction trace with real per-opcode tags (J/JAL/JALR/JR/
+branches/loads/stores/immediates).
+
+### What the real backward trace shows
+
+The 256 instructions immediately preceding the self-relaunch call are
+entirely OSDSYS's own code (0x00100b14-0x001001b4), not kernel glue. Fully
+decoded:
+
+- 0x00100b68: `bne $s1,$0,+1` / `addiu $a3,$s2,0x7d48` - sets up a pointer
+  into a global table region at absolute RAM address 0x00157d48ish.
+- 0x00100be0-0x00100bf8: a tight byte-copy loop (`lbu`/`sb` via $a1->$s0,
+  looping on `$a0` as a down-counter via `bne $a0,$0`) - copies roughly
+  18-19 bytes, i.e. a short string (very plausibly a fixed module/device
+  name OSDSYS re-validates on every relaunch).
+- 0x00100c00-0x00100c14: computes the copied string's length (`subu
+  $v0,$s0,$s2`), reads a second value from the SAME table region via a
+  different base (`lw $v1,0x7d48($s3)`), then `beq $v0,$v1,+8` - compares
+  copied-length against the table's stored expected length.
+- In this captured run, **the branch was taken** (v0==v1, i.e. the check
+  PASSED) - execution falls straight into a normal function epilogue
+  (restore saved $s0-$s5/$ra, `jr ra`), not into any visible error/retry
+  path.
+- Returning caller (0x00100b14-0x00100b28) is a one-line accessor:
+  `lui $v1,0x15; ...; lw $v0,0x7d48($v1); ...; jr ra` - i.e. a getter that
+  simply returns the global at absolute address 0x00157d48. Captured live
+  value: `0x000c58f4`. Dumped the surrounding 0x00157d30-0x00157d60
+  region too; nothing there looks like a CDVD/SIF/pad status word (no
+  0/1 flag pattern, no small enum-sized values consistent with the
+  CD_SCMD/DiskReady conventions this project's own task #447/#536
+  history has repeatedly found elsewhere).
+- Falling further back: 0x001000ec/0x001000f4 call the real FlushCache
+  syscall trampoline (0x001007e0: `addiu v1,zero,0x64; syscall`) twice,
+  then 0x001000fc-0x00100108 sets up `_ExecPS2` arguments (`a1=[sp+4]`,
+  `a2=$s0`, `a3=$s1`) and calls the real ExecPS2 trampoline
+  (0x001001b0: `addiu v1,zero,7; syscall`) with **a0 hardcoded via a bare
+  `lui $a0,0x0020`** (=0x00200000) - i.e. this specific call site's target
+  address is a compile-time constant, not conditionally chosen at
+  runtime.
+
+Every conditional branch actually observed in this 256-instruction window
+(the `bne $s1,0` setup check, the copy loop's own exit condition, and the
+length-match compare) either fell through harmlessly or took its "success"
+path. None of them is a CDVD-ready, SIF-mailbox, or SIO2/pad-status check,
+and none of them failed. This does not support the specific hypothesis
+that a failing CDVD/SIF/pad signal directly and immediately gates *this*
+call site. It refines last round's finding rather than contradicting it:
+this self-relaunch call looks like it fires as part of OSDSYS's own
+unconditional, periodic internal routine (validate a fixed string/table
+entry, flush cache, relaunch self) rather than as a reactive "give up,
+something failed" branch. If a real failing condition exists that decides
+*whether this whole routine runs at all* on a ~34.4M-instruction cadence,
+it must live further upstream than this window (the caller of 0x00100b68,
+outside the captured 256 instructions) - not yet located.
+
+### Memory-card / CDVD-ready question
+
+Confirmed against this project's own established citations, not fresh
+guesswork: OSDSYS's menu ELF is BIOS-ROM-resident and loaded directly at
+0x00200000 (Round 274), and this project's own real McServ modeling
+(Round 456) already established that a missing/absent memory card gets a
+real "no card present" response rather than blocking menu display - no
+virtual memory card is required merely to show the OSDSYS browser. Whether
+a CDVD-ready/disc-presence signal is what OSDSYS needs to ESCALATE out of
+its idle/restart cycle into full interactive menu operation remains the
+genuinely open part of task #447/#536 - this round's trace did not find
+that check inside the self-relaunch call itself, so it must be searched
+for elsewhere (most likely in whatever calls 0x00100b68, or in a
+completely separate polling function that decides when to re-enter this
+routine at all).
+
+No tracked source changed (scratch-only, `/tmp/ee_core_r980.c` + new
+`/tmp/r980_driver.c`, per the standing backup-before-experimenting rule).
+Regression suite and Wii cross-build correctly skipped (docs-only round).

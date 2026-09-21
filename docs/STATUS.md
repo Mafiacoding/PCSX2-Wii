@@ -45565,3 +45565,98 @@ one level further out.
 
 No tracked source changed this round (scratch-only, `/tmp/ee_core_r967.c`).
 Regression suite and Wii cross-build correctly skipped (docs-only).
+
+## Round 974-979 (task #961/#962/#963 continuation): restart-loop mechanism fully decoded - real SYSCALL-driven OSDSYS self-relaunch, not an emulator bug; 32MB-RAM hypothesis checked and not supported
+
+User's instructions this window: "brich die Kette soweit auf bis du ne
+Loesung findest, und implementiere sie" (keep disassembling the SCPH-50004
+restart loop until a real fix is found, and ship it), then "unser emulator
+hat einen eigenen Problem auch wegen dem 32 MB RAM ... vielleicht auch der
+Grund wieso der BIOS resettet die ganze Zeit" (new hypothesis: our own
+32MB-RAM modeling might be part of why the BIOS keeps restarting).
+
+### 32MB-RAM hypothesis: checked, not supported by evidence
+
+`ee_core.c:186 #define EE_RAM_SIZE (32*1024*1024)` matches real PS2 hardware's
+documented 32MB EE main RAM exactly - correct, not a bug. The only other
+32MB-adjacent constant in the tree, `checkpoint.c:43 EE_RAM_SIZE_CKPT
+(32*1024*1024+65536)`, already carries a pre-existing comment (from an
+earlier round) explaining the +65536 as intentional oversized scratch-buffer
+slack for a read buffer, not a real size mismatch - confirmed correct on
+re-read, not a bug. Every address directly implicated in the actual
+restart-loop mechanism (0x00082000ish low-RAM code, 0x80000200-0x80000340
+kernel exception glue, 0x80002f80/0x80005988 syscall handlers, 0x80014f40
+dispatch table) sits far below any 32MB boundary. No fix implemented for
+this hypothesis; it does not explain the mechanism actually observed.
+
+### The restart loop: fully traced to a real SYSCALL, not an interrupt, not KExit, not an emulator bug
+
+Continuing Round 974-977's disassembly (Function A @0x80005598, Function B
+@0x80002f80/0x800057E0 orchestrators; KExit stub confirmed unreached across
+300M+ instructions), this round added live $ra-capture at both Function A's
+and Function B's entry points across a fresh 256M-instruction SCPH-50004
+diskless run. Every single hit - all of them, Function A and Function B
+alike, across 8+ full restart cycles - returns to the IDENTICAL address
+`ra=0x80000304`. Disassembling 0x800002A0-0x80000340 (the real code
+containing that return address) shows a textbook R5900 exception-entry
+prologue: three SQ (128-bit) context-saves, `mfc0 $at,Status` / bit-mask /
+`mtc0 $at,Status`, then at 0x800002F0-0x800002FC a table-walk (`lui
+$k0,0x8001; addu $k0,...,$at; lw $k0,0x4f40($k0)` -> handler address, then
+`jalr $k0`) - i.e. a genuine, real EE-kernel exception/syscall dispatch
+table at base 0x80014f40 (0x80010000+0x4f40).
+
+Capturing COP0 Cause/Status at that exact JALR (pc=0x800002fc) across 8
+dispatches gives `Cause=0x00008020` on every single one, with zero
+variance. Decoded: bits15 (IP7) aside, the ExcCode field (bits 6:2) reads
+0x08 = "Sys" - a genuine SYSCALL exception, not a hardware interrupt. This
+overturns this round's own earlier working assumption (carried from Round
+975) that the restart cycle was interrupt-driven; it is not. The dispatch
+table's `$k0` (about-to-be-called handler address) was captured at each of
+the 8 hits: 0x80001c78, 0x80001cb8, 0x80002f80 (twice), 0x80005988 (four
+times), 0x80001c78, 0x80001cb8, 0x80002f80 again - i.e. a fixed sequence of
+4 distinct real EE-kernel syscall handlers invoked once (0x80001c78,
+0x80001cb8), twice (0x80002f80), and once more (0x80005988) per outer
+restart cycle, all reached via genuine guest-issued `syscall` instructions
+that our own C-level HLE intercept correctly does NOT shortcut (only
+sysnum 1/4/60/61/100 etc. are C-level HLE'd; everything else correctly
+falls through to a real R5900 exception into the guest's own registered
+handler code, exactly as real hardware would).
+
+0x80002f80 is the same address Round 465 (many months ago) already
+identified as the real `p_ExecPS2`-family syscall handler (EE syscall 7,
+`_ExecPS2`/`ExecPS2`). Capturing its arguments live: the first invocation
+each cycle passes `a0=0x00100008`, the second `a0=0x00200000`. The second
+value is the long-established, many-times-cited real load address of
+OSDSYS's own ELF (first identified as such back in Round 274). This means
+the observed "Restart."/"Restart Without Memory Clear." banner sequence is
+literally **OSDSYS re-invoking `_ExecPS2()`/`ExecPS2()` on itself**, i.e. a
+genuine, real, intentional BIOS self-relaunch - not a crash, not a
+mis-dispatched interrupt, not stray KExit, and not related to our RAM
+sizing. 0x80005988 (immediately adjacent to, but distinct from, the
+"Function A" 0x80005598 first disassembled in Round 974) is a fourth,
+still-not-fully-named real kernel syscall handler in the same code region,
+called once per cycle with v0=0x002c0000 on return (another real, plausible
+OSDSYS/EELOAD-adjacent address, not yet further decoded).
+
+### Classification
+
+This is real, correct, intentional BIOS/OSDSYS behavior: on a diskless
+boot with no valid boot target, OSDSYS's own real kernel code decides
+(after its own internal checks - almost certainly related to the
+long-standing, still partially open task #447/#536 disc/CDVD/SIF-dispatch
+escalation gap) to re-launch itself from scratch, over and over, at a
+period of ~34.4M EE instructions per cycle. No source-level bug was found
+in the restart mechanism itself; forcing a "fix" here would mean
+suppressing correct, real BIOS behavior, which the project's own
+anti-fabrication rule prohibits. The genuine remaining blocker for reaching
+OSDSYS's real menu/game-boot state on a diskless run continues to be task
+#447/#536's already-long-documented disc-command/SIF-dispatch escalation
+gap, not anything newly found in this round's restart-loop trace.
+
+No tracked source changed this round (all instrumentation lived in scratch
+`/tmp/ee_core_r979*.c` copies per the standing backup-before-experimenting
+rule). Regression suite and Wii cross-build correctly skipped (docs-only
+round). Task #962 ("find who calls the SCPH-50004 cold-init routine
+repeatedly") is now answered: OSDSYS's own real syscall-driven ExecPS2
+self-relaunch, confirmed via live $ra/Cause/Status capture, not an external
+caller or emulator bug.

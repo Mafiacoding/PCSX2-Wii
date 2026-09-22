@@ -45758,3 +45758,114 @@ routine at all).
 No tracked source changed (scratch-only, `/tmp/ee_core_r980.c` + new
 `/tmp/r980_driver.c`, per the standing backup-before-experimenting rule).
 Regression suite and Wii cross-build correctly skipped (docs-only round).
+
+## Round 981 (task #963 continuation): 0x00100b68 caller trace + CDVD-presence A/B test
+
+User (relaying a third-party/AI-generated proposal) asked for two things:
+(1) an EE-side hook at 0x00100b68 logging `$ra` (the "parent caller") plus
+SIF_MSCOM/SIF_SMFLAG, to find what invokes the self-relaunch preamble;
+(2) an IOP-side experimental override forcing the CDVD drive into a
+"disc present" state, to test whether that breaks the SCPH-50004 restart
+loop.
+
+### Corrections made to the proposal before implementing anything
+
+The pasted snippet again contained fabricated details, caught by grep
+against this project's own real source before writing any code (same
+anti-fabrication discipline as Round 980):
+
+- Invented a fictional `EE_REG_READ32()` macro and a guessed, uncited
+  "RPC status field" at RAM 0x00020000+0x4054. Dropped both. Used this
+  project's real, already-existing `sif_mmio_read32(addr,&out)`
+  accessor (`hw/sif.c`) instead, against the real SIF_MSCOM (0x1000F200)
+  and SIF_SMFLAG (0x1000F230) register addresses (`hw/sif.c` lines 9/12
+  - these two addresses happened to already match the proposal, but were
+  verified rather than trusted blindly).
+- Proposed CDVD status byte values ("0x02 = NODISC", "0x06 = PAUSE") that
+  do not match this project's real, already-cited constants
+  (`include/core/hw/iop_cdvd.h`: `IOP_CDVD_STATUS_PAUSE=0x0Au`,
+  `IOP_CDVD_TYPE_NODISC=0x00u`, `IOP_CDVD_TYPE_PS2CD=0x12u`). Used the
+  real, already-existing, already-tested `iop_cdvd_set_disc_present()`
+  (`hw/iop_cdvd.c`, same function Round 479's disc-presence A/B test
+  used on the older BIOS target) instead of a fabricated hardcoded
+  status-getter override.
+
+### $ra hook result: NOT an outer OSDSYS state-machine caller - it's a real internal decompressor loop
+
+Both boot modes hit 0x00100b68 at ee_instr=34,951,647 with an identical
+8-hit pattern: hit #1 shows `ra=0x00100b14`, hits #2-8 show
+`ra=0x00100b78` with `$s1` counting down `0x1d,0x1c,0x1b,0x1a,0x19,0x18,
+0x17` (29 down to 23). Disassembling the real function body
+(0x00100af8-0x00100c58, via this project's own `tools/round655-ee-disasm`
+EE disassembler against a live RAM dump taken at the first hit) fully
+explains this, and it is NOT an outer "state machine dispatcher" as the
+proposal implied:
+
+- 0x00100b30 is a self-contained function: `s2` = destination pointer
+  (=0x00200000 in every capture - OSDSYS's own ELF-load target), `s4`=
+  `s3`=0x00150000 (global table base), `s1`=0 initial ("bits remaining
+  until next codeword refill").
+- 0x00100b68 is the TOP OF AN INTERNAL LOOP inside that same function,
+  reached via a plain branch (`beq zero,zero,0x00100b68` at 0x00100c30),
+  not via a function call - so `$ra` here reflects only the most
+  recently executed `jal`, not a "caller of the loop".
+- `bne s1,zero,0x00100b7c` / `jal 0x00100c60` / `addiu s1,zero,30`: when
+  the countdown reaches 0, calls a sub-function at 0x00100c60 to refill
+  a Huffman/LZ-style bitstream codeword, then resets the countdown to 30
+  (0x1e). This `jal` is at 0x00100b70, and MIPS sets `$ra`=`pc_of_jal+8`
+  = 0x00100b78 - exactly the value seen on hits #2-8, confirming this is
+  simply the return address pinned from the last refill call, unchanged
+  while the countdown (`$s1`) ticks down once per iteration
+  (`addiu s1,s1,-1` at 0x00100c24).
+- Hit #1's `ra=0x00100b14` is likewise mundane: it's `pc_of_jal+8` for
+  the real call site `jal 0x00100b30` at 0x00100b0c, inside a small
+  wrapper function (~0x00100af8) that is this decompressor's actual
+  external caller.
+- The loop body (0x00100b7c-0x00100c34) is a textbook LZSS/Huffman-style
+  decompressor: a control bit selects either a literal-byte copy
+  (0x00100be0-0x00100bf8, byte-by-byte `lbu`/`sb`) or a back-reference
+  copy, output length is checked against a target value stored at the
+  same global 0x00157d48 identified in Round 980, and the loop either
+  continues (shifting the codeword left by one consumed bit) or returns.
+
+**Conclusion:** 0x00100b68 is the real BIOS-ROM decompressor that
+unpacks OSDSYS's own compressed image into RAM at 0x00200000 - this is
+what runs on EVERY "Restart."/"Restart Without Memory Clear." cycle to
+rebuild the relaunched OSDSYS instance, not a decision point about
+whether to restart. It has no outer "parent caller" worth chasing beyond
+the trivial wrapper found; the actual restart *decision* (per Round
+974-980) happens elsewhere, upstream of this decompression step.
+
+### CDVD-presence A/B test: complete, byte-identical negative result
+
+Ran the full 100,000,000-instruction-budget harness (`/tmp/r981_driver.c`
++ `/tmp/ee_core_r981.c`) in both modes to completion (`nopresent`: default
+post-reset TRAY_OPEN/NODISC state; `present`: forced
+`iop_cdvd_set_disc_present(IOP_CDVD_TYPE_PS2CD)` = TYPE=0x12/PAUSE before
+boot). Both runs are **byte-for-byte identical** across all captured
+data: the same 8 hits at 0x00100b68 (same `ee_instr`, same `$ra`/`$s1`/
+`$s2`/`$s3`), the same constant `SIF_MSCOM=0x00000000` /
+`SIF_SMFLAG=0x40070000` throughout, and the same final state after the
+full 799,999,285-instruction run: `ee_halted=0`, `pc=0x00100c28` in both
+modes.
+
+**The simulated CDVD disc-presence signal has zero observable effect** on
+the SCPH-50004 restart loop, its cadence, or any traced register/memory
+state - consistent with, and now confirming on a second/different BIOS
+target, Round 479's identical negative finding on the older BIOS image.
+This is an honest negative result, not a partial one: the run reached
+full completion in both modes, so there is no missing tail data that
+could still show divergence.
+
+### Status
+
+No tracked source changed this round (scratch-only:
+`/tmp/ee_core_r981.c`, `/tmp/r981_driver.c`, reusing existing
+`tools/round655-ee-disasm/disasm.c`), per the standing
+backup-before-experimenting rule. Regression suite and Wii cross-build
+correctly skipped (docs-only round). Task #447/#536's open question -
+what real condition (if any, in this emulation) should escalate OSDSYS
+out of its restart cycle - is NOT the CDVD disc-presence signal; that
+avenue is now closed on both BIOS targets tested. The next place to look
+is further upstream of the decompression/relaunch machinery documented in
+Rounds 974-981, not inside it.

@@ -46788,3 +46788,110 @@ methodology, or by a SIF-RPC/LOADFILE reply this trace never receives).
 No tracked source changed this round (diagnostic-only, `tools/` driver
 only) - regression suite and Wii cross-build correctly skipped per this
 project's own established convention for docs/diagnostic-only rounds.
+
+## Round 991 (task #971): scanned for the real writer of OSDSYS flag 0x0040dc80 - found only a zero-initializer and a companion buffer-registration struct, no signal-setter anywhere in the resident image
+
+Follow-up to Round 990. Built `tools/round991-dc80-writer-scan/analyze.c`
+(same disasm block, extended with a full-RAM static scanner) to find
+every EE instruction site that constructs the address 0x0040dc80 via
+the same `lui $r,0x0041` / `addiu $r,$r,-9088` two-instruction pattern
+Round 990's own read-side accessor used (the canonical MIPS compiler
+idiom for a 32-bit constant whose low half has its sign bit set -
+scanned with a 3-instruction lookahead window, since the compiler can
+interleave one independent instruction between the pair, as it does in
+the read accessor itself). Booted to the Round 990 resting point first
+(confirmed reached again at the same ee_instr=55,999,939) so the whole
+OSDSYS image is resident, then scanned all 32MB of EE RAM.
+
+### Only 3 hits in the entire resident image
+
+**Hit #3 (0x0026fe90)** is Round 990's already-known read accessor -
+confirms the scan methodology is sound.
+
+**Hit #2 (0x0026fcdc)** is a zero-initializer, not a signal writer:
+
+```
+0x0026fcdc: lui   v0, 0x0041
+0x0026fce4: addiu v0, v0, -9088      ; v0 = 0x0040dc80
+0x0026fce8: addiu v0, v0, 124        ; v0 = 0x0040dcfc (table's last word)
+0x0026fcf0: sw    zero, 0(v0)        ; clear - loop continues (not shown) down to 0x0040dc80
+```
+
+This is the real writer of the all-zero state Round 990 found - it's an
+explicit BSS-style clear loop for the table, confirming the table's
+zero content is deliberate initialization, not simply "unwritten
+memory."
+
+**Hit #1 (0x0026fc7c)**, inside a larger function starting at
+0x0026fc18, is the interesting one - full disassembly (this round,
+0x0026fbe0-0x0026fce8):
+
+```
+0x0026fc38: cop0  zero, s0, 57         ; COP0 register read
+0x0026fc3c: sync
+0x0026fc40: cop0  v0, zero, 24576      ; another COP0 register read
+0x0026fc44: and   v0, v0, v1           ; v0 &= 1
+0x0026fc4c: bne   v0, zero, 0x0026fc38 ; busy-wait on a COP0 status bit
+  ... (real "uncached accelerated" pointer construction, ORing
+       0x20000000 into two buffer base addresses 0x0040DA80 and
+       0x0040DB00 - the standard PS2 DMA-target-buffer aliasing idiom)
+0x0026fc80: addiu v0, a3, -9384       ; v0 = 0x0040DB58 (a companion struct)
+0x0026fc84: addiu v1, v1, -9088       ; v1 = 0x0040dc80 (OUR table's address)
+0x0026fc8c: sw    a0, -9384(a3)       ; MEM[0x0040DB58]    = 0x2040DA80 (uncached alias)
+0x0026fc94: sw    v1, 28(v0)          ; MEM[0x0040DB58+28] = 0x0040dc80 (our table's OWN ADDRESS)
+0x0026fc98: sw    a2, 4(v0)           ; MEM[0x0040DB58+4]  = 0x2040DB00 (uncached alias)
+0x0026fca0: sw    t0, 16(v0)          ; MEM[0x0040DB58+16] = 32 (count)
+0x0026fcb0: sw    a1, 12(v0)          ; MEM[0x0040DB58+12] = 0x0040DB80 (another buffer)
+... then two back-to-back zero-fill loops: one clearing 0x0040DB80-
+0x0040DC80 (256 bytes, 32x8), the other (Hit #2 above) clearing
+0x0040DC80-0x0040DCFC (our table, 128 bytes, 32x4)
+```
+
+This is a real, well-formed buffer/queue-registration routine: it
+starts with a COP0-register busy-wait, builds two "uncached
+accelerated" (0x20000000-OR'd) DMA-target buffer aliases, and populates
+a struct at 0x0040DB58 whose fields include our table's own address
+(stored as a pointer, at +28), a count of 32, and a second buffer
+pointer (0x0040DB80, at +12) - immediately followed by zero-fill loops
+covering both referenced buffers. Shape (buffer pointer + element count
++ a paired uncached-DMA-alias pointer, all zeroed before use) is
+consistent with a real IOP-communication queue/mailbox setup (this
+project's own `sif_cmd_iop_handle_init_cmd()`/`ee_recvbuf_addr` machinery
+in `source/hw/sif.c` models the analogous IOP-side "EE gave me a receive
+buffer address" bookkeeping for a different, lower-level SIF_CMD_INIT_CMD
+mechanism at IOP address 0x0008C440 - not proven to be the same
+mechanism as this EE-side struct, but the architectural shape strongly
+suggests this table is likewise a receive/completion buffer some
+asynchronous producer is expected to signal into).
+
+### Conclusion: no EE store instruction anywhere touches 0x0040dc80 except init and read
+
+Across the ENTIRE 32MB resident RAM image, only an initializer (zeroes
+it) and the reader (Round 990's polling loop) reference this address via
+this construction pattern - there is no third site that writes a
+non-zero value into it. Two honest possibilities, not yet distinguished:
+(a) the real writer uses a different addressing pattern this specific
+2-instruction scan can't catch (e.g. reusing an already-computed base
+register from earlier in some other function, rather than re-deriving
+the constant), or (b) - matching this project's own recurring pattern
+class (Round 468's orphaned AddIntcHandler registration is the closest
+precedent) - the real signal is supposed to arrive from an IOP-side SIF/
+DMA completion this project's own boot trace never reaches, so the
+writer code genuinely never runs in this emulator's current state.
+
+### Next step
+
+Widen the scan beyond the fixed 2-instruction constant-construction
+pattern to a proper base-register data-flow scan (track any register
+once it's known to hold 0x0040dc80 or a value copied from the struct at
+0x0040DB58+28, across its full live range, not just immediately after
+construction) to catch indirect writers. In parallel, check whether
+`source/hw/sif.c`'s real SIF0 (IOP-to-EE) DMA payload-copy path
+(`ee_mem_write32`-based, per `sif_cmd_iop_write_private_queue_copy()`,
+Round 562's citation) could target this address range directly, which
+would explain a real write with no corresponding EE store instruction
+at all.
+
+No tracked source changed this round (diagnostic-only, `tools/` driver
+only) - regression suite and Wii cross-build correctly skipped per this
+project's established docs/diagnostic-only-round convention.

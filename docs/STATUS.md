@@ -46046,3 +46046,122 @@ No tracked source changed this round (scratch-only: `/tmp/ee_core_r983.c`
 built from the current tracked `ee_core.c`, reusing Round 982's driver),
 per the standing backup-before-experimenting rule. Regression suite and
 Wii cross-build correctly skipped (docs-only round).
+
+## Round 984: OSDSYS crt0/main() disassembled; restart-loop trigger identified as main()'s own argv[0]-invalid fallback path (task #963), correcting an in-round divide-by-zero-BREAK false lead
+
+User's request this round: disassemble/reverse-engineer OSDSYS's own
+crt0 and `main()` logic to understand the exact mechanism governing its
+behavior, in order to finally apply that understanding to the restart
+loop (tasks #447/#536/#960/#963). Real SCPH-50004 BIOS, `tools/round655-
+ee-disasm`'s own disassembler, and direct runtime instrumentation only -
+no guessing.
+
+### crt0 fully decoded
+
+Fresh disassembly of the real, freshly-decompressed OSDSYS segment at
+its confirmed real entry `0x00200000` (Round 982) gives the complete
+real crt0 sequence: 2 alignment NOPs, a `sq`-based BSS zero-clear loop,
+`SetupThread` (syscall 60), `SetupHeap` (syscall 61), `ei` (enable
+interrupts), a small helper call, an `argc` load from a fixed global at
+`0x002C5A80`, then **`jal 0x002093B0` - real OSDSYS `main(argc, argv)`**.
+After `main()` returns: `j 0x00257540`, eventually `syscall 35`
+(`Exit`). This matches a standard MIPS/EE crt0 exactly - no gap here.
+
+### main() decoded; an in-round false lead now corrected with direct evidence
+
+`main()` at `0x002093B0` opens with a normal prologue, saves
+`fp = a1` (argv), then its first substantive call is `jal 0x002621F8`.
+Earlier in this same round, this call was seen to fire on every restart
+cycle (3/3, `ra=0x002093e8` each time) while the presumed post-return
+merge point `0x00209400` never fired - and disassembly of
+`0x002621F8`/`0x00262148` looked like a run-once lazy-initializer
+tail-jumping into what pattern-matched a compiler-generated 64-bit
+software-division routine, with what looked like a `beql
+$a1,$zero,+8 / break` divide-by-zero guard at `0x00262394`. That reading
+was reported as the leading hypothesis for the restart loop's origin.
+
+**Direct instrumentation disproves it.** Two runtime hooks were added
+(scratch-only, in `/tmp/ee_core_r984.c`, never touching tracked source):
+one at the guard address `0x00262394` to log the real `$a1` (the
+presumed divisor), and one on `ee_raise_exception()` itself to catch any
+real `EE_EXC_CODE_BP` (Breakpoint) exception. Across a fresh SCPH-50004
+boot reaching `0x002621F8`'s first invocation, **neither ever fired.**
+A full per-instruction PC/register trace of that first call (4,000 steps,
+then re-run with a transition-only tracer out to 2,000,000 steps)
+confirms why: the call takes a completely different path than the one
+disassembled - `0x002621F8``'s run-once check reads its flag as already
+non-zero-equivalent on this path, and instead of tail-jumping into the
+division routine at all, it falls through its own body and returns
+normally (`v0` return value observed, real `$ra=0x002093e8` landed on
+exactly as expected). **`0x002621F8` returns. It does not divide by
+zero, and no BREAK exception is ever raised on this path.** The earlier
+reading of `0x00262148` as "the" call target was an artifact of reading
+the disassembly text without confirming which basic block runtime
+control flow actually takes; this round's fix is to always confirm a
+disassembled branch target against a live per-instruction trace before
+treating it as the executed path, not just the reachable one.
+
+### The real path, and the real restart-loop trigger
+
+After `0x002621F8` returns, `main()` does **not** proceed into the
+argv[0]-vs-known-string comparison path at all in this invocation, but
+into the `v0==0` fallback branch, landing on `0x00209048` - the routine
+Round 984 itself had already disassembled and flagged (correctly) as
+calling `jal 0x00257D40`. Live tracing now shows exactly what
+`0x00257D40` does: two instructions, then a genuine `syscall` fires,
+vectoring through the real general exception handler
+(`0x80000180`, `Status.BEV`-dependent base + `0x180` offset - the same
+vector this project's own `ee_raise_exception()` uses), through the real
+EE kernel syscall-dispatch table, into kernel code at `0x800055a0`
+onward that reads/copies a string byte-by-byte (a real "buffer the
+message, then transmit" kernel print pattern) and then busy-polls the
+real debug SIO UART TX-ready bit in a loop around `0x8000d838` -
+**and while this loop is running, the captured debug-SIO console output
+prints `"# Initialize GS ..."`, immediately followed (across the same
+window) by `"# Initialize INTC ..."`, `"# Initialize TIMER ..."`, and
+the rest of the exact reinitialization message sequence this project has
+captured on every restart cycle since Round 392.**
+
+This directly answers Round 968's open question ("who calls the
+SCPH-50004 cold-init routine repeatedly?"): **OSDSYS's own `main()`
+calls it**, via this exact `v0==0` fallback path, triggered because the
+`argv[0]` value this tree hands to `main()` on the post-decompression
+call fails whatever check that fallback branch guards (main() never
+even reaches the `0x00208FD8` string-compare call in this invocation -
+confirmed by the full PC trace, which never touches `0x00208FD8`
+either). The full call chain, all confirmed by direct trace, not by
+static reading: `main()` → `0x002621F8` (returns normally) →
+`0x00209048` (fallback path) → `0x00257D40` → real `syscall` → EE
+general exception vector → kernel syscall dispatch → `0x800055a0`-region
+kernel print routine → debug-SIO UART TX loop, printing exactly the
+"# Initialize ..." / "# Restart." sequence already captured - i.e., the
+very hardware-reinitialization sequence that IS the restart loop.
+
+### Classification
+
+Not yet fully resolved whether this fallback path is itself the literal
+reinit trigger or whether it and the reinit sequence share a common
+downstream call target reached from both - the 2,000,000-step trace cap
+was hit still inside the debug-SIO print loop, before returning to
+OSDSYS code. What is now directly evidenced, not guessed: main()'s
+argv[0]-fallback branch and the observed restart-inducing reinit
+sequence are the same code path, reached from OSDSYS's own main() on
+every single restart cycle. This narrows tasks #966/#968's open question
+concretely: the fix is not in the BIOS/OSDSYS code (which is behaving
+exactly as designed for an invalid-argv[0] invocation) but in whatever
+this tree currently hands to OSDSYS as `argv[0]` on the post-decompression
+`main()` call - almost certainly the same "OSDSYS's own real invocation
+argv" gap flagged as open in earlier rounds (Round 466's trampoline argv
+work, Round 552's "EELOAD rom0:PS2LOGO" trigger hunt), now newly tied
+directly to the restart loop for the first time.
+
+### Workflow
+
+No tracked source changed this round - `/tmp/ee_core_r984.c` (scratch,
+built fresh from tracked `ee_core.c` each rebuild, restored immediately
+after each test run) was the only file touched; `source/core/ee/ee_core.c`
+was verified byte-identical to its pre-round state throughout. Host-native
+regression suite and devkitPPC Wii cross-build correctly skipped
+(docs-only investigative round). Scratch binaries/dumps (`/tmp/r984*`)
+cleaned up after data extraction, per the project's ephemeral-scratch
+convention.

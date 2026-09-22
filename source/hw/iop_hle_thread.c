@@ -265,8 +265,36 @@ static void reschedule(iop_state_t *st)
          * fall back to this project's existing, already-established
          * "idle but interrupt-responsive" mechanism (iop_core.h's
          * `idle` field, task #179) rather than inventing new halt
-         * semantics. */
-        if (g.current_thread_id != 0) save_context(st, g.current_thread_id);
+         * semantics.
+         *
+         * Round 1011 (task #989, porting Round 824's task #846 fix
+         * from ee_hle_thread.c verbatim): the save below is only
+         * correct when g.current_thread_id is genuinely the thread
+         * `st`'s live register file belongs to - i.e. its own tracked
+         * status is still RUN. If an interrupt-context call (e.g. a
+         * WakeupThread fired from a handler) has already flipped some
+         * OTHER thread's status without going through a normal
+         * switch-in, g.current_thread_id can be stale relative to
+         * `st` here, and an unconditional save would silently
+         * overwrite that thread's real saved state with whatever
+         * transient context happens to be live right now - exactly
+         * the corruption class Round 824 root-caused and fixed on the
+         * EE side (docs/STATUS.md's Round 824 entry). Round 1009's
+         * trace found no such interrupt-context reschedule() calls in
+         * the current boot (only 5 total, all synchronous), so this
+         * is a defensive fix, not a fix for an observed symptom here -
+         * but the IOP scheduler should not carry a bug class already
+         * proven real and fixed once on the EE side. */
+        if (g.current_thread_id != 0) {
+            iop_tcb_t *cur0 = tcb(g.current_thread_id);
+            if (cur0 && cur0->status == IOP_THS_RUN) {
+                save_context(st, g.current_thread_id);
+            } else if (cur0) {
+                /* The live `st` doesn't belong to this tracked thread
+                 * (it already self-blocked or was never really RUN) -
+                 * do not save over its real state. */
+            }
+        }
         g.current_thread_id = 0;
         st->idle = 1;
         return;
@@ -274,8 +302,17 @@ static void reschedule(iop_state_t *st)
     if (next != g.current_thread_id) {
         if (g.current_thread_id != 0) {
             iop_tcb_t *cur = tcb(g.current_thread_id);
-            if (cur && cur->status == IOP_THS_RUN) cur->status = IOP_THS_READY;
-            save_context(st, g.current_thread_id);
+            /* Round 1011 (task #989): same gating as above, applied to
+             * the switch-out path - matches Round 824's exact fix on
+             * the EE side (ee_hle_thread.c's reschedule()). Only save
+             * `st` into the outgoing thread's TCB when it is genuinely
+             * still the one `st` represents (status==RUN); the READY
+             * downgrade was already correctly gated this way, only the
+             * save call itself was not. */
+            if (cur && cur->status == IOP_THS_RUN) {
+                cur->status = IOP_THS_READY;
+                save_context(st, g.current_thread_id);
+            }
         }
         load_context(st, next);
         tcb(next)->status = IOP_THS_RUN;
@@ -755,6 +792,16 @@ int iop_hle_thread_try_handle(iop_state_t *st, uint32_t pc)
             } else {
                 st->gpr[2] = 0; /* pre-set: the real return value once woken */
                 st->pc = ra; st->next_pc = ra + 4u;
+                /* Round 1011 (task #989), porting Round 826's task
+                 * #846-follow-up fix from ee_hle_thread.c verbatim: this is
+                 * a genuine self-block - `st` still holds this thread's own
+                 * live, correct context and `cur` still equals it, so save
+                 * explicitly here, BEFORE flipping status to WAIT and
+                 * calling reschedule(). reschedule()'s own save is now
+                 * gated on status==RUN (Round 1011's other fix, see its own
+                 * doc comment there), which would otherwise skip this exact
+                 * case since status is about to become WAIT, not RUN. */
+                save_context(st, cur);
                 t->status = IOP_THS_WAIT;
                 t->wait_type = IOP_TSW_SLEEP;
                 t->wait_id = 0;
@@ -836,6 +883,16 @@ int iop_hle_thread_try_handle(iop_state_t *st, uint32_t pc)
              * overflow for large usec values. */
             uint64_t cycles = ((uint64_t)usec * IOP_HLE_THREAD_CLOCK_HZ) / 1000000ull;
             t->delay_deadline = st->instructions_executed + cycles;
+            /* Round 1011 (task #989), porting Round 826's task
+             * #846-follow-up fix from ee_hle_thread.c verbatim: this is
+             * a genuine self-block - `st` still holds this thread's own
+             * live, correct context and `cur` still equals it, so save
+             * explicitly here, BEFORE flipping status to WAIT and
+             * calling reschedule(). reschedule()'s own save is now
+             * gated on status==RUN (Round 1011's other fix, see its own
+             * doc comment there), which would otherwise skip this exact
+             * case since status is about to become WAIT, not RUN. */
+            save_context(st, cur);
             t->status = IOP_THS_WAIT;
             t->wait_type = IOP_TSW_DELAY;
             t->wait_id = 0;
@@ -940,6 +997,16 @@ int iop_hle_thread_try_handle(iop_state_t *st, uint32_t pc)
             st->gpr[2] = 0; /* pre-set: the real return value once woken */
             st->pc = ra; st->next_pc = ra + 4u;
             if (t) {
+                /* Round 1011 (task #989), porting Round 826's task
+                 * #846-follow-up fix from ee_hle_thread.c verbatim: this is
+                 * a genuine self-block - `st` still holds this thread's own
+                 * live, correct context and `cur` still equals it, so save
+                 * explicitly here, BEFORE flipping status to WAIT and
+                 * calling reschedule(). reschedule()'s own save is now
+                 * gated on status==RUN (Round 1011's other fix, see its own
+                 * doc comment there), which would otherwise skip this exact
+                 * case since status is about to become WAIT, not RUN. */
+                save_context(st, cur);
                 t->status = IOP_THS_WAIT;
                 t->wait_type = IOP_TSW_SEMA;
                 t->wait_id = semid;
@@ -1119,6 +1186,16 @@ int iop_hle_thread_try_handle(iop_state_t *st, uint32_t pc)
             st->gpr[2] = 0; /* pre-set: the real return value once woken */
             st->pc = ra; st->next_pc = ra + 4u;
             if (t) {
+                /* Round 1011 (task #989), porting Round 826's task
+                 * #846-follow-up fix from ee_hle_thread.c verbatim: this is
+                 * a genuine self-block - `st` still holds this thread's own
+                 * live, correct context and `cur` still equals it, so save
+                 * explicitly here, BEFORE flipping status to WAIT and
+                 * calling reschedule(). reschedule()'s own save is now
+                 * gated on status==RUN (Round 1011's other fix, see its own
+                 * doc comment there), which would otherwise skip this exact
+                 * case since status is about to become WAIT, not RUN. */
+                save_context(st, cur);
                 t->status = IOP_THS_WAIT;
                 t->wait_type = IOP_TSW_EVENTFLAG;
                 t->wait_id = efid;

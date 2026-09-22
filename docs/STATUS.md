@@ -48389,3 +48389,110 @@ cleanly, design the actual thread-1-handoff experiment with full
 instrumentation of `rpc_pending_sets` and EE boot depth from the very
 first switch, so any regression is caught immediately rather than
 discovered only at the end like Round 519's was.
+
+## Round 1011 (task #989): ported Round 824's save_context gating fix to iop_hle_thread.c's reschedule() - caught and fixed a self-inflicted regression within the same round, matching Round 826's exact bug class on the EE side
+
+Round 1010 found that `iop_hle_thread.c`'s `reschedule()` still had
+the exact unconditional-`save_context()`-on-switch-out bug class that
+Round 824 (task #846) already found and fixed on the EE side
+(`ee_hle_thread.c`): both the "no thread ready" branch and the
+switch-out branch called `save_context(st, g.current_thread_id)`
+unconditionally, which is unsafe whenever `g.current_thread_id` is
+stale relative to what `st` actually represents (e.g. an
+interrupt-context call to `reschedule()` firing while
+`current_thread_id` still points at a genuinely-parked WAIT-status
+thread) - it would silently overwrite that parked thread's saved pc
+with a transient execution's pc.
+
+**Step 1 - the direct port.** Applied Round 824's fix verbatim: gated
+both `save_context()` calls in `reschedule()` on
+`cur->status == IOP_THS_RUN`, exactly mirroring
+`ee_hle_thread.c`'s corresponding code, with a doc comment citing
+Round 824/task #846 as the source. Verified clean via
+`gcc -fsyntax-only` and a full `gcc -c` compile.
+
+**Step 2 - caught a real regression via targeted testing.** Running
+`tests/run_test.sh test_iop_hle_thread` immediately failed:
+
+```
+ok:   waiter is RUN again after SignalSema wakes it
+ok:   SignalSema's wakeup causes a real pre-emptive switch back to the waiter
+FAIL: resumed waiter's pc is exactly its own saved WaitSema return address
+```
+
+`tests/run_test.sh test_iop_hle_event_flags_alarm` also failed (1
+check). This is exactly the Round 826 (task #846 follow-up) bug class
+that was already found and fixed once before, on the EE side: the
+WaitSema/SleepThread/(and, on the IOP side, also DelayThread and
+WaitEventFlag) self-block handlers set `t->status = IOP_THS_WAIT`
+*before* calling `reschedule()`, so by the time `reschedule()` runs,
+the new `cur->status == IOP_THS_RUN` gate incorrectly also skips
+saving the thread's own legitimate, just-now park state - even though
+`g.current_thread_id` and `st` are both still completely correct for
+that thread at that exact moment. The Round 824-style gate alone is
+therefore only half the fix; it closes the interrupt-context
+staleness hazard but breaks the legitimate cooperative self-block
+save path, precisely as the EE side's own history (Round 824 then
+Round 826) predicted it would.
+
+**Step 3 - the companion fix.** Audited every `IOP_THS_WAIT`
+assignment site in `iop_hle_thread.c` to find the full scope of
+genuine self-block sites (as opposed to sites that operate on an
+arbitrary *other* thread, which don't need this treatment - e.g.
+`SuspendThread`/`iSuspendThread`, which ORs `IOP_THS_SUSPEND` onto a
+caller-specified target thread's status, not necessarily its own).
+Found 4 genuine self-block sites: `SleepThread`, `DelayThread`,
+`WaitSema`, and `WaitEventFlag` - each sets its own thread's status to
+`IOP_THS_WAIT` and then calls `reschedule()`. Added an explicit
+`save_context(st, cur)` call immediately before the status flip at
+each of the 4 sites, mirroring Round 826's exact fix pattern from
+`ee_hle_thread.c`'s WaitSema/SleepThread handlers (which only needed
+2 sites on the EE side; the IOP side additionally has DelayThread and
+WaitEventFlag as genuine self-block primitives, both now covered).
+
+**Verification.** After the companion fix: `test_iop_hle_thread` and
+`test_iop_hle_event_flags_alarm` both pass cleanly again (0
+failures). `test_iop_module_loader_bootinfo` and
+`test_iop_module_loader_p_twin_skip` (unaffected by this change, as
+expected - they don't exercise the scheduler's self-block paths) also
+pass. A ~100s bounded partial `tests/run_test.sh --all` pass covered
+10 further tests (`test_bios_loader` through the start of
+`test_ee_cop0_tlb`), all clean, 0 failures - this project's standing
+substitution for the full 136-test suite, which still exceeds this
+sandbox's effective single-call timeout. `gcc -fsyntax-only` and a
+full `gcc -c` compile of `iop_hle_thread.c` are both clean. The
+devkitPPC Wii cross-build (`make clean && make`) completes with exit
+0, producing `pcsx2-wii.dol`.
+
+**Honest accounting.** This round's first attempt (Step 1) was a real,
+concrete regression - not a hypothetical one - caught only because
+this round specifically targeted `test_iop_hle_thread` and
+`test_iop_hle_event_flags_alarm` rather than relying solely on the
+generic partial `--all` pass (which, per Round 1008-1010's own
+methodology notes, would NOT have caught it, since those two tests
+aren't part of the alphabetically-early subset a ~100-160s bounded
+pass reaches). The fix that shipped is the Step 1 + Step 3 combination
+together; Step 1 alone was never committed to tracked source in a
+broken state - it was caught and corrected within this same round,
+before any commit. This mirrors the project's own established
+practice (see Round 826's own writeup) of documenting an intermediate
+regression transparently rather than silently smoothing over it.
+
+**Net effect on behavior:** this round is intentionally a pure
+defensive-correctness fix, not a boot-depth-changing one. It closes a
+real, evidenced latent hazard (the same class Round 824 closed on the
+EE side) without changing any currently-observed boot trace, since
+the previously-unconditional `save_context()` calls happened to be
+harmless in every code path actually exercised by today's boot traces
+- but the hazard was real (proven by the fact that removing it without
+the companion fix immediately broke 2 existing tests that already
+exercise the affected paths).
+
+**Next round's concrete target:** now that the save_context-ordering
+fix is landed cleanly on both EE and IOP sides, design the actual
+carefully-scoped, heavily-instrumented thread-1-handoff experiment
+(the Round 519-class idea), backed by Round 1010's evidence that
+tid=4/5/6's own code is real, coherent SIF-RPC-registration logic
+safe to run - instrumenting `rpc_pending_sets` and EE boot depth from
+the very first switch so any regression is caught immediately, unlike
+Round 519's after-the-fact discovery.

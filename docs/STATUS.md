@@ -45967,3 +45967,82 @@ No tracked source changed this round (scratch-only:
 `tools/round655-ee-disasm/disasm.c`), per the standing
 backup-before-experimenting rule. Regression suite and Wii cross-build
 correctly skipped (docs-only round).
+
+## Round 983 (task #960/#536 continuation): fact-checking the user's 3 hand-off hypotheses against real runtime data
+
+User (relaying a third-party/AI-generated proposal) raised three specific
+hypotheses about the OSDSYS decompress-to-entry hand-off characterized in
+Rounds 981-982, and asked which panned out. Checked each against real
+runtime instrumentation or existing tracked-source citations rather than
+assumption.
+
+### Hypothesis 1: SetupThread (syscall 60) stack corruption via stack_base=-1
+
+**Partially right on the premise, wrong on the conclusion.** Instrumented
+the real syscall-60 dispatch (`ee_core.c`'s existing handler) to log
+every call's real args/computed `sp_top` at runtime. Captured 10 calls
+across ~138M instructions (3 full restart cycles):
+
+```
+call #1/#4/#7/#10 (pc=0x00082064): gp=0x000991f0 stack_base=0x00091200 stack_size=8192  sp_top=0x00093200  (low-level kernel-stage thread, explicit non-sentinel args)
+call #2/#5/#8      (pc=0x00100064): gp=0x0015fb70 stack_base=0xffffffff stack_size=1048576 sp_top=0x01ff0000  (pre-relaunch/decompress-stage OSDSYS thread)
+call #3/#6/#9      (pc=0x00200064): gp=0x002cc970 stack_base=0xffffffff stack_size=32768   sp_top=0x01ff0000  (Round 982's freshly-relaunched OSDSYS main thread)
+```
+
+The user's `stack_base = -1` claim is **real and confirmed** for both
+0x00100064 and 0x00200064 - not fabricated. But this project's OWN
+tracked source already special-cases exactly this sentinel (Round 274,
+`ee_core.c` ~line 4127): when `stack_base==0xFFFFFFFFu`, it substitutes
+a safe fixed top (`EE_RAM_SIZE - 0x10000` = `0x01FF0000`) instead of
+letting the naive `stack_base + stack_size` arithmetic overflow/wrap
+toward near-zero. The runtime data confirms this fix engages correctly
+and produces the identical, sane, 16-byte-aligned `sp_top=0x01ff0000`
+every single time, for every one of the 3 restart cycles captured, with
+no crash or derailment. **No stack corruption found** - the specific
+Round 274 bug this hypothesis describes was real, but was already fixed
+before this round, and the fix is confirmed still correctly effective
+for the SCPH-50004 target.
+
+### Hypothesis 2: real entry-PC lies deeper (0x00200008/0x00200010/0x00200030), not 0x00200000
+
+**Disproven by Round 982's own hard evidence**, not by assumption: the
+real disassembly already obtained (see Round 982) shows the syscall-7
+`_ExecPS2` dispatch genuinely lands on `0x00200000` itself, and that
+address contains real, valid code - two ordinary alignment NOPs followed
+immediately by the real BSS-clear loop and the SetupThread call this
+round just verified. There are no "ELF header remnants" at the entry;
+the decompressor (Round 981) writes only the ELF's actual loaded
+segment content, not raw header bytes, to that address.
+
+### Hypothesis 3: SIF_SMFLAG bit 30 mismatch causes OSDSYS to abandon IOP sync
+
+**Premise doesn't apply to this tree, per its own existing
+documentation.** `source/hw/sif.c`'s `sif_mmio_read32()` (Round 940,
+task #925, explicit prior user directive) already unconditionally
+forces bit 30 (`0x40000000`) into every SIF_SMFLAG read
+(`*out = g_sif.smflag | 0x40000000u`) as a deliberately-labeled synthetic
+diagnostic override - Round 937 had structurally confirmed no IOP-side
+code path in this tree can organically set that bit (it would require an
+unimplemented Sony-proprietary SIF-RPC handshake). So bit 30 cannot
+"mismatch" what OSDSYS expects in the way hypothesized: it is
+unconditionally 1 on every read, by this project's own already-committed
+design, not by organic hardware simulation. The real, organic handshake
+bits (`0x00070000` = SIFINIT|CMDINIT|BOOTEND) were separately confirmed
+stable and correct in earlier work (docs/STATUS.md's 131st/Round-943
+findings) and are unaffected by this override.
+
+### Conclusion
+
+All three specific hand-off hypotheses are now closed with direct
+evidence, not speculation. None of them explains the restart loop: the
+SetupThread mechanism is safe (a previously-fixed bug, not a live one),
+the entry PC is genuinely correct, and the SIF bit-30 signal is
+synthetic/forced rather than a real mismatch surface. The restart loop's
+actual trigger remains upstream in OSDSYS's own post-crt0 logic, as
+Round 982 already concluded - this round narrows the search space
+further by ruling out these three specific, concrete alternatives.
+
+No tracked source changed this round (scratch-only: `/tmp/ee_core_r983.c`
+built from the current tracked `ee_core.c`, reusing Round 982's driver),
+per the standing backup-before-experimenting rule. Regression suite and
+Wii cross-build correctly skipped (docs-only round).

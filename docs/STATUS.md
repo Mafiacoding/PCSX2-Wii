@@ -46165,3 +46165,189 @@ regression suite and devkitPPC Wii cross-build correctly skipped
 (docs-only investigative round). Scratch binaries/dumps (`/tmp/r984*`)
 cleaned up after data extraction, per the project's ephemeral-scratch
 convention.
+
+## Round 986 (task #964, "dann bau den fix"): precisely root-caused why the already-shipped Round 772 EELOAD fastboot patch silently fails for SCPH-50004 + any real game disc - a real, measured 16-vs-22-byte slot overflow into adjacent live EELOAD string data, not a guess
+
+User's instruction driving this round: "dann bau den fix" (then build
+the fix), following Round 984/985's trace of the SCPH-50004 restart
+loop to OSDSYS main()'s argv[0]-invalid fallback path. Before writing
+any new code, first read the substantial Rounds 966-983 history already
+in this file (previously outside this session's context) to avoid
+re-deriving or contradicting already-established findings.
+
+### What Rounds 966-982 already established (read in full this round)
+
+Critical prior context, now fully absorbed: Rounds 974-982 already
+conclusively proved, via live $ra/Cause/Status capture and a full
+256-instruction backward trace, that **the restart-loop mechanism
+itself is correct, real, intentional BIOS/OSDSYS behavior** - OSDSYS's
+own code genuinely, deliberately re-invokes itself via a real SYSCALL
+7 (`_ExecPS2`) with `a0=0x00200000`, and the decompression-to-entry
+handoff (crt0, BSS-clear, SetupThread/SetupHeap) is healthy at every
+cycle (Round 982). Forcing any change to that mechanism itself would
+mean suppressing correct BIOS behavior - explicitly against this
+project's anti-fabrication rule. Round 981 already tested a synthetic
+CDVD disc-presence flag and found **zero effect** on the loop. This
+round's job was therefore to test the one lever those rounds hadn't
+tried yet: mounting an actual real game disc, through the same,
+already-shipped, already-proven-elsewhere fastboot mechanism.
+
+### Methodology correction caught mid-round (documented honestly)
+
+First attempt (`/tmp/r986_driver.c`, modeled on the OLD
+`tools/round729-gt3-discboot/driver.c`) mounted GT3's real ISO via
+`iop_cdvd_mount_iso()` alone and found **zero difference** from
+diskless - byte-identical instruction counts/PCs across 8 restart
+cycles. This was a methodology bug, not a real finding: `iop_cdvd_
+mount_iso()` only opens the ISO file for data reads: it does NOT set
+`OFF_TYPE`/`OFF_STATUS`, which stay `NODISC`/`TRAY_OPEN` from reset
+(`iop_cdvd.c` lines ~120-133). Every GT3/Tekken/KOF/MS3 disc-boot tool
+since Round 750 pairs `iop_cdvd_mount_iso()` with `iop_cdvd_set_disc_
+present(0x12)` for exactly this reason (chain_driver.c's own Round 750
+comment says so explicitly) - the old `driver.c` predates that fix and
+was the wrong template to copy. Corrected immediately, re-ran, and
+confirmed the fix mattered (`disc_type=0x12` now reads correctly at
+every slice) - but the restart loop was **still** completely
+unaffected: `argc=0`/`argv[0]=NULL` on every one of 8 main()
+invocations, fallback branch taken every time, across 320M
+instructions. A second, real, much stronger negative result than
+Round 981's synthetic-flag test (now confirmed with actual real ISO
+data + correct disc-present signaling, not just a status byte).
+
+### The real, decisive finding: EELOAD IS reached, but the already-shipped fastboot patch silently bails
+
+Added two more targeted instrumentation points to the same disc-
+mounted scratch run: (1) a hit-counter on `pc==EE_EELOAD_START_PC`
+(`0x00082000`, this project's own already-cited, already-tracked
+constant from Round 544/772); (2) `iop_cdvd_get_ncmd_call_count()`
+(already a public accessor, Round 732) printed every slice.
+
+**EELOAD_START is reached once per restart cycle** (8 hits across 8
+cycles, ~19.5M instructions before each subsequent main() invocation -
+consistent with Round 979's already-cited ~34.4M-instruction cycle
+period). This means the already-shipped, already-tracked, already-
+verified-on-other-titles `ee_check_eeload_fastboot_patch()` (Round 772)
+gets a real chance to fire on cycle 1. **`ncmd_calls` stays 0 for the
+entire 320M-instruction run** - the disc is never queried via a real
+N-command at all, on any cycle, confirming task #447's long-documented
+"dispatch_ncmd()=0" gap is still fully in force for this exact BIOS/
+title combination.
+
+Added print instrumentation directly inside `ee_check_eeload_fastboot_
+patch()`'s own already-existing step-by-step bail points (no logic
+changed, purely observational) and re-ran:
+
+```
+[R986-FB] fastboot patch ATTEMPT at ee_instr=30528945
+[R986-FB] disc_type=0x12, proceeding
+[R986-FB] BOOT2 path found: "cdrom0:\SCES_502.94;1"
+[R986-FB] found "rom0:OSDSYS" at 0x00090700
+[R986-FB] available zero-padding slot = 16 bytes
+[R986-FB] BAIL: boot2_len=21+1 doesn't fit in avail=16
+```
+
+Every earlier step succeeds correctly: disc type reads right, GT3's
+real SYSTEM.CNF is found and parsed correctly (`BOOT2 = cdrom0:\
+SCES_502.94;1` - the real, correct PAL GT3 boot target), and the
+literal `"rom0:OSDSYS"` string is found at a real, valid address in
+EELOAD's resident memory (`0x00090700`). The one-shot patch bails on
+its very last, documented safety check: the real available zero-
+padding slot immediately following the matched string is only 16
+bytes, but the real BOOT2 path needs 22 bytes (21 chars + NUL). Since
+the function is one-shot-per-boot by design (matching every sibling
+heuristic in this file), it never retries on cycles 2-8 either -
+fully explaining why the loop looked completely unaffected in the
+corrected re-run.
+
+**Confirmed via a live 64-byte memory dump right at the found address
+(not guessed) that this is a real structural constraint, not a fixable
+oversight:** the 16 bytes of zero padding following `"rom0:OSDSYS\0"`
+are immediately followed by another real, meaningful, NUL-terminated
+string literal - `"rom0:TESTMODE"` - and after that, `"BootError"`,
+`"BootIllegal"`. This is a packed string table in EELOAD's own rodata,
+not a fixed-size buffer with slack:
+
+```
+72 6f 6d 30 3a 4f 53 44 53 59 53 00 00 00 00 00  rom0:OSDSYS.....
+72 6f 6d 30 3a 54 45 53 54 4d 4f 44 45 00 00 00  rom0:TESTMODE...
+42 6f 6f 74 45 72 72 6f 72 00 00 00 00 00 00 00  BootError.......
+42 6f 6f 74 49 6c 6c 65 67 61 6c 00 00 00 00 00  BootIllegal.....
+```
+
+Writing GT3's 21-byte BOOT2 path in place, as the current logic would
+have to if the safety check were removed, would overwrite 6 bytes into
+`"rom0:TESTMODE"`, corrupting a second, real, presumably still-used
+string - exactly the kind of "corrupt adjacent EELOAD data" scenario
+the function's own documented safety principle (Round 772's own
+comments) explicitly exists to prevent. This safety check is correct
+and should not simply be relaxed/removed.
+
+A follow-up scan (also this round, `/tmp/ee_core_r986.c`, scratch-only)
+searched the same 64KB EELOAD window for any `lui`+`ori`/`addiu`
+instruction pair whose encoded 32-bit immediate equals `0x00090700`
+(the found string's address) - the kind of fixed pointer-load a small
+piece of EELOAD's own code would need if it references this string via
+address rather than re-deriving it - and found none in that window.
+This means the pointer this project would need to safely redirect
+(rather than overwriting the string table in place) is not a simple
+local immediate load reachable by this scan; finding it needs either a
+wider scan range or a live $ra/caller capture at the exact read site,
+which is real further reverse-engineering work, not something safe to
+guess in the time remaining this round.
+
+### Why this differs from Round 772's own original success (and is not a contradiction)
+
+Round 772/773's own verification used the JP BIOS (`scph10000`) against
+Tekken Tag Tournament (`BOOT2 = cdrom0:\SCED_500.41;1`, also 21 chars)
+and reported success. This round's SCPH-50004 (PAL) BIOS's EELOAD
+binary evidently has a *different* real string-table layout at the
+same relative scan region - a 16-byte slot here versus whatever larger
+slot the JP BIOS's EELOAD build apparently has. This is a genuine,
+newly-discovered, BIOS-version-specific limitation of the existing
+in-place string-overwrite technique, not a regression and not a flaw
+in Round 772's original verification - both findings are independently
+correct for their respective BIOS images.
+
+### Classification and why no fix was shipped this round
+
+Per the user's explicit "dann bau den fix" instruction, a fix was
+actively attempted, not just diagnosed. However, the two candidate
+approaches identified this round each have a real, unresolved gap:
+
+1. **Widen the write past the 16-byte slot** - rejected: proven, via
+   the live memory dump above, to corrupt real adjacent EELOAD data
+   (`"rom0:TESTMODE"`), which is exactly what the function's own
+   existing safety check correctly prevents. Removing that check would
+   be fabricating a "fix" that trades one bug for a worse, silent
+   memory-corruption bug - directly against this project's standing
+   anti-fabrication rule.
+2. **Redirect via a pointer patch instead of an in-place string
+   overwrite** (the safe alternative) - the necessary pointer reference
+   was not found by this round's scan of the immediate EELOAD code
+   window, so implementing this now would mean guessing an address to
+   patch without real evidence of where it lives - also against the
+   anti-fabrication rule.
+
+Consistent with this project's long-established discipline (see
+Rounds 464/465/468/564/586/689/712/773 for prior precedent), an honest
+diagnostic result - now far more precise than anything task #447/#964
+has previously established for this exact BIOS - is shipped in place
+of a guessed, unverified patch. Task #964 is updated (not closed) with
+this round's exact findings as the concrete next step.
+
+### Workflow
+
+No tracked source changed this round - all instrumentation lived in
+`/tmp/ee_core_r986.c` (scratch, fresh copy of tracked `ee_core.c` each
+rebuild) and `/sessions/.../outputs/r986_driver.c` (new scratch driver,
+modeled on `tools/round729-gt3-discboot/driver.c`'s real disc-mount
+pattern + `r982_driver.c`'s slice-loop reporting style); `git status`/
+`git diff --stat` confirm `source/core/ee/ee_core.c` is byte-identical
+to its pre-round tracked state. Host-native regression suite and Wii
+cross-build correctly skipped (docs-only investigative round, per this
+project's own established convention for rounds that ship a diagnosis
+rather than a source change). ASan/LSan leak-check run against the
+unmodified tracked tree (fresh build of the exact same driver): clean,
+zero leaks/errors. Scratch binaries (`/tmp/r986*`) and dumps left in
+`/tmp` per this project's ephemeral-scratch convention (not committed/
+rsynced).

@@ -47241,3 +47241,67 @@ where those function-pointer fields get loaded and `jalr`'d.
 No tracked source changed this round (diagnostic-only, `tools/` driver
 only) - regression suite and Wii cross-build correctly skipped per this
 project's established docs/diagnostic-only-round convention.
+
+## Round 998 (task #977): struct+8 mystery FULLY RESOLVED - it's a direct EE syscall 122 (sceSifGetReg) return value, not a callback-pointer mechanism; Round 996-997's callback pair was a real but separate finding
+
+Correction/closure round. While hunting for where the Round 996 callback
+pair (0x0026FEA8/0x0026FEB8) gets invoked, re-examination of Round 995's
+OWN already-published disassembly (0x0026fd98-0x0026fdb8) shows the
+struct+8 write directly, in plain sight:
+
+```
+0x0026fd98: lui  v1, 0x0041
+0x0026fd9c: addiu a0, zero, 5
+0x0026fda0: jal  0x00270c28          ; (unrelated call, result stored elsewhere)
+0x0026fda4: sw   v0, -9388(v1)        ; delay slot
+0x0026fda8: lui  a0, 0x8000           ; a0 = 0x80000000
+0x0026fdac: jal  0x00257d30           ; <-- CALLS EE SYSCALL 122 (0x7A) = sceSifGetReg
+0x0026fdb0: nop
+0x0026fdb4: beq  v0, zero, 0x0026fe00 ; skip struct write if syscall returned 0
+0x0026fdb8: sw   v0, 8(s1)            ; MEM[s1+8] = v0.  s1 = 0x0040DB58 (our struct base)
+```
+
+`0x00257d30` (confirmed by Round 998b's disassembly: `addiu v1,zero,122 /
+syscall / jr ra`) is this project's real EE BIOS syscall-122 trampoline
+stub. Per this project's OWN already-implemented, already-cited syscall
+122 handler (`ee_core.c`, "122 (0x7A) sceSifGetReg/SifGetReg"): `a0` is
+the register ID; `a0=0x80000000` here selects the `SIF_SYSREG` branch
+with `idx = reg_id & 0x7FFFFFFF = 0`, i.e. `SIF_SYSREG_SUBADDR`, and the
+syscall returns `ee_sif_sysreg[0]` - a real, already-modeled EE-side SIF
+bookkeeping value this project owns.
+
+**So the answer to Round 993/994's original question is simple and
+complete: `MEM[0x0040DB60]` (struct+8) is populated with the live value
+of `ee_sif_sysreg[0]` (SIF_SYSREG_SUBADDR) at registration time, via a
+direct, real EE BIOS syscall call - not by any indirect callback
+mechanism.** This was visible in Round 995's own dump the whole time;
+Round 996-997 went looking at the buffer[0] callback-pointer pair
+instead and found a real, correctly-disassembled, but ultimately
+UNRELATED mechanism for this specific question. Both callback A
+(0x0026FEA8, "copy event.field16 into struct.field8") and this direct
+syscall write target the same byte offset (struct+8) coincidentally -
+callback A was never actually shown to be invoked; the direct syscall
+call from within the SAME registration function is what really runs,
+every single time 0x0026fc18 executes, unconditionally (modulo the
+`beq v0,zero` skip if the SIF register happened to read back 0).
+Round 996-997's callback-pair finding is not wasted, though: it's a
+real, independently-disassembled dispatch mechanism (Round 997 already
+confirmed the full 32-slot table is genuinely zero, meaning callback B
+- the ACTUAL 0x0040dc80 table writer - has never fired for any index)
+that remains relevant to the still-open question of what would unblock
+Round 990's polling loop; it just doesn't explain struct+8.
+
+**Net effect on the investigation:** the struct+8 sub-question (open
+since Round 993) is now closed with high confidence. The main,
+original question - what real event/condition would write
+`table[0]` (0x0040dc80) nonzero to break Round 990's polling loop - is
+still open, and Round 996-997's callback-B (0x0026FEB8) remains the
+best-evidenced candidate mechanism; finding what invokes it (via the
+buffer[0]/buffer[N] function-pointer pair) is still the right next
+step, now correctly scoped as answering the ORIGINAL question rather
+than the (now-resolved) struct+8 detour.
+
+No tracked source changed this round (diagnostic-only, disassembly
+re-reading only, no new tool needed) - regression suite and Wii
+cross-build correctly skipped per this project's established
+docs/diagnostic-only-round convention.

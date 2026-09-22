@@ -49234,3 +49234,110 @@ crash that appears once thread-1 retirement is combined with this
 round's SIF_SMFLAG fix - this is the next blocker standing between
 "retirement causes an EE stall" (now understood and fixed) and
 "retirement can be safely re-enabled." Retirement remains disabled.
+
+## Round 1022 (task #1000): pc=0x72000000 IOP crash root-caused to a
+## stray-value gap outside the interpreter's normal store path
+
+**Goal:** diagnose (not yet fix) the new IOP crash at pc=0x72000000
+discovered in Round 1021 when thread-1 retirement is combined with
+that round's SIF_SMFLAG fix.
+
+**Method:** scratch-only (per the standing backup-before-experimenting
+rule - no tracked source touched). Built a scratch copy of
+`iop_module_loader.c` with the 4 Round-519-guarded retirement call
+sites re-enabled, paired with the real (already-tracked, unmodified)
+`source/hw/sif.c`. Added crash-time register/descriptor-dump
+instrumentation to a scratch `iop_core.c`, then progressively refined
+a memory-write watch (word, then byte/halfword too) on the exact
+field implicated by the crash.
+
+**Exact crash mechanism, fully evidenced:**
+- Crashing instruction: IOP pc=`0x000190D8`, `jalr $ra, $v0` (raw
+  `0x0040F809`), inside a generic "invoke module/callback descriptor"
+  trampoline (`0x000190A4`-`0x000190E0`).
+- The trampoline does `lw v0, 4(s2)` then jumps through it. At crash
+  time `s2 = 0x00000001`, so the load reads `*(1+4) = *(5)`, which
+  returns `0x72000000` - content living adjacent to a `rom0:OSDSYS`
+  ASCII banner resident in low IOP memory, not a real function
+  pointer.
+- `s2=1` is fed by a caller loop (`0x00019220`-`0x0001924C`) that
+  repeatedly calls a list-iterator primitive at `0x0001903C` and
+  invokes the trampoline whenever it returns non-zero.
+
+**Disassembly of the iterator (`0x0001903C`), full contiguous
+decode:** the function is a completely ordinary, correctly-behaving
+`CpuSuspendIntr`/`CpuResumeIntr`-guarded linked-list walk - it reads
+an iterator struct's `current` field (`*(s1+12)`), and if non-zero,
+advances it to `*(current+60)` and returns the *old* current pointer
+in `$v0`; if zero, it returns 0. This matches this project's own
+existing citation for the real LOADCORE reboot-notify-handler list
+(ps2sdk `AddRebootNotifyHandler`, Round 432/~1008) - the code being
+walked, immediately after the real IOP-reboot banner "# Restart
+Without Memory Clear.", is genuine Sony kernel code doing exactly
+what it should.
+
+**The real defect is one level further back:** the iterator's
+`current` field (for one of 4 distinct list-iterator structs the loop
+walks - located at `0x00150344`, `0x0015032c`, `0x00152174`, and the
+crashing one at `0x0015262c`) already holds the raw integer value `1`
+- not a valid pointer, not 0 - before `get_next()` is ever called on
+it. A dynamic single-address write-watch found zero writes to
+`0x0015262c` for the remainder of the crashing run. To rule out a
+timing/ordering artifact, the watch was widened to a static watch on
+all 4 addresses from instruction 0, and extended to this project's
+separate byte/halfword store paths (`iop_mem_write8`/`iop_mem_write16`,
+not just `iop_mem_write32` - the same class of blind spot already
+flagged on the EE side in Round 822/tasks #842-843, "extend
+write-watch to write8/write16/write64", now confirmed to also apply
+on the IOP side). Across the entire ~5M-instruction run: the only
+recorded stores to that field are `SB`/`SW` writes of value `0x00`.
+**No store of any width, at any point in the traced execution, ever
+writes the value 1 to that field.** IOP RAM is confirmed
+zero-initialized at boot (`iop_core.c`'s `memset` on `g_iop.ram`), so
+this is not merely "never initialized" - a real emulator-visible write
+of `1` must be happening through a path this project's
+`iop_mem_write8/16/32` accessors do not intercept (most likely a
+bulk-copy/direct-buffer/DMA delivery routine writing straight into
+the IOP RAM backing array).
+
+**Root-cause classification: genuine emulator modeling gap** - the
+same class of write-path-coverage gap this project has hit before
+(EE side, Round 822), now located on the IOP side, narrowed to a
+specific address (`0x0015262c`) and a specific bad value (`1`). This
+crash only becomes *reachable* because thread-1 retirement (still
+disabled in tracked source) plus Round 1021's SIF_SMFLAG fix lets IOP
+boot progress far enough to execute this low-memory region
+(`0x00012000`-`0x00019400`) for the first time in this project's
+history - the crash itself is not caused by either of those two
+fixes; it is a pre-existing, previously-unreachable gap.
+
+**No fix implemented this round**, correctly, per the anti-fabrication
+discipline: the exact writer of the stray `1` is not yet located (only
+proven to not be a normal interpreted-instruction store), so a
+targeted fix isn't yet possible - a defensive jalr-target-validity
+guard would only mask the symptom, not address why a real kernel
+list-node pointer field ends up holding a raw small integer. Tracked
+source is unmodified this round (`git status --porcelain` clean, only
+`docs/STATUS.md` changes).
+
+**Scratch files (all `/tmp/r1022/`, none committed):**
+`iop_module_loader_retire.c` (retirement re-enabled), `iop_core_trace.c`
+(all R1022 instrumentation stages), `r1022_driver.c` (survey driver),
+`r1022_dumpmem.c`/`iop_dump_0x12000.bin` (RAM dump + disasm input),
+`disasm` (reused `tools/round655-ee-disasm` build), progressively
+refined binaries `r1022_retire`/`r1022_retire2`/`r1022_watch`/
+`r1022_watch4`/`r1022_watch816`, and their stdout/stderr logs
+(`r1022b`-`r1022f` series document the successive narrowing from
+"crash reproduced" through "exact field identified" to "no CPU store
+ever writes the bad value").
+
+**Mandatory workflow:** docs-only round (no tracked source changed) -
+host-native regression suite and Wii cross-build correctly skipped,
+per this project's established convention for docs-only diagnostic
+rounds. Next round should audit this project's SIF/DMA delivery code
+and other IOP-side HLE modules for a direct `iop_ram`-buffer write
+that bypasses `iop_mem_write8/16/32` and targets the
+`0x00150000`-`0x00153000` region with small-integer payloads - now a
+narrow, well-bounded search given the exact address and exact bad
+value are both known. Thread-1 retirement remains disabled in tracked
+source pending this fix.

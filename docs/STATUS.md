@@ -46703,3 +46703,88 @@ is the first round in that arc where the diskless boot path reaches a
 stable, past-restart-loop resting point through a real, disassembly-
 and-citation-backed mechanism (not a guessed constant), fully verified
 by the mandatory regression/Wii-build/disc-boot workflow before commit.
+
+## Round 990 (task #970): characterized the diskless resting point pc=0x0026fe9c - it's a real, unresolved polling loop, NOT a VBLANK-wait about to render the menu
+
+Follow-up to Round 989: with the SetupThread fix in place, SCPH-50004's
+diskless boot now settles at pc=0x0026fe9c (first reached at
+instr=55,999,939 in this round's own fresh run - consistent with, and a
+tighter bound than, Round 989's "somewhere before 160M" observation).
+This round asked the two concrete open questions from that point: is
+control flow truly parked or genuinely polling, and is GS PMODE/DISPLAY2
+close to organic configuration.
+
+Built `tools/round990-diskless-resting/analyze.c` (reusing the
+disasm_one()/dump_range() block already used by Rounds 655/944/947/950/
+951's own tools) to boot fresh to that pc and dump GPRs, GS state, a
+disassembly window, and a 4096-step oscillation trace.
+
+### Disassembly: a real array/table accessor, called from a real polling loop
+
+```
+0x0026fe90: lui   v0, 0x0041
+0x0026fe94: sll   a0, a0, 2
+0x0026fe98: addiu v0, v0, -9088      ; v0 = 0x0040dc80 (table base)
+0x0026fe9c: addu  a0, a0, v0         ; <- resting pc
+0x0026fea0: jr    ra
+0x0026fea4: lw    v0, 0(a0)          ; delay slot: v0 = table[index]
+```
+
+Caller, at 0x0026f7e8-0x0026f7f4:
+
+```
+0x0026f7e8: jal   0x0026fe90         ; call accessor(index=0)
+0x0026f7ec: daddu a0, zero, zero     ; delay slot: a0 = 0
+0x0026f7f0: beq   v0, zero, 0x0026f7e8   ; loop while table[0] == 0
+0x0026f7f4: ld    ra, 48(sp)
+```
+
+This is a real, well-formed `while (table[0] == 0) {}` busy-wait, not a
+crash, wild jump, or dead single-instruction spin - confirmed both by
+the disassembly and by a live 4096-step oscillation trace, which showed
+exactly the 10 addresses this call/return/branch cycle would produce
+(0x0026fe90-0x0026fea4 in the accessor, 0x0026f7e8-0x0026f7f4 in the
+caller), nothing else. GPR state at the resting pc matches exactly:
+v0=0x0040dc80 (table base, just computed), a0=0x00000000 (index 0,
+pre-shift), ra=0x0026f7f0 (the beq's own address - a real, tight
+call/check/loop cycle).
+
+### The polled cell is real RAM, and it reads zero the whole time
+
+0x0040dc80 is ordinary EE RAM (well inside the 32MB space, not a GS/IOP
+MMIO register), i.e. OSDSYS's own internal state - some flag or counter
+another part of OSDSYS's own code is expected to set. A dump of
+0x0040dc70-0x0040dcd0 (25 words bracketing the polled cell) came back
+all-zero, confirming nothing in this project's boot ever writes it.
+
+### GS state: still the Round 940/941 synthetic force, not organic
+
+`gs->pmode/dispfb2/display2` at the resting point, and again after the
+4096-step trace, exactly match the Round 940/941 diagnostic-force
+fingerprint (pmode=0x02, dispfb2=0x1400, display2=0x001bf27f0003227c) -
+the tool's own built-in fingerprint check confirms MATCH. This directly
+answers this round's second open question: no, PMODE/DISPLAY2 are NOT
+close to organic configuration at this resting point. Whatever picture
+a Dolphin/Wii screenshot shows at this point is still coming from that
+Round 940/941 synthetic override, not from real BIOS-driven display
+setup - the interactive OSDSYS browser menu is not about to render
+organically from here.
+
+### Significance and next step
+
+Round 989's fix genuinely broke the restart loop and got the diskless
+boot to real, never-before-reached OSDSYS code - that finding stands.
+But the honest characterization of what's *at* that new resting point
+is: a second, distinct real blocker (an unresolved wait on an
+uninitialized OSDSYS-internal flag at 0x0040dc80), not organic progress
+toward the menu. Next real step (not done this round): find what real
+code path in OSDSYS is supposed to write 0x0040dc80 - almost certainly
+gated behind some other subsystem this project's own boot trace hasn't
+reached yet (candidates to check first: whether this address is written
+by a callback OSDSYS registers via AddIntcHandler/CreateThread that
+never runs, per this project's own established "task #180 lesson"
+methodology, or by a SIF-RPC/LOADFILE reply this trace never receives).
+
+No tracked source changed this round (diagnostic-only, `tools/` driver
+only) - regression suite and Wii cross-build correctly skipped per this
+project's own established convention for docs/diagnostic-only rounds.

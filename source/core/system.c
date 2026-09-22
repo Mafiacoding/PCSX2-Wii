@@ -8,7 +8,6 @@
 #include "core/system.h"
 #include "core/ee/ee_core.h"
 #include "core/iop/iop_core.h"
-#include "core/hw/gs.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <unistd.h>
@@ -91,95 +90,16 @@ void system_rebind_iop_bridge(void)
     ee_core_set_iop_write8_bridge(iop_core_get_state(), system_iop_write8_adapter);
 }
 
-/* Round 940 (task #925, explicit user directive - "Schritt 3: Die
- * ultimative Fallback - Die PMODE/DISP2 Gewaltsimulation"):
- * DELIBERATE SYNTHETIC DIAGNOSTIC OVERRIDE, NOT REAL HARDWARE
- * MODELING OR A CLAIM THAT THE REAL BIOS EVER DOES THIS. Round 939
- * showed PMODE staying 0x00 across an 8.24-BILLION-instruction
- * diskless boot (converged idle steady-state, not slow organic
- * progress). Round 940's fresh BIOS disassembly additionally found
- * that even with Schritt 1's SIF_SMFLAG bit-30 hook forcing the
- * dispatcher's first gate, a second independent gate
- * (*(0x80023EF8) != 0, real EE RAM content) still blocks the real
- * SIF2 dispatch path in every observed checkpoint - so the real
- * BIOS is not expected to configure PMODE/DISPLAY2 itself within any
- * reasonable instruction budget on the current tree. Per the user's
- * explicit instruction ("Wenn das BIOS PMODE nicht anfasst, tun wir
- * es im Emulator-Code selbst"), once the EE has executed more than
- * SIF_R940_FORCE_DISPLAY_THRESHOLD instructions AND PMODE is still
- * unconfigured (0), we hard-write PMODE=0x03 (circuits 1+2 enabled),
- * SMODE2=0x3 (interlace+frame-mode bits set) and standard/plausible
- * NTSC 640x448 values into DISPFB2/DISPLAY2, purely so libogc's own
- * display-open logic on real Wii/Dolphin has a nonzero PMODE to
- * react to and SOMETHING (BIOS/OSDSYS content, garbage, or a flat
- * color field) reaches the screen - any visible pixel is more debug
- * data than more billions of instructions of confirmed black screen.
- * This only fires ONCE, and never overwrites a PMODE the real BIOS
- * configured on its own (checked immediately before writing) - if
- * the SIF hooks above (or a future real fix) ever let the BIOS reach
- * its own real SetGsCrt/PMODE write first, this block is a silent
- * no-op forever after. Left unconditional/always-compiled (no build
- * flag) per the user's explicit "erzwingen" (force) directive - see
- * Round 940 STATUS.md for the full before/after evidence and the
- * exact register-value derivation (DX=636 DY=50 MAGH=0 MAGV=0
- * DW=639 DH=447, the standard ps2sdk/PCSX2 640x448 NTSC layout). */
-#define SIF_R940_FORCE_DISPLAY_THRESHOLD 25000000ull
-
-static void system_r940_force_display_if_needed(ee_state_t *ee)
-{
-    static int forced_once = 0;
-    if (forced_once)
-        return;
-    if (ee->instructions_executed < SIF_R940_FORCE_DISPLAY_THRESHOLD)
-        return;
-
-    gs_state_t *gs = gs_get_state();
-    forced_once = 1; /* only ever attempt this once, regardless of outcome */
-    if (gs->pmode != 0)
-        return; /* real BIOS already configured display itself - do not stomp it */
-
-    /* Round 941 (task #925 continued, real-hardware evidence from the
-     * user's own Dolphin run of the Round 940 JIT-on build): the
-     * debug HUD correctly reported "configured by BIOS/game" and EE
-     * instructions were well past this threshold, yet Dolphin's own
-     * D3D12 stats showed Draw calls: 0 and the screen stayed black.
-     * Root cause, found by reading main.c's real blit call site
-     * (run_real_boot_flow(), ~line 509): `int en1 = pmode & 0x1;` /
-     * `active_dispfb = en1 ? gs->dispfb1 : gs->dispfb2;` - EN1 is
-     * PREFERRED over EN2 whenever both are set (an intentional,
-     * real-hardware-accurate choice from Round 212's own fix, cited
-     * right above that code: "EN1 preferred if both are somehow set,
-     * matching real hardware's Circuit-1-is-primary convention").
-     * Round 940 set PMODE=0x03, enabling BOTH EN1 and EN2, but only
-     * ever wrote DISPFB2/DISPLAY2 (Circuit 2) - DISPFB1/DISPLAY1 were
-     * left at their real, never-configured value of 0. So main.c's
-     * circuit-selection logic picked Circuit 1 (EN1 set) every time,
-     * decoded DISPFB1=0 via gs_decode_dispfb() into bw_pixels=0 (see
-     * gs_wii_output.c: fbw_field = (dispfb>>9)&0x3F, 0 when dispfb is
-     * 0), and main.c's `if (bw_pixels > 0)` guard silently skipped
-     * the entire gs_blit_psmct32_to_xfb() call - GS memory was never
-     * blitted to the screen at all, regardless of what Schritt 3
-     * wrote into Circuit 2. This fully explains the user's exact
-     * symptom (HUD says "configured", draw calls/pixels are zero)
-     * without needing to touch gs_wii_output.c or invent any new
-     * hypothesis. Fix: force PMODE=0x02 (EN2 only, EN1 left 0) -
-     * this is not a new guess, it is the exact real-hardware
-     * convention this project already confirmed and documented in
-     * Round 212 (real PCSX2 debugger screenshot of the GT3 BIOS
-     * splash showing PMODE=0x66, EN1=0/EN2=1, DISPFB2 populated,
-     * DISPFB1 zero) - so this fix makes the synthetic override match
-     * the one real-hardware PMODE pattern this project has direct
-     * evidence for, instead of an arbitrary "enable both" guess. */
-    gs->pmode    = 0x02u;             /* enable GS circuit 2 ONLY (matches Round 212's real-hardware-confirmed EN1=0/EN2=1 pattern) */
-    gs->smode2   = 0x3u;               /* INT=1 (interlace), FFMD=1 (frame mode) */
-    gs->dispfb2  = 0x1400u;            /* FBP=0, FBW=10 (640/64), PSM=0 (PSMCT32) */
-    gs->display2 = 0x001bf27f0003227cull; /* DX=636 DY=50 MAGH=0 MAGV=0 DW=639 DH=447 */
-    system_safe_printf("\n[R941-FORCE] instr=%llu: BIOS never configured PMODE - "
-           "forcing PMODE=0x02 (Circuit2-only, Round 941 fix)/SMODE2=0x3/DISPFB2=0x%04x/DISPLAY2=0x%016llx "
-           "(Round 940/941 synthetic diagnostic override, NOT real hardware fidelity)\n",
-           (unsigned long long)ee->instructions_executed, (unsigned)gs->dispfb2,
-           (unsigned long long)gs->display2);
-}
+/* Round 1017 (task #994, user's explicit instruction: "Nimm alle
+ * Pmode Hacks raus und lasse den Bios den Pmode und Disp2 aufwecken"
+ * - remove all PMODE hacks, let the BIOS wake PMODE/DISP2 itself):
+ * the Round 940/941 synthetic PMODE/SMODE2/DISPFB2/DISPLAY2 force-
+ * override (system_r940_force_display_if_needed()) has been REMOVED
+ * entirely. PMODE and the GS display registers are now only ever
+ * written by genuine BIOS/game code via the normal GS MMIO path
+ * (source/hw/gs.c) - nothing in system.c synthesizes display state
+ * anymore. See docs/STATUS.md Round 1017 for the removal rationale
+ * and the fresh organic-boot survey this enabled. */
 
 int system_run_interleaved(uint64_t max_slices)
 {
@@ -195,7 +115,6 @@ int system_run_interleaved(uint64_t max_slices)
         if (!iop->halted)
             iop_core_step();
 
-        system_r940_force_display_if_needed(ee);
 
         if (ee->halted && iop->halted) {
             system_safe_printf("\n[+] system_run_interleaved: both cores halted after %llu slice(s)\n",

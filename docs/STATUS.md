@@ -48865,3 +48865,122 @@ This reprioritizes task #937/#938's "real trigger condition for
 SIF_SMFLAG bit 30" investigation as a prerequisite for any future
 thread-1-retirement attempt, rather than a parallel, lower-priority
 thread.
+
+## Round 1017-1019 (tasks #993-#996): user-directed pivot to diskless-only investigation; PMODE/DISP2 hack removed; semaphore-0 producer precisely characterized
+
+**User's explicit instruction this round (verbatim, German):** "1.
+Kümmere dich nur noch erstmal um die Diskless Story , 2. Führe den
+Boot der Scph5004 aus und schau wo es nun hängen bleibt und behebe
+das problem. , 3. Nimm alle Pmode Hacks raus und lasse den Bios den
+Pmode und Disp2 aufwecken , 4. wir haben in den alten tasks ja alles
+überstanden bis dann die Reboot schleifen kam die wir auch behoben
+haben." Translation: focus exclusively on the diskless (BIOS-only,
+no disc) boot for now; re-run the SCPH-50004 boot and find/fix where
+it currently hangs; remove all PMODE hacks and let the BIOS wake
+PMODE/DISP2 itself organically; earlier rounds already got past the
+reboot-loop bug (Round 989).
+
+**Step 1 - discarded uncommitted Round 1016 patch.** The prior
+round's in-progress, uncommitted second-SIF2-gate diagnostic patch to
+`source/core/system.c` was cleanly reverted via `git checkout --`,
+since it predates and is superseded by this round's redirect.
+
+**Step 2 - removed the Round 940/941 PMODE/DISP2 force hack.** Per
+the user's explicit instruction, `system_r940_force_display_if_needed()`
+(the one-shot synthetic override that, once 25M instructions had
+executed with `gs->pmode==0`, hard-wrote fixed NTSC PMODE/SMODE2/
+DISPFB2/DISPLAY2 values) has been REMOVED ENTIRELY from
+`source/core/system.c`, along with its call site and the now-unused
+`core/hw/gs.h` include. PMODE and the GS display registers are now
+only ever written by genuine BIOS/game code via the normal GS MMIO
+path (`source/hw/gs.c`) - nothing in `system.c` synthesizes display
+state anymore. (The separate Round 940 SIF_SMFLAG bit-30 force in
+`source/hw/sif.c` was deliberately left untouched - it is an
+input-precondition force that helps the BIOS's own dispatcher reach
+genuine code, not an output-fabrication like the PMODE hack, and the
+user's instruction specifically named "Pmode Hacks".)
+
+**Step 3 - fresh organic (hack-free) diskless boot survey (Round
+1017).** A new host-native driver (extending the Round 1014 pattern
+with GS PMODE/SMODE2/DISPFB1/DISPFB2/DISPLAY1/DISPLAY2 sampling) was
+run against the SCPH-50004 BIOS with no disc, budget 60,000,000
+instructions. Result: `ee_pc=0x00257964` (WaitSema(semid=0) park,
+exactly the Round 1005/1006-documented resting point),
+`iop_pc=0x00155c00` (idle, exactly the Round 1006-documented
+resting point), `pmode=0x00` throughout the entire run - i.e.
+removing the hack did not change the underlying organic behavior at
+all, it only stopped fabricating a display state that was masking
+whether the BIOS ever genuinely configures PMODE/DISP2 on its own
+(it does not, within 60M instructions, on the current tree).
+
+**Step 4 - Round 1018 combined-fix experiment (scratch-only,
+disproved).** Round 1015's standing hypothesis - that combining
+Round 1012's thread-1 retirement + Round 1014's trampoline-anchored
+idle fallback with a forced write of the real second SIF2-dispatch
+precondition (EE RAM word `*(0x80023EF8) != 0`, identified via
+Round 940's own BIOS disassembly) might let real BIOS dispatch
+through the SIF2 gate without the Round 519/1012-class regression -
+was built and tested in `/tmp/r1018` (scratch `system.c`/
+`iop_hle_thread.c`/`iop_module_loader.c` variants, tracked source
+untouched). Result: the combination reproduces the severe Round
+519/1012 regression signature exactly - `rpc_pending_sets` frozen at
+0 (never climbs from its normal ~20), EE oscillating in the
+`pc=0x00082180-0x0008219C` range instead of reaching the
+`pc=0x00257964` resting point. **This conclusively disproves Round
+1015's hypothesis and closes out the entire thread-1-retirement
+experimental line** (spanning Rounds 1009, 1011, 1012, 1014, 1015,
+1018) as empirically worse than the current tree's default
+(non-retiring) IOP scheduler behavior, regardless of which SIF2-gate
+fix is combined with it. Not shipped (scratch-only negative result).
+
+**Step 5 - precise semaphore-0 producer characterization (Round
+1019, task #996).** Built a diagnostic (`/tmp/r1017/r1017_semacheck2.c`)
+sampling `ee_hle_thread_get_signal_calls(0)`, EE INTC raise-counts
+per cause, and live INTC_STAT/INTC_MASK every 200,000 instructions
+across the early boot window. Findings, all against the current
+(post-Round-1011, hack-free) tree:
+
+- `signal_calls(0)` climbs 0 -> 2 -> 19 between roughly instruction
+  4,000,000 and 6,400,000, then stays flat at exactly 19 all the way
+  out to the 60,000,000-instruction budget (re-confirming Round
+  1005's earlier "signaled 19 times" finding is still exactly true on
+  the current tree, unchanged by the Round 1011 scheduler fix or the
+  Round 1017 PMODE-hack removal).
+- **Correction to the Round 1005 framing:** the 19 signals are NOT
+  VBLANK-periodic and NOT SBUS-interrupt-driven. `VBLANK_START`/
+  `VBLANK_END` raise counts climb continuously and organically
+  throughout the entire 60M-instruction run (97/98 raises by the end)
+  - proving the VBLANK generator itself works correctly - while
+  `signal_calls(0)` stays frozen at 19 the whole time, disproving any
+  1:1 VBLANK-to-signal relationship. Likewise, the real EE
+  `SBUS`-cause raise count stays flat at exactly 3 for the entire
+  window (4,000,000-6,400,000 instructions) during which
+  `signal_calls(0)` climbs from 2 to 19 - so the burst of 17 signal
+  calls is not interrupt-driven either. Also worth noting:
+  `INTC_MASK` never includes the VBLANK_START/END bits (stays
+  `0x1002` = SBUS + one other cause only) throughout this entire
+  window, so the EE's real VBLANK ISR is provably never even
+  dispatched during this period - ruling it out entirely as
+  semaphore-0's producer.
+- **Conclusion:** the 19 `SignalSema(0)` calls are straight-line
+  real BIOS/kernel initialization code (most likely a one-time
+  resource/heap-slot setup loop, not a recurring producer), which
+  completes and stops well before thread 1 ever parks on
+  `WaitSema(0)`. Thread 1's block is therefore NOT "waiting for the
+  20th occurrence of a periodic event" (the Round 1005 framing) but
+  waiting for exactly one further, distinct `SignalSema(0)` call from
+  a genuinely different code path that our organic boot never
+  reaches. This is consistent with, and further narrows, the
+  long-standing task #447/#536 finding that real progress here is
+  gated on the still-unresolved SIF2 second-dispatch-gate problem
+  (Round 940's RAM flag `*(0x80023EF8)`) - not a new, independent
+  gap.
+
+**Classification.** No new safe, evidenced fix was found this round
+for the diskless blocker itself; Round 1018's leading candidate was
+disproven by direct measurement, and Round 1019's diagnostic work
+refines the existing task #447/#536 understanding rather than
+resolving it. Per this project's anti-fabrication discipline, no
+speculative fix is being shipped. The one real, shipped source change
+this round is the user-directed PMODE/DISP2 hack removal (Step 2)
+itself, which goes through the full mandatory workflow below.

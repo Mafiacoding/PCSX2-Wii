@@ -48667,3 +48667,115 @@ to complete the regression-verification sweep for Round 1011), or
 begin scoping the trampoline-anchored fallback thread redesign Round
 1012 sketched - now with the added motivation that it would unblock
 GT3's real disc-boot path too, not only the diskless investigation.
+
+## Round 1014 (task #990 follow-up): implemented and empirically tested the trampoline-anchored fallback redesign - result is a clean, evidenced NEGATIVE (worse than the current tree, same Round 519/1012 regression signature), NOT shipped to tracked source
+
+Per the user's explicit instruction to implement Round 1012's deferred
+"trampoline-anchored fallback" idea now, this round built and tested
+it in full, per the standing backup-before-experimenting rule (all
+work done in `/tmp/r1014` scratch copies of `iop_hle_thread.c` and
+`iop_module_loader.c` - tracked source was never touched; confirmed
+clean via `git status --short` / `git diff --stat` both before and
+after this round's work).
+
+**What was implemented.** Two changes, scoped exactly as Round 1012's
+own experiment: (1) `iop_hle_thread_retire_root_thread()` re-enabled
+at the single genuine-completion call site in
+`iop_module_loader.c` (not the 3 panic-bypass sites, which stay
+disabled per Round 519's original scope). (2) A new fallback in
+`iop_hle_thread.c`'s `reschedule()`, in the `next == 0` branch (fires
+when nothing is READY): if `g_root_thread_retired` is true, restore
+`st->pc`/`st->next_pc` to `iop_module_loader_get_trampoline_addr()`
+(a Round 1008 accessor) before setting `idle = 1`, so the module
+loader's own pc-anchored continuation mechanisms (Round 936's
+spurious-interrupt ack, Round 938's SIF-cmd bit-30 dispatch, Round
+953's VBLANK-burst handling - all keyed to IOP's live pc genuinely
+equalling `g.trampoline_addr`) still have a chance to fire once the
+real tid=4/7/8/5/6 cascade Round 1012 found exhausts, instead of the
+pc being left wherever the last real thread happened to self-block.
+
+**Verification methodology.** A differential test: the exact same
+driver (samples `g_r303_rpc_pending_sets` and EE/IOP pc/idle every
+20M slices) built twice - once linked against the current tracked
+`iop_hle_thread.c`/`iop_module_loader.c` (control, retirement still
+disabled) and once against the Round-1014-patched scratch copies
+(treatment) - run against the identical SCPH-50004 diskless boot for
+150M instructions each.
+
+**Control (current tracked tree, unmodified):** `rpc_pending_sets`
+climbs 0->2 (slice 5M) ->20 (slice 20M) and holds at 20 through slice
+60M; EE rests at pc=0x00257964 (Round 1005's already-documented
+WaitSema resting point); IOP rests at pc=0x00155c00, idle=1. This is
+the known-good, non-regressed baseline.
+
+**Treatment (Round 1014 patch applied):** `rpc_pending_sets` is 0 at
+every single sample from slice 5M through slice 40M+ - it never even
+reaches the control's early value of 2, let alone 20. EE cycles
+indefinitely in the pc=0x00082180-0x00082198 range (confirmed via
+`[!] system_run_interleaved: hit slice cap` warnings every iteration)
+- this is the exact same early BOOTEND-poll-class address range Round
+519's own original writeup described, and the exact same
+pc=0x00082180-0x00082198 signature Round 1012's un-mitigated
+experiment also reproduced. IOP itself does still show
+idle=1/pc=0x00155c00 in the periodic samples (i.e. the pc-restore
+logic IS doing what it was written to do - the IOP's own pc is
+correctly anchored at the trampoline address, not off in
+tid=4/7/8/5/6's bodies the way Round 1012's un-mitigated version
+left it). But this alone does not help: EE-side progress and RPC
+activity are just as badly regressed as Round 519/1012's original,
+unmitigated failure.
+
+**Why the pc-restore mitigation didn't help (evidenced, not
+speculative).** `source/core/iop/iop_core.c`'s own doc comment on the
+`idle` field (around its `iop_core_step()` idle-check block, lines
+~2140-2170) states plainly: while `idle` is set, real fetch/decode/
+execute is skipped entirely, and the *only* way `idle` clears is
+`iop_check_hw_interrupt()` finding a genuinely pending interrupt
+(`if (!pending_before && g_iop.exception_pending) g_iop.idle = 0;`) -
+this check is unconditional-even-while-idle and is explicitly
+independent of which IOP thread (if any) is "current." So simply
+having the correct pc parked at the trampoline is necessary but
+provably not sufficient: the IOP only ever resumes real fetch/decode/
+execute there in response to a real interrupt vectoring in, and nothing
+about this round's fix changes when or whether that happens. Critically,
+the divergence in this round's treatment run is visible from the very
+first sample (slice=5M, well before Round 1012's own instr=3,808,446
+retirement-firing point even had time to matter much), meaning the
+regression isn't purely a "wanders off and never finds its way back"
+problem the way Round 1012 characterized it - something about thread
+1's retirement disrupts real forward progress substantially earlier
+and more broadly than a bare pc/next_pc restore on idle-entry can
+repair. The most likely remaining explanation, not yet tested: thread
+1's continued *existence* (READY/dispatchable, re-entering the
+trampoline for real dispatch on every real wake, not just sitting
+there while permanently idle) may itself be load-bearing for some
+downstream mechanism keyed to `g.current_thread_id == 1` specifically
+(not just pc equality) - Round 936/938/953's own implementations were
+not audited this round for such a dependency, and would be the
+natural next place to look if this line of investigation is resumed.
+
+**Disposition.** Per this project's backup-before-experimenting rule
+and anti-fabrication discipline, since the experiment produced a
+clear, reproducible regression relative to the current tree (not
+merely "no improvement"), nothing from this round's `/tmp/r1014`
+scratch copies was applied to tracked source. `iop_hle_thread.c` and
+`iop_module_loader.c` remain exactly as Round 1011 left them.
+`iop_hle_thread_retire_root_thread()` remains disabled at all 4 call
+sites, per Round 519's original scope, unchanged by this round.
+
+**Mandatory workflow.** Docs-only round (no tracked source changed) -
+host-native regression suite and Wii cross-build correctly skipped
+per this project's established convention for docs-only rounds (see
+e.g. Round 463/1013's own entries for the same convention). Verified
+`git status --short` / `git diff --stat` both clean of tracked-source
+changes before writing this entry. This STATUS.md update, commit, and
+the mandatory leak-check are this round's only remaining steps.
+
+**Next round's concrete target.** The natural next step, if this
+investigation is resumed, is auditing Round 936/938/953's actual
+implementations for a `g.current_thread_id == 1`-style (or similar
+thread-1-specific) dependency, rather than assuming pc-equality alone
+is their only gate - this round's evidence strongly suggests such a
+dependency exists somewhere in that chain. Absent that, the standing
+task #938/#939 (push GT3/diskless surveys further, then Tekken/KOF/MS3)
+remains open and is the lower-risk next round to pick up.

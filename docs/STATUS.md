@@ -47385,3 +47385,42 @@ service, that's the real, evidenced gap to fix.
 No tracked source changed this round (diagnostic-only, `tools/` driver
 only) - regression suite and Wii cross-build correctly skipped per this
 project's established docs/diagnostic-only-round convention.
+
+## Round 1000 (task #979 start): IOP state at the Round 990 resting point matches the ALREADY-DOCUMENTED idle-park location from Round 950 - not a fresh freeze, ties this investigation arc directly into the existing rpc_bind_count thread
+
+Checked IOP's live state at the exact moment EE parks at the Round 990
+resting pc (0x0026fe9c). Result: `IOP pc=0x00155c00`,
+`instructions_executed=3,809,273`. Disassembly around this address is
+non-code (ASCII "Sync" text and zero-padding, e.g.
+`0x001558f0: 0x636e7953` = "Sync"), confirming this is a data/string
+region, not a live instruction stream - IOP is not fetching real
+instructions here, it is PARKED.
+
+**This is not a new finding in isolation - it is the exact same
+location already documented in Round 950's writeup**: *"iop_pc parks
+at 0x00155c00 (close to, not identical to, SCPH-10000's documented
+0x00155910 idle point - worth comparing in a future round)."* Rounds
+943-947 (SCPH-10000 investigation) established that this class of IOP
+park point is a REAL, CORRECT idle-wait trampoline (not a bug) -
+critically, Round 950's own DVE-fix survey observed real, non-forced
+SIF-RPC activity continuing to climb WHILE the IOP sits at this park
+point: `rpc_bind_count` rose from 1 (at cum=5,000,000) to 13 (by
+cum=60,000,000). So "parked here" does not mean "incapable of further
+work" - genuine periodic servicing clearly still happens.
+
+**This directly connects Round 990-999's investigation (does anything
+deliver a packet to EE RAM 0x0040DA80?) to Round 950's still-open
+"worth comparing in a future round" note and its climbing
+`rpc_bind_count`.** The concrete next question is now well-scoped:
+among those real, already-observed RPC binds, does any of them
+correspond to the specific service that would deliver our struct's
+inbound packet? If yes, the delivery mechanism exists and simply
+hasn't been triggered by whatever real-world event normally requests
+it (a genuinely unmet precondition, not a missing feature). If none of
+the 13 observed binds match, that would point to a real, currently-
+unmodeled IOP-side service gap - the actionable fix this whole
+Round 990-1000 arc has been searching for.
+
+No tracked source changed this round (diagnostic-only, `tools/` driver
+only) - regression suite and Wii cross-build correctly skipped per this
+project's established docs/diagnostic-only-round convention.

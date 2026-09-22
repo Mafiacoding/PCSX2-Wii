@@ -48984,3 +48984,153 @@ resolving it. Per this project's anti-fabrication discipline, no
 speculative fix is being shipped. The one real, shipped source change
 this round is the user-directed PMODE/DISP2 hack removal (Step 2)
 itself, which goes through the full mandatory workflow below.
+
+## Round 1020 (task #998): root-caused why thread-1 retirement stalls the EE at the SIF_SMFLAG/BOOTEND poll loop (task #987/#519 follow-up)
+
+**User's request (German, verbatim in the conversation this round):**
+a combined static-analysis + dynamic-scheduler-trace attack on the
+open question left by Round 1012/1018/519: exactly *why* re-enabling
+`iop_hle_thread_retire_root_thread()`'s thread-1 retirement (still
+disabled at all 4 call sites in `iop_module_loader.c` since Round
+519) causes the EE to get stuck at pc=0x00082180-0x00082198 instead
+of progressing normally. The user asked two concrete clarifying
+questions and proposed a specific trace-point plan; both are answered
+below, followed by the actual instrumented-experiment result.
+
+### Static analysis answer (user's Q1: is dispatch logic in a
+separate `iop_scheduler.c`/`iop_sub_dispatch()` module?)
+
+No such file exists in this project. The entire IOP scheduler core
+lives in `source/hw/iop_hle_thread.c`: `reschedule()` (static, the
+sole scheduling point) and `pick_next_ready()` (static, lines
+233-248). Direct read of `pick_next_ready()`'s full body, and a
+`grep -n "== 1\b"` across the file, confirm **no hardcoded
+`thread_id == 1` special-casing anywhere** - it is a plain
+priority/`ready_seq`-FIFO scan over `IOP_HLE_THREAD_MAX_THREADS`
+threads whose status is `IOP_THS_RUN`/`IOP_THS_READY`. The "implicit
+idle-fallback assumes thread 1" hypothesis in the user's Fokus-1 is
+disproven by direct source inspection: `pick_next_ready()` returns
+`0` (no real thread id) when nothing is ready, and `reschedule()`'s
+`next == 0` branch is a dedicated, thread-id-agnostic idle path
+(Round 1011's gated `save_context()` logic), not a fallback onto
+thread 1.
+
+The `trace_scheduler_state()`-style trace point the user asked to add
+at `reschedule()`'s entry **already exists**, uncompiled, as the
+`R936_STEP_TRACE` macro (Round 936) at the top of `reschedule()` -
+this round just had to turn it on (`#define R936_STEP_TRACE` in the
+scratch copy) rather than write it from scratch.
+
+### Dynamic trace answer (user's Q2: capture explicit READY/SLEEP
+transitions?) and the retirement experiment itself
+
+Per the project's backup-before-experimenting rule, three tracked
+files were copied to `/tmp/r1020/` and instrumented there only
+(`source/hw/{sif,iop_module_loader,iop_hle_thread}.c` remain
+byte-identical to before this round):
+
+- `sif_trace.c`: two `fprintf(stderr, "[R1020-SIF] ...")` points
+  around the existing BOOTEND-reassert mechanism (Round 441) -
+  one where `sif_mmio_write32()`'s `SIF_SMFLAG` case *schedules* the
+  delayed reassert (fires when the EE writes a value clearing bit
+  `0x00040000`), one where `sif_ee_tick()` actually *fires* it.
+- `iop_module_loader_trace.c`: re-enabled all 4 of Round 519's
+  disabled `iop_hle_thread_retire_root_thread(st)` call sites (each
+  now also prints `[R1020-MODLOAD] retire_root_thread() call site`),
+  plus a print at every `mark_iop_boot_complete()` call.
+- `iop_hle_thread_trace.c`: a print at the exact moment of retirement
+  inside `iop_hle_thread_retire_root_thread()` (before/after status
+  flip and `reschedule()`), a print in `reschedule()`'s idle branch
+  (`next==0`, i.e. ready-queue-empty), and a print at every
+  READY-to-RUN `SWITCH: <from> -> <to>` transition (with the
+  incoming thread's priority/`ready_seq`) - directly answering the
+  user's ready-queue-transition request, scoped to the switch/idle
+  events rather than logging every single `reschedule()` call
+  unconditionally (kept the existing `R936_STEP_TRACE` line too, for
+  raw call-count cross-checking).
+
+Two 20,000,000-instruction diskless SCPH-50004 boot runs were built
+and executed: `r1020_retire_trace` (all 3 instrumented files, thread-1
+retirement ACTIVE) and `r1020_control_trace` (same driver, same
+`sif_trace.c`, but the ordinary tracked `iop_hle_thread.c`/
+`iop_module_loader.c` - retirement stays disabled, matching the
+current shipped tree).
+
+**Control run (retirement disabled, matches shipped tree):** reaches
+EE pc=0x00257964 (exactly Round 1005's documented `WaitSema` resting
+point) with IOP thread 1 still `RUN`, parked at the trampoline address
+`0x00155C00`. The BOOTEND-reassert mechanism fires clean, real
+schedule/fire pairs **twice** during the run (`smflag` restored to
+`0x00070000` each time), confirming Round 441's cross-processor-
+handshake-delay design works exactly as intended in the shipped tree.
+
+**Retirement-enabled run:** the full causal sequence, in order:
+1. `mark_iop_boot_complete()` fires once (confirming
+   `g_sif_extra.iop_boot_completed_once` is set - the Round 1019
+   summary's expectation that this precondition is already satisfied
+   by retirement time is confirmed correct).
+2. Immediately after, the retirement call site fires;
+   `iop_hle_thread_retire_root_thread()` retires thread 1
+   (`RUN`->`DORMANT`, `thread_count=6`) and calls `reschedule()`.
+3. `reschedule()` switches, in strict one-shot succession, through
+   every other real thread once each: `1->4->7->8->5->6`.
+4. After thread 6's single turn, `pick_next_ready()` finds nothing
+   ready at all - `reschedule()` enters the idle branch
+   (`ready_count=0`) and **the trace stops**: no further
+   `reschedule()` calls occur for the rest of the 20M-instruction
+   budget.
+5. **`[R1020-SIF]` never fires even once** in this run - the EE never
+   performs the SIF_SMFLAG bit-`0x00040000`-clearing write that would
+   trigger the reassert mechanism in the first place. The EE's own pc
+   is confirmed (via the driver's periodic status line) to be stuck
+   cycling within `0x00082180-0x0008218C` for the entire remainder of
+   the run, making zero forward progress.
+
+**Root cause, evidenced:** in the shipped/working tree, thread 1
+never actually stops after the module-loader dispatch completes - it
+re-enters the "idle-bypass" trampoline point (`0x00155C00`,
+`iop_module_loader.c`'s 4 now-disabled call sites) repeatedly as its
+own steady-state loop, and each re-entry is what drives the IOP side
+of the real SIF_SMFLAG handshake that the EE's read-only poll loop at
+pc=0x00082180 is waiting on (the two observed reassert cycles).
+Retiring thread 1 the moment `mark_iop_boot_complete()` fires denies
+it any further re-entries into that loop. The 6 other real threads
+(3/4/5/6/7/8, previously shown by Round 1010 to be genuine,
+non-placeholder SIF-RPC-registration code) each get exactly one
+scheduling turn once thread 1 vacates the CPU, complete their own
+one-shot work, and go idle - **none of them perform the SIF_SMFLAG
+write thread 1's loop was providing**. The EE, which itself needs to
+reach the point of performing that write, never gets there either,
+because whatever upstream IOP activity feeds it depends transitively
+on thread 1's continued presence. This is a real, load-bearing
+dependency, not a scheduler bug: `pick_next_ready()` and `reschedule()`
+behave exactly as designed in both runs; the regression is entirely a
+consequence of *what* gets silently skipped when thread 1 stops being
+scheduled, not *how* scheduling itself works.
+
+This directly answers the open question left by Round 519's own
+warning ("do not wire it back up without new evidence explaining why
+thread 1 can safely be retired at all in this idle-bypass context"):
+it is **not** currently safe, because no replacement for thread 1's
+repeated idle-bypass re-entry (and whatever real SIF-handshake
+maintenance it performs there) exists yet. Retirement remains
+correctly disabled at all 4 tracked call sites; this round shipped no
+tracked-source change, only the diagnosis.
+
+**Files (all scratch, `/tmp/r1020/`, none committed - per the
+standing backup-before-experimenting and checkpoint/`.bin` exclusion
+rules):** `sif_trace.c`, `iop_module_loader_trace.c`,
+`iop_hle_thread_trace.c`, `r1020_retire_trace.c` (driver),
+`r1020_retire_trace`/`r1020_control_trace` (built binaries),
+`r1020_stdout.log`/`r1020_stderr.log` (retirement-enabled run),
+`r1020_control_stdout.log`/`r1020_control_stderr.log` (control run).
+
+**Mandatory workflow:** docs-only round (no tracked source changed) -
+host-native regression suite and Wii cross-build correctly skipped,
+per this project's established convention for docs-only diagnostic
+rounds (see e.g. Round 463/819/1019's identical framing). Next round
+should investigate what specific real IOP-side action thread 1's
+idle-bypass re-entry performs (a fresh disassembly of the trampoline
+target's body, since Round 1010 only characterized threads 4-8, not
+this repeated re-entry path itself) so that a safe replacement -
+rather than an outright retirement - can eventually be designed.

@@ -48158,3 +48158,121 @@ as possible - e.g. only adding a READY-thread check specifically at
 the point idle transitions to 1, not altering the scheduler's general
 dispatch logic - and verified against the same rpc_pending_sets/EE-
 depth regression markers Round 519 used before being trusted.
+
+## Round 1009 (task #987): live-traced reschedule()'s real call pattern across a full boot - found the "starvation" is NOT a missed-call bug, it's the module loader's silent bypass of a fix (iop_hle_thread_retire_root_thread()) already built and already proven broken back in Round 519
+
+Round 1008 closed with a clear next target: scope a fix for
+tid=4/5/6 never getting CPU time once the IOP idles at the EESYNC/
+trampoline park point. Before writing any fix, this round built a
+live instrumented trace (scratch copies of iop_hle_thread.c and
+iop_module_loader.c, per this project's backup-before-experimenting
+rule - `tools/round1006-iop-park-check/` companions were NOT used;
+this was a throwaway `/tmp/r1009/trace_driver` + 2 scratch .c files,
+nothing committed) logging every `reschedule()` call and every
+`advance_to_next_module()` call across the full SCPH-50004 boot to
+budget=55,000,000.
+
+**Finding: reschedule() only ever fires 5 times in the entire boot,
+and every single one of them is already correct.**
+
+```
+[R1009] ensure_root_thread() synthesized tid=1 pc=0x000001c0
+[R1009] reschedule() cur=1 next=3 idle_before=0 pc=0x0001a8b4   (inside REBOOT)
+[R1009] reschedule() cur=3 next=1 idle_before=0 pc=0x000001b0   (thread 3 hands back to thread 1)
+[R1009] reschedule() cur=1 next=1 idle_before=0 pc=0x0014a200   (inside/next-to CDVDFSV, entry 0x0014a214 - matches tid=4)
+[R1009] reschedule() cur=1 next=1 idle_before=0 pc=0x00150c2c   (inside/next-to FILEIO - matches tid=5/6 range)
+[R1009] reschedule() cur=1 next=1 idle_before=0 pc=0x00150c64   (same)
+```
+(no further reschedule() calls at all after this, all the way through
+SIFINIT/FILEIO/SECRMAN/EESYNC and the repeated trampoline re-parks at
+0x00155c00)
+
+Reading this against Round 1007's findings: the 3rd/4th/5th calls are
+exactly the moments CDVDFSV and FILEIO's own real init code creates
+and starts tid=4/5/6 (their StartThread syscalls correctly invoke
+`reschedule()`, matching this project's own comment at that call site
+- "the newly-READY thread may now pre-empt the caller if higher
+priority"). `pick_next_ready()` correctly computes `next=1` (no
+switch) every time - meaning tid=4/5/6 were created with a real,
+numerically-worse (lower real-priority) value than thread 1's
+priority=64, so real MIPS/THREADMAN priority scheduling correctly
+keeps the boot/root context running instead of preempting it. This
+is NOT a scheduler bug - `pick_next_ready()`/`reschedule()`'s own
+logic is working exactly as designed, every single time it's called.
+
+**The actual gap, now much more precisely characterized:** after the
+5th reschedule() call (still deep inside FILEIO's own dispatch),
+`reschedule()` is NEVER called again for the rest of the boot -
+including at the moment SECRMAN and EESYNC run to completion and the
+IOP genuinely finishes all module dispatch. That completion is
+signaled entirely by `iop_module_loader.c` writing `st->idle = 1`
+directly (the trampoline re-entry site, Round 1008), completely
+bypassing `iop_hle_thread.c`. From iop_hle_thread.c's own bookkeeping
+perspective, thread 1 is STILL `current_thread_id` and STILL
+`IOP_THS_RUN` forever after - nothing ever tells the scheduler "the
+root context is done, go check if anyone else is ready."
+
+**This is not a new discovery - it is EXACTLY the gap Round 514/519
+already tried to close, and Round 519 already found the straightforward
+fix doesn't work.** `source/hw/iop_hle_thread.c` already contains
+`iop_hle_thread_retire_root_thread()` (currently disabled/unused,
+lines ~1345-1364), whose own header comment documents: a first,
+correctly-scoped attempt (retire thread 1 to DORMANT exactly once,
+only while it's still genuinely RUN, then call `reschedule()`) was
+built, wired into all of iop_module_loader.c's idle-bypass sites,
+and STILL caused `rpc_pending_sets` to collapse from a real 228 to a
+hard 0 and the EE boot depth to regress from pc=0x0050172C (~320M
+real instructions) all the way back to parking at pc=0x000820E0 (a
+much earlier BOOTEND poll) - i.e. switching execution away from
+thread 1 to whichever real worker thread `pick_next_ready()` then
+picked made things dramatically worse, not better. The function is
+kept in the tree specifically with the warning: "Do not wire it back
+up without new evidence explaining why thread 1 can safely be
+retired at all in this idle-bypass context."
+
+This round does not have that new evidence. Re-implementing the exact
+same mechanism (retire root thread, reschedule) without understanding
+WHY it broke SIF-RPC dispatch last time would just reproduce a
+already-documented regression - so it was not attempted.
+
+**One hypothesis ruled out this round:** searched for every use of
+`iop_hle_thread_get_current_thread_id()`/`_get_status()` outside
+iop_hle_thread.c itself, to check whether some OTHER subsystem
+(e.g. the SIF-RPC delivery code responsible for `rpc_pending_sets`)
+has a hidden functional dependency on `current_thread_id` specifically
+staying `1`. Found exactly one external call site,
+`source/hw/iop_cdvd.c:344-348` (the `SCMD_CLOSECONFIG` diagnostic
+block from Round 814) - and it is explicitly documented as "Purely
+observational; no dispatch/result/interrupt behavior changed in any
+way" (a debug fprintf, not a functional gate). So the Round 519
+regression is NOT explained by some other subsystem silently checking
+"is thread 1 current" - it must instead come from the CONTENT of
+whichever real worker thread `reschedule()` switched execution to
+(i.e. tid=4/5/6-class threads' own saved state/code not actually
+being capable of safely resuming/driving forward real boot progress
+once given the CPU) - though this is inference, not yet directly
+re-verified with fresh instrumentation.
+
+**No fix implemented this round** (correctly, given the above - would
+be re-guessing an already-disproven mechanism). No tracked source was
+changed (the 2 instrumented files used for this round's trace live
+only in `/tmp/r1009`, never copied into the tracked tree, matching
+this project's own backup-before-experimenting rule for exactly this
+kind of exploratory instrumentation); host-native regression suite and
+Wii cross-build are correctly skipped per this project's established
+docs-only-round convention.
+
+**Next round's concrete target:** before ever re-attempting a
+reschedule-based fix, fully disassemble tid=4/5/6's real bodies (not
+just their entry-window disasm from Round 1007) to determine whether
+their saved state is actually well-formed/resumable, or whether this
+project's CreateThread/StartThread modeling for CDVDFSV/FILEIO's
+worker threads is itself incomplete in a way that would explain why
+switching to them mid-boot derails real forward progress. If they
+turn out to be legitimately resumable, the real missing piece may be
+narrower than a full "retire root thread" - e.g. only reschedule()ing
+opportunistically from the module-loader's idle transition without
+ever changing thread 1's own status (so it stays a valid re-selection
+target, matching this round's observation that thread 1's own
+priority=64 already naturally loses to nothing right now because
+nothing else is ever actually offered the chance).

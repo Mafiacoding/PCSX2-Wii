@@ -47774,3 +47774,124 @@ docs-only-round convention (only new tools/round1005-waitsema-id/*.c
 diagnostic files were added, using this project's own already-public
 ee_hle_thread.h accessors; no ee_core.c/ee_hle_thread.c edits this
 round).
+
+---
+
+## Round 1006 (task #984): IOP pc=0x00155C00 freeze resolved - genuine
+park, correctly modeled, but the real IOP scheduler is starving 3
+READY worker threads via a bypass path with known prior history
+
+**Step 1 - settle park vs. sampling-coincidence (tools/round1006-iop-
+park-check/analyze.c):** built a driver that reaches the same resting
+point as Round 1005 (ee_instr=50,350,406, ee_pc=0x00257964,
+iop_instr=3,819,302, iop_pc=0x00155c00) and then calls raw
+`iop_core_step()` 2000 times, ONE AT A TIME (no 1M-instruction
+chunking), tracking pc/instruction-count after every single call:
+
+    [R1006] total pc/instr changes across 2000 raw steps: 0
+
+Zero changes across 2000 individual steps conclusively rules out
+Round 862's "coarse-sampling artifact" class of mistake - this is a
+genuine, stable park, not a same-pc coincidence at chunk boundaries.
+The run also reported `iop_idle=1`.
+
+**Step 2 - same methodology correction Round 1005 made on the EE
+side, applied to the IOP side:** raw disassembly around the frozen pc
+(0x00155BE0-0x00155C20) decoded to implausible/data-looking content
+(e.g. word 0x636E7953 at 0x155BE0 is literally the ASCII bytes
+"Sync"), which would be a red flag IF the IOP were actively fetching
+there - but grep confirmed `g_iop.idle` (checked in
+source/core/iop/iop_core.c:2160, `if (g_iop.idle) { ... skip real
+fetch/decode/execute entirely ... }`) is exactly this project's
+already-established Task #179 "idle-not-halt" design: while idle, the
+CPU does NOT fetch/decode at all - pc simply stays wherever it was
+when idle was last set, and only real hardware-interrupt checks keep
+running every tick. So the "garbage" bytes at the frozen pc are moot:
+that address is never actually being executed while idle=1.
+
+Searching for who WRITES `idle=1` found it is never set directly in
+ee_core.c or iop_core.c themselves - it's set from TWO different real
+subsystems: `source/hw/iop_hle_thread.c`'s `reschedule()` (line 271,
+the direct IOP-side analog of Round 569's/Round 1005's EE scheduler,
+set only when `pick_next_ready()` finds nothing at all ready), and
+`source/hw/iop_module_loader.c` (5 call sites, e.g. line ~1380's
+`is_loadcore_panic_loop()` completion path: "module boot sequence
+complete ... real IOP hardware never halts regardless ... matching
+[an earlier] site's own three-part fix (idle=1, IEc=1,
+exception_pending=0)").
+
+**Step 3 - real IOP HLE thread-table dump (tools/round1006-iop-park-
+check/analyze2.c, using iop_hle_thread.h's already-existing public
+accessors, same non-instrumented technique as Round 1005's
+analyze2.c):**
+
+    [R1006-2] IOP thread_count=6 current_tid=1
+      tid=1 status=1(RUN)     wait_type=0 wait_id=0 entry=0x00000000 pc=0x0001a8b4 prio=64
+      tid=2 status=16(DORMANT) entry=0x00121190 pc=0x00000000 prio=8
+      tid=3 status=16(DORMANT) entry=0x0001a928 pc=0x000001b0 prio=10
+      tid=4 status=2(READY)   entry=0x0014a214 pc=0x0014a214 prio=80
+      tid=5 status=2(READY)   entry=0x00151884 pc=0x00151884 prio=96
+      tid=6 status=2(READY)   entry=0x00151af0 pc=0x00151af0 prio=96
+    stats: threads_created=5 threads_started=4 threads_exited=1 context_switches=2
+    stats: wait_sema_blocked=0 wait_sema_immediate=0 wait_evf_blocked=0
+
+None of the 6 threads has wait_type==IOP_TSW_SEMA (3) - so, unlike the
+EE side, this is NOT a WaitSema park at all. The real picture: tid=1
+(prio=64, the "synthetic bridge thread" already identified by Round
+513 as the one running module_loader.c's fixed module-dispatch
+sequence) is still marked RUN, while three real worker threads -
+tid=4/5/6 (entries 0x0014a214, 0x00151884, 0x00151af0, likely real
+IOP driver/module init threads per their distinct, non-bump-arena
+entry points) are READY and have NEVER been scheduled even once
+(context_switches=2 total for the whole boot, and none of the 3 READY
+threads' pcs have advanced past their own entry point).
+
+**Root cause:** `is_loadcore_panic_loop()`'s completion path in
+iop_module_loader.c sets `st->idle = 1` DIRECTLY - it does not call
+`reschedule()` at all, so it never even asks whether any other real
+thread should run instead. Read `iop_hle_thread_tick()` (called
+unconditionally every `iop_core_step()`, even while idle, same
+unconditional-even-while-idle pattern as iop_timers_tick()) and
+confirmed its own `reschedule()` call is gated behind `woke_any`,
+which is ONLY set by a DelayThread deadline expiring - an
+already-READY thread (never WAIT-DELAY) can never trigger it. So once
+idle=1 is set this way, tid=4/5/6 have no path back to being
+reconsidered, ever, for the rest of the boot: this specific freeze is
+a genuine, permanent scheduler-starvation bug, not by-design idle.
+
+**Why no fix is being implemented this round (anti-fabrication
+discipline):** this exact class of change - having thread 1 give up
+its RUN status once its own dispatch work is done, so lower-priority-
+but-ready worker threads can run - was already attempted once before
+and explicitly reverted. `iop_hle_thread_retire_root_thread()`'s own
+header comment (Round 519 incident writeup, still in source/hw/
+iop_hle_thread.c today) documents that retiring thread 1 (even in a
+carefully-guarded, one-time, RUN-only form) collapsed real SIF-RPC
+dispatch entirely (`rpc_pending_sets` 228 -> 0) and regressed EE boot
+depth from pc=0x0050172C (~320M real instructions) back down to an
+early BOOTEND poll at pc=0x000820E0 - and it says explicitly: "Do not
+wire it back up without new evidence explaining why thread 1 can
+safely be retired at all in this idle-bypass context." This round's
+new evidence (3 READY threads permanently starved, 0 SEMA-type waits
+anywhere in the table) narrows WHERE the problem is, but does not by
+itself explain why thread 1 staying RUN forever is also load-bearing
+for real RPC dispatch - that connection needs to be traced before any
+fix attempt, exactly as the existing warning requires.
+
+**Next round's concrete target:** disassemble tid=4/5/6's entry
+points (0x0014a214, 0x00151884, 0x00151af0) to identify which real
+IOP modules they belong to (cross-reference against Round 512/513's
+existing module-identity work), and trace what tid=1's own code at
+pc=0x0001a8b4 does immediately before falling into
+`is_loadcore_panic_loop()`'s completion branch - specifically whether
+it's plausibly still mid-dispatch (in which case idle=1 here is
+simply premature) or genuinely finished (in which case the real fix
+needs to explain the Round 519 RPC-dispatch dependency before thread
+1 can safely stop being current).
+
+No tracked source changed this round - regression suite and Wii
+cross-build correctly skipped per this project's established
+docs-only-round convention (only new tools/round1006-iop-park-check/
+*.c diagnostic files were added, using this project's own already-
+public iop_hle_thread.h accessors; no iop_core.c/iop_hle_thread.c/
+iop_module_loader.c edits this round).

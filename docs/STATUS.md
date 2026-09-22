@@ -46562,3 +46562,144 @@ Follow-up task recorded (#969): find the real writer of
 0x00157C00/0x00157C04 (or confirm real hardware also leaves it
 zero/NULL and the actual escape mechanism is inside 0x00209048's own
 body, not the argc gate itself).
+
+## Round 989 (task #969): SCPH-50004 diskless restart-loop root cause found and fixed - SetupThread (syscall 60) never wrote real argc/argv
+
+Round 988 left off having precisely located but not explained
+0x00157C00/0x00157C04 (OSDSYS's argc/argv staging cell) as permanently
+zero in this emulation, with a write-watch across 150M+ instructions
+finding zero writers anywhere in EE-side code. This round finds and
+fixes the real writer.
+
+### Disproving the leading syscall-100 (FlushCache) hypothesis
+
+The decompression stub's crt0 sequence calls four syscalls in order
+before reading argc: `sq zero`-loop clearing RAM
+[0x00157B80, 0x00157D64) (which includes the argc/argv cells - so
+whatever writes them must run AFTER this clear), syscall 60
+(SetupThread), syscall 61 (SetupHeap), and syscall 100. Real ps2sdk's
+own `docs/reference/ps2sdk/ee/kernel/include/syscallnr.h` was checked
+fresh: syscall 100 (0x64) is `__NR_FlushCache` - a real cache-
+management syscall with no plausible connection to argc/argv, and this
+project's existing no-op implementation for it is correct. This
+hypothesis is closed as disproven, not merely deprioritized.
+
+### The real disassembly evidence: SetupThread's fifth argument
+
+Fresh disassembly of the same decompression stub's SetupThread call
+site shows five arguments passed, not three:
+
+```
+$a0 = gp
+$a1 = stack_base (0xFFFFFFFF sentinel, per Round 274's citation)
+$a2 = stack_size (0x100000)
+$a3 = args = 0x00157C00       <- the SAME address later read for argc
+$t0 = root_func = 0x1000B8    (loaded separately, passed as the 5th real arg)
+```
+
+Real ps2sdk's own `docs/reference/ps2sdk/ee/kernel/include/kernel.h`
+(line 220) gives SetupThread's real signature:
+
+```c
+extern void *SetupThread(void *gp, void *stack, s32 stack_size,
+                          void *args, void *root_func);
+```
+
+This is an exact match: the stub's `$a3` is real SetupThread's `args`
+parameter, and it is the identical address the stub reads argc from
+three instructions after the syscall returns. This project's existing
+syscall-60 implementation (Round 171, refined Round 274 for the -1
+stack_base sentinel) computes only `$sp` from gp/stack_base/stack_size
+and returns directly - it never reads or uses `$a3` at all. That is
+the actual modeling gap Round 988 was looking for: real SetupThread
+also writes the calling thread's real argc/argv (already known to the
+kernel from the original `_ExecPS2` dispatch that started this thread)
+into the RAM cell pointed to by `args`.
+
+### The fix: let syscall 60 vector as a real exception (task #180 lesson)
+
+This project has an established, previously-cited convention (the
+"task #180 lesson", already applied to syscalls 6/7/16/17/18/19 in
+`ee_core.c`): when a syscall is a real, resident-in-ROM BIOS kernel
+function that this project's own loaded BIOS image already contains
+working code for, do not hand-guess its internal bookkeeping in
+software - let it vector as a genuine MIPS Syscall exception instead,
+so the BIOS's own resident kernel code performs the entire mechanism
+for real. Syscall 60 (SetupThread) was a deliberate, cited exception
+to this pattern up through Round 274, on the reasoning that only the
+`$sp` computation mattered. Round 988's disassembly evidence shows
+that reasoning was incomplete: the args-parameter write is real,
+observable BIOS-kernel behavior this project's own ROM image performs
+correctly whenever given the chance to run.
+
+The fix removes the Round 171/274 software `$sp`-computation shortcut
+for syscall 60 entirely and lets it vector as a real exception, exactly
+like syscalls 6/7/16-19 already do.
+
+### Empirical verification: the real BIOS ROM performs the write
+
+With the exception-raise in place, genuine resident BIOS ROM code
+(observed executing at pc=0x80004FB4/0x80004FC4, in the low-kernel
+address range reached via the real Syscall exception vector) is what
+runs SetupThread - and it writes `argc=1` to 0x00157C00 and a valid
+argv pointer to 0x00157C04. These are not injected/fabricated values;
+they are the literal result of the emulator letting the BIOS's own ROM
+code execute, observed via a write-watch instrumented in scratch only
+(`/tmp/ee_core_r989b.c`'s `R989_ARGCARGV_WATCH` block, never promoted
+to tracked source).
+
+A 160M-instruction, 4-slice boot survey with the fix in place confirmed
+this breaks SCPH-50004's diskless restart loop: the EE settles at a
+stable resting point (pc=0x0026fe9c) instead of repeatedly cycling
+through the "Restart Without Memory Clear" message. A targeted RAM dump
+and disassembly around that resting pc confirmed it is genuine,
+well-formed OSDSYS code (a small array-index/accessor function), not a
+crash or a wild jump into garbage.
+
+### Verification workflow
+
+- **Host-native regression suite**: all 136 `tests/test_*.c` files run
+  individually via `tests/run_test.sh` across several foreground
+  batches (background `--all` runs do not survive across tool-call
+  boundaries in this sandbox, confirmed again this round - foreground
+  per-test invocation appending to a persistent log is the only
+  reliable pattern here). Result: 0 failures across all 136 tests.
+  `tests/test_ee_syscall_setupthread.c` (Round 274's original test,
+  which asserted the now-retired software $sp-computation model
+  including its own direct-return/no-exception behavior) was rewritten
+  to assert the new exception-vectoring behavior instead, matching the
+  established pattern already used by
+  `tests/test_ee_syscall_full_audit_sweep.c`'s `run_syscall_test()`
+  for syscalls 6/7/16-19 (halted stays 0, Cause.ExcCode == Syscall (8),
+  EPC points at the SYSCALL instruction, pc vectors to 0xBFC00380).
+  `tests/test_ee_syscall_full_audit_sweep.c` itself does not cover
+  sysnum 60 and needed no changes.
+- **devkitPPC Wii cross-build**: clean, 0 errors/0 warnings, produced
+  `pcsx2-wii.dol` (566912 bytes). (The `libmpfr.so.4` toolchain quirk
+  documented earlier in this file recurred fresh this session and was
+  fixed the same documented way: `export
+  LD_LIBRARY_PATH=$DEVKITPPC/lib:$LD_LIBRARY_PATH` before `make`.)
+- **Disc-boot regression check** (highest risk, since SetupThread runs
+  in every game's crt0): GT3, Tekken Tag Tournament (Demo), King of
+  Fighters 2000/2001, and Metal Slug 3 were each re-run from cold boot
+  against the SCPH-50004 BIOS via `r986_driver.c` for 100M-instruction
+  budgets. GT3 ran cleanly to 629M instructions, resting at
+  pc=0x8000fde8, not halted. Tekken ran to 46.8M instructions, resting
+  at pc=0x00400324 (in the game's own code space), not halted. KOF ran
+  to 35.3M instructions and settled at pc=0x0010b924 - the EXACT
+  resting point already documented for KOF in task #967's post-
+  Round-987 finding, confirming zero regression. Metal Slug 3 ran to
+  35.5M instructions and cleanly halted via a real, legitimate `KExit`
+  syscall (guest-requested termination) - not a crash. No new halts,
+  crashes, or unexpected resting points appeared on any of the four
+  titles.
+
+### Significance
+
+This closes the multi-round task #447/#536/#960/#963/#964/#965/#968/#969
+investigation arc's most persistent open blocker: SCPH-50004's
+diskless boot no longer gets stuck in an infinite restart loop. This
+is the first round in that arc where the diskless boot path reaches a
+stable, past-restart-loop resting point through a real, disassembly-
+and-citation-backed mechanism (not a guessed constant), fully verified
+by the mandatory regression/Wii-build/disc-boot workflow before commit.

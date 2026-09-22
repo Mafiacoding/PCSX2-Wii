@@ -4118,107 +4118,61 @@ static int ee_step(void)
                 return 1;
             }
             if (sysnum == 60) {
-                /* 60 (0x3C) SetupThread - Round 171 (task #172
-                 * continuation): CORRECTED from the previous "generic
-                 * default return 0" treatment above. Real ps2sdk
-                 * signature (ee/kernel/include/kernel.h, fetched this
-                 * round): "void *SetupThread(void *gp, void *stack,
-                 * s32 stack_size, void *args, void *root_func);" -
-                 * and real ps2sdk crt0 (ee/startup/src/crt0.c's
-                 * __start(), the entry point EVERY ps2sdk-built ELF
-                 * uses, including real game executables and OSDSYS
-                 * itself) calls this syscall and then does
-                 * "move $sp, $2" - i.e. uses the syscall's OWN RETURN
-                 * VALUE directly as the new stack pointer, not a
-                 * fixed/precomputed constant. Returning a bare 0 here
-                 * (as this project's previous generic-default
-                 * treatment did) would set $sp=0 for any real ELF
-                 * booted through this path - never surfaced as a bug
-                 * before because this project's diskless BIOS-only
-                 * boot path apparently never reaches a SetupThread
-                 * call site that immediately consumes the return
-                 * value this way (its own internal bootstrap code is
-                 * not built with this crt0). Real, standard MIPS
-                 * stack-growth convention (stack grows DOWN from a
-                 * high address, same convention this project's own
-                 * ee_core_init() already uses for its initial $sp -
-                 * see that function) means the correct top-of-stack
-                 * value is stack_base + stack_size, 16-byte aligned
-                 * (EE o32 ABI requires 16-byte stack alignment for
-                 * 128-bit register spills - MMI/COP2 quadword
-                 * loads/stores, already modeled elsewhere in this
-                 * file). $gp is also set from $a0 here, matching the
-                 * real signature, even though every real crt0 also
-                 * sets $gp itself immediately before this syscall
-                 * (harmless, redundant, and more faithful to real
-                 * kernel behavior for any future caller that doesn't
-                 * self-set $gp first). */
-                uint32_t gp         = (uint32_t)GPR(4); /* $a0 */
-                uint32_t stack_base = (uint32_t)GPR(5); /* $a1 */
-                int32_t  stack_size = (int32_t)GPR(6);  /* $a2 */
-                uint32_t sp_top;
-                /* Round 274 (task #423, 315th finding): real, cited
-                 * BIOS-ROM disassembly of OSDSYS's own crt0 (not
-                 * ps2sdk's - OSDSYS is Sony-internal code, predating/
-                 * separate from the public ps2sdk toolchain, and its
-                 * real crt0 differs from the fetched ps2sdk crt0.c's
-                 * "la $5,_stack" convention) shows OSDSYS genuinely
-                 * calls SetupThread with $a1 (stack_base) = 0xFFFFFFFF
-                 * (-1) and $a2 (stack_size) = 0x5000 (20480) -
-                 * confirmed via exact per-instruction register capture
-                 * at the real call site (0x00200064) in a live host-
-                 * native trace, not inferred. This project's own
-                 * previous plain "stack_base + stack_size" arithmetic
-                 * (Round 171) does not special-case this value: as an
-                 * unsigned 32-bit add, 0xFFFFFFFF + 0x5000 overflows
-                 * and wraps to 0x00004FFF (then 16-byte-aligned to
-                 * 0x00004FF0) - a near-zero address, 20KB into RAM.
-                 * Confirmed via a second, independent live trace that
-                 * this exact wrapped value is genuinely handed back
-                 * as $sp, and the very next real instruction OSDSYS
-                 * itself executes (a real stack-relative register
-                 * save in its own compiled code, at 0x00204D6C) then
-                 * takes a real AdES (Address Error on Store,
-                 * Cause.ExcCode=3) exception - after which this
-                 * project's boot trace never returns to OSDSYS's own
-                 * code for the rest of any run tested (up to 336
-                 * million EE instructions). This is a real,
-                 * reproducible bug in this project's OWN emulation,
-                 * not a PS2 hardware/kernel architecture gap - no
-                 * genuine PS2 console has ever crashed running its own
-                 * factory-shipped OSDSYS.
+                /* SetupThread (Round 989, task #969 - SCPH-50004
+                 * diskless restart-loop investigation, supersedes the
+                 * earlier Round 171/274 software $sp-computation
+                 * model).
                  *
-                 * No citable Sony source for the EXACT real kernel
-                 * semantics of stack_base==-1 was found (it is not
-                 * documented in the public ps2sdk headers, which never
-                 * produce this value from their own crt0) - so this
-                 * fix does not claim to replicate undocumented Sony
-                 * internals byte-for-byte. Instead it applies the
-                 * same overflow-safety principle any correct kernel
-                 * stack-setup routine must apply regardless of what
-                 * -1 specifically "means": never hand back a stack
-                 * pointer produced by silently wrapping around zero.
-                 * When stack_base is the all-ones sentinel (a common,
-                 * conventional "let the kernel pick" placeholder in
-                 * real thread/stack-setup APIs generally), this
-                 * project substitutes a safe, explicitly-derived
-                 * default: the top of this project's own already-
-                 * modeled EE_RAM_SIZE (32MB), minus a conservative
-                 * safety margin, so the resulting stack sits in
-                 * ordinary, valid, mapped high RAM rather than
-                 * colliding with low memory - honestly labeled as a
-                 * principled substitution, not a byte-exact citation. */
-                if (stack_base == 0xFFFFFFFFu) {
-                    sp_top = (uint32_t)(EE_RAM_SIZE - 0x10000u); /* 32MB - 64KB safety margin */
-                } else {
-                    sp_top = (uint32_t)((uint64_t)stack_base + (uint64_t)(uint32_t)stack_size);
-                }
-                sp_top &= ~0xFu; /* 16-byte align, real EE o32 ABI requirement */
-                st->gpr[28].ud0 = gp; /* $gp */
-                GPR(2) = sp_top;      /* $v0, consumed directly as $sp by real crt0 */
-                st->pc = this_pc + 4u;
-                st->next_pc = this_pc + 8u;
-                return 1;
+                 * Real ps2sdk kernel.h (docs/reference/ps2sdk/ee/kernel/
+                 * include/kernel.h, line 220) gives SetupThread's real
+                 * signature:
+                 *   extern void *SetupThread(void *gp, void *stack,
+                 *                             s32 stack_size,
+                 *                             void *args,
+                 *                             void *root_func);
+                 * Fresh disassembly of the SCPH-50004 decompression
+                 * stub's own crt0-style startup code (entry=0x00100008)
+                 * shows it calls SetupThread with $a3(args)=0x00157C00
+                 * - the EXACT SAME RAM address the stub later reads
+                 * argc from (computing argv at args+4) to decide
+                 * whether OSDSYS's main() proceeds normally or falls
+                 * into its reinit/restart branch. This project's prior
+                 * software model (Round 171/274) computed only $sp
+                 * from gp/stack_base/stack_size and never read or used
+                 * $a3 at all - that is the actual modeling gap: real
+                 * SetupThread also writes the calling thread's real
+                 * argc/argv (already known to the kernel from the
+                 * original _ExecPS2 dispatch that started this thread)
+                 * into the RAM cell pointed to by args.
+                 *
+                 * Per this project's established "task #180 lesson"
+                 * (already applied to sysnum 6/7/16/17/18/19: do not
+                 * hand-guess a real, resident-in-ROM kernel function's
+                 * internal bookkeeping when this project's own BIOS
+                 * image already contains real code for it - let it
+                 * vector as a genuine MIPS Syscall exception instead,
+                 * so the BIOS's own resident kernel code performs the
+                 * entire mechanism itself), this now vectors as a real
+                 * exception rather than short-circuiting in software.
+                 *
+                 * Empirically verified (Round 989): with this exception
+                 * raised, genuine resident BIOS ROM code (observed at
+                 * pc=0x80004FB4/0x80004FC4, in the low-kernel address
+                 * range) performs SetupThread for real and writes
+                 * argc=1 to 0x00157C00 and a valid argv pointer to
+                 * 0x00157C04 - the exact missing values that were
+                 * causing SCPH-50004's diskless boot to read argc==0
+                 * and fall into its infinite "Restart Without Memory
+                 * Clear" loop. A 160M-instruction, 4-slice boot survey
+                 * confirmed this breaks the loop: the EE settles at a
+                 * stable, disassembly-verified-legitimate resting point
+                 * (pc=0x0026fe9c) instead of repeatedly cycling through
+                 * the restart message. See docs/STATUS.md Round 989 for
+                 * the full finding chain and tests/test_ee_syscall_
+                 * setupthread.c (rewritten this round) for the host-
+                 * native regression coverage of this new behavior. */
+                ee_raise_exception(st, EE_EXC_CODE_SYS, this_pc, in_delay_slot);
+                break;
             }
             if (sysnum == 64) {
                 /* 64 (0x40) CreateSema - task #188 (task #172/#187

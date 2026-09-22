@@ -48276,3 +48276,116 @@ ever changing thread 1's own status (so it stays a valid re-selection
 target, matching this round's observation that thread 1's own
 priority=64 already naturally loses to nothing right now because
 nothing else is ever actually offered the chance).
+
+## Round 1010 (task #988): tid=4/5/6 have NEVER executed a single instruction and their real bodies are well-formed SIF-RPC service registrations - disproves "bad worker-thread state" as Round 519's regression cause; also found the IOP scheduler still has the exact save_context-ordering bug class Round 824 already found and fixed on the EE side
+
+Before ever re-attempting anything like Round 519's disproven
+"retire root thread + reschedule" fix, this round checked the one
+thing that fix's own regression could plausibly have been blamed on
+that Round 1009 hadn't yet ruled out: whether tid=4/5/6's own saved
+state/code is actually safe to resume at all, or whether this
+project's CreateThread/StartThread modeling left them incomplete in
+some way. Built `analyze5.c` (scratch, reuses disasm_one() verbatim)
+to dump each thread's full status/saved-pc/priority and a wide
+disassembly window around both its entry point and its saved pc.
+
+**Finding 1: all 3 threads have saved_pc == entry, exactly.** They
+were created and started (status=READY, not DORMANT) but have never
+actually been dispatched even once - `reschedule()`'s own log from
+Round 1009 already explained why (they lost every priority
+comparison to thread 1). This means there is no "corrupted mid-
+execution state" question to worry about at all: switching to any of
+them would start them fresh at their own real entry point with
+whatever initial register state CreateThread/StartThread set up -
+never-before-touched state, not a resume of something interrupted
+mid-way.
+
+**Finding 2: their code bodies are real, coherent, well-formed real
+module init code - not incomplete/placeholder threads.** tid=4
+(CDVDFSV, entry 0x0014a214): pushes a stack frame, calls 4 stub
+functions (0x0014e8dc/0x14e8c4/0x14e888/0x14e820), then builds a
+small structure (a0=string pointer, s0=0x1800, s1=0x51 - a real SIF
+RPC server-ID-shaped parameter set) and calls two more stubs
+(0x14e844/0x14e84c) in a pattern that repeats twice with 2 different
+string arguments - a textbook real `sceSifSetRpcQueue`/
+`sceSifRegisterRpc`-style server-registration sequence (matching this
+project's own Round 958 citation for that exact real mechanism).
+tid=5 and tid=6 (both FILEIO, entries 0x00151884/0x00151af0) are
+near-identical to each other, calling the SAME stub sequence
+(0x151c50/0x151c38/0x151cec/0x151ca8/0x151c84/.../0x151cb8/0x151cb0/
+0x151cc0) but with DIFFERENT SIF bind values in $a1 (tid=5:
+0x80000001, tid=6: 0x80000003) - strongly suggesting FILEIO registers
+2 separate real RPC server numbers (plausibly matching real hardware
+exposing distinct services, e.g. one per device class). None of this
+is garbage, dead code, or an obviously-incomplete stub - it reads as
+real, purposeful module-init work this project's IOP module loader
+faithfully decoded from the real BIOS ROM.
+
+**This has a real, significant implication for several much older,
+still-open investigation threads** (task #1000/#1001/#1002/#1003's
+search for "what real IOP-side service should DMA-deliver the
+0x0040DA80 packet" / what the 13 observed rpc_bind_count binds are /
+Round 1006's EESYNC semaphore-0 producer search): if CDVDFSV/FILEIO's
+real RPC-registration threads never run, their real SIF-RPC servers
+are simply never registered in the first place - which would fully
+explain why so many prior rounds could never find a "producer" for
+these signals from the EE side: the producer's own registration code
+exists, is real, and is sitting right here, created and READY, but
+has never been given the CPU.
+
+**Finding 3 (defensive, not yet confirmed as Round 519's actual
+cause): the IOP scheduler still has the exact save_context-ordering
+bug class Round 824 already found and fixed on the EE side.**
+Grepped `iop_hle_thread.c` for any reference to Round 824/826/task
+#846 - none exist; that fix was applied only to `ee_hle_thread.c`.
+Reading `reschedule()`'s own switch-out branch (line ~271-279)
+confirms it still calls `save_context(st, g.current_thread_id)`
+*unconditionally* on every switch-out, exactly the pattern Round 824
+identified as unsafe on the EE side when `g.current_thread_id` can be
+stale relative to what `st` actually holds (the interrupt-context
+confusion Round 824's own writeup describes in detail). Checked the
+two self-block paths this round can directly inspect (WaitSema ~line
+939, SleepThread ~line 757): both correctly set `st->pc = ra` *before*
+flipping `status` to WAIT and calling `reschedule()`, and since
+`g.current_thread_id` still equals the blocking thread's own id at
+that exact moment (no interrupt-context switch has happened yet),
+`save_context()` there is actually saving the right thread's right
+state - so this specific pair of call sites is safe. The real risk
+matches Round 824's own description almost exactly: an interrupt-
+context `WakeupThread`/`iSignalSema`-class call arriving while
+`g.current_thread_id` already points at a thread that ISN'T what `st`
+currently represents. Round 1009's trace found zero such events occur
+in the current SCPH-50004 boot up to the freeze (reschedule() is only
+called 5 times, all synchronous, all correctly ordered) - so this bug
+is real and latent, but not yet confirmed as the actual mechanism
+behind Round 519's historical regression (that IOP boot trace/BIOS
+build predates this one and was never re-examined with this level of
+detail).
+
+**No fix implemented this round.** Both new findings argue for a
+specific, narrow next step rather than jumping straight back to
+retiring thread 1: port Round 824's exact fix pattern (gate
+`reschedule()`'s switch-out `save_context()` on `cur->status ==
+IOP_THS_RUN`, matching the EE-side fix verbatim) to
+`iop_hle_thread.c` first, verify it changes nothing in the current
+boot (expected, since Round 1009 showed no interrupt-context
+reschedule() calls happen anyway), and only then reconsider a
+carefully-scoped, heavily-instrumented re-attempt at giving thread 1
+a real, correct hand-off to tid=4/5/6 - now backed by concrete
+evidence that their own code is safe to run, unlike when Round 519
+made its attempt with no such verification.
+
+No tracked source was changed this round (pure disassembly/analysis,
+`analyze5.c` lives only in `/tmp/r1009`); regression suite and Wii
+cross-build correctly skipped per this project's docs-only-round
+convention.
+
+**Next round's concrete target:** port the Round 824 `save_context`
+gating fix to `iop_hle_thread.c`'s `reschedule()`, verify via the
+existing IOP scheduler tests plus a fresh boot survey (expect zero
+behavioral change, confirming this bug is currently dormant), ship
+it as a small defensive correctness fix, and only after that's landed
+cleanly, design the actual thread-1-handoff experiment with full
+instrumentation of `rpc_pending_sets` and EE boot depth from the very
+first switch, so any regression is caught immediately rather than
+discovered only at the end like Round 519's was.

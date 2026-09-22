@@ -252,4 +252,15 @@ int iop_module_loader_get_module_count(void);
 const char *iop_module_loader_get_module_name(int index);
 uint32_t iop_module_loader_get_module_entry(int index);
 
+/* Round 1008 (task #986): read-only diagnostic accessor for the
+ * loader's own dynamically bump-allocated dispatch-return address
+ * (g.trampoline_addr = bump_alloc(8), set once during boot) - added
+ * to settle which of iop_module_loader_try_handle()'s several
+ * `st->idle = 1` call sites is producing a given observed freeze,
+ * without needing to guess or re-derive the value. Same established
+ * pattern as the module-name/entry accessors above: exposes existing
+ * internal state for diagnostics, no behavior change. Returns 0 if
+ * boot has not run yet (trampoline_addr not yet allocated). */
+uint32_t iop_module_loader_get_trampoline_addr(void);
+
 #endif

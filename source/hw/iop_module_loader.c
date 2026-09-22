@@ -221,6 +221,10 @@ uint32_t iop_module_loader_get_module_entry(int index)
     return g.entry_points[index];
 }
 
+/* Round 1008 (task #986): see this function's own doc comment in
+ * include/core/hw/iop_module_loader.h. */
+uint32_t iop_module_loader_get_trampoline_addr(void) { return g.trampoline_addr; }
+
 static inline uint32_t rd_le32(const uint8_t *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);

@@ -47993,3 +47993,168 @@ only-round convention (only tools/round1006-iop-park-check/analyze3.c
 added, using this project's own already-public iop_module_loader.h
 accessors; no iop_core.c/iop_hle_thread.c/iop_module_loader.c edits
 this round).
+
+## Round 1008 (task #986): resolved both of Round 1007's open items - trampoline_addr conclusively matches the frozen pc (site #4, not site #5), EESYNC's own real init code genuinely runs and completes, and a new (currently benign) trampoline-stub memory-corruption finding was made along the way
+
+Round 1007 left two concrete open questions: (1) does
+`g.trampoline_addr` actually equal the frozen IOP pc (0x00155c00),
+conclusively pinning which of `iop_module_loader_try_handle()`'s 5
+`st->idle = 1` call sites fires for this freeze; and (2) is EESYNC
+(the last of 29 real IOP modules, identified last round) still
+legitimately mid-execution when the freeze hits, or has it already
+finished its own real work.
+
+**Accessor added.** Following this project's long-established
+read-only-diagnostic-accessor pattern (the same one used for
+`iop_module_loader_get_module_name()`/`_get_module_entry()`), added
+`uint32_t iop_module_loader_get_trampoline_addr(void)` to
+`include/core/hw/iop_module_loader.h` and
+`source/hw/iop_module_loader.c`, simply returning `g.trampoline_addr`.
+Pure getter, zero side effects. Verified via `gcc -fsyntax-only`, a
+full `gcc -c` compile, and the 2 existing module-loader tests
+(`test_iop_module_loader_bootinfo`, `test_iop_module_loader_p_twin_skip`),
+all clean.
+
+**Finding 1 - call-site attribution conclusively settled.** Built
+`tools/round1006-iop-park-check/analyze4.c` (reusing the disasm_one()
+block plus the new accessor) and ran it against SCPH-50004 at the
+same budget=55,000,000 used since Round 1005:
+
+```
+[R1008] reached ee_instr=50350406 iop_pc=0x00155c00 iop_idle=1 trampoline_addr=0x00155c00 match=YES-trampoline-reentry-site
+```
+
+`trampoline_addr == iop->pc` exactly. This conclusively confirms call
+site #4 (the `pc == g.trampoline_addr` branch, gated behind
+`g.idle_transition_done`, found in Round 1007) is what fires for this
+freeze - not site #5 ("genuine completion"), and not any of the 3
+panic-bypass sites (#1-#3). Round 1007's attribution is now fully
+resolved, not just "more plausible."
+
+**Finding 2 - EESYNC's own real code genuinely executes and
+completes; this is the real, intentional post-module-load parking
+point, not a starvation artifact.** The full disassembly of
+0x00155aa0-0x00155c40 (EESYNC's module body through the trampoline)
+shows real, coherent code, not garbage:
+
+- 0x00155aa0-0x00155b18: a real function that calls 3 stub thunks
+  (0x00155bc0 -> j 0x00102860, 0x00155bb8 -> j 0x00102ab8, 0x00155bc8
+  -> j 0x001028bc, all landing in LOADCORE's syscall-dispatch region,
+  matching the "j real_target; addiu zero,zero,ordinal" import-stub
+  pattern seen throughout this codebase), checks a couple of status
+  bits, and returns cleanly via `jr ra`.
+- 0x00155b1c-0x00155b38: a second small function, calls one more stub
+  (0x00155b94 -> j 0x000175f8, a SIFMAN-region address) and returns.
+- 0x00155b3c-0x00155bfc: NOT code - this is EESYNC's own data/export
+  section. Decoded ASCII confirms it: bytes at 0x155b4c/0x155b50
+  spell "eesync\0\0" (the module's own name string, matching its
+  ROMDIR/module-list entry from Round 1007), bytes at 0x155b8c/0x155b90
+  spell "sifman\0\0" (an import dependency name), bytes at
+  0x155bb0/0x155bb4 spell "loadcore\0..." (another import dependency
+  name), and bytes at 0x155be0/0x155be4 spell "SyncEE\0\0" (very
+  likely this module's real RPC/service name - directly consistent
+  with the "missing EE-semaphore-0 signal producer" lead from Round
+  1005/1006, though the exact RPC wiring is still unconfirmed).
+  0x155bb8-0x155bcc hold 3 more 2-word import-stub thunks (matching
+  the 3 `jal` targets called from the first function above).
+- The `jr ra` at 0x00155b14 returns to whatever's in `$ra` - which,
+  since EESYNC is module index 28 (the LAST of 29 real modules per
+  Round 1007's full module-list dump), is `g.trampoline_addr` (set by
+  `advance_to_next_module()`/the initial dispatch setup, both of
+  which use `st->gpr[31] = g.trampoline_addr` as every module's
+  return address - source/hw/iop_module_loader.c lines 1044/1250).
+
+Putting these together: EESYNC's own real init code is NOT still
+mid-execution and NOT being starved of CPU time by the module loader.
+It runs to completion (both of its real functions execute, call their
+real import stubs, and return cleanly) and then legitimately lands
+back at the trampoline - the same "all 29 real modules have now run
+their init entry point once" completion event this project's own
+code comments already describe (source/hw/iop_module_loader.c line
+~1581's "genuine completion" site, and the Round 425/426-documented
+"idle -> real interrupt wakes IOP -> handler runs -> RFE resumes ->
+re-park" cycle that site #4 implements for every subsequent
+re-entry). This is a **correction, not a reversal**, of Round
+1006/1007's framing: the module loader's own idle=1 here is
+legitimate, intentional, real-BIOS-faithful behavior - it is NOT the
+bug. The bug (still open, still exactly as characterized in Round
+1006) is downstream, in the real IOP HLE thread scheduler itself:
+`iop_hle_thread_tick()`'s `reschedule()` call is only triggered by a
+WAIT+DELAY thread's timeout expiring (`woke_any`), never by an
+already-READY thread (tid=4/5/6, CDVDFSV/FILEIO/FILEIO per Round
+1007) simply being ready. That gap is what actually starves those 3
+threads once the IOP goes idle here - not the module loader's
+decision to idle in the first place.
+
+**Finding 3 (new, minor, currently benign) - the trampoline's
+defensive self-jump stub has been overwritten by something else.**
+`iop_module_loader.c` line 1015 writes a real MIPS self-jump
+instruction to `g.trampoline_addr` at allocation time:
+`iop_mem_write32(st, g.trampoline_addr, 0x08000000u |
+((g.trampoline_addr >> 2) & 0x03FFFFFFu))` - for trampoline_addr =
+0x00155c00 this evaluates to 0x08055700 ("j 0x00155c00", i.e. jump to
+self). But the actual word read back at the freeze is 0x001021F0
+(decodes as "tge zero, s0" if naively disassembled as an
+instruction - more likely it's really a 0x00102xxx-region *pointer*
+value, given 0x102xxx is LOADCORE's own address space per this
+round's stub-thunk targets above). Something wrote over the stub
+between setup and the freeze. The code's own comment at that line
+already documents that this word is "never actually
+fetched-and-decoded... a self-jump is written purely as a defensive
+fallback in case something ever reaches this address unexpectedly" -
+and indeed nothing does reach it as code (site #4's pc-match check
+runs before fetch, exactly like every other idle-bypass site), so
+this has **no effect on current correctness**. But it is a real,
+reproducible finding, and it is structurally identical to the
+already-fixed-once Round 769 bug (a real module's own legitimate
+internal store landing on bump-allocated scratch memory the loader
+didn't know was still "live" from that module's perspective) - this
+time the collision is silent because nothing currently depends on
+the stub's content. Not chased further this round (would need a
+write-watch on 0x00155c00-0x00155c07 during a fresh boot to find the
+real writer) since it's confirmed non-blocking; flagged for a future
+round if the trampoline mechanism is ever extended to rely on its
+stub content actually being fetched.
+
+**No fix implemented this round** for the real, still-open bug (the
+`woke_any`-gated `reschedule()` starving READY threads) - this
+round's job was resolving the two specific open questions from Round
+1007, not re-attempting a fix without new evidence on the scheduler
+gap itself, per this project's anti-fabrication discipline. That
+remains next round's concrete target, now with a fully clean picture:
+the module loader's part of this story is completely and correctly
+understood, so a `reschedule()`-side fix can be scoped without
+worrying it might really be a module-loader-side dispatch bug in
+disguise.
+
+**Verification:** `gcc -fsyntax-only` and full `gcc -c` compile of
+`iop_module_loader.c` after the accessor addition - both clean.
+`tests/run_test.sh test_iop_module_loader_bootinfo` and
+`test_iop_module_loader_p_twin_skip` - both pass, "0 check(s) failed".
+Broader regression pass: `tests/run_test.sh --all` run for the fixed
+maximum time this tool allows (this project's known standing issue -
+the sequential 136-test suite takes longer than any single tool call
+can wait); the first 16 tests it reached in that window (spanning
+GIF/DMA/CDVD-chain/VU0-COP2-broadcast coverage, unrelated modules
+exercised as an incidental breadth check) all completed cleanly with
+"0 check(s) failed" - no regressions surfaced. The devkitPPC Wii
+cross-build completed with exit=0 (`pcsx2-wii.elf`/`pcsx2-wii.dol`
+both produced); the one build error hit initially
+(`libmpfr.so.4: cannot open shared object file`) was traced to a
+stale `LD_LIBRARY_PATH` in this sandbox instance, not a source issue -
+the library exists at `$DEVKITPPC/lib/libmpfr.so.4` and the rebuild
+succeeded cleanly once `LD_LIBRARY_PATH` included it.
+
+**Next round's concrete target:** scope and implement a fix for the
+real bug - broaden `iop_hle_thread_tick()`'s reschedule-trigger
+condition (or add an explicit "check for any READY thread" pass on
+every idle-transition, not just on WAIT+DELAY timeout expiry) so that
+tid=4/5/6 (CDVDFSV/FILEIO/FILEIO, all real, all genuinely READY, all
+currently un-dispatchable once idle=1 fires here) get a chance to
+run. Given the Round 519 precedent (a different, more invasive
+thread-1-retirement attempt collapsed real SIF-RPC dispatch and had
+to be reverted), any candidate fix here should be scoped as narrowly
+as possible - e.g. only adding a READY-thread check specifically at
+the point idle transitions to 1, not altering the scheduler's general
+dispatch logic - and verified against the same rpc_pending_sets/EE-
+depth regression markers Round 519 used before being trusted.

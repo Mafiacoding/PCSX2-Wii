@@ -5419,22 +5419,53 @@ static int ee_step(void)
                         if (cid == SIF_CMD_INIT_CMD) {
                             uint32_t ee_recvbuf = ee_mem_read32(st, src + 16u);
                             sif_cmd_iop_handle_init_cmd(ee_recvbuf);
-                            if (sif_cmd_iop_get_init_cmd_count() == 1u) {
-                                /* task #187 (63rd finding): arm a
-                                 * delayed delivery instead of firing
-                                 * immediately - see
-                                 * ee_check_rpcinit_pending() below for
-                                 * why (avoids colliding with this same
-                                 * syscall's own outgoing-completion
-                                 * dma_channel_signal_done() call a few
-                                 * lines below, and this project's own
-                                 * boot trace shows no natural second
-                                 * SIF_CMD_INIT_CMD send ever occurs
-                                 * before boot reaches its steady-state
-                                 * poll loop, so waiting for one is not
-                                 * viable). */
-                                ee_arm_rpcinit_pending();
-                            }
+                            /* task #187 (63rd finding) / Round 1004
+                             * (task #982) CORRECTION: arm a delayed
+                             * delivery instead of firing immediately -
+                             * see ee_check_rpcinit_pending() below for
+                             * why (avoids colliding with this same
+                             * syscall's own outgoing-completion
+                             * dma_channel_signal_done() call a few
+                             * lines below).
+                             *
+                             * This used to be guarded to only the FIRST
+                             * observed send (`init_cmd_count()==1`), on
+                             * the claim that "this project's own boot
+                             * trace shows no natural second
+                             * SIF_CMD_INIT_CMD send ever occurs before
+                             * boot reaches its steady-state poll loop".
+                             * Round 1004's own fresh, real, host-native
+                             * SCPH-50004 diskless-boot trace directly
+                             * disproves that claim: a SECOND
+                             * SIF_CMD_INIT_CMD send genuinely does
+                             * occur (ee_instr=50,317,136, count=2),
+                             * following a real "Restart Without Memory
+                             * Clear" BIOS reboot cycle that replaces the
+                             * EE's receive buffer with a NEW address
+                             * (0x0040DA80, superseding the first send's
+                             * 0x000935C0 at ee_instr=30,537,912). With
+                             * the old count==1 guard, the one-shot
+                             * g_rpcinit_pending flag fired-and-cleared
+                             * for the FIRST (stale, pre-reboot) buffer
+                             * only; the second, real, final buffer -
+                             * the exact address this project's own
+                             * dispatcher (Round 999) polls - never
+                             * received any synthetic reply at all. This
+                             * is the real, directly-observed root cause
+                             * of table[0]@0x0040dc80 staying zero
+                             * across every prior round's survey
+                             * (Rounds 991-1003). Fix: re-arm on EVERY
+                             * observed INIT_CMD send, not just the
+                             * first. sif_cmd_iop_send_rpcinit_ready()
+                             * reads sif_cmd_iop_get_ee_recvbuf() at
+                             * FIRE time (200 real EE instructions
+                             * later), not at arm time, so each
+                             * re-arming targets whichever recvbuf was
+                             * most recently reported - the same
+                             * behavior a real IOP would need to exhibit
+                             * to correctly ack a buffer that the EE
+                             * itself replaced mid-boot. */
+                            ee_arm_rpcinit_pending();
                         }
                         if (cid == SIF_CMD_RPC_BIND) {
                             /* task #192 (68th finding, CORRECTED in

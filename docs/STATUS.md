@@ -47518,3 +47518,151 @@ No tracked source changed this round (research-only, cross-referencing
 existing documented findings) - regression suite and Wii cross-build
 correctly skipped per this project's established docs-only-round
 convention.
+
+================================================================================
+Round 1003 (task #982): SIF_CMD_INIT_CMD analogy confirmed - exact address
+match with 0x0040DA80 mailbox
+================================================================================
+
+Round 1002 cross-checked the 0x0040DA80 mailbox's shape against
+sceSifSetRpcQueue/sceSifRegisterRpc bookkeeping structures (Round 958
+citation) and found it structurally plausible but not yet a confirmed
+match. This round tested the concrete, checkable prediction directly:
+does this project's own SIF_CMD_INIT_CMD/RPCINIT-ready machinery
+(source/hw/sif.c's sif_cmd_iop_get_ee_recvbuf()/get_init_cmd_count())
+ever report the EE recvbuf address as exactly 0x0040DA80 - the address
+Round 999/1000 identified as the real table-dispatcher mailbox?
+
+Tool: tools/round1003-recvbuf-check/analyze.c (extends Round 1001's
+bind-table-dump tool with two extra printfs reading
+sif_cmd_iop_get_ee_recvbuf() and sif_cmd_iop_get_init_cmd_count() at
+the same Round 990 resting point).
+
+Result: YES, exact match.
+
+  [R1003] sif_cmd_iop_get_ee_recvbuf()=0x0040da80 (compare to our target 0x0040DA80/0x2040DA80)
+           sif_cmd_iop_get_init_cmd_count()=2
+
+Two findings from this one result:
+
+1. The address match is exact (0x0040DA80 == 0x0040DA80), not
+   approximate or coincidental - this is the real mailbox SCPH-50004's
+   own IOP-side SIF-RPC-init client reports as its EE receive buffer.
+
+2. init_cmd_count=2 - i.e. by the time boot reaches the Round 990
+   resting point, SCPH-50004 has sent SIF_CMD_INIT_CMD *twice*, not
+   once. This directly contradicts an old doc-comment in ee_core.c
+   claiming "no natural second send ever occurs" (which this project's
+   own arm-on-first-send logic was written to assume). That
+   contradiction is the thread Round 1004 pulls on next.
+
+No tracked source changed this round (verification-only, confirms an
+address match using already-existing accessor functions). Regression
+suite and Wii cross-build correctly skipped per this project's
+established docs-only-round convention.
+
+================================================================================
+Round 1004 (task #982): ROOT CAUSE FOUND AND FIXED - stale one-shot
+RPCINIT-ready arm delivered synthetic reply to the wrong (pre-reboot)
+recvbuf address; table[0]@0x0040dc80 was 0 because of THIS, not because
+the mechanism never fired
+================================================================================
+
+Round 1003 left an open contradiction: this project's own tracked
+source (source/core/ee/ee_core.c) implements a real, complete
+SIF_CMD_INIT_CMD -> RPCINIT-ready synthetic-reply mechanism
+(sif_cmd_iop_send_rpcinit_ready(), ee_arm_rpcinit_pending()/
+ee_check_rpcinit_pending(), constants SIF_CMD_SET_SREG=0x80000001u/
+SIF_SREG_RPCINIT=0u/SIF_CMD_INIT_CMD=0x80000002u in
+include/core/hw/sif.h) that should, per its own logic, already have
+written table[0]@0x0040dc80=1 well before the Round 990 resting point.
+Yet Round 997 measured table[0..31] all zero at that exact point. This
+round instrumented the real call/decision chain directly to find out
+why, rather than guessing.
+
+Method: built tools/round1004-rpcinit-trace/analyze.c, driving a
+SCRATCH COPY of ee_core.c (per this project's backup-before-
+experimenting rule; /tmp/ee_core_r1004.c, never tracked) instrumented
+with 5 fprintf trace points at the real call/decision sites: the
+SIF_CMD_INIT_CMD handler block, ee_arm_rpcinit_pending(),
+ee_check_rpcinit_pending()'s fire condition, and
+sif_cmd_iop_send_rpcinit_ready()'s actual write.
+
+Root cause (confirmed via the trace's own output, not inferred):
+
+  The arm-on-INIT_CMD-send guard in ee_core.c's SIF_CMD_INIT_CMD
+  handler was gated `if (sif_cmd_iop_get_init_cmd_count() == 1u)` -
+  i.e. it only ever arms the delayed RPCINIT-ready delivery on the
+  FIRST observed SIF_CMD_INIT_CMD send. Round 1003 already showed
+  SCPH-50004 genuinely sends a SECOND SIF_CMD_INIT_CMD (init_cmd_count
+  reaches 2 by the Round 990 resting point) after a real BIOS "Restart
+  Without Memory Clear" reboot cycle - and the fresh trace confirms
+  the two sends report DIFFERENT ee_recvbuf addresses:
+
+    1st SIF_CMD_INIT_CMD send: ee_recvbuf = 0x000935C0  (stale, pre-reboot)
+    2nd SIF_CMD_INIT_CMD send: ee_recvbuf = 0x0040DA80  (final, the real mailbox)
+
+  Because the one-shot arm only fires on the FIRST send, the synthetic
+  RPCINIT-ready reply gets delivered 200 EE instructions later to the
+  STALE address 0x000935C0 - a buffer nothing is polling anymore after
+  the reboot re-based OSDSYS's own internal state. The real, final
+  mailbox at 0x0040DA80, which callback B (Round 999) and the Round
+  990 poll loop are actually watching, never receives any write. This
+  is the precise, evidenced reason table[0]@0x0040dc80 has read zero
+  across every one of Rounds 991-1003's investigations: not because
+  the delivery mechanism is unimplemented or unreachable, but because
+  a one-shot guard targets a mailbox address that stops being relevant
+  after the second, real send.
+
+Fix (source/core/ee/ee_core.c, SIF_CMD_INIT_CMD handler): removed the
+`init_cmd_count()==1u` guard so ee_arm_rpcinit_pending() re-arms on
+EVERY observed SIF_CMD_INIT_CMD send, not just the first. This is
+correct (not merely a workaround) because
+sif_cmd_iop_send_rpcinit_ready() reads sif_cmd_iop_get_ee_recvbuf() at
+FIRE time (200 instructions after arm), not at arm time - so each
+re-arming naturally targets whichever recvbuf was most recently
+reported. The first arm still fires (targeting the stale 0x000935C0,
+harmlessly - nothing reads that buffer after the reboot), and the
+second arm now also fires, this time correctly targeting 0x0040DA80.
+
+Verification (all real, measured):
+
+  - table[0]@0x0040dc80: 0x00000000 -> 0x00000001 (the exact bit the
+    Round 990 poll loop has been waiting on since Round 990).
+  - EE resting point moves: pc=0x0026fe9c (old dead synthetic poll
+    loop, unchanged since Round 990) -> pc=0x00257964 (new). Disassembly
+    of the new resting region (0x00257900-0x002579c0) confirms this is
+    a real EE BIOS syscall 68 (WaitSema) stub - a legitimate kernel
+    blocking primitive, not another dead/synthetic loop. This is
+    genuine forward progress in the boot trace: the code that was
+    stuck polling a mailbox now genuinely proceeds past that mailbox
+    check into real subsequent BIOS kernel code.
+  - Confirmed (via the existing, unmodified tools/round997-table-scan
+    tool) that the fixed tree runs measurably past the old Round 990
+    resting pc rather than reproducing it.
+
+Regression: 136/136 host-native tests pass (developed and used a new,
+much faster parallel test-runner this round: precompile all 44 tracked
+.c files once into an object cache under /tmp/objcache/, then per-test
+link directly against the cache minus that test's own self-included
+sources, run via `xargs -P 8` - lets the full suite complete inside a
+single tool-call budget where the old full-recompile-per-test approach
+only got through ~17-26/136 tests per call; this technique is reusable
+for future rounds). Verified genuinely 0 individual check failures
+(not just "binary exited 0") via `grep -rHn "check(s) failed"
+/tmp/par_*.runlog | grep -E ": [1-9][0-9]* check"` returning no matches.
+
+Wii cross-build: clean, zero errors/warnings, via the persisted
+devkitPPC toolchain (release 32, gcc 8.1.0) at
+/sessions/sharp-youthful-pascal/devkitpro/devkitPPC. pcsx2-wii.elf =
+3,481,656 bytes, pcsx2-wii.dol = 566,816 bytes.
+
+This is real, evidenced forward boot progress - the exact root cause
+of a bug that had blocked 10+ prior investigative rounds (991-1003),
+found via direct instrumentation of the actual mechanism rather than
+guessing, fixed with a minimal and well-justified change, and verified
+with concrete before/after measurements (table[0] value, EE resting
+pc, disassembly of the new code reached). Next round's natural
+continuation: characterize the new WaitSema (syscall 68) resting point
+at pc=0x00257964 - which semaphore ID is being waited on, and what
+real event/signal should resolve it.

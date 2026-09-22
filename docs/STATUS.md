@@ -45869,3 +45869,101 @@ out of its restart cycle - is NOT the CDVD disc-presence signal; that
 avenue is now closed on both BIOS targets tested. The next place to look
 is further upstream of the decompression/relaunch machinery documented in
 Rounds 974-981, not inside it.
+
+## Round 982 (task #960/#536 continuation): OSDSYS main-segment entry captured - real, healthy crt0 handoff, no bug found
+
+User (relaying a third-party/AI-generated proposal) asked to catch the
+exact instant OSDSYS's freshly LZSS-decompressed main segment (Round
+981) first takes control at/above 0x00200000, and to dump the SIF
+register state at that instant.
+
+### Corrections made before implementing
+
+Same discipline as Rounds 980/981 - checked the pasted snippet against
+real source before writing anything: (1) it used a fictional variable
+name `this_pc` - this codebase's real per-iteration PC variable is `pc`
+(declared at the top of `ee_step()`); used that. (2) it invented a
+fictional `EE_REG_READ32()` macro again - dropped, replaced with the
+real `sif_mmio_read32(addr,&out)` accessor, exactly as corrected in
+Round 981. (3) its prose additionally mentioned dumping an uncited "RPC
+status field" with no address ever given - not fabricated; only the SIF
+registers and the already-real, already-cited global at 0x00157d48 were
+dumped.
+
+### Result: entry PC is always exactly 0x00200000, and it's real, valid code
+
+Instrumented `pc == 0x00100b14` (Round 981's real decompressor-return
+address) to arm a one-shot watch, then captured the first instruction
+fetch at `pc` in `[0x00200000, 0x00300000)` afterward. Ran a fresh cold
+boot to 480,000,000+ EE instructions; captured 5 restart cycles, all
+byte-identical:
+
+```
+entry #1: pc=0x00200000 opcode=0x00000000 ee_instr=49715699  SIF_MSCOM=0x00000000 SIF_SMFLAG=0x40070000
+entry #2: pc=0x00200000 opcode=0x00000000 ee_instr=84166112  SIF_MSCOM=0x00000000 SIF_SMFLAG=0x40070000
+entry #3: pc=0x00200000 opcode=0x00000000 ee_instr=118616525 SIF_MSCOM=0x00000000 SIF_SMFLAG=0x40070000
+entry #4: pc=0x00200000 opcode=0x00000000 ee_instr=153066945 SIF_MSCOM=0x00000000 SIF_SMFLAG=0x40070000
+entry #5: pc=0x00200000 opcode=0x00000000 ee_instr=187517358 SIF_MSCOM=0x00000000 SIF_SMFLAG=0x40070000
+```
+
+`opcode=0x00000000` (a bare NOP) looked suspicious at first glance - it
+could mean either a deliberate alignment NOP or an emulator bug (e.g.
+jumping to an address the decompressor never actually finished writing).
+Dumped and disassembled the next 128 bytes at 0x00200000 (via this
+project's own `tools/round655-ee-disasm` EE disassembler) to check:
+
+```
+0x00200000: nop
+0x00200004: nop
+0x00200008: lui v0, 0x002C        ; v0 = 0x002C5900 (BSS start)
+0x0020000C: lui v1, 0x0041        ; v1 = 0x004132B0 (BSS end)
+0x00200010-14: addiu v0/v1, ...
+0x00200018: nop
+0x0020001C: nop
+0x00200020: sq zero, 0(v0)        ; zero-clear 16 bytes
+0x00200024: sltu at, v0, v1
+0x00200028: nop
+0x0020002C: bne at, zero, 0x00200018   ; loop
+0x00200030: addiu v0, v0, 16
+0x00200034-58: lui/addiu a0-t0 (SetupThread args)
+0x00200064: addiu v1, zero, 60         ; syscall 60 = SetupThread
+0x00200068: syscall
+0x0020006C-7C: lui/addiu a0-a1 (SetupHeap args)
+0x00200080: addiu v1, zero, 61         ; syscall 61 = SetupHeap
+0x00200084: syscall
+```
+
+This is real, valid, unmistakable code: the two leading NOPs are
+ordinary entry-point alignment padding, followed by a textbook
+ps2sdk-style crt0 startup - a BSS zero-clear loop via SQ (128-bit
+stores), then the real SetupThread (syscall 60) and SetupHeap (syscall
+61) kernel calls, exactly matching this project's own already-cited real
+EE syscall table (Round 493).
+
+### Conclusion
+
+The self-relaunch mechanism (Round 974-982's full chain: syscall-7
+`_ExecPS2` -> LZSS decompression at 0x00100b30 -> jump to entry) is
+**working completely correctly end-to-end** - the decompression finishes
+before the jump, the entry address is the real, correct ELF entry point
+(not a stale/wrong default), and OSDSYS's crt0 begins a normal, healthy
+startup sequence identical to what any well-formed ps2sdk-based PS2
+program would do. SIF_MSCOM/SIF_SMFLAG are still idle/unchanged
+(0x00000000 / 0x40070000) at this exact first instant, which is expected
+- OSDSYS's own SIF setup happens later in its init, after BSS-clear/
+SetupThread/SetupHeap, not at the very first instruction.
+
+**No bug was found in the decompression-to-entry handoff.** This closes
+off that specific hypothesis: whatever makes OSDSYS restart instead of
+progressing to full menu/escalation is NOT a corruption or
+mis-dispatch in the relaunch mechanics themselves - it must be a
+decision made later, inside OSDSYS's own normal post-crt0
+initialization or main-loop logic (the same open question task #447/536
+has been chasing since Round 480+), not in anything captured by Rounds
+974-982.
+
+No tracked source changed this round (scratch-only:
+`/tmp/ee_core_r982.c`, `/tmp/r982_driver.c`, reusing existing
+`tools/round655-ee-disasm/disasm.c`), per the standing
+backup-before-experimenting rule. Regression suite and Wii cross-build
+correctly skipped (docs-only round).

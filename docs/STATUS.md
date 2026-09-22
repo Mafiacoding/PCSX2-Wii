@@ -48496,3 +48496,102 @@ tid=4/5/6's own code is real, coherent SIF-RPC-registration logic
 safe to run - instrumenting `rpc_pending_sets` and EE boot depth from
 the very first switch so any regression is caught immediately, unlike
 Round 519's after-the-fact discovery.
+
+## Round 1012 (task #990): heavily-instrumented re-attempt of the Round 519 thread-1-handoff idea - reproduced the exact same regression, but this time with a concrete, evidenced mechanism explaining WHY
+
+Per Round 1010's "next round's concrete target" and the standing rule
+that Round 519's retirement idea must not be re-attempted "without new
+evidence explaining why thread 1 can safely be retired at all," this
+round built a scratch-only (never applied to tracked source - see
+this project's backup-before-experimenting rule), heavily-instrumented
+re-run of exactly that idea against SCPH-50004: `iop_hle_thread.c` and
+`iop_module_loader.c` scratch copies with `R1012_TRACE` fprintf
+instrumentation added to `reschedule()` (every call: cur/next tid,
+status, priority, pc) and `iop_hle_thread_retire_root_thread()` (fully
+re-enabled, but ONLY at the genuine-completion call site - the one
+Round 1008 proved actually fires on SCPH-50004 - not the 3 panic-
+bypass sites, which stayed disabled per Round 519's original scope).
+A companion driver sampled `g_r303_rpc_pending_sets` (the same EE-side
+counter Round 519 used to detect its 228->0 regression) and EE/IOP pc
+on every IOP thread-id change.
+
+**What the trace showed, step by step (instr=3,808,446 onward):**
+thread 1 is correctly retired to DORMANT and `reschedule()` correctly
+picks tid=4 (CDVDFSV, prio=80 - the best/lowest-numeric priority among
+the READY threads), exactly as real THREADMAN priority scheduling
+should. tid=4 genuinely executes ~80 real instructions of its own
+body (matching Round 1010's "real, coherent SIF-RPC registration
+code" finding) before self-blocking. `reschedule()` then correctly
+cascades through tid=7 (prio=81, a real thread that had apparently
+already been created earlier in boot but was never in Round 1007/
+1010's tid 1-6 census - a genuinely new finding: at least 2 more real
+worker threads exist beyond tid 4/5/6), tid=8 (prio=81), tid=5
+(FILEIO, prio=96), and tid=6 (FILEIO, prio=96) - each running a
+real, short burst of its own body and then self-blocking, all 5
+threads landing on the exact same pc=0x00019258 (a real syscall trap
+inside their own module bodies, not an HLE sentinel address -
+consistent with Round 1010's "real SifSetRpcQueue/SifRegisterRpc-
+style registration sequences" finding). Once all 5 are blocked,
+`reschedule()` correctly finds nothing READY (`next=0`) and the IOP
+goes idle.
+
+**The regression, reproduced with a concrete mechanism this time:**
+from that point on, `g_r303_rpc_pending_sets` stays frozen at 0 for
+the rest of the observed run (matching Round 519's exact 228->0
+signature), and the EE gets stuck cycling in the pc=0x00082180-
+0x00082198 range indefinitely (slice-cap warnings every iteration,
+never advancing) - the same early BOOTEND-poll-class resting point
+Round 519's own writeup described (pc=0x000820E0 there; this project's
+current tree's equivalent idle poll loop sits a few instructions away
+in the same region, consistent with intervening unrelated fixes
+shifting the exact address slightly).
+
+**Root cause, now genuinely explained rather than just re-observed:**
+before this round's retirement fix, "thread 1" was never a real
+THREADMAN thread at all - it was this project's own synthetic label
+for "whatever the module loader's own `st`-driven continuation is
+doing," and the module loader's post-boot progress mechanisms (Round
+936's spurious-interrupt ack, Round 938's SIF-cmd bit-30 runtime
+dispatch, Round 953's VBLANK-burst handling, and any future work in
+that vein) are all keyed to IOP's live pc genuinely staying at
+`g.trampoline_addr` between re-entries (see `iop_module_loader.c`'s
+own `pc != g.trampoline_addr` guard at the top of its trap-check
+function). Retiring thread 1 hands `st`'s pc away, via `reschedule()`
++ `load_context()`, to real TCB-loaded thread bodies - and once that
+cascade of real threads exhausts and the IOP goes idle again, `st`'s
+pc is wherever the last thread (tid=6 here) happened to block
+(0x00019258), NOT `g.trampoline_addr` anymore. Every downstream
+mechanism that depends on re-entering exactly `g.trampoline_addr` to
+keep doing its own work permanently stops firing from that point on -
+which is exactly what a frozen `rpc_pending_sets` and a regressed EE
+pc would look like, and is exactly what was observed both in Round
+519 and again here.
+
+**Disposition:** disproven a second time, but for a reason that is
+now well-evidenced and actionable rather than mysterious. A future
+attempt at this idea would need to NOT simply abandon `st`'s pc to
+whichever real thread cascade runs next - it would need some
+mechanism to let the module loader's own trampoline-anchored
+continuation logic keep running even after thread 1 is retired (for
+example: re-arming a synthetic "thread 0.5" whose saved pc is always
+`g.trampoline_addr`, so that once the real tid=4/7/8/5/6 cascade
+exhausts and the IOP would otherwise go idle, `reschedule()` falls
+back to resuming AT the trampoline rather than wherever the last real
+thread happened to block). That redesign is a substantially larger
+change than a one-line retirement call and is deferred, not attempted
+this round, per this project's anti-fabrication discipline (no
+half-evidenced fix is being shipped here).
+
+No tracked source was changed this round - `git status --short`
+confirmed clean before and after; all scratch files live only under
+`/tmp/r1012` per the backup-before-experimenting rule. Regression
+suite and Wii cross-build correctly skipped (docs-only/investigation
+round, no tracked source changed).
+
+**Next round's concrete target:** either (a) design and build the
+"trampoline-anchored fallback thread" redesign sketched above, with
+its own careful instrumentation before it ever touches tracked
+source, or (b) set this specific idea aside as a known dead end absent
+that redesign and resume the broader post-JIT/GS-display-wiring work
+(task #887) or the still-open GT3/Tekken/KOF/MS3 extended-survey tasks
+(#938/#939/#960/#966/#967).

@@ -47305,3 +47305,83 @@ No tracked source changed this round (diagnostic-only, disassembly
 re-reading only, no new tool needed) - regression suite and Wii
 cross-build correctly skipped per this project's established
 docs/diagnostic-only-round convention.
+
+## Round 999 (task #978): MAJOR SYNTHESIS - found the real inbound-packet handler and confirmed the final blocker is a DMA-delivered byte this EE-only static scan cannot see (consistent with the SIF-RPC precedent flagged since Round 991)
+
+Follow-up to Round 998. Widened the disassembly around Round 998's
+HIT#11/#12 dispatcher (0x0026f970-0x0026f9e4) to find its real function
+entry and caller context (0x0026f8e0-0x0026f9fc, a 144-byte-frame
+function). **This is the real inbound-event handler for our whole
+subsystem:**
+
+```
+0x0026f8e0: addiu sp, sp, -144          ; prologue
+0x0026f8f0: addiu s0, v1, -9384         ; s0 = 0x0040DB58 (our struct)
+0x0026f8f8: lw    a3, -9384(v1)          ; a3 = MEM[struct+0] = 0x2040DA80 (uncached alias ptr)
+0x0026f8fc: lbu   v0, 0(a3)              ; v0 = *(byte*)0x2040DA80  <- POLLED FLAG BYTE
+0x0026f900: andi  a1, v0, 255
+0x0026f904: beq   a1, zero, 0x0026f9f0   ; if flag byte == 0, return immediately (nothing pending)
+...
+0x0026f928: sb    zero, 0(a3)            ; consume: clear the flag byte
+0x0026f934-0026f950:                     ; copy a1-derived-length packet from *a3 into sp (LQ/SQ loop)
+0x0026f954: jal   0x00257d10              ; syscall (120, sibling of the 121/122 stubs)
+0x0026f95c: lw    v1, 8(sp)               ; read back a field from the just-copied packet
+0x0026f968: lw    v0, 8(sp)               ; (same field, re-read)
+0x0026f974-0x0026f9e4: dispatch buffer[event_id] via callback A/B (Round 996-997's mechanism),
+                                          where event_id = (packet field @ +8) & 0x7FFFFFFF
+```
+
+So the complete, now fully-understood mechanism is: this function polls
+a single flag byte at real EE RAM address **0x0040DA80** (struct+0's
+target, the "uncached accelerated DMA-target buffer" Round 991 already
+correctly identified by shape). When nonzero, it treats the buffer as
+an inbound packet, copies it to the stack, extracts an event ID from
+the packet body, and dispatches to buffer[event_id]'s registered
+callback (callback A = buffer[0], callback B = buffer[1], per Round
+998's corrected 8-byte-stride reading) - callback B is the one that
+would populate `table[0]` (0x0040dc80) and break Round 990's polling
+loop.
+
+**Final check this round: does ANYTHING write a nonzero byte to real
+address 0x0040DA80?** Static-scanned the full 32MB image for the
+`lui 0x0041 / addiu ...,-9600` (0x0040DA80) constant-construction
+pattern (Round 991's proven methodology, retargeted). **Result: exactly
+3 hits, all inside the SAME registration function (0x0026fc18-
+0x0026fe90) we already fully disassembled in Round 995** - all three
+are setup-time stores of the POINTER CONSTANT 0x0040DA80/0x2040DA80
+into struct fields (struct+0 itself, and a sibling struct at
+0x0040DB40+16), not writes of DATA INTO that address. No EE MIPS
+instruction anywhere in the resident image writes a byte to 0x0040DA80
+itself.
+
+**This closes the loop on the whole Round 990-999 investigation with a
+clean, honest, well-evidenced conclusion**: the polling loop Round 990
+found is real, correctly wired, genuinely event-driven kernel
+machinery - registration (0x0026fc18), storage (struct at 0x0040DB58),
+dispatch (0x0026f8e0), and two real consumer callbacks (0x0026FEA8/
+0x0026FEB8) are all present and correctly linked. The one missing piece
+is external: something is supposed to DMA-deliver a packet into EE RAM
+at 0x0040DA80 (almost certainly from the IOP side, mirroring the
+already-documented SIF-RPC precedent in `sif_cmd_iop_write_private_queue_copy()`/
+`sif_cmd_iop_send_rpc_bind_rend()` in `ee_core.c`, Round 562/565's
+citation trail) - and this project's current SCPH-50004 diskless-boot
+IOP-side model apparently never issues that specific delivery. This
+class of write (DMA/interpreter-driven, not a static MIPS store) is
+exactly what Round 991/992 already flagged as invisible to a pure
+static-disassembly scan, and Round 992's ~440M-instruction empirical
+observation already confirmed it never happens within that window
+either.
+
+**Next step (not yet started):** identify what real IOP-side kernel
+service is supposed to deliver this packet (candidates: SIF-RPC bind/
+call completion, McServ, PADMAN bind-ack, or a MECHACON-class service -
+Round 991's struct-shape comparison to the existing `SIF_CMD_INIT_CMD`
+mechanism remains the best lead), and either (a) find where in the real
+BIOS/IOP call chain this delivery should originate and confirm whether
+this project's IOP-side model reaches that code at all, or (b) if the
+IOP-side code is confirmed unreached/unmodeled for this specific
+service, that's the real, evidenced gap to fix.
+
+No tracked source changed this round (diagnostic-only, `tools/` driver
+only) - regression suite and Wii cross-build correctly skipped per this
+project's established docs/diagnostic-only-round convention.

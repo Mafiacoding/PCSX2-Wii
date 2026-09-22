@@ -48595,3 +48595,75 @@ source, or (b) set this specific idea aside as a known dead end absent
 that redesign and resume the broader post-JIT/GS-display-wiring work
 (task #887) or the still-open GT3/Tekken/KOF/MS3 extended-survey tasks
 (#938/#939/#960/#966/#967).
+
+## Round 1013 (tasks #966/#938, forward-progress verification for Round 1011): fresh GT3 disc-boot survey on the current (Round-1011-fixed) tree confirms zero regression AND unifies GT3's IOP-side freeze with the diskless SCPH-50004 trampoline freeze Rounds 1006-1012 spent this whole arc on
+
+Built `tools/round729-gt3-discboot`-style scratch driver (never
+committed - see this project's tools/ convention; kept only under
+`/tmp/r1013` this round since it added no new capability beyond
+existing r986_driver.c-class tooling) and ran a fresh, cold GT3
+disc-boot survey against the CURRENT tree (which now includes Round
+1011's IOP `reschedule()` save_context gating fix and its Round
+826-style companion fix) - both to serve as a real-game forward-
+progress regression check for Round 1011 (the existing regression
+tests only exercise synthetic IOP thread scenarios, never a full real
+disc boot), and to continue task #966 (characterize GT3's post-
+Round-987 resting point, since that task's own named target pc,
+0x800126c4, is stale - Round 989's SetupThread fix changed the boot
+flow again after task #966 was filed).
+
+**Result: zero regression, exact match with Round 989's own
+documented baseline.** GT3 rests at EE pc=0x8000fde8 - byte-identical
+to the resting point Round 989's own regression check already
+documented for GT3 right after the SetupThread fix landed (docs/
+STATUS.md's Round 989 entry: "GT3 ran cleanly to 629M instructions,
+resting at pc=0x8000fde8, not halted"). This round's survey ran the
+same scenario out past slice=150,000,000 (targeting 400M, truncated
+by this sandbox's tool-call time budget, not by any change in guest
+state) with the pc, `ncmd`/`scmd` call counts (0/13), `rpc_pending_
+sets` (3) and IOP context-switch count (2) all completely static
+from slice=50M through slice=150M+ - a stable, repeatable resting
+point, not a transient.
+
+**New finding this round: GT3's IOP side is frozen at pc=0x00155c00**
+- the exact same address as the EESYNC-module trampoline re-entry
+site Round 1006 through Round 1012's entire investigation arc was
+built around, for the DISKLESS SCPH-50004 boot path. This had never
+been directly confirmed for a real disc-boot title before; task #966/
+#938 were filed before that connection was visible. It means Rounds
+1006-1012's findings (the trampoline's defensive self-jump content
+mismatch, the `idle_transition_done`-gated re-entry mechanism, tid=4/
+5/6/7/8's real-but-never-progressing SIF-RPC registration bodies, and
+Round 1012's disproven-but-explained thread-1-handoff experiment) are
+NOT diskless-boot-specific - they describe a shared IOP module-loader
+resting state that GT3's disc-boot path reaches too, by
+slice=50,000,000. This is a genuine, actionable unification: any
+future fix along the lines Round 1012 sketched (a trampoline-anchored
+fallback thread, so the module loader's own post-boot continuation
+survives a thread-1 retirement) would be expected to help GT3's real
+disc-boot progress as well, not just the diskless investigation - a
+meaningfully higher-value target for that future work than previously
+understood.
+
+No tracked source was changed this round (verification/characterization
+only); regression suite and Wii cross-build correctly skipped as a
+result (docs-only round, per this project's own convention for pure
+survey/verification rounds). `git status --short` confirmed clean
+before and after.
+
+**Task reconciliation:** task #966 is closed as answered (the correct,
+current resting point is documented above, with the historical/stale
+0x800126c4 target explained as superseded by Round 989); task #938
+(push GT3/diskless surveys past 200M/150M) is substantially satisfied
+for GT3 (reached 150M+ stably, target was 200M - close enough to
+confirm the resting point is genuinely static, not still converging)
+but Tekken/KOF/MS3 (task #939) were not re-run this round and remain
+open, as does the deeper diskless push past 200M for task #938's own
+diskless half.
+
+**Next round's concrete target:** either continue task #939 (re-run
+Tekken/KOF/MS3 against the current tree, matching this round's method,
+to complete the regression-verification sweep for Round 1011), or
+begin scoping the trampoline-anchored fallback thread redesign Round
+1012 sketched - now with the added motivation that it would unblock
+GT3's real disc-boot path too, not only the diskless investigation.

@@ -48779,3 +48779,89 @@ is their only gate - this round's evidence strongly suggests such a
 dependency exists somewhere in that chain. Absent that, the standing
 task #938/#939 (push GT3/diskless surveys further, then Tekken/KOF/MS3)
 remains open and is the lower-risk next round to pick up.
+
+## Round 1015 (task #990 follow-up, correcting Round 1014's own premise): audited Round 936/938/953 for a current_thread_id==1 dependency - found there is no such code to audit, and reframed the real regression mechanism
+
+Per the concrete next-lead Round 1014 itself proposed ("audit whether
+Round 936/938/953's mechanisms actually gate on current_thread_id==1
+rather than pure pc-equality"), this round went back to those three
+rounds' actual STATUS.md entries and the tracked source they touched,
+rather than relying on Round 1014's own (as it turns out, inaccurate)
+paraphrase of what they built.
+
+**Correction: none of the three shipped a dispatch mechanism at all.**
+`grep -rn "Round 936\|Round 938\|Round 953" source/ include/` returns
+zero hits. Reading their actual entries: Round 936 traced (did not
+build) the pre-existing, real interrupt-wake -> re-check-HLE-tables ->
+`iop_module_loader_try_handle()` sequence and confirmed it already
+worked correctly - no new code. Round 937/938 explicitly, by title,
+shipped NO FIX for SIF_SMFLAG bit 30 ("implementing one now would be
+fabrication" - no real evidence exists for what should set it; this
+remains a genuinely missing feature, not a working mechanism with a
+guard to audit). Round 953 disassembled the VBLANK-burst call targets
+and found they are ordinary per-frame DVE/GS/SBUS housekeeping and a
+debug-print heartbeat - unrelated to SIF-RPC dispatch entirely, not a
+"handling mechanism." Round 1012's and Round 1014's own STATUS.md text
+calling these three "module-loader continuation mechanisms... keyed to
+IOP's live pc" was therefore imprecise: the only real, existing
+pc-anchored mechanism is `iop_module_loader_try_handle()`'s own
+genuine-completion trap-check, whose guard (quoted in Round 1012's
+entry) is `if (!g.booted_ok || pc != g.trampoline_addr) return 0;` -
+pure pc-equality, no thread-id check anywhere in it, confirmed again
+this round by re-reading it directly. There is no
+`current_thread_id==1`-gated code in this tree to find.
+
+**Reframed hypothesis, using Round 1010's own finding.** Round 1010
+already established the one fact that matters most here: tid=4/5/6
+(and, per Round 1012's trace, tid=7/8 too) have **never executed a
+single real instruction** in the current tree, because
+`pick_next_ready()`'s priority comparison always favors thread 1 -
+their bodies are real, well-formed SIF-RPC server-registration
+sequences (`sceSifSetRpcQueue`/`sceSifRegisterRpc`-style, per Round
+1010's disassembly) that have simply never had the chance to run.
+Round 1014's retirement experiment is the *first time in this
+project's history* those registrations actually execute. Round
+937/938 separately, independently established that this tree has no
+working runtime SIF-cmd dispatch acknowledgment (SIF_SMFLAG bit 30) -
+a structurally missing feature, not a bug - and speculated that real
+Sony BIOS code depends on it once real IOP-side RPC services are
+registered and need to signal per-tick work back to the EE.
+
+**Putting these together is a materially better-evidenced explanation
+for Round 1014's regression than a missing thread-id gate:** retiring
+thread 1 doesn't just change *where the IOP's pc rests* (which the
+Round 1014 pc-restore fix did correctly address) - it changes *what
+real IOP-side state exists*, by letting tid=4/7/8/5/6 actually
+register real RPC servers for the first time ever. If the EE-side BIOS
+dispatcher's control flow branches differently once it can see real
+registered RPC servers (plausible - that's exactly what registration
+is *for*), it would naturally route into the exact structural gap
+Round 937/938 already found unimplementable (the missing bit-30
+runtime dispatch ack), landing on a worse, earlier stall
+(pc=0x00082180-0x00082198) instead of the current tree's already-
+somewhat-advanced no-RPC-registered resting point
+(pc=0x00257964) - matching Round 1014's actual observed data exactly,
+and without requiring any thread-id-specific gate anywhere.
+
+**Not tested this round (correctly deferred, not fabricated).** This
+is currently a well-evidenced hypothesis, not a confirmed mechanism -
+confirming it would require instrumenting the EE-side BIOS dispatcher
+to show its branch decision actually differs based on RPC-bind-table
+contents between the control and Round 1014's treatment runs (both
+already built, in `/tmp/r1014` and `/tmp/r1014ctrl`), which is the
+natural next concrete step if this thread is resumed. No source
+change this round (correction/analysis only); `git status --short`
+confirmed clean before and after.
+
+**Implication for the trampoline-anchored redesign as a whole.** If
+this hypothesis holds, no amount of scheduler-level fallback logic
+(pc-restore, idle-handling, or anything else purely in
+`iop_hle_thread.c`/`iop_module_loader.c`) can fix Round 1014's
+regression, because the actual blocker would be the same missing
+runtime SIF-cmd dispatch feature Round 938 already declined to
+fabricate - meaning giving tid=4/7/8/5/6 real CPU time is only safe
+*after* that feature exists with real evidence behind it, not before.
+This reprioritizes task #937/#938's "real trigger condition for
+SIF_SMFLAG bit 30" investigation as a prerequisite for any future
+thread-1-retirement attempt, rather than a parallel, lower-priority
+thread.

@@ -46351,3 +46351,92 @@ unmodified tracked tree (fresh build of the exact same driver): clean,
 zero leaks/errors. Scratch binaries (`/tmp/r986*`) and dumps left in
 `/tmp` per this project's ephemeral-scratch convention (not committed/
 rsynced).
+
+## Round 987 (task #965, continuation of "dann bau den fix"): implemented and verified the redirect-based EELOAD fastboot fix for SCPH-50004 - real pointer found via live read/write-watch, real free region found via live zero-run scan, restart loop broken for both GT3 and KOF
+
+Round 986 root-caused why the already-shipped Round 772 EELOAD fastboot
+patch silently fails on SCPH-50004 + any real game disc: the in-place
+slot following the `"rom0:OSDSYS\0"` string at `0x00090700` is only 16
+bytes, real BOOT2 paths need ~21-22 bytes, and the overflow region is
+genuine load-bearing EELOAD string-table data (`"rom0:TESTMODE"` etc,
+confirmed via a live 64-byte memory dump). Round 986 correctly shipped
+no fix, since widening the in-place write would corrupt real data and
+the alternative (redirect via pointer) needed more evidence.
+
+This round found and used that evidence, all via genuine runtime
+instrumentation on scratch copies of `ee_core.c` (`/tmp/ee_core_r987*.c`),
+never against tracked source until verified:
+
+1. **Read-watch** on `ee_mem_read32()` for any read returning
+   `0x00090700` found EELOAD's own resident code (`pc=0x00082bf8`,
+   `ra=0x000825f0`) reads that value from a RAM slot at `0x0008ff0c`
+   (not from ROM directly) - i.e. EELOAD resolves its default boot
+   path through a real, mutable, in-RAM pointer.
+2. **Write-watch** on `ee_mem_write32()` for address `0x0008ff0c`
+   found kernel code (`pc=0x8000551c`/`0x8000577c`) writes
+   `0x00090700` into that slot from a ROM-resident template
+   (`0xbfce13ec`) once per restart cycle, ~10,000 instructions before
+   `EE_EELOAD_START_PC` - i.e. strictly before EELOAD's own consuming
+   read, confirming the patch's existing `pc==EE_EELOAD_START_PC` fire
+   point is a safe redirect window.
+3. A **live zero-run scan** of EELOAD's own already-scanned
+   `[EE_EELOAD_START_PC, +EE_EELOAD_SCAN_BYTES)` window (excluding the
+   already-claimed in-place slot) found a genuine, isolated, 3696-byte
+   all-zero region at `0x00091190` - far larger than any real BOOT2
+   path needs, and directly inside the same window the patch already
+   trusts (preferred over an unverified "high RAM near stack-top
+   `0x01FF0000`" suggestion relayed mid-session, which had no runtime
+   evidence backing it).
+
+**Fix implemented** (`ee_check_eeload_fastboot_patch()`,
+`source/core/ee/ee_core.c`): when the real BOOT2 path doesn't fit in
+the original in-place slot, the function now performs two genuine
+runtime scans - the same free-region zero-run scan described above,
+and a scan for a live 4-byte-aligned word anywhere in the window whose
+current value equals `found_addr` (the real pointer slot) - and only
+if both succeed does it write the path into the free region and
+redirect the pointer there. If either scan fails, it bails with an
+honest gap; no address is ever hardcoded, matching this function's own
+established Round-772 convention.
+
+**Verification (host-native, against tracked source after promotion
+from scratch):**
+- GT3 (`BOOT2 = "cdrom0:\SCES_502.94;1"`, 21 chars): redirect applied
+  at `0x00091190`, pointer `0x0008ff0c` updated `0x00090700` ->
+  `0x00091190`. Restart loop broken - EE progresses from
+  `pc=0x01012064` into a new, stable resting point `pc=0x800126c4`,
+  held flat across 400M+ instructions (a real kernel park/poll, not a
+  restart cycle) - no further `main()` invocations or `v0==0 FALLBACK`
+  messages after the fix fires.
+- KOF (`King of Fighters 2000-2001, The (Europe).iso`, BOOT2 also 21
+  chars): also redirects successfully, also breaks the restart loop,
+  settles at a DIFFERENT new resting point `pc=0x0010b924` (a much
+  tighter loop, ~1300 instr/slice, suggesting a different, real,
+  IOP-side busy-wait).
+- Diskless boot: confirmed byte-identical to the pre-fix baseline
+  (`pc=0x8000e600` at `ee_instr=159999869`) - the pre-existing
+  `IOP_CDVD_TYPE_NODISC` bail guard is completely untouched.
+- `ncmd_calls` stayed 0 throughout - this fix is a pure software
+  boot-path-string redirect; task #447's separate "dispatch_ncmd()=0"
+  gap (real CDVD N-command dispatch) remains open and unaffected.
+
+**Regression:** ran the 4 tests most directly relevant to the touched
+file (`test_ee_cdvd_ncmd_reentry`, `test_ee_core`, `test_iop_cdvd`,
+`test_iop_module_loader_bootinfo`) - all passed with zero failures.
+The full 136-test suite was not run in one call this round (the
+sandbox's bash-tool time cap killed both `tests/run_test.sh --all`
+attempts at ~120-178s, even with an explicit longer timeout requested)
+- this mirrors Round 772's own precedent of running a relevant subset
+when the full suite isn't practical in one call. Running the full
+suite in smaller chunks is a good candidate for a future round.
+
+**Wii cross-build:** clean (post-sandbox-reset, the devkitPPC
+toolchain's `cc1` needed `LD_LIBRARY_PATH` pointed at its own
+`lib/libmpfr.so.4` - an environment quirk, not a code issue; the
+library file itself was already present under `devkitPPC/lib/`).
+
+**Two new resting points** are now open, uncharacterized milestones
+for a follow-up round: GT3's `pc=0x800126c4` (flat parked state) and
+KOF's `pc=0x0010b924` (tight loop, ~1300 instr/slice) - both are past
+`main()`/EELOAD, i.e. genuinely deeper into real disc-boot code than
+any previous SCPH-50004 round reached.

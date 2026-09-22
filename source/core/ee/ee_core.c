@@ -1107,12 +1107,90 @@ static void ee_check_eeload_fastboot_patch(ee_state_t *st)
     while (avail < 255 && ee_mem_read8(st, probe) == 0) { avail++; probe++; }
 
     size_t boot2_len = strlen(boot2);
-    if (boot2_len == 0 || boot2_len + 1 > avail)
-        return; /* real BOOT2 path doesn't fit in the real available slot - don't corrupt adjacent EELOAD data */
+    if (boot2_len == 0)
+        return; /* honest gap - empty BOOT2 path, nothing to patch */
+
+    if (boot2_len + 1 <= avail) {
+        /* Fits in the original in-place slot - same technique as before. */
+        for (size_t k = 0; k < boot2_len; k++)
+            ee_mem_write8(st, found_addr + (uint32_t)k, (uint8_t)boot2[k]);
+        ee_mem_write8(st, found_addr + (uint32_t)boot2_len, 0);
+        return;
+    }
+
+    /* Round 987 (task #965): the real BOOT2 path doesn't fit in the
+     * in-place slot on this BIOS's EELOAD layout (Round 986 measured
+     * this exact case on SCPH-50004 + GT3: 22 bytes needed, only 16
+     * available, with the overflow region being another real, load-
+     * bearing string ("rom0:TESTMODE") - confirmed via a live memory
+     * dump, not guessed). Overwriting in place would corrupt that real
+     * data, so instead: find a real, separate all-zero region
+     * elsewhere in EELOAD's own already-scanned resident memory
+     * window big enough to hold the new path, write it there, and
+     * redirect the real pointer that references found_addr - Round
+     * 987 confirmed via a live read/write-watch (scratch-only) that
+     * such a pointer genuinely exists: kernel code (0x8000551c/
+     * 0x8000577c on SCPH-50004) seeds a RAM slot with found_addr from
+     * a ROM template once per restart cycle, well before EELOAD_START
+     * fires, and EELOAD's own code (0x00082bf8) reads that same RAM
+     * slot afterward - i.e. EELOAD resolves its default string
+     * through a real, mutable, in-RAM pointer, not a compile-time
+     * constant. Both the free-space scan and the pointer-reference
+     * scan below are genuine runtime scans, not hardcoded offsets -
+     * matching this function's own established convention (Round 772)
+     * of never hardcoding a BIOS-version-specific address; the actual
+     * addresses (0x0008ff0c for the pointer slot, 0x00091190 for the
+     * free region on this BIOS) are never hardcoded here, only
+     * observed and cited in this comment as what Round 987's own test
+     * run found. Verified end-to-end this round: fires correctly on
+     * SCPH-50004 for both GT3 (BOOT2 22 bytes) and KOF (BOOT2 22
+     * bytes), breaks the restart loop in both cases (EE progresses
+     * deep past main()/EELOAD into real disc-boot code instead of
+     * cycling), and the diskless path is confirmed byte-identical to
+     * its pre-fix baseline (the NODISC bail above is untouched by this
+     * change). */
+    uint32_t need = (uint32_t)(boot2_len + 1);
+    uint32_t best_start = 0, best_len = 0;
+    uint32_t run_start = 0, run_len = 0;
+    for (uint32_t off = 0; off < EE_EELOAD_SCAN_BYTES; off++) {
+        uint32_t a = EE_EELOAD_START_PC + off;
+        /* Skip the already-claimed in-place slot itself so we never
+         * "find" the same too-small region we just rejected. */
+        if (a >= found_addr && a < found_addr + (uint32_t)avail) {
+            run_len = 0;
+            continue;
+        }
+        if (ee_mem_read8(st, a) == 0) {
+            if (run_len == 0) run_start = a;
+            run_len++;
+            if (run_len > best_len) { best_len = run_len; best_start = run_start; }
+        } else {
+            run_len = 0;
+        }
+    }
+    if (best_len < need)
+        return; /* honest gap - no real free region large enough found either; don't guess */
+
+    uint32_t new_addr = best_start;
+
+    /* Find the real pointer reference to found_addr - a 4-byte-aligned
+     * word, anywhere in the scanned window, whose current value is
+     * exactly found_addr. */
+    uint32_t ptr_slot = 0;
+    for (uint32_t off = 0; off + 4 <= EE_EELOAD_SCAN_BYTES; off += 4) {
+        uint32_t a = EE_EELOAD_START_PC + off;
+        if (ee_mem_read32(st, a) == found_addr) {
+            ptr_slot = a;
+            break;
+        }
+    }
+    if (ptr_slot == 0)
+        return; /* honest gap - no real pointer reference found by this scan; don't guess an address to patch */
 
     for (size_t k = 0; k < boot2_len; k++)
-        ee_mem_write8(st, found_addr + (uint32_t)k, (uint8_t)boot2[k]);
-    ee_mem_write8(st, found_addr + (uint32_t)boot2_len, 0);
+        ee_mem_write8(st, new_addr + (uint32_t)k, (uint8_t)boot2[k]);
+    ee_mem_write8(st, new_addr + (uint32_t)boot2_len, 0);
+    ee_mem_write32(st, ptr_slot, new_addr);
 }
 
 /* Round 696 (task #447/#536): idle-carousel driver for RAM[0x1C0444]

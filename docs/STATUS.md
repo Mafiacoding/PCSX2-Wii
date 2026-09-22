@@ -46440,3 +46440,125 @@ for a follow-up round: GT3's `pc=0x800126c4` (flat parked state) and
 KOF's `pc=0x0010b924` (tight loop, ~1300 instr/slice) - both are past
 `main()`/EELOAD, i.e. genuinely deeper into real disc-boot code than
 any previous SCPH-50004 round reached.
+
+## Round 988 (task #968, Round 984 follow-up): pinpointed the exact real mechanism and RAM address that gates OSDSYS main()'s argv[0]-fallback branch on SCPH-50004 diskless boot - and proved, via exhaustive write-watch, that this project's emulation never writes it
+
+Round 984 traced the diskless restart loop to OSDSYS main()'s `v0==0`
+fallback branch, but had not yet found what actually gates that
+branch. This round found it precisely, via live register capture +
+static disassembly of the real, post-decompression OSDSYS memory
+(never guessed):
+
+### The real ExecPS2 call chain (two calls per restart cycle, both genuine BIOS syscalls)
+
+A live hook on the syscall-7 (`_ExecPS2`) dispatch point in
+`ee_step()` (scratch-only, `/tmp/ee_core_r988.c`) captured every real
+`_ExecPS2(entry, gp, argc, argv)` call across a fresh SCPH-50004
+diskless boot:
+
+1. `pc=0x00083234` (EELOAD's own code): `entry=0x00100008`, `gp=0`,
+   `argc=1`, `argv=0x0008ff0c` -> `argv[0]="rom0:OSDSYS"`. EELOAD
+   launches the real OSDSYS decompression stub with a genuinely valid
+   argv.
+2. `pc=0x001001b4` (inside that same decompression stub, real BIOS ROM
+   code loaded via the already-verified `sif_loadfile_elf_load()`
+   ROMDIR mechanism): `entry=0x00200000` (OSDSYS's real main-image
+   entry), `gp=0`, **`argc=0`**, `argv=0x00157c04` ->
+   **`argv[0]=NULL`**. This call launches the actual, decompressed
+   OSDSYS program - with an empty argument list.
+
+### The real gate, disassembled
+
+A one-shot memory dump of the freshly-decompressed OSDSYS image
+(0x00200000-0x00270000, `/tmp/r988_osdsys_dump.bin`) let
+`tools/round655-ee-disasm` disassemble `main()` (0x002093B0) for real:
+
+```
+0x002093E0: jal 0x002621F8
+0x002093E4: sw  a0, 392(sp)        ; save argc to stack
+0x002093E8: lw  v0, 392(sp)        ; reload argc
+0x002093EC: bne v0, zero, 0x00209400   ; argc != 0 -> normal path (argv[0] compare at 0x00208FD8)
+0x002093F4: jal 0x00209048             ; argc == 0 -> the fallback/reinit path Round 984 found
+```
+
+This directly confirms and sharpens Round 984's finding: the branch is
+a plain `argc == 0` check, not a `v0`-from-0x002621F8 check as Round
+984's text implied (0x002621F8 is called immediately before for an
+unrelated reason - a lazy-init guard on a static flag at 0x00413280,
+confirmed by disassembling it too: it never touches argc/argv at all).
+Since `_ExecPS2`'s real `num_args`/`argv` become the launched
+program's own `a0`/`a1` (crt0 register convention, matching `main()`'s
+own prologue `daddu fp, a1, zero`), the second `_ExecPS2` call's
+`argc=0` directly IS what `main()` sees and fails on.
+
+### Where argc/argv actually come from
+
+Disassembling the decompression stub itself (`/tmp/r988_stub_dump.bin`,
+0x00100000-0x00104000) traced the `argc`/`argv` values back to their
+source, precisely:
+
+```
+0x00100090: lui v0, 0x0015; addiu v0, v0, 31744   ; v0 = 0x00157C00
+0x00100098: lw  a0, 0(v0)                          ; a0 = *(0x00157C00)   <- becomes argc
+0x0010009C: jal 0x001000C0
+0x001000A0: addiu a1, v0, 4                        ; a1 = 0x00157C04      <- becomes argv
+
+0x001000C0: ...
+0x001000CC: daddu s1, a1, zero      ; s1 = argv ptr (0x00157C04)
+0x001000D8: daddu s0, a0, zero      ; s0 = argc value (*(0x00157C00))
+...
+0x00100100: daddu a2, s0, zero      ; ExecPS2's argc = s0
+0x00100104: daddu a3, s1, zero      ; ExecPS2's argv = s1
+0x00100108: jal   0x001001B0        ; = the generic syscall-7 trampoline (addiu v1,zero,7; syscall; jr ra)
+```
+
+So `argc` for OSDSYS's real launch is whatever 32-bit value currently
+sits at RAM address **0x00157C00**, and `argv` is fixed at
+**0x00157C04** (whose first slot, `argv[0]`, was observed as NULL).
+Neither is computed by this stub - it just relays whatever is already
+in that RAM slot.
+
+### Proven: nothing in this project's emulation ever writes 0x00157C00-0x0015 7C10
+
+A live write-watch on `ee_mem_write32()` for that exact address range,
+run across a fresh cold boot through 4 full restart cycles
+(150M+ instructions), fired **zero times**. The value is permanently
+whatever RAM reset leaves there (0 in this emulator's zero-initialized
+RAM) - never touched by any EE-side code this project currently
+executes.
+
+### Classification
+
+This is a genuine, precisely-located gap, not yet a fix: something
+real (most plausibly an earlier real BIOS/kernel boot stage, before
+EELOAD even loads the decompression stub, since SetupHeap - syscall
+61 - runs immediately before this stub reads 0x00157C00) is expected
+to populate this RAM-resident argc/argv staging slot with a valid
+value (analogous to Round 987's EELOAD pointer-slot finding, but one
+stage earlier in the chain and for a different real subsystem), and
+this project's emulation does not yet do so. Per this project's
+anti-fabrication discipline, no fix was implemented this round -
+writing a guessed constant (e.g. argc=1 + a fabricated "rom0:OSDSYS"
+string) into 0x00157C00/0x00157C04 without evidence for who is
+supposed to write it and what real value belongs there would be
+exactly the kind of unverified injection this project has consistently
+rejected (most recently, explicitly, in response to a relayed
+SIF-RPC-status-injection proposal this same session). Also explicitly
+disproven this round: the SIF-RPC/LOADFILE-hardware-status premise
+from that same relayed proposal - the real gate is a plain, disassembled
+`argc==0` check inside OSDSYS's own `main()`, unrelated to LOADFILE,
+SIO2, or NVRAM signaling.
+
+### Workflow
+
+No tracked source changed this round - `git status --short` confirmed
+byte-clean throughout; all instrumentation lived in
+`/tmp/ee_core_r988.c` (built fresh from tracked `ee_core.c` each time,
+never promoted). Host-native regression suite and Wii cross-build
+correctly skipped (docs-only investigative round). Scratch dumps/
+binaries (`/tmp/r988*`, `/tmp/ee_core_r988.c`) to be cleaned up.
+
+Follow-up task recorded (#969): find the real writer of
+0x00157C00/0x00157C04 (or confirm real hardware also leaves it
+zero/NULL and the actual escape mechanism is inside 0x00209048's own
+body, not the argc gate itself).

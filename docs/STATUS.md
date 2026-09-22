@@ -47041,3 +47041,89 @@ and whether tracing that write leads to the real signal source for
 No tracked source changed this round (diagnostic-only, `tools/` driver
 only) - regression suite and Wii cross-build correctly skipped per this
 project's established docs/diagnostic-only-round convention.
+
+## Round 994 (task #974): struct+8 anomaly is written in the SAME instruction bracket as the registration function's own guard flag - not a separate later consumer as Round 993 speculated. Also: found and fixed a real diagnostic-tool hazard (TLB-fault side effect from reading unmapped EE memory too early)
+
+Follow-up to Round 993, which found the companion struct at 0x0040DB58 is
+genuinely populated at the Round 990 resting point, with one anomaly:
+offset +8 (MEM[0x0040DB60]) held 0x000194d0 instead of the 0 that
+Round 991's disassembly showed being written there during init
+(`sw zero, 8(v0)`). Round 993 flagged this as possible evidence of an
+"active post-init consumer" - something else touching the struct after
+initialization completed. This round tests that directly: watch for the
+exact moment each value changes from cold boot.
+
+**Methodology hazard found and fixed first.** The initial version of
+this round's tool called `ee_mem_read32()` on the guard-flag and
+struct+8 addresses immediately after `system_init()`, before running
+any EE instructions - intended as an innocuous host-side diagnostic
+peek. This is NOT safe: `ee_mem_read32()` (ee_core.c:1805-1839) is a
+real architectural access, and for an unmapped KUSEG address it calls
+`ee_mem_check_tlb_fault()` (ee_core.c:1730), which raises a genuine
+MIPS TLB-refill exception ON THE ACTUAL EE STATE - setting Cause/EPC/
+BadVAddr and redirecting `ee->pc` into the exception vector - if
+`st->mem_tlb_miss` gets set. Since this project models the R5900 MMU
+for real (confirmed by the BIOS's own boot log: "TLB spad=0 kernel=1:12
+default=13:30 extended=31:38", which only gets printed once the BIOS's
+own early boot code has set the TLB up), reading a KUSEG RAM address
+before the BIOS has mapped it corrupts the emulated CPU state before
+boot even starts. This exactly explained the first attempt's symptom:
+`ee->pc` stuck at 0xBFC00680/0x690/0x380 (the exception vector) for the
+tool's entire run, while `ee->instructions_executed` kept climbing
+normally (the CPU was genuinely running - just permanently looping in
+its own fault handler from instruction ~0 onward, never reaching real
+BIOS code). Fixed by running a 200,000-instruction warm-up slice before
+any diagnostic `ee_mem_read32()` call. This is a real, previously-
+unknown hazard for any future round's diagnostic tooling: peeking at
+"not yet mapped" EE memory via the normal read path is not
+side-effect-free in this project, unlike a plain memory dump would be.
+
+**Result (with the hazard fixed).** Coarse 1M-instruction-granularity
+scan from cold boot:
+
+```
+guard flag MEM[0x002ab284]: 0x00000000 -> 0x00000001 at ee_instr=57,599,939 (bracket [56,599,939, 57,599,939])
+MEM[0x0040db60] (struct+8): 0x00000000 -> 0x000194d0 at ee_instr=57,599,939 (SAME bracket)
+```
+
+Both changes land in the exact same 1-million-instruction bracket. This
+means struct+8's non-zero value is very likely written by the SAME
+call to the registration function (0x0026fc18) that Round 993 confirmed
+ran - not by some separate, later, independent consumer as Round 993's
+"active consumer" hypothesis speculated. Round 991's disassembly of
+0x0026fc18 showed `sw zero, 8(v0)` zeroing this field, but evidently
+there is a further store to the same address later in that same
+function's body (outside the 0x0026fbe0-0x0026fce8 window Round 991
+disassembled) that overwrites it with the real value - a normal
+"zero first, then populate" init sequence, not evidence of ongoing
+post-init activity. **This corrects Round 993's framing**: the struct+8
+anomaly is not (so far as this round's evidence shows) a sign of an
+active queue consumer; it's just an incomplete disassembly window from
+Round 991.
+
+**Not yet resolved:** a finer, single-instruction-precision replay
+(Phase 2 of this round's tool) tried to pinpoint the exact write
+instruction by fast-forwarding to `ee_instr=(bracket_lo)` via
+`system_run_interleaved(bracket_lo)` and then single-stepping
+(`system_run_interleaved(1)` in a loop), but it did not catch the write
+within the expected step budget - the single-stepped pc cycled through
+only a small, unrelated set of addresses (0x00083A84, 0x000842CC,
+0x000842D4, 0x00083A94, 0x00083A8C), meaning the fast-forward replay
+landed at a materially different program point than the original
+coarse scan's `ee_instr=56,599,939` sample. This is the same class of
+issue Round 992 flagged as an open anomaly ("total_budget not respected
+as expected") - `ee->instructions_executed` and the `max_slices`
+parameter to `system_run_interleaved()` are not in a reliable 1:1
+relationship (likely because a "slice" advances IOP and EE by different
+amounts, or slices are consumed unevenly when one core is far ahead of
+the other), so replaying "the same number of slices" from a fresh cold
+boot does not reliably reproduce "the same point in EE's own
+instruction stream." Pinpointing the exact writer instruction needs a
+different bracketing method next round (e.g. bracket directly by
+`ee->instructions_executed` value during a single continuous run rather
+than replaying via slice count from a fresh boot, or single-step from
+the very start of the same run instead of restarting).
+
+No tracked source changed this round (diagnostic-only, `tools/` driver
+only) - regression suite and Wii cross-build correctly skipped per this
+project's established docs/diagnostic-only-round convention.

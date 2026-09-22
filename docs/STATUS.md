@@ -47895,3 +47895,101 @@ docs-only-round convention (only new tools/round1006-iop-park-check/
 *.c diagnostic files were added, using this project's own already-
 public iop_hle_thread.h accessors; no iop_core.c/iop_hle_thread.c/
 iop_module_loader.c edits this round).
+
+---
+
+## Round 1007 (task #985): identified real module identities for
+Round 1006's 3 starved threads + the frozen pc's own module - strong
+new EESYNC lead connecting to Round 1005's EE-side semaphore-0 finding
+
+**Tool (tools/round1006-iop-park-check/analyze3.c, new):** reuses
+Round 1006's disasm_one() block plus iop_module_loader.h's already-
+public per-module name/entry accessors (`iop_module_loader_get_
+module_count()`/`_get_module_name()`/`_get_module_entry()` - no new
+instrumentation) to identify which real loaded module owns each of
+Round 1006's 4 addresses of interest, and disassemble around each.
+
+**tid=1's TCB-saved pc (0x0001a8b4) is STALE, not live:** disassembly
+shows a normal REBOOT-module (entry 0x0001a800, offset +0xb4) function
+epilogue - `jal 0x0001AB04` / `addu v0,zero,zero` / `lw ra,40(sp)` /
+`jr ra` - a completely ordinary "return 0" tail, not any kind of
+blocking primitive. This confirms `iop_hle_thread_get_pc(1)` reads the
+TCB struct's own saved-context field, which is only written by
+`save_context()` at switch-OUT time - since tid=1 has stayed the live/
+RUN thread the whole boot (context_switches=2 total per Round 1006),
+this field is simply whatever was recorded once, long ago, and does
+NOT represent where the CPU currently is. The REAL live pc is
+`iop->pc` (0x00155c00, already established in Round 1006).
+
+**tid=4/5/6 (all READY, all starved) belong to real, named IOP
+service modules - not synthetic/orphan threads:**
+
+    tid=4 entry=0x0014a214 -> CDVDFSV @0x0014a110 (offset +0x104)
+    tid=5 entry=0x00151884 -> FILEIO  @0x00150b80 (offset +0xd04)
+    tid=6 entry=0x00151af0 -> FILEIO  @0x00150b80 (offset +0xf70)
+
+CDVDFSV is the real CD-ROM filesystem-service module; FILEIO is the
+real file-I/O service module (two separate worker threads within it).
+These are genuine, real driver threads - exactly the kind of thing a
+real PS2 IOP boot needs running to service disc/file requests - sitting
+permanently READY-but-never-scheduled since Round 1006's confirmed
+freeze.
+
+**The frozen live pc (0x00155c00) belongs to EESYNC - the LAST module
+in the real 29-module IOPBTCONF list (offset +0x160 from entry
+0x00155aa0):** this resolves Round 1006's "garbage-looking disassembly"
+observation - the ASCII "Sync" bytes found nearby (0x00155BE0) are very
+plausibly EESYNC's own embedded string literal sitting inline with its
+code, completely ordinary ROM layout for a module literally named
+"EE-Sync" - not evidence of misalignment or bad data.
+
+**Correction to Round 1006's exact call-site attribution:** re-reading
+`iop_module_loader_try_handle()`'s full body found a 5th, distinct
+`st->idle = 1` site (line ~1539) that Round 1006 didn't examine
+closely: `if (g.idle_transition_done) { st->idle = 1; return 1; }`,
+gated behind `pc == g.trampoline_addr` (line 1518) - the module
+loader's own dynamically bump-allocated dispatch-return address
+(`g.trampoline_addr = bump_alloc(8)`, a runtime value, not a fixed
+constant this round had time to read back). This is DIFFERENT from
+(broader than) the 3 pc-pattern-matched one-shot panic-bypass sites
+Round 1006's writeup specifically named (is_loadcore_panic_loop /
+is_unconditional_trap_stub / is_registration_walk_panic_loop) - it
+fires on EVERY subsequent visit to the trampoline address once boot
+is marked complete, matching the source's own documented Round 425/
+426 "idle -> real interrupt wakes IOP -> handler runs -> RFE resumes
+-> re-park" cycle. This round could not conclusively pin which of the
+(now confirmed 5, not 3) call sites produced the CURRENT freeze at
+pc=0x00155c00, since that requires reading g.trampoline_addr's actual
+runtime value (not done this round). Round 1006's actual load-bearing
+claim - that ALL of these sites set `idle=1` directly without ever
+calling `reschedule()`, independent of iop_hle_thread.c's own ready-
+thread bookkeeping - remains correct and is unaffected by which
+specific site fired.
+
+**New lead, not yet pursued:** EESYNC is the very last real module
+loaded, its name directly suggests "EE Synchronization", and Round
+1005 already found the EE side is genuinely WaitSema-blocked on
+semaphore 0 with 19 real SignalSema(0) calls already delivered this
+boot (a live, repeating producer/consumer relationship - not a dead
+semaphore). EESYNC is now the leading, evidenced candidate for the
+real IOP-side code that should deliver semaphore 0's 20th signal
+(almost certainly via a SIF/RPC call back to the EE side), given its
+name and its position as the final module in the real boot sequence,
+directly at the point of the freeze.
+
+**Next round's concrete target:** disassemble EESYNC's full module
+body (0x00155aa0 through well past the frozen pc 0x00155c00) to
+determine whether it (a) is still legitimately mid-execution when the
+freeze hits (meaning idle=1 fired prematurely, a genuine starvation
+bug matching this round's CDVDFSV/FILEIO finding), or (b) has already
+completed its own real work correctly, in which case the missing
+signal to the EE must be produced somewhere else. Also read back
+`g.trampoline_addr`'s actual runtime value to conclusively settle
+which of the 5 idle=1 call sites is firing.
+
+No tracked source changed this round - regression suite and Wii
+cross-build correctly skipped per this project's established docs-
+only-round convention (only tools/round1006-iop-park-check/analyze3.c
+added, using this project's own already-public iop_module_loader.h
+accessors; no iop_core.c/iop_hle_thread.c/iop_module_loader.c edits
+this round).

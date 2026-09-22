@@ -47666,3 +47666,111 @@ pc, disassembly of the new code reached). Next round's natural
 continuation: characterize the new WaitSema (syscall 68) resting point
 at pc=0x00257964 - which semaphore ID is being waited on, and what
 real event/signal should resolve it.
+
+================================================================================
+Round 1005 (task #983): characterized the new WaitSema resting point
+(pc=0x00257964) reached after Round 1004's fix - real thread/semaphore
+state confirmed via the correct (Round 569) scheduler, one methodology
+correction along the way, IOP-side freeze narrowed as the next target
+================================================================================
+
+Follow-up to Round 1004's fix, which moved the SCPH-50004 diskless-boot
+EE resting point from a dead synthetic poll loop (pc=0x0026fe9c) to
+pc=0x00257964, disassembled as a real EE BIOS syscall 68 (WaitSema)
+instruction with $a0 (semid) = 0. This round asked: which real thread
+is parked, on which real semaphore, and has anything ever tried to
+release it?
+
+**Methodology correction (documented, not hidden).** The first attempt
+(tools/round1005-waitsema-id/analyze.c + trace_driver.c) instrumented
+the OLD, legacy software-syscall-bypass blocks in ee_core.c
+(sysnum==64/65/66/68 around line 4177-4553, the same blocks Round 1004
+edited last round) with fprintf trace points, expecting to catch the
+real CreateSema/WaitSema/SignalSema(0) call sites. Zero trace lines
+ever fired despite the EE genuinely sitting at the WaitSema syscall
+with semid=0 - a direct contradiction that led to re-reading
+ee_core.c's actual SYSCALL dispatch (line ~3976-3992) and finding the
+real reason: `if (ee_hle_thread_try_handle(st, sysnum, this_pc,
+in_delay_slot)) return 1;` is checked FIRST and unconditionally
+returns before the legacy blocks are ever reached. Round 569 ("real EE
+multi-threading implemented") replaced CreateSema/DeleteSema/
+SignalSema/WaitSema/SetupThread's real dispatch with a clean-room
+scheduler in source/core/ee/ee_hle_thread.c; the old ee_core.c blocks
+this project has been editing/citing since Round 189/190 are DEAD CODE
+on every syscall path ee_hle_thread_try_handle() claims (which is all
+of 64/65/66/68/60 and more) - they only still matter for the syscalls
+ee_hle_thread.c does NOT claim. This is a real, useful correction:
+Round 1004's own SIF_CMD_INIT_CMD fix is unaffected (that's a
+different dispatch path, sif_cmd_iop_handle_init_cmd(), not gated by
+ee_hle_thread_try_handle()), but any FUTURE round instrumenting
+CreateSema/WaitSema/SignalSema/DeleteSema/SetupThread must patch
+ee_hle_thread.c, not ee_core.c's legacy blocks.
+
+**Correct diagnosis (tools/round1005-waitsema-id/analyze2.c, using
+ee_hle_thread.h's already-existing public diagnostic accessors - no
+instrumentation needed):**
+
+  [R1005-2] thread_count=1 current_tid=1
+    tid=1 status=4 wait_type=2 wait_id=0 entry=0x00000000 saved_pc=0x00257964 wakeup_count=0 prio=64
+  [R1005-2] Signal-call counters:
+    semid=0 signal_calls=19
+
+This confirms: exactly one real EE thread exists (tid=1), it is
+genuinely WAIT-blocked (status=4=EE_THS_WAIT) on a semaphore
+(wait_type=2=EE_TSW_SEMA) with wait_id=0, saved at pc=0x00257964 - a
+real, correctly-modeled WaitSema(0) park, not a stray/wandered-off
+instruction. Semaphore 0 has genuinely been SignalSema'd 19 times
+already during this same boot (per ee_hle_thread_get_signal_calls(0)),
+confirming a real producer/consumer relationship exists and has fired
+repeatedly - this is not a semaphore nobody ever signals (unlike some
+earlier rounds' dead-end semid=0 investigations on OTHER boot paths/
+BIOS images); it's a periodic real signal that the thread is simply
+waiting for its 20th occurrence of, similar to the pattern
+docs/STATUS.md already documents for other titles (e.g. "SIGNAL
+semid=0 by tid=3 ... WAIT semid=0 by tid=2 ... immediately calls
+WaitSema(0) a second time").
+
+**Extended-budget re-check (tools/round1005-waitsema-id's stability
+driver, /tmp/r1005c_stability.c, scratch-only - a permanent
+stability-detection driver, 5 consecutive identical-pc 1M-instruction
+chunks):** confirmed the park is completely stable, not merely
+sampled-as-stable - `ee_instr` freezes at EXACTLY 50,350,406 across a
+further 12,000,000-instruction-budget observation window (7 chunks
+past the park), with pc AND the IOP's own pc (0x00155C00) both
+unchanged in every single chunk. Read ee_core.c's own idle-tick
+mechanism (`ee_step()`'s `if (st->idle) { ee_core_park_tick(st);
+ee_hle_thread_reschedule_kick(st); return 0; }`, and
+`ee_core_park_tick()` itself, lines 10730-10802) to confirm this is
+NOT a case of real hardware ticks silently stalling: VBLANK, the four
+EE peripheral timers, SIF delayed-reassertion, RPCINIT/RPC-bind
+pending-delivery checks, and CDVD NCMD pending-delivery checks all
+still run on every idle tick (this is precisely the real, deliberate,
+previously-fixed Round 855/942 idle design - `instructions_executed`
+correctly does NOT increment for idle ticks since no real instruction
+is fetched, which is why the counter itself reads as "frozen" even
+though real peripheral state keeps evolving underneath).
+
+**IOP-side puzzle, correctly left open rather than guessed at:**
+`system_run_interleaved()` (source/core/system.c) calls
+`iop_core_step()` unconditionally every slice, NOT gated on the EE's
+`halted` or `idle` state - so the IOP is not silently starved by the
+EE's own park mechanism the way a bug would look. Yet the IOP's own pc
+(0x00155C00) is equally frozen across the same 12M-instruction
+extended-budget window. Two honest possibilities, not yet
+distinguished: (a) the IOP has its own, separately-modeled busy-park
+mechanism (mirroring the EE's WaitSema idiom) and is genuinely,
+correctly parked waiting for its own real event; or (b) the IOP is
+stuck in a tight loop whose pc happens to read identically at every
+1M-instruction chunk boundary sampled (a sampling-granularity
+coincidence Round 862 already warned this project about once before -
+"coarse-sampling artifact"). This is the concrete next-round question:
+disassemble around IOP pc=0x00155C00 and determine which case this is,
+since whichever real IOP subsystem should be producing semaphore 0's
+20th SignalSema(0) most likely lives there.
+
+No tracked source changed this round - regression suite and Wii
+cross-build correctly skipped per this project's established
+docs-only-round convention (only new tools/round1005-waitsema-id/*.c
+diagnostic files were added, using this project's own already-public
+ee_hle_thread.h accessors; no ee_core.c/ee_hle_thread.c edits this
+round).

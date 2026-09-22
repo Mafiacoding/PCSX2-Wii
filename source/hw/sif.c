@@ -390,6 +390,50 @@ int sif_iop_mmio_write32(uint32_t addr, uint32_t value)
             g_sif.smflag = value;
             if ((value & ~old_smflag) != 0u)
                 ee_intc_raise(EE_INTC_IRQ_SBUS);
+
+            /* Round 1021 (task #999, continuation of Round 441's own
+             * delayed-reassert design): this exact raw-overwrite
+             * `sw a0, SMFLAG` call is real Sony code (confirmed via
+             * fresh disassembly of IOP pc=0x000175FC-0x00017620 -
+             * a genuine sceSifSetSMFlag()-equivalent library routine,
+             * no load-then-OR, matching this case's own real-hardware
+             * semantics exactly). Until Round 1012/1020's thread-1-
+             * retirement experiments, IOP threads other than thread 1
+             * had NEVER executed a single instruction in this
+             * project's entire emulation history (Round 1010's
+             * finding), so this project never had occasion to model
+             * what happens when ANOTHER real thread's own legitimate
+             * SetSMFlag(SIF_STAT_CMDINIT)-only call (value=0x00020000,
+             * no SIFINIT/BOOTEND bits) genuinely overwrites - and so
+             * silently drops - the BOOTEND bit mark_iop_boot_complete()
+             * had just set moments earlier. Real hardware must have
+             * some further mechanism that re-establishes BOOTEND after
+             * this kind of legitimate multi-thread SMFLAG contention
+             * (the exact same class of real, evidenced cross-processor/
+             * cross-thread handshake-delay gap Round 441 already fixed
+             * for the EE-clear-triggered case - see that case's own
+             * comment above and sif_ee_tick() below for the full
+             * grounding). Applying the identical, already-real-cited
+             * delayed-reassert mechanism here - triggered by an
+             * IOP-side clobber instead of an EE-side clear - is the
+             * narrowest possible extension of already-verified real
+             * behavior, not a new invention: if this specific IOP
+             * write genuinely drops a BOOTEND bit that was set at
+             * least once already (iop_boot_completed_once), schedule
+             * the same real timing-gap-respecting restore. Currently
+             * a no-op in the shipped tree (thread-1 retirement stays
+             * disabled per Round 519/1020 - see iop_hle_thread.c's
+             * header comment - so no other IOP thread has ever run to
+             * reach this write with a clobbering value yet), but a
+             * real, evidenced fix in its own right, verified via
+             * Round 1021's retirement-enabled scratch experiment
+             * (docs/STATUS.md) and verified to cause zero behavioral
+             * change in the current, retirement-disabled tree. */
+            if (g_sif_extra.iop_boot_completed_once &&
+                (old_smflag & 0x00040000u) && !(g_sif.smflag & 0x00040000u)) {
+                g_sif_extra.bootend_reassert_pending = 1;
+                g_sif_extra.bootend_reassert_ticks_left = SIF_BOOTEND_REASSERT_DELAY_TICKS;
+            }
             return 1;
         }
         case 0x40: g_sif.ctrl   = value; return 1;

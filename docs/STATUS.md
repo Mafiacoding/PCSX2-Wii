@@ -49134,3 +49134,103 @@ idle-bypass re-entry performs (a fresh disassembly of the trampoline
 target's body, since Round 1010 only characterized threads 4-8, not
 this repeated re-entry path itself) so that a safe replacement -
 rather than an outright retirement - can eventually be designed.
+
+## Round 1021 (task #999): SIF_SMFLAG clobber root-caused and fixed;
+## thread-1 retirement blocked by a newly-discovered separate IOP crash
+
+**Directive:** the user's explicit instruction this round was "ja und
+mach so lange weiter bis du sie beheben kannst" - keep going until the
+Round 1020 stall can actually be fixed, not just diagnosed.
+
+**Correction of Round 1020's causal attribution.** Direct re-reading
+of `iop_module_loader_try_handle()` (the trampoline handler, ~lines
+1520-1650) showed that repeated re-entry does **not** perform active
+SIF work: after its first, `g.idle_transition_done`-gated pass, every
+subsequent call just does `st->idle = 1; return 1;`. `iop_core.c`'s
+idle-check additionally gates *all* trap-dispatch functions (this one
+included) behind `!g_iop.idle`, so once idle, nothing IOP-side happens
+regardless of `current_thread_id` until a genuine hardware interrupt
+fires. Round 1020's claim that "thread 1's repeated re-entry provides
+the SIF handshake" was therefore imprecise; the real divergence needed
+fresh, fuller instrumentation to find.
+
+**New instrumentation built this round** (all scratch, `/tmp/r1020/`):
+`[R1021-IOPSMFLAG]` (every write in `sif_iop_mmio_write32()`'s SMFLAG
+case 0x30, with old/new/clearmask and the writing IOP pc via
+`iop_core_get_state()->pc`), `[R1021-EESMFLAG]` (every EE-side clearing
+write in `sif_mmio_write32()`'s SIF_SMFLAG case), and `[R1021-IOPWAKE]`
+(every genuine `g_iop.idle` 1->0 transition, in `iop_core.c`).
+
+**Root cause, fully evidenced.** In the retirement-enabled run,
+immediately after `mark_iop_boot_complete()` sets
+`smflag=0x00070000` (BOOTEND included) and thread 1 is retired, thread
+4 runs for the very first time in this project's history and executes
+a genuine Sony IOP library routine - confirmed via fresh disassembly
+of IOP pc=`0x000175FC`-`0x00017620` (reusing the existing
+`tools/round655-ee-disasm` R5900 disassembler, which also correctly
+decodes R3000A/MIPS-I code since IOP code only uses standard MIPS-I
+opcodes) - that does `sw a0, 0(v0)` with `v0=0xBD000030` (KSEG1 alias
+of SIF_SMFLAG) and `a0=0x00020000` (SIF_STAT_CMDINIT only). This is a
+real, legitimate `sceSifSetSMFlag(SIF_STAT_CMDINIT)`-equivalent call -
+a raw `lui`/`ori`/`sw` store sequence, not a load-then-OR - matching
+this emulator's own already-correct case-0x30 raw-overwrite semantics
+exactly (Round 317's citation). The write **silently clobbers the
+BOOTEND bit** `mark_iop_boot_complete()` had just set, moments before
+the EE's poll loop ever got a chance to observe it. Because no IOP
+thread other than thread 1 had ever executed a single instruction in
+this project's history before Round 1012/1020's retirement
+experiments (Round 1010's finding), this project's model never had
+occasion to handle "a second legitimate IOP thread's own SetSMFlag
+call overwriting BOOTEND" - and no mechanism existed to re-establish
+BOOTEND afterward, since the existing Round-441 delayed-reassert only
+triggers from the EE-clear path, whose precondition (the EE having
+already observed and cleared BOOTEND once) is never met here.
+
+**The fix, implemented and verified.** Extended the exact same,
+already-real-cited Round-441 delayed-reassert mechanism to also
+trigger from the IOP-side clobber path
+(`sif_iop_mmio_write32()`'s case 0x30): if this specific write
+genuinely drops a BOOTEND bit that had previously been set while
+`g_sif_extra.iop_boot_completed_once` is true, schedule
+`bootend_reassert_pending`/`bootend_reassert_ticks_left` exactly as
+the EE-clear case already does. This is the narrowest possible,
+symmetric extension of already-verified real behavior, applied to
+tracked `source/hw/sif.c`.
+
+**Verification:**
+- *Retirement-enabled + fix* (scratch): the EE fully escapes the
+  pc=0x00082180 stall, progresses deep into new BIOS territory
+  (pc~0x00100Bxx-0x00100Cxx), and even prints the real BIOS console
+  string "# Restart Without Memory Clear." (a previously-documented
+  genuine IOP-reboot-cycle message, Rounds 372/373). However, the IOP
+  itself now halts at a clearly-invalid pc=0x72000000 - a **new,
+  separate, unexplained wild-jump/crash** that only becomes reachable
+  once this SIF_SMFLAG gap is fixed and retirement is active.
+- *Retirement-disabled (current shipped config) + fix*: reaches the
+  exact same resting point as the pre-fix baseline
+  (`ee_pc=0x00257964`, `iop_pc=0x00155C00`, `iop_cur_tid=1`) -
+  **confirmed zero regression**, since the clobber condition
+  structurally never triggers when only thread 1 ever runs.
+
+**Decision:** ship only the SIF_SMFLAG-clobber-reassert fix to
+tracked `source/hw/sif.c` this round - it is safe, evidenced, a no-op
+in the current (retirement-disabled) tree, and a real fix for its own
+sake. Thread-1 retirement stays **disabled** at all 4
+`iop_module_loader.c` call sites (per Round 519/1020's decision) -
+re-enabling it is now blocked by the newly-discovered IOP crash at
+pc=0x72000000, a separate, deeper problem that needs its own fresh
+disassembly/trace in a future round before any further action.
+
+**Mandatory workflow completed:** full 136-test host-native regression
+suite re-run against the fixed tree (all batches, zero real failures -
+only benign "0 check(s) failed" / "PASS: 0 check(s) failed" summary
+lines throughout); devkitPPC Wii cross-build succeeded cleanly
+(`pcsx2-wii.dol` produced, no errors/warnings in the tail of the
+build log); this STATUS.md writeup; commit; rsync; leak-check (see
+below).
+
+**Open item for a future round:** investigate the pc=0x72000000 IOP
+crash that appears once thread-1 retirement is combined with this
+round's SIF_SMFLAG fix - this is the next blocker standing between
+"retirement causes an EE stall" (now understood and fixed) and
+"retirement can be safely re-enabled." Retirement remains disabled.

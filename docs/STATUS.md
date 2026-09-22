@@ -47176,3 +47176,68 @@ to it).
 No tracked source changed this round (diagnostic-only, `tools/` driver
 only) - regression suite and Wii cross-build correctly skipped per this
 project's established docs/diagnostic-only-round convention.
+
+## Round 996-997 (task #976): MAJOR FINDING - identified the real callback pair registered against our struct, explaining struct+8's write and confirming the table-signal event has never fired for ANY index
+
+Follow-up to Round 995, which found the registration function
+(0x0026fc18) builds one entry in a 32-slot "buffer" array at
+0x0040DB80, with fields +0 and +8 holding two code addresses
+(0x0026FEA8 and 0x0026FEB8) and fields +4/+12 both holding a
+back-reference to our struct (0x0040DB58). This round disassembles
+those two addresses.
+
+**Callback A (0x0026FEA8-0x0026FEB0), a 2-instruction leaf function:**
+```
+lw   v0, 16(a0)      ; v0 = MEM[a0+16]        (read event-source field+16)
+jr   ra
+sw   v0, 8(a1)        ; MEM[a1+8] = v0          (write into *a1 field+8)
+```
+If called with `a1` = our struct (0x0040DB58), this writes directly
+into `MEM[0x0040DB60]` - **exactly the struct+8 field Round 993/994
+found anomalously non-zero.** This is almost certainly the real writer
+Round 993-995 were hunting for: some event source object (`a0`) had
+its field+16 copied into our struct's field+8 via this callback.
+
+**Callback B (0x0026FEB8-0x0026FED0), a 6-instruction leaf function:**
+```
+lw   v0, 16(a0)       ; v0 = MEM[a0+16]        (event-source field+16 = index)
+lw   a2, 28(a1)        ; a2 = MEM[a1+28]         (our struct field+28 = 0x0040dc80, OUR TABLE!)
+lw   v1, 20(a0)        ; v1 = MEM[a0+20]        (event-source field+20 = value)
+sll  v0, v0, 2         ; v0 *= 4
+addu v0, v0, a2         ; v0 = table_base + index*4
+jr   ra
+sw   v1, 0(v0)          ; table[index] = value
+```
+If called with `a1` = our struct, `a2` resolves to `MEM[0x0040DB58+28]`
+= 0x0040dc80 - **our exact table** (the one Round 990's resting loop
+polls). This is the real, long-hunted table-signal mechanism from
+Rounds 990-995: some event source's field+16 selects the table index,
+field+20 supplies the value, and this callback writes `table[index] =
+value`. Round 990's polling loop only checks `table[0]`.
+
+**Verification:** dumped all 32 table slots (0x0040dc80-0x0040dcfc) at
+the Round 990 resting point - **every single slot is 0x00000000, not
+just table[0].** This confirms callback B has not fired for ANY index
+yet in this boot trace, while callback A evidently HAS fired (struct+8
+is non-zero) - consistent with these being two independently-invoked
+handlers for (presumably) two different event types on the same
+underlying object, where only the callback-A event has happened so
+far.
+
+**Synthesis of Rounds 990-997:** the 0x0040dc80 polling loop is a real,
+well-formed event-driven table mechanism, genuinely registered and
+partially active (callback A's event class has fired at least once),
+but the specific event that would invoke callback B (and thus populate
+`table[0]`, breaking the polling loop) has never occurred anywhere in
+this boot trace, even after ~440M instructions of continued execution
+(Round 992). This reframes the investigation's target question
+precisely: **what real hardware/kernel event is supposed to invoke
+callback B with an event-source object whose field+16 == 0?** These
+are tiny leaf functions with no callers visible in their own bodies, so
+they must be invoked indirectly via the function pointers stored in the
+buffer[0] entry (0x0040DB80: +0 and +8) - the next step is finding
+where those function-pointer fields get loaded and `jalr`'d.
+
+No tracked source changed this round (diagnostic-only, `tools/` driver
+only) - regression suite and Wii cross-build correctly skipped per this
+project's established docs/diagnostic-only-round convention.

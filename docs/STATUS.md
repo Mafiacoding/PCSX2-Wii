@@ -47424,3 +47424,46 @@ Round 990-1000 arc has been searching for.
 No tracked source changed this round (diagnostic-only, `tools/` driver
 only) - regression suite and Wii cross-build correctly skipped per this
 project's established docs/diagnostic-only-round convention.
+
+## Round 1001 (task #980): the bind-sid table shows only LOADFILE bound at our resting point - our struct's mechanism is NOT standard SIF-RPC, rules out the "unmet RPC bind" hypothesis
+
+Follow-up to Round 1000's note connecting this investigation to Round
+950's separately-observed `rpc_bind_count` climb. Used this project's
+own already-existing `sif_cmd_iop_dump_bind_table()` (Round 952) to
+inspect the real bind-sid tracking table at the EXACT Round 990 resting
+point (not a different survey run at a different instruction count).
+
+**Result:** only ONE real RPC service is bound at this point -
+`sid=0x80000006` = `SIF_SID_LOADFILE` (the already-modeled, unrelated
+ELF-loading RPC service) - and `rpc_bind_count=1`. Round 950's later
+observation of `rpc_bind_count` climbing to 13 was from a separate
+60,000,000-slice survey measured differently (cumulative slices, not
+EE-instruction-matched to our exact resting pc) and is not directly
+comparable instruction-for-instruction to this round's snapshot; taken
+together, though, both confirm the same thing: whatever additional RPC
+binds accumulate later in boot, NONE of them are present yet at the
+point our struct's polling loop first parks, and - more importantly -
+**our struct's inbound-packet mechanism (Round 999's 0x0026f8e0
+dispatcher) has no `cd_ptr`/`sid` concept anywhere in its own
+disassembly** (Round 995-999's full disassembly of the registration
+function and dispatcher never touches `sif_cmd_iop_handle_rpc_bind`/
+`sif_cmd_iop_track_bind_sid`/any of the real RPC-bind infrastructure
+this project already models for LOADFILE/PADMAN/MCSERV/CDVD/FILEIO).
+
+**This rules out the "waiting on an RPC bind that never completes"
+hypothesis** as the explanation for our struct's dormant table. The
+mechanism Round 991-999 traced is a structurally different, more
+primitive raw-mailbox pattern (uncached-alias buffer + polled flag
+byte + event-ID dispatch table), closer to the low-level
+`SIF_CMD_INIT_CMD`-class mechanism Round 991 originally compared it to
+than to the higher-level `sceSifBindRpc()`/`sceSifCallRpc()` API this
+project's existing SIF-RPC infrastructure already serves. The real
+next step remains identifying what IOP-side (or EE-kernel-internal)
+service uses this specific raw-mailbox shape - worth checking whether
+it matches a lower-level primitive like `sceSifSetRpcQueue`/
+`sceSifRegisterRpc`'s own internal bookkeeping (Round 958's citation
+trail), rather than any application-level RPC service.
+
+No tracked source changed this round (diagnostic-only, `tools/` driver
+only) - regression suite and Wii cross-build correctly skipped per this
+project's established docs/diagnostic-only-round convention.

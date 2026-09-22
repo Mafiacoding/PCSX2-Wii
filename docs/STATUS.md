@@ -46895,3 +46895,55 @@ at all.
 No tracked source changed this round (diagnostic-only, `tools/` driver
 only) - regression suite and Wii cross-build correctly skipped per this
 project's established docs/diagnostic-only-round convention.
+
+## Round 992 (task #972): extended real-time observation - 0x0040dc80 never changes even ~440M instructions past the resting point
+
+Follow-up to Round 991. Rather than assume "no writer" from a static
+scan alone, built `tools/round992-dc80-longwatch/analyze.c` to boot to
+the same Round 990 resting pc (reproduced again at the same
+ee_instr=55,999,939) and then keep running the REAL interleaved EE+IOP
+scheduler (`system_run_interleaved()` - so all timer/DMAC/INTC/SIF
+machinery this project's own "task #180 lesson" interrupt/exception
+delivery depends on keeps ticking every step, exactly as it would on
+real hardware) for a much longer window, sampling `MEM[0x0040dc80]`
+after every 5,000,000-instruction chunk.
+
+### Result: no change across ~440M further instructions
+
+The EE's pc stayed at exactly `0x0026fe9c` and `MEM[0x0040dc80]`
+stayed exactly `0x00000000` for the entire observed run, from
+ee_instr=55,999,939 up through at least ee_instr=495,999,939 (the run
+was still executing, unchanged, when the sandbox's wall-clock budget
+for this diagnostic call was reached - not a self-terminating halt).
+This rules out "the signal just hasn't arrived yet within a short
+sample window" - it's a sustained, real non-event across roughly 8x
+the instruction count needed to reach the resting point in the first
+place.
+
+### Significance
+
+Combined with Round 991's finding that no EE store instruction
+anywhere in the resident image ever targets this address, this is now
+strong (not just suggestive) evidence that whatever real subsystem is
+supposed to signal this flag - most plausibly an IOP-side SIF/DMA
+completion delivered into the buffer-registration struct Round 991
+found at 0x0040DB58 (table address stored at +28) - never fires in
+this project's current emulated boot, consistent with the established
+"task #180 lesson" pattern class (the closest precedent being Round
+468's orphaned AddIntcHandler registration): a real, well-formed
+registration exists, but its trigger condition is never met by this
+project's current subsystem coverage.
+
+### Next step
+
+Identify what real code CALLS the buffer-registration function at
+0x0026fc18 (Round 991's Hit #1's containing function) - a caller
+cross-reference (scan for `jal 0x0026fc18` / `jalr` targeting it across
+the resident image) would name the actual subsystem this queue belongs
+to (SIF-RPC client init, MCSERV, PADMAN bind, or something else
+entirely), which is needed before guessing at what real trigger
+condition this project's boot trace is missing.
+
+No tracked source changed this round (diagnostic-only, `tools/` driver
+only) - regression suite and Wii cross-build correctly skipped per this
+project's established docs/diagnostic-only-round convention.

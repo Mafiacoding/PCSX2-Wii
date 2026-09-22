@@ -47127,3 +47127,52 @@ the very start of the same run instead of restarting).
 No tracked source changed this round (diagnostic-only, `tools/` driver
 only) - regression suite and Wii cross-build correctly skipped per this
 project's established docs/diagnostic-only-round convention.
+
+## Round 995 (task #975 start): static disassembly CORRECTS Round 994 - no second store to struct+8 exists anywhere in the registration function's own body
+
+Follow-up to Round 994, which found the guard flag and the struct+8
+anomaly change in the same 1M-instruction bracket and speculated this
+meant struct+8's value (0x000194d0) was "very likely written by the
+SAME call to the registration function" (0x0026fc18), just via a store
+outside Round 991's earlier, narrower disassembly window
+(0x0026fbe0-0x0026fce8).
+
+This round tests that directly by fully disassembling the entire
+registration function body, 0x0026fc18 through 0x0026fe90 (where
+Round 990's known resting-point accessor begins) - a much wider window
+than Round 991 covered. **Result: this hypothesis is WRONG.** The full
+disassembly contains exactly one store to offset+8 of the
+0x0040DB58-based pointer (v0): `0x0026fca8: sw zero, 8(v0)` - the same
+zero-write Round 991 already found. There is no second store to that
+exact address (0x0040DB60) anywhere else in the function. Three other
+`sw ..., 8(...)` instructions do appear later in the same function
+(0x0026fd2c `sw v1,8(a0)`, 0x0026fdb8 `sw v0,8(s1)`, 0x0026fe24
+`sw v0,8(s0)`), but each targets a different base register/struct -
+none of them is 0x0040DB58, so none of them touches our field.
+
+**Correction to Round 994:** the "same 1M-instruction bracket"
+correlation does NOT mean "same function, missed store." It means
+something else - most plausibly one of the several subroutines this
+function calls out to (0x00257ba0, 0x00257d00, 0x00257630, 0x00270c28,
+0x00257d30 [called 3x], 0x00257d20 [called 2x] - all in the
+0x00257000-0x00271000 range, unexplored so far) - writes to 0x0040DB60
+during the same window, OR the correlation is coincidental (both
+changes just happen to fall in the same coarse 1M-instruction sample
+because the whole init sequence, including several sub-calls, executes
+in a tight burst around ee_instr=57M). Round 993's original "active
+consumer" framing turns out to be closer to the truth than Round 994's
+correction of it - apologies for the back-and-forth; this is exactly
+why every claim in this investigation gets checked against fresh
+disassembly rather than accepted from the previous round's reasoning.
+
+**Next step (unresolved):** check the 6 called subroutines above for a
+store to 0x0040DB60/struct-base+8, starting with 0x00257d30 (called 3
+times from within this function, and its return value is checked
+immediately afterward with `beq v0, zero, ...` at 0x0026fdb4 - it looks
+like it could plausibly return a pointer or status feeding further
+struct writes, given the adjacent `sw v0, 8(s1)` right after one call
+to it).
+
+No tracked source changed this round (diagnostic-only, `tools/` driver
+only) - regression suite and Wii cross-build correctly skipped per this
+project's established docs/diagnostic-only-round convention.

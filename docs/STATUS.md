@@ -46947,3 +46947,97 @@ condition this project's boot trace is missing.
 No tracked source changed this round (diagnostic-only, `tools/` driver
 only) - regression suite and Wii cross-build correctly skipped per this
 project's established docs/diagnostic-only-round convention.
+
+## Round 993 (task #973): found the real caller of the buffer-registration function - it DID run for real; the companion struct is genuinely populated, with one open anomaly
+
+Follow-up to Round 991/992 (SCPH-50004 diskless resting point pc=0x0026fe9c,
+polling `MEM[0x0040dc80] == 0`). Round 991 found the only writer-adjacent
+code touching this address is a buffer-registration routine at 0x0026fc18
+that builds a companion struct at 0x0040DB58 (uncached DMA-alias buffer
+pointers, count=32, and our table's own address 0x0040dc80 at +28), then
+zero-fills the table. Round 992 confirmed empirically that the table byte
+never changes across ~440M further instructions. This round asks: does
+that registration function ever actually get CALLED during a real boot,
+or is it dead/unreached code on this path?
+
+**Method.** Built `tools/round993-fc18-caller-scan/analyze.c` (reuses the
+Round 990/991 disassembler). Computed the direct `jal 0x0026fc18` encoding
+(`(3<<26) | ((0x0026fc18>>2) & 0x03FFFFFF)` = `0x0C09BF06`) and scanned all
+32MB of EE RAM for that exact word (with a planned fallback scan for
+indirect `lui`/`addiu` JALR-style construction, unused since the direct
+scan found a hit). Boots to the Round 990 resting pc first, exactly as
+Round 990-992 did, then scans the resident image as it exists at that
+point in the real boot trace.
+
+**Result: exactly one direct-JAL caller, at 0x0026f6c4**, inside a
+classic call-once-guarded init wrapper:
+
+```
+0x0026f6a0: lui   v1, 0x002b            ; v1 = 0x002B0000
+0x0026f6a4: addiu sp, sp, -64           ; prologue
+0x0026f6a8: lw    v0, -19836(v1)        ; v0 = MEM[0x002AB284]  (guard flag)
+0x0026f6ac: sd    ra, 48(sp)
+0x0026f6b0: sd    s2, 32(sp)
+0x0026f6b4: sd    s1, 16(sp)
+0x0026f6b8: bne   v0, zero, 0x0026f818  ; if guard != 0, skip straight to return
+0x0026f6bc: sd    s0, 0(sp)
+0x0026f6c0: addiu v0, zero, 1           ; v0 = 1
+0x0026f6c4: jal   0x0026fc18            ; CALL the registration function
+0x0026f6c8: sw    v0, -19836(v1)        ; delay slot: MEM[0x002AB284] = 1 (mark done)
+0x0026f818: ld    ra, 48(sp)            ; skip-path / post-call path: pure epilogue
+0x0026f81c: ld    s2, 32(sp)
+0x0026f820: ld    s1, 16(sp)
+0x0026f824: ld    s0, 0(sp)
+0x0026f828: jr    ra
+0x0026f82c: addiu sp, sp, 64
+```
+
+The "already initialized" skip path (0x0026f818-0x0026f82c) is a bare
+epilogue - it does nothing else. The next function in memory
+(0x0026f830 onward) is unrelated: a dcache-flush-range routine
+(`lui t9,0xffff`/`ori t9,t9,-64` building a 0xffffffc0 cache-line mask,
+then a `cache`-instruction loop) - not part of this struct's consumption
+path. So this wrapper's entire job is "run the registration once, then
+return"; whatever is meant to *use* the struct afterward lives elsewhere,
+not in this function.
+
+**Did it actually run on our boot trace?** Dumped the guard flag and the
+companion struct's live contents at the Round 990 resting point:
+
+```
+MEM[0x002ab284] (guard: 0=never ran, 1=already ran) = 0x00000001
+
+0x0040db58: 2040da80   (uncached DMA alias #1 - matches Round 991's +0 prediction)
+0x0040db5c: 2040db00   (uncached DMA alias #2 - matches +4 prediction)
+0x0040db60: 000194d0   (ANOMALY - Round 991's disasm showed `sw zero,8(v0)` here; expected 0)
+0x0040db64: 0040db80   (buffer pointer - matches +12 prediction)
+0x0040db68: 00000020   (count = 32 - matches +16 prediction)
+0x0040db6c: 00000000   (matches +20 prediction)
+0x0040db70: 00000000   (matches +24 prediction)
+0x0040db74: 0040dc80   (our table's own address - matches +28 prediction)
+0x0040db78: 00000000
+```
+
+Guard flag = 1 confirms the registration function genuinely executed
+during this real boot trace (not dead/unreached code), and 6 of 7 struct
+fields match Round 991's static-disassembly prediction exactly. This
+rules out "the whole mechanism is just never invoked" as the explanation
+for why 0x0040dc80 stays zero - it IS wired up and initialized for real.
+
+**Open anomaly:** offset +8 (`MEM[0x0040DB60]`) holds `0x000194d0`
+instead of the `0` that Round 991's disassembly showed being written
+there (`sw zero, 8(v0)`) during initialization. Since the guard flag
+confirms init ran, and init unconditionally zeroes this field, something
+must have written a non-zero value to it AFTER initialization completed
+- meaning some other, not-yet-identified code IS touching this struct
+post-init. This is the most promising lead so far: it suggests the queue
+mechanism is not merely inert after setup, but has at least one active
+consumer/writer elsewhere in the boot trace. Not yet investigated: what
+writes struct+8, whether 0x000194d0 is itself a plausible pointer/index
+value (it falls in the low-RAM/kernel-vector range below 0x00020000),
+and whether tracing that write leads to the real signal source for
+0x0040dc80 itself.
+
+No tracked source changed this round (diagnostic-only, `tools/` driver
+only) - regression suite and Wii cross-build correctly skipped per this
+project's established docs/diagnostic-only-round convention.

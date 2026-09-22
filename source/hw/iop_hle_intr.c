@@ -63,6 +63,39 @@ typedef struct {
      * had no `else` branch and so silently left `st->pc` completely
      * unchanged - i.e. stuck at this exact address forever. */
     uint32_t saved_ra;
+
+    /* Round 1023 (task #1001, continuation of Round 422/423's own
+     * fix, generalized): real MIPS hardware interrupts are
+     * architecturally transparent to the ENTIRE interrupted register
+     * file - delivery is EPC/Cause/Status-based, not a JAL-style
+     * call, so no GPR (nor HI/LO) is ever touched by the CPU itself
+     * on real hardware. Round 423 already established this principle
+     * and fixed it for $ra specifically (see that field's own
+     * comment above) - but this project's own HLE dispatch mechanism
+     * below still only saves/restores $ra; every other GPR plus
+     * HI/LO get silently clobbered by whatever the real, registered
+     * handler function legitimately does with them (a real function
+     * body is free to use $v0/$v1/$a0-$a3/$t0-$t9/HI/LO as it likes -
+     * that's exactly what "caller-saved" means at the C-ABI level,
+     * and a genuine hardware interrupt is not a caller in that
+     * sense). Root-caused via fresh live instrumentation (Round
+     * 1022/1023, docs/STATUS.md): once thread-1 retirement plus
+     * Round 1021's SIF_SMFLAG fix let IOP boot reach this dispatch
+     * path for the first time in this project's history, an
+     * interrupt landing between a `get_next()` list-iterator call
+     * (source/hw/iop_module_loader.c-class code at IOP pc~0x1903C)
+     * and its caller's `beq $v0,...` check let the interrupt
+     * handler's own unrelated `li v0,1; jr ra` epilogue silently
+     * overwrite $v0 out from under the interrupted code, which then
+     * misread the leaked value 1 as a real list-node pointer and
+     * `jalr`'d through garbage, crashing at pc=0x72000000. Saving
+     * and restoring the full GPR file (skipping index 0, which is
+     * architecturally always 0 and never legitimately written) plus
+     * HI/LO here is the narrowest correct generalization of Round
+     * 423's own already-verified principle - not a new invention. */
+    uint32_t saved_gpr[32];
+    uint32_t saved_hi;
+    uint32_t saved_lo;
 } iop_hle_intr_globals_t;
 
 static iop_hle_intr_globals_t g;
@@ -352,6 +385,19 @@ int iop_hle_intr_try_handle(iop_state_t *st, uint32_t pc)
                 intc->istat_hi &= ~(1u << (g.dispatched_irq - 32u));
             st->cop0[12] = (st->cop0[12] & ~0x0Fu) | ((st->cop0[12] >> 2) & 0x0Fu); /* Status stack pop, real RFE formula */
             st->gpr[31] = g.saved_ra; /* Round 423: restore the interrupted code's own real $ra, clobbered above to build this trampoline's own return gate - see the struct field's comment */
+            /* Round 1023: restore the FULL interrupted GPR file + HI/LO
+             * the real handler function was free to clobber - see
+             * saved_gpr[]'s own struct-field comment for the full
+             * rationale/citation. gpr[31] is restored twice (once by
+             * the Round 423 line above, once by this loop) - harmless,
+             * both write the same value since saved_gpr[31]==saved_ra
+             * by construction; kept this way rather than removing the
+             * Round 423 line, to avoid disturbing already-verified
+             * code. */
+            for (int r = 1; r < 32; r++)
+                st->gpr[r] = g.saved_gpr[r];
+            st->hi = g.saved_hi;
+            st->lo = g.saved_lo;
             st->pc = g.saved_epc;
             st->next_pc = g.saved_epc + 4u;
             /* Round 347: the real, registered handler for
@@ -403,6 +449,12 @@ int iop_hle_intr_dispatch_interrupt(iop_state_t *st, uint32_t irq)
     g.saved_epc = st->cop0[14]; /* EPC, already written by the caller before calling this */
     g.in_dispatch = 1;
     g.saved_ra = st->gpr[31]; /* Round 423: the interrupted code's own real $ra - see this struct field's own comment for why this must be restored, not discarded */
+    /* Round 1023: save the FULL interrupted GPR file + HI/LO - see
+     * saved_gpr[]'s own struct-field comment above for why. */
+    for (int r = 1; r < 32; r++)
+        g.saved_gpr[r] = st->gpr[r];
+    g.saved_hi = st->hi;
+    g.saved_lo = st->lo;
 
     st->gpr[4] = g.intr_handler_arg[irq]; /* $a0 = arg, real RegisterIntrHandler ABI */
     st->gpr[31] = IOP_HLE_INTR_HANDLER_RETURN_TRAMPOLINE; /* $ra = our own return gate */

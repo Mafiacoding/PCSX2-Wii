@@ -50498,3 +50498,36 @@ The bitmap's only set bit is bit 31 of word 3 = priority `3*32+31 = 127` - the r
 4. Verify with a decisive experiment (Round 1037 rigor): does this lead to genuine, sustained real-code dispatch of previously-parked threads, not just a cosmetic change.
 
 **Mandatory workflow:** docs-only + new xref tooling (`tools/round1051-real-dispatcher/`, `tools/` excluded from SOURCES/Wii build). No tracked source modified yet - deliberately, since the TCB layout and the interrupt-return-reachability question are not yet fully confirmed, and the standing backup-before-experimenting rule requires that confirmation before any tracked edit. `git status --short` shows only new tool files + STATUS.md. Regression/Wii-build correctly skipped. Leak-check clean.
+
+## Round 1052 (task #447/#536/#1051 continuation): EXACT confirmation - real Reschedule()/GetHighestReadyPriority() dispatcher is NEVER reached in current boot (0 hits across 60M real IOP instructions, checked one-by-one)
+
+**Context.** Round 1051 located the real Sony THREADMAN top-level dispatcher
+- `GetHighestReadyPriority()` at IOP 0x001158A8
+- `Reschedule()` at IOP 0x0011590C (single static caller: 0x00115c9c)
+- an enclosing "cause"-dispatch function starting at/before 0x00115ba0
+
+and confirmed via a static memory read that the underlying ready-bitmap/TCB-pointer globals (0x0011BA20-0x0011BA34) are live and correctly tracking the idle thread. The open question left for this round: is the enclosing dispatcher function (0x00115800-0x00115E00) actually *executed* during real ongoing IOP execution in the current boot, or is it real-but-currently-unreached code?
+
+**First attempt (coarse, inconclusive).** `tools/round1052-live-exec-check/pc_hit_check.c` resumed the Round 1045 steady-state checkpoint (ee_pc=0x0020eee8, 1.74B cumulative EE instructions) and sampled `iop->pc` once per 100,000-instruction chunk boundary across a 60,000,000-instruction budget. Result: zero hits reported in 0x00115800-0x00115E00. But this sampling method cannot reliably detect a brief visit to a narrow (~1536-byte, likely well under 100 real instructions) function body that begins and completes entirely within a single 100,000-instruction chunk - so this result alone was flagged as inconclusive, not authoritative.
+
+**Second attempt (exact, conclusive).** Built `tools/round1052b-exact-pcwatch/pc_hit_exact.c`, linked against a *scratch-only* copy of `source/core/system.c` (`/tmp/r1052b/system_r1052b.c`, tracked source untouched) that calls a new `r1052b_note_pc(iop->pc)` hook immediately after **every single** `iop_core_step()` call inside `system_run_interleaved()`'s slice loop - i.e. every real IOP instruction, zero sampling gap, not a chunk-boundary estimate. `r1052b_note_pc()` increments a per-address hit counter whenever pc falls in 0x00115800-0x00115E00.
+
+Ran against the same Round 1045 checkpoint with the same 60,000,000-instruction budget:
+
+```
+[R1052B] starting exact per-instruction pc-watch, budget=60000000, range=0x00115800-0x00115e00
+[R1052B] progress: instr_done=5000000  total_checked=5000000  total_hits=0 ee_pc=0x0020eee8
+...
+[R1052B] progress: instr_done=60000000 total_checked=60000000 total_hits=0 ee_pc=0x0020eee8
+[R1052B-RESULT] EXACT (non-sampled) check: ZERO hits in 0x00115800-0x00115e00 across 60000000 real IOP instructions checked one-by-one.
+```
+
+**Conclusion (evidenced, not guessed).** The real Sony `Reschedule()`/`GetHighestReadyPriority()`/enclosing-dispatcher region is **genuinely never fetched** during this 60M-instruction real-execution window from the Round 1045 resting point - confirmed exactly, not by sampling. This is a real, live, pervasively-cross-referenced (40+ static callers, Round 1049) piece of Sony kernel code that is nonetheless **dead in this specific execution context**.
+
+**What this means for the user's "build the real Sony TCB" instruction.** The user explicitly authorized taking however many rounds needed to find "die richtige Lösung" - either wiring into the real TCB/scheduler infrastructure, or an HLE intercept, whichever the evidence supports. This round's evidence narrows the real-TCB-wiring path significantly: even if this project's HLE `CreateThread`/`WakeupThread` handlers were rewritten to allocate real-format TCBs and call the real `ready_set`/`ready_clear`/list-primitive functions directly (bridging into the confirmed-live bitmap/list structures from Round 1049/1050), that alone would NOT cause those threads to actually run, because the real dispatch function that would ever read the bitmap and switch context (`Reschedule()`) is not being invoked by anything in the current execution flow at all. Populating the real ready-structures without also getting the real interrupt/exception path that leads to `Reschedule()` to fire would be "genuine Sony data structures, still never consulted" - the same class of result as Round 1046's negative force-wake experiment, just one layer deeper.
+
+The real, unresolved question this surfaces for Round 1053: **what real condition/interrupt should be causing the enclosing dispatcher (0x00115ba0+) to run periodically, and why does it never fire in our IOP model?** Leading hypothesis (not yet verified): this project's IOP timer/INTC interrupt delivery may not be routing into the real per-tick scheduler-invocation path the way real hardware does - i.e. the gap may be in `source/hw/iop_intc.c`/IOP timer modeling, not in thread-table content at all. This needs a fresh disassembly of what real code *should* call into 0x00115ba0-and-up (a caller/xref search one level higher than Round 1051's `xref2.c`, which only searched for the two already-known JAL targets, not for what calls the enclosing function's *entry point*).
+
+**Classification.** Honest negative result, evidenced by exact (non-sampled) instrumentation - not fabricated, not guessed. No tracked-source change this round (system.c's instrumentation lives only in the scratch copy `/tmp/r1052b/system_r1052b.c`). Regression suite and Wii cross-build correctly skipped (docs/tools-only round, no tracked source changed). New tool files added under `tools/round1052-live-exec-check/` and `tools/round1052b-exact-pcwatch/` (excluded from the Wii SOURCES list, same convention as all prior round-tools).
+
+**Next round (1053):** find the real caller(s)/trigger of the enclosing dispatcher's entry point (starts at or before 0x00115ba0) - static xref for JAL/JALR targeting that address specifically (not just Reschedule()/GetHighestReadyPriority()'s own callers), and check whether it's reached from a real interrupt-vector path our IOP INTC/timer modeling doesn't yet drive.

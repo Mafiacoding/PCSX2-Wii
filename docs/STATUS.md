@@ -50341,3 +50341,24 @@ Directly continuing the Round 1039-1042 "identify and implement per-service SIF-
 **Mandatory workflow:** no tracked source modified (`git status --short` empty). Regression suite and Wii cross-build correctly skipped (docs-only re-verification round, consistent with this project's established convention). Leak-check clean.
 
 Next round: either (a) build a chained-checkpoint driver to push the correlated R933/R1036 survey substantially past 90M instructions and find the actual next real service (if any) past IOPHEAP's call=135 reply, or (b) pivot to identifying `0x80000596`'s true real-hardware identity (Round 1041's still-open lead) via call-site-level tracing rather than the shared-dispatcher-PC snoop currently used.
+
+## Round 1045: checkpoint-chain verification confirms Round 1044's call=135 ceiling is a REAL wall, not a budget artifact (SCPH-50004 diskless boot, task #447/#536/#1009)
+
+Directly answers Round 1044's own open question ("re-run at a substantially larger budget to confirm the IOPHEAP reply's downstream effect") using the chained-checkpoint methodology the user asked for, modeled exactly on the established `tools/round939-diskless-pmode/chain_driver.c` start/continue pattern.
+
+**New tooling:** `tools/round1045-diskless-chain/chain_driver.c` - a diskless (no `iop_cdvd_mount_iso()`) checkpoint-chaining driver built with `-DR933_RPCCALL_TRACE -DR1036_REG_TRACE` against the unmodified tracked tree. Each invocation runs a 60,000,000-instruction-equivalent chunk (`system_run_interleaved()` budget) and either starts fresh or resumes from `checkpoint_save()`/`checkpoint_load()`, letting several short (~90s) process invocations accumulate a cumulative instruction count far beyond any single tool-call's wall-clock limit.
+
+**Result - four chained runs, cumulative real EE-instruction counts:**
+```
+run 1 (start):     total_instr=443,874,401   ee_pc=0x0020eee8  R1036REG count=135
+run 2 (continue):  total_instr=875,874,401   ee_pc=0x0020eee8  R1036REG count=135
+run 3 (continue):  total_instr=1,307,874,401 ee_pc=0x0020eee8  R1036REG count=135
+run 4 (continue):  total_instr=1,739,874,401 ee_pc=0x0020eee8  R1036REG count=135
+```
+Across **1.74 billion** EE instructions - roughly 19x Round 1044's single-run 90,000,000-instruction budget - the EE program counter never moves from `0x0020eee8` and the correlated SIF-RPC registration counter never advances past **call=135** (the already-implemented `SIF_SID_IOPHEAP rpc_number=1` reply). This settles Round 1044's open question decisively: this is a **genuine steady state**, not an artifact of insufficient instruction budget.
+
+**Interpretation:** the currently-implemented SIF-RPC dispatch tree (all 12 real services cataloged through Round 1044) is now fully exhausted for this boot path - every request the BIOS issues gets a real, cited reply, and the boot still does not progress past this point. This confirms the real remaining blocker is NOT "one more missing SIF-RPC service" (the productive Round 1039-1042 pattern), but the deeper, already-characterized semaphore-0-producer/`0x8026F4D0`-dispatcher chain from Rounds 990-1038 - specifically, Round 1038's own finding that IOP-side worker threads 4-8 are themselves TSW_SLEEP-parked and never get scheduled to actually produce further completions, independent of whether this project's EE-side reply logic is correct.
+
+**Mandatory workflow:** `tools/round1045-diskless-chain/chain_driver.c` is new tooling under `tools/`, consistent with this project's established convention (Round 588/729/936/939 etc.) that `tools/` is excluded from the tracked `SOURCES` list used for the Wii cross-build, so no Wii-build or regression-suite change is needed for it. No core tracked source (`ee_core.c`/`system.c`/`sif.c`) was modified this round - this was a pure re-verification round using already-shipped, already-tracked dispatch logic. `git status --short` confirms only the new tool file is added. Checkpoint files (`r1045.ckpt`, 40MB, contains BIOS-derived RAM content) were kept in `/tmp/r1044/` only, never committed or rsynced, per the standing checkpoint-handling and leak-prevention rules.
+
+Next round: resume the semaphore-0-producer/IOP-worker-thread-starvation investigation (Rounds 990-1038) with this now-confirmed, extremely well-evidenced steady state as the fixed reference point - specifically, determine why IOP threads 4-8 remain permanently TSW_SLEEP-parked rather than being scheduled to service the pending completions. In parallel, continue the still-open `0x80000596` real-identity lead (Round 1041) via call-site-level tracing.

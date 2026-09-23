@@ -49846,3 +49846,100 @@ directly relevant to the FIFO-queue change). Wii cross-build: clean,
 `pcsx2-wii.dol` produced with no errors (the sandbox's devkitPPC toolchain
 needed `LD_LIBRARY_PATH` pointed at its own bundled `lib/libmpfr.so.4` -
 an environment quirk, not a code issue).
+
+## Round 1033: the "20th call" is real BIOS design, not a bug - semid=-1 and the callback pointer are both deliberately left unset for this SIF-RPC request
+
+**User's literal request this round:** "Fix die Lücke in IOP, und fix den
+callback damit 20 call endlich aufgerufen werden kann." (Fix the gap in
+IOP, and fix the callback so the 20th call can finally be invoked.)
+
+**Method (all in a `/tmp/r1033` scratch tree, per the standing backup-
+before-experimenting rule - nothing below was applied to tracked source
+until the honest conclusion was reached that no fix was warranted):**
+
+1. Traced `cd_ptr`'s provenance: `call_cd = ee_mem_read32(st, src+0x1Cu)`
+   (line 5622 of `ee_core.c`) confirms `cd_ptr` is echoed straight from
+   the real EE-side SIF request packet the BIOS itself wrote - not
+   emulator-allocated, and this project has no separate `SifCallRpc()`-
+   library HLE modeling to audit (confirmed via grep: no `sceSifClientData`
+   struct or `cd->sema`-style pattern anywhere in the tree).
+2. Added a correctly-gated write-watch (fixed from Round 1032's earlier
+   crashing unconditional read-probe) on `ee_mem_write32()`/`write64()`,
+   watching the physical range `0x002fcfc0`-`0x002fcfe0` (the `cd_ptr`
+   struct Round 1032's dispatcher reads `+8` and `+0x1C` from). Ran a
+   fresh 60,000,000-instruction SCPH-50004 diskless-boot survey.
+3. Caught exactly 7 real writes to this struct across the whole boot
+   (excluding the generic BSS-zero passes at `pc=0x8000e5ec`/`0x00200024`,
+   which are unrelated bulk-clear loops touching all of EE RAM at reset):
+   ```
+   phys=+0x10 val=0            pc=0x0026f27c ra=0x00209330  (pre-zero by caller)
+   phys=+0x00 val=0x2040dd00   pc=0x0026f2a0 ra=0x0026f288  (submit fn)
+   phys=+0x04 val=0x00000010   pc=0x0026f2a4 ra=0x0026f288  (submit fn)
+   phys=+0x08 val=0xffffffff   pc=0x0026f324 ra=0x0026f288  (submit fn, DELIBERATE)
+   phys=+0x14 val=0            pc=0x0026f544 ra=0x0026f9a8  (reply-side helper)
+   phys=+0x18 val=0            pc=0x0026f54c ra=0x0026f9a8  (reply-side helper)
+   phys=+0x00 val=0            pc=0x0026f570 ra=0x0026f56c  (reply cleanup)
+   ```
+   `+0x1C` (the callback-function-pointer field the Round 1032 dispatcher's
+   `jalr v0 = MEM[cd_ptr+0x1C]` depends on) and `+0x20` (its argument) are
+   **never written anywhere in the entire 60M-instruction organic boot.**
+4. Disassembled the real BIOS code at all three write sites using the
+   Round-655 EE/R5900 disassembler (fresh, this round):
+   - `0x8026F250`-`0x8026F280`: a thin wrapper. Confirmed via register
+     trace that the real caller (`0x80209328`, itself inside a small
+     helper ending at `ra=0x00209330`) invokes it as
+     `submit(a0=cd_ptr, a1=18 /*0x12, request/resource type*/, a2=1)`.
+     The wrapper stores `a1` into `s3` and **`a2` into `s2`** before
+     falling straight into the submission body at `0x8026F280`.
+   - `0x8026F280`-`0x8026F350` (the real submission body): allocates a
+     resource object (`jal 0x8026F5D0`), fills `cd_ptr+0/+4` from it, then
+     branches on `v1 = s2 & 1`. Since the caller passed `a2=1`, `v1=1`,
+     which takes the **`else` branch at `0x8026F318`**: sets
+     `cd_ptr+8 = -1` in the **delay slot of a `bgez`** (i.e.
+     unconditionally, regardless of any real semaphore result) and jumps
+     straight to the SIF-submit call at `0x8026F328`, **completely
+     skipping** the sibling `v1==0` branch that would otherwise call the
+     real `CreateSema`-class syscall (`0x80257920`) and store its real
+     semaphore id into `cd_ptr+8`. Neither branch of this function ever
+     touches `cd_ptr+0x1C`.
+   - `0x8026F520`-`0x8026F550` (the `ra=0x0026f9a8` reply-side helper):
+     copies two fields (`+0x14`, `+0x18`) out of a *different* structure
+     (`lw s0,28(s0)` chases one more pointer level) - unrelated to the
+     callback-pointer field.
+
+**Conclusion:** the caller explicitly requests **mode=1** ("no self-
+signal wanted") for this specific SIF-RPC submission (resource/request
+type `0x12`). The real BIOS's own submission routine honors that by
+deliberately writing `cd_ptr+8 = -1` (which is exactly the gate value
+Round 1032's dispatcher checks before deciding whether to fire
+`iSignalSema(0)`) and by design never writes a callback pointer into
+`cd_ptr+0x1C` for this call either. This is not an unfinished write, a
+race, or a missing-initialization bug - it is the real, disassembled
+SCPH-50004 BIOS choosing a genuinely fire-and-forget submission for this
+particular request, on purpose, via a flag the caller itself set.
+
+**This means the user's original framing needs correcting, not just the
+implementation:** there is no "gap in IOP" and no "callback" to fix for
+this specific 20th SignalSema(0)/RPC-call slot - the real PS2 BIOS never
+intended this particular call to signal or callback at all. Round 1032's
+17+2=19 accounting (19 real `SignalSema(0)` calls vs. 20
+`ee_arm_rpc_call_pending()`/enqueue events) is fully and correctly
+explained: the 20th enqueue is real, but it is a genuine fire-and-forget
+SIF-RPC submission by design, not a stalled or broken 20th signal.
+
+**No tracked-source change is warranted this round** - `ee_core.c`'s
+existing dispatcher/queue logic (including Round 1032's FIFO-queue fix)
+is already behaviorally correct for this call; adding a synthetic
+self-signal or synthetic callback-pointer write here would be fabricating
+behavior the real BIOS does not have, which the project's standing
+anti-fabrication rule forbids. Per this project's own established
+convention for rounds that reach a genuine "no fix needed, correctly
+diagnosed" conclusion (e.g. Rounds 469, 608, 712, 775), the host-native
+regression suite and Wii cross-build are correctly skipped this round
+(no tracked source changed); this docs entry, the git commit, and the
+mandatory leak-check are still completed below.
+
+**Open threads still on the board:** the `ra=0x00084504` signal source
+(2 of Round 1032's 19 real `SignalSema(0)` calls) remains completely
+undisassembled and is a legitimate next-round candidate, though it is
+unrelated to this round's finding.

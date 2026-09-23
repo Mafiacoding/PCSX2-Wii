@@ -50302,3 +50302,26 @@ So all 4 sids were already correctly identified and dispatched in this tree - no
 **Wii cross-build:** `ee_core.c`, `system.c`, and `sif.c` all compile cleanly under `powerpc-eabi-gcc -DGEKKO -mcpu=750 -meabi -mhard-float`.
 
 Next round: identify what real IOP-memory address(es) SCPH-50004's BIOS is polling via `LF_F_GET_ADDR` and whether this project's own IOP memory model returns a value that lets the boot progress further (or whether it's an addr this project's IOP RAM never organically initializes, in which case the honest 0 is the correct current-state reply).
+
+## Round 1043: identify the real IOP address(es) polled by LF_F_GET_ADDR (SCPH-50004 diskless boot, task #447/#536)
+
+**Method:** added a `#ifdef R1043_GETADDR_TRACE` diagnostic print directly inside Round 1042's shipped `SIF_SID_LOADFILE rpc_number==3` branch in a scratch copy of `ee_core.c` (`/tmp/r1043/ee_core_r1043.c`, based on the already-shipped Round 1042 tree), logging the decoded `iop_addr`/`type`/`width` and the value returned by the read bridge for every real `LF_F_GET_ADDR` call. Rebuilt against the full current source tree (including `source/core/recompiler/ee_jit.c`, now a hard link-time dependency of `ee_core.c` since the Round 887+ JIT wiring - the exclusion list used in Round 1041/1042's scratch builds needed this addition) and re-ran the same 90,000,000-instruction SCPH-50004 diskless boot survey.
+
+**Finding - real two-step pointer chase, not two independent probes:** the trace captured both calls precisely:
+```
+[R1043GETADDR] iop_addr=0x000003C0 type=2 width=4 src=0x0040CE80
+[R1043GETADDR] -> val=0x000EFF00
+[R1043GETADDR] iop_addr=0x000EFF00 type=2 width=4 src=0x0040CE80
+[R1043GETADDR] -> val=0x00000000
+```
+Both calls use `type=2` (`LF_VAL_LONG`, 4-byte read). The **first** call reads real IOP address **0x000003C0** - a fixed low-IOP-memory address immediately adjacent to the 0x400-0x4C0 real Sony low-kernel ROM region this project's own Round 760 fixed-address-loading fix already targeted (see STATUS.md Round 760) - and gets back **0x000EFF00**, a plausible in-range IOP RAM pointer (well within the real IOP's 2MB address space). The **second** call then reads *that exact value* as its own `iop_addr` (0x000EFF00) - i.e. this is a genuine pointer-chase: SifIopGetVal(0x3C0) fetches a pointer/handle from a fixed low-memory slot, then a second SifIopGetVal call dereferences it. The second call gets back **0x00000000**.
+
+**Classification:** IOP RAM address 0x000EFF00 reads as zero in this project's emulated IOP RAM because nothing in this project's tree has ever organically written to it - this project's SYSMEM/heap-allocator IOP-side code does not yet run far enough to populate whatever real structure lives there (plausibly a heap-free-byte-count or allocator-state field, given the address's proximity to typical IOP heap regions, though the exact real Sony struct was not identified this round - no ps2sdk EE-side caller of `SifIopGetVal()` exists to cross-reference, since this is BIOS-internal, not app-level, code). Per this project's standing anti-fabrication discipline: this is classified as an **honest, currently-correct reply** (0 really is what this project's IOP RAM holds at that address right now), not a bug to patch with an invented nonzero value - inventing a value here with no real evidence for what it should be would violate the project's core discipline just as surely as skipping a real fix would.
+
+**Forward-progress check:** the post-call EE/IOP resting state (EE pc=0x0020eee8, IOP still cycling in the same 0x00019xxx-region polling loop, same 9-thread table with threads 5/6/7 still parked on semaphores 7/9/10) is **unchanged** from Round 1042's already-documented steady state - confirming the newly-answered `LF_F_GET_ADDR` calls do not, by themselves, unblock further boot progress. The real blocker remains the already-characterized semaphore-0-producer / SIF2-gate chain from Rounds 990-1036.
+
+**No fix implemented this round** - the honest 0 reply is standing, correctly reflecting this project's current IOP-RAM state; a genuine gap (if any) would require first identifying what real Sony IOP code should write to 0x000EFF00 and confirming that code's own real trigger condition is unmet in this tree, which is out of scope for this round's diagnostic pass.
+
+**Regression/Wii build:** correctly skipped - no tracked source changed this round (diagnostic macro lives only in the scratch copy `/tmp/r1043/ee_core_r1043.c`, never applied to the tracked tree).
+
+Next round: identify the real Sony structure at IOP address 0x000EFF00 (candidate: SYSMEM heap-state field, given proximity to the low-kernel ROM region) and trace what real IOP-side code should populate it, to determine if this is a genuine emulator gap or expected pre-init BIOS behavior; alternatively, resume the standing semaphore-0-producer/SIF2-gate investigation (Rounds 990-1036) as the more likely actual blocker.

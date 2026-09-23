@@ -460,32 +460,8 @@ static uint32_t g_iop_cmd_rpc_bind_count;
 
 /* task #202 (79th finding): small fixed-size cd_ptr->sid table - see
  * the citation in sif.h above sif_cmd_iop_track_bind_sid()'s
- * declaration for the full real-protocol grounding.
- *
- * Round 1041 (task #1009 follow-up): the original size-8 comment
- * ("not an arbitrary limit hiding a bug") is now directly contradicted
- * by this project's own evidence - a Round 1040 SCPH-50004 diskless
- * scratch survey (see docs/STATUS.md Round 1040/1041 entries)
- * observed 9 DISTINCT real RPC-client cd_ptr values bound
- * simultaneously (FILEIO 0x80000001, LOADFILE-class, MTAP
- * 0x80000901, RMMAN2 0x80000C01, PAD_BIND_ID1_NEW 0x80000100, two
- * PAD_BIND OLD-protocol clients, CDVD_INIT 0x80000592, and one
- * further not-yet-identified service) before the boot even reaches
- * this round's new resting point - one more than the old table could
- * hold. The eviction this caused was directly observed: the FILEIO
- * client's cd_ptr (the very first real bind of the boot, tracked
- * many instructions earlier) silently returned sid=0x00000000
- * ("not found" - sif_cmd_iop_lookup_bind_sid()'s documented miss
- * return) on a later real RPC_CALL against that exact same cd_ptr,
- * even though FILEIO was bound and working correctly earlier in the
- * very same trace. This is a real, evidenced correctness bug (a
- * genuinely bound, still-in-use real RPC client silently
- * misclassified as unbound once the boot's real client count grows
- * past the table's capacity), not a hypothetical one - raised to 16
- * to hold comfortably more than the empirically observed real-boot
- * peak of 9 with headroom for further real growth as later rounds
- * unlock deeper boot stages and more real RPC clients bind. */
-#define SIF_CMD_BIND_SID_TABLE_SIZE 16
+ * declaration for the full real-protocol grounding. */
+#define SIF_CMD_BIND_SID_TABLE_SIZE 8
 static uint32_t g_bind_sid_table_cd[SIF_CMD_BIND_SID_TABLE_SIZE];
 static uint32_t g_bind_sid_table_sid[SIF_CMD_BIND_SID_TABLE_SIZE];
 static uint32_t g_bind_sid_table_next;

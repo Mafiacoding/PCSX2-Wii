@@ -50174,3 +50174,43 @@ The concrete, disassembly-grounded next step (not attempted this round due to co
 No tracked source was modified this round (all experimentation was scratch-only, per the standing backup-before-experimenting rule - and since nothing was ever applied to tracked files, no backup/revert cycle was needed either). `git status --short` confirms zero tracked diff. Regression suite and Wii cross-build are therefore correctly skipped (docs-only round), matching this project's long-established convention for diagnosis-only rounds (e.g. Rounds 464/465/467/469/775).
 
 Leak-check: `git ls-files | grep -iE '\.(bin|iso|nvm|mec|erom|rom1|rom2|ckpt)$'` returns nothing (clean).
+
+## Round 1038 (task #1008 continuation): correlated the low-level 0x8026FA40 registration stream against real outbound SIF_CMD_RPC_CALL DMA traffic - identifies the exact stuck request
+
+### Methodology
+
+Continuing directly from Round 1037's finding (the WaitSema(0)/(3) park is a real completion-delivery gap, not correct hardware idle behavior), this round fully disassembled the completion dispatcher itself, `0x8026F4D0` (previously only structurally characterized in Round 1032), from the fresh RAM dump `/tmp/r1036/ee_ram_r1037.bin`. Full decode:
+
+- Walks a singly-linked list (via each node's `+28` "next" pointer) starting from its `a0` argument.
+- At each node, compares `node+0x20` against the two real, already-cited resource-type constants `SIF_CMD_RPC_CALL` (`0x8000000A`) and `SIF_CMD_RPC_BIND` (`0x80000009`).
+- On an `RPC_CALL` match: reads `entry = MEM[node+28]`, and if `entry+28` (a function pointer) is non-NULL, **calls it directly via `jalr`** with `a0 = entry+32` - a real completion-callback dispatch, not a queue hand-off.
+- On an `RPC_BIND` match: copies three struct fields from the list node into `entry` (no callback invoked).
+- After the walk, if the final node's `+8` field is `>= 0`, calls `0x80257950` - which disassembles to `syscall -67`, i.e. **`iSignalSema`** (ps2sdk kernel syscall 67, negative/interrupt-context encoding; confirmed against the adjacent syscall stubs at `0x80257900`-`0x8025799C`: 62=PollSema-family, 64=CreateSema, 66=SignalSema, 67=iSignalSema, 68=WaitSema, 69=PollSema, 70=iPollSema, 71=ReferSemaStatus - exact ps2sdk kernel.h ordinals).
+
+So `0x8026F4D0` is confirmed as the real EE kernel's async-completion-list walker/dispatcher, invoked (per Round 1032) only via indirect `jalr` - i.e. as an interrupt-context callback - and it is what ultimately calls `iSignalSema` to unblock the parked `WaitSema(0)` thread.
+
+### The correlation experiment
+
+Built a scratch copy of `ee_core.c` (`/tmp/r1038/ee_core_r1038.c`, never copied back to tracked source) and compiled it with BOTH the existing `R1036_REG_TRACE` hook (logs every call into the `0x8026FA40` registration routine) and the existing `R933_RPCCALL_TRACE` hook (Round 933, logs every real, genuine outbound SIF0 DMA write carrying `cid==SIF_CMD_RPC_CALL`, including the resolved `call_sid` via the already-tracked `sif_cmd_iop_lookup_bind_sid()` bind table). Ran the resulting driver (`/tmp/r1038/r1038_correlate`, built from the pre-existing `driver_base.c`) against the real SCPH-50004 BIOS for 60,000,000 instructions and read the two trace streams in strict chronological order.
+
+Result: every `[R1036REG] ... a0=0x8000000a` registration is immediately preceded by an `[R933EVT] RPC_CALL ...` event - confirming these are the SAME real SIF-RPC call observed at two different layers (the high-level outbound-DMA snoop and the low-level EE-kernel completion-list registration), not two independent mechanisms as Round 1037 had tentatively guessed. The (call=1..4) registrations with `a0` values `0x80000000`/`0x80000002` are unrelated, non-RPC uses of the same generic completion-list primitive (confirms `0x8026FA40` is a general-purpose async-wait facility, not SIF-RPC-specific) and are not part of this investigation.
+
+Decoding each preceding `[R933EVT]`'s `call_sid` against this project's own already-cited real service-ID table (`include/core/hw/sif.h`) identifies exactly which real PS2 RPC service each of the 20 registrations belongs to:
+
+- `call_sid=0x80000006` (`SIF_SID_LOADFILE`, real, cited) - the initial OSDSYS/EELOAD ELF-load call.
+- `call_sid=0x80000001` (`SIF_SID_FILEIO`, real, cited - "Round 303, real 'silently never replied to' blocker Round 302's CDVD_SCMD fix exposed") - a real, repeating `fioOpen`/`fioRead`/`fioClose`-class sequence (`rpc_number` cycling `0,2,1`), fired multiple times.
+- `call_sid=0x80000400` (`SIF_SID_MCSERV`, real, cited), `rpc_number=254`.
+- `call_sid=0x80000006` again, `rpc_number=0`, repeating 4 times back-to-back just before the park.
+- **`call_sid=0x80000901`, `rpc_number=1`** - the call immediately preceding the 20th (stuck) registration. This service ID does **not** appear anywhere in `include/core/hw/sif.h`'s existing real-service table (LOADFILE=6, FILEIO=1, IOPHEAP=3, MCSERV=0x400, PAD=0x10F/0x11F, SPU2DRV=0x601, CDVD_INIT/NCMD/SCMD/DISKREADY=0x592/0x593/0x595/0x59A), nor anywhere else in STATUS.md's prior 1037-round history (confirmed via grep - zero hits). This is a genuinely new, previously-uncatalogued real SIF-RPC service identity.
+
+### What this establishes
+
+The stuck park is not an anonymous/generic failure - it is a real, specific, identifiable SIF-RPC call to service `0x80000901`, function number 1, that this project has never before observed or documented, and for which no dispatch/reply logic exists anywhere in the current tree (the only existing synthetic-reply logic, `ee_check_rpc_bind_pending()`/`sif_cmd_iop_send_rpc_bind_rend()`, only fires for the single `SIF_SID_LOADFILE`+`rpc_number==1` case per its own explicit, already-documented scope). This confirms and sharpens Round 1037's conclusion: the real fix is implementing genuine dispatch/reply coverage for this newly-identified service (and, more generally, extending the existing FILEIO/MCSERV/LOADFILE-style per-service reply logic to cover it) rather than a generic "always signal" shortcut.
+
+### Next step (not yet attempted)
+
+Identify the real-hardware identity of SIF-RPC service `0x80000901` - it is not in any of this project's already-fetched ps2sdk/PCSX2/psdevwiki source citations under the name checked so far, so it needs either a fresh source search (grep the already-downloaded ps2sdk-master.zip tree, Round 530's citation, for `0x80000901` or `0x901` literal occurrences) or a fresh disassembly of the real bind call that registered it (walking backward from `sif_cmd_iop_lookup_bind_sid()`'s bind table to find which `sceSifBindRpc(..., 0x80000901, ...)` call site produced this id). Once identified, a real, evidenced dispatch/reply handler (mirroring the existing FILEIO/MCSERV/LOADFILE pattern) can be implemented and verified with the same rigor as Round 1037's decisive signal experiment.
+
+### Mandatory workflow
+
+No tracked source modified this round (all work in `/tmp/r1038/`, a scratch copy of `ee_core.c` plus a throwaway driver reusing `driver_base.c`). `git status --short` confirmed empty. Regression suite and Wii cross-build correctly skipped (docs-only round). Leak-check (`git ls-files | grep -iE '\.(bin|iso|nvm|mec|erom|rom1|rom2|ckpt)$'`) clean.

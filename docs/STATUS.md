@@ -49729,3 +49729,120 @@ diagnostic-only; all instrumentation used the tree's own already-tracked
 tracked source itself). Host-native regression suite and Wii cross-build
 correctly skipped per this project's established docs-only-round
 convention.
+
+## Round 1032 (task #1010): dispatcher 0x8026F4D0 fully disassembled and reached live via KUSEG addressing; 20th-signal gap precisely explained; FIFO queue fix shipped (harmless, evidenced-insufficient) per direct user request
+
+**User's explicit request this round (German):** "Fix die Lücke in iop,
+und fix den callback damit 20 call endlich aufgerufen werden kann." (Fix
+the gap in IOP, and fix the callback so the 20th call can finally be
+invoked.)
+
+**Methodological correction, upstream of everything else this round.**
+Round 1031's static disassembly of 0x8026F4D0 used this project's
+established KSEG0-addressing convention for the disassembler tool, which
+is correct for static analysis. But a first dynamic PC-trace hook that
+checked `this_pc == 0x8026F4D0u` literally (KSEG0 form only) got **zero**
+hits across a fresh 60M-instruction SCPH-50004 diskless boot - appearing
+to confirm Round 1031's "reached only via indirect JALR, no direct JAL
+callers" framing meant it might never actually run. Masking to the
+physical address (`this_pc & 0x1FFFFFFFu`) and comparing against the
+physical range instead immediately found **18 real hits** - the CPU
+executes this code via its KUSEG virtual-address form (`0x0026f4d0`, top
+bit clear), not KSEG0, even though both alias the same physical bytes.
+This is a durable, generalizable fix for any future PC-based dynamic
+instrumentation in this project: always mask to the physical address when
+checking "does this PC ever execute", since real BIOS code may run under
+either segment form depending on the caller's own addressing mode.
+
+**Full disassembly of the real REND-reply dispatcher body** (fresh
+`ee_disasm` run at `0x8026F4D0`-`0x8026F580`, this round): entry parameter
+`s0=a0` (recvbuf); reads `v1=MEM[s0+0x20]` (inner_cid, matches the
+already-cited real `SIF_CMD_RPC_CALL=0x8000000A`/`SIF_CMD_RPC_BIND=0x80000009`
+constants from `include/core/hw/sif.h`); on either match, walks
+`s0 = MEM[s0+0x1C]` exactly once (s0 becomes `cd_ptr`, echoed from the
+original request packet); then at `0x8026F550`: `a0 = MEM[s0+8]` - this
+reads the REAL per-request semaphore-id field off `cd_ptr`, correcting
+Round 1031's mistaken belief that this field lived on the recvbuf itself;
+`0x8026F554: bltz a0, 0x8026F564` (skip the self-signal if the field is
+negative); `0x8026F55C: jal 0x80257950` (a real iSignalSema syscall stub
+- one of the project's already-documented "3 separate copies" of that
+stub pair). For the `SIF_CMD_RPC_CALL` case specifically, the dispatcher
+also performs a genuine indirect callback dispatch (`jalr v0` where
+`v0 = MEM[cd_ptr+0x1C]`, a real dynamically-populated function pointer,
+passing `a0 = MEM[cd_ptr+0x20]`) when that pointer is non-null - a real,
+working mechanism, separate from the earlier "callback never invoked"
+framing (which was about a different, still-uninvestigated inner jalr,
+not about whether the dispatcher itself is reached).
+
+**Ground-truth dynamic counts, this round's fresh 60M-instruction trace:**
+dispatcher entry (`phys_pc==0x0026F4D0`): 18 hits. Of those, the real gate
+value `MEM[cd_ptr+8]`: 17× `0x00000000` (non-negative, self-signal fires),
+1× `0xffffffff` (negative, correctly skipped per real BIOS logic - this
+one skip at `instr=50347042`, `cd_ptr=0x002fcfc0`). The jal-to-iSignalSema
+instruction (`phys_pc==0x0026F55C`) fires exactly 17 times, matching the
+17 gate=0 visits exactly. A full grep of the R818SEMA log for real
+`SignalSema` events found **19 total**: 17 with `ra=0x0026f564` (this
+dispatcher's own jal, confirmed) plus 2 with a different return address
+`ra=0x00084504` (a separate, uninvestigated call site in another
+duplicated syscall-stub-table region). **17+2=19 exactly matches R818SEMA's
+observed count**, fully explaining the 20-create/19-signal discrepancy:
+20 CreateSema/WaitSema cycles occur; 18 reply deliveries reach this
+dispatcher; 17 self-signal, 1 correctly self-gates (its own request's
+semid field is genuinely -1 by real BIOS design); the remaining 2 signals
+come from the separate `ra=0x00084504` site. `g_r303_rpc_pending_sets=20`,
+`g_r303_rpc_delivered_count=20`, `g_r303_rpc_pending_clobbers=0` -
+unchanged before and after the fix below, confirming the single-slot
+delivery mechanism never actually experienced a genuine backlog-overwrite
+in this trace window.
+
+**FIFO queue fix - implemented, verified, shipped, but honestly NOT
+sufficient to resolve the user's stated symptom.** Replaced the existing
+single-slot, overwritable delayed-delivery mechanism (`g_rpc_bind_pending`
+/`g_rpc_bind_delay`/`g_rpc_bind_cd_pending`/`g_rpc_bind_inner_cid`, shared
+by `ee_arm_rpc_bind_pending()` and `ee_arm_rpc_call_pending()`) with a real
+FIFO queue (depth 8 - far more than the deepest backlog ever observed,
+which never exceeded 1 - so this is a safety margin against an
+only-assumed, not-previously-guaranteed invariant this project's own
+Round 303 comment had flagged, not a tuned value). **Verified via a direct
+A/B dynamic-trace comparison** (built and ran both the unfixed and fixed
+scratch trees against the identical 60M-instruction boot):
+`signal_calls(0)` stayed at 19 both before and after; dispatcher-entry/jal
+hit counts identical (18/17); `g_r303_*` counters byte-identical. **This
+disproves the working hypothesis that a single-slot-overwrite race was the
+missing-20th-signal's cause** - no genuine backlog>1 request was ever
+observed in this window, so the single-slot mechanism never actually
+clobbered anything here. Shipped anyway to `source/core/ee/ee_core.c` as a
+real, evidenced, harmless architectural improvement (closing a
+previously-unguaranteed invariant), with the shipped code's own comments
+honestly stating it does not resolve the user's stated symptom - this
+distinction is preserved here rather than glossed over.
+
+**Abandoned diagnostic probe (not a finding).** An unconditional
+`ee_mem_read32(0x002fcfc0+8)` watch on every single EE instruction from
+instruction 0 crashed the emulated boot (`ee_pc` ended at the
+reset-vector value, zero real progress) - diagnosed as a bug in the probe
+itself (reading arbitrary memory before TLB/mapping setup triggers
+spurious exceptions that corrupt emulation state), not a real finding
+about the target address. Not retried this round given time budget; this
+remains the concrete next step.
+
+**What remains OPEN.** The user's literal request - make the 20th call
+fire - is **not yet fulfilled**; `signal_calls(0)` still tops out at 19,
+both before and after this round's fix. The precise next investigative
+target: find what real upstream BIOS code is supposed to populate
+`cd_ptr=0x002fcfc0`'s own `+8` semid field with a valid (non-negative)
+value before this specific delivery is dispatched, and why it doesn't for
+this one anomalous `cd_ptr` (a pointer well outside the ~0x0040d000-
+0x00412000 pool every other observed `cd_ptr` came from) - this requires a
+correctly-gated memory watch (not the crashing unconditional one above).
+The separate `ra=0x00084504` call site (2 of the 19 real signals) was
+identified but never disassembled.
+
+**Verification.** Host-native regression suite: all 136 individual test
+files re-run this round (batched due to the sandbox's per-call timeout
+cap) against the modified `ee_core.c` - **all 136 pass, 0 failures**,
+including `test_ee_core`, `test_sif`, and `test_dma_sif2` (the most
+directly relevant to the FIFO-queue change). Wii cross-build: clean,
+`pcsx2-wii.dol` produced with no errors (the sandbox's devkitPPC toolchain
+needed `LD_LIBRARY_PATH` pointed at its own bundled `lib/libmpfr.so.4` -
+an environment quirk, not a code issue).

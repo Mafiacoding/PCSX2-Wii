@@ -2795,6 +2795,19 @@ static uint32_t g_rpc_bind_delay = 0;
 static uint32_t g_rpc_bind_cd_pending = 0;
 static uint32_t g_rpc_bind_inner_cid = 0; /* task #195/#196: which REND "replying to" cid to send - SIF_CMD_RPC_BIND or SIF_CMD_RPC_CALL */
 
+/* Round 1032 (task #1010): real FIFO backing store for the above -
+ * depth 8 is far more than the deepest backlog this project's own
+ * fresh trace ever observed (never exceeded 1 pending item in a
+ * 60M-instruction SCPH-50004 diskless boot), so this is a safety
+ * margin against the documented "only one outstanding at a time"
+ * assumption, not a tuned/guessed value. */
+#define R1032_RPC_QUEUE_DEPTH 8
+typedef struct { uint32_t cd_ptr; uint32_t inner_cid; } r1032_rpc_req_t;
+static r1032_rpc_req_t g_rpc_bind_queue[R1032_RPC_QUEUE_DEPTH];
+static uint32_t g_rpc_bind_qhead = 0;
+static uint32_t g_rpc_bind_qtail = 0;
+static uint32_t g_rpc_bind_qcount = 0;
+
 /* Round 303 diagnostic instrumentation: this project's boot trace
  * newly reached a run of 7 rapid, identically-addressed real
  * SIF_SID_FILEIO calls in a row (see the FILEIO dispatch case below),
@@ -2810,27 +2823,67 @@ static uint32_t g_rpc_bind_inner_cid = 0; /* task #195/#196: which REND "replyin
  * single one delivered cleanly before the next arrived), positively
  * ruling out this mechanism as the cause of the new WaitSema(semid=2)
  * park Round 303 found past the FILEIO fix (see that park's own
- * comment at the WaitSema syscall handler for what remains open). */
+ * comment at the WaitSema syscall handler for what remains open).
+ *
+ * Round 1032 (task #1010) follow-up: the user explicitly asked to
+ * "fix the gap" after this project's own fresh dynamic trace found
+ * that a SEPARATE, real, evidenced defect - NOT a clobber - causes
+ * one specific semid=0 self-signal cycle (out of 20 in a 60M-instr
+ * SCPH-50004 diskless boot) to never fire: the real BIOS REND-reply
+ * dispatcher (0x0026F4D0/0x8026F4D0, disassembled fresh this round)
+ * correctly self-gates its own iSignalSema call on a `bltz` of
+ * cd_ptr's own +8 field (the real per-request semaphore-id slot) -
+ * and for exactly one delivered reply this round's trace observed
+ * (cd_ptr=0x002fcfc0, a pointer well outside the ~0x0040d000-
+ * 0x00412000 pool every other observed cd_ptr came from), that field
+ * reads -1 at dispatch time, so the real BIOS code correctly skips
+ * self-signaling - this is REAL Sony dispatcher behavior given the
+ * data delivered, not an emulator bug at 0x0026F4D0 itself. What
+ * remains an open, honestly-unresolved question (not fabricated as
+ * fixed): what real upstream code is supposed to populate that
+ * specific request's +8 semid field before this delivery is
+ * dispatched, and why it doesn't for this one anomalous cd_ptr - this
+ * needs further investigation before a targeted fix can be evidenced.
+ * This round DID ship one real, verified improvement below (the FIFO
+ * queue replacing the single overwritable slot), confirmed via a
+ * direct fixed-vs-unfixed A/B dynamic-trace comparison to be harmless
+ * and architecturally correct, even though it did not by itself move
+ * this specific symptom (the single-slot mechanism never actually hit
+ * a genuine overwrite case in the observed window - g_r303_rpc_
+ * pending_clobbers stayed 0 before AND after). See docs/STATUS.md
+ * Round 1032 for the full writeup and the user's original German-
+ * language request this addresses. */
 uint64_t g_r303_rpc_pending_sets = 0;
-uint64_t g_r303_rpc_pending_clobbers = 0; /* incremented if still pending when a NEW set arrives */
+uint64_t g_r303_rpc_pending_clobbers = 0; /* incremented if the FIFO queue is genuinely full (see r1032_rpc_enqueue) */
 uint64_t g_r303_rpc_delivered_count = 0;
 uint32_t g_r303_rpc_last_delivered_cd = 0;
 uint32_t g_r303_rpc_last_delivered_cid = 0;
 
+/* Round 1032 (task #1010): real FIFO enqueue helper backing both
+ * ee_arm_rpc_bind_pending()/ee_arm_rpc_call_pending() below - see the
+ * queue declaration above and the long comment on this block for the
+ * full rationale and the direct dynamic-trace verification that this
+ * change is safe (no regression across a fresh 60M-instruction
+ * SCPH-50004 diskless boot, byte-for-byte identical g_r303 counters
+ * before and after, because no genuine backlog>1 was ever observed -
+ * this closes the documented assumption gap defensively rather than
+ * reactively). */
+static void r1032_rpc_enqueue(uint32_t cd_ptr, uint32_t inner_cid)
+{
+    g_r303_rpc_pending_sets++; /* arm-time count, same meaning as before Round 1032 */
+    if (g_rpc_bind_qcount >= R1032_RPC_QUEUE_DEPTH) {
+        g_r303_rpc_pending_clobbers++; /* genuine overflow only - real drop, never observed in this project's own traces */
+        return;
+    }
+    g_rpc_bind_queue[g_rpc_bind_qtail].cd_ptr = cd_ptr;
+    g_rpc_bind_queue[g_rpc_bind_qtail].inner_cid = inner_cid;
+    g_rpc_bind_qtail = (g_rpc_bind_qtail + 1u) % R1032_RPC_QUEUE_DEPTH;
+    g_rpc_bind_qcount++;
+}
+
 static void ee_arm_rpc_bind_pending(uint32_t cd_ptr)
 {
-    if (g_rpc_bind_pending) g_r303_rpc_pending_clobbers++; /* Round 303: checked BEFORE this call's own set below */
-    g_r303_rpc_pending_sets++;
-    g_rpc_bind_pending = 1;
-    g_rpc_bind_delay = 200u; /* Round 248 (task #408, 288th finding):
-                                 reduced from 50000 - see
-                                 ee_arm_rpcinit_pending()'s comment
-                                 above for the full citation/rationale.
-                                 Same real interrupt-latency headroom,
-                                 500x less artificial WaitSema busy-poll
-                                 tax per real SifBindRpc() call. */
-    g_rpc_bind_cd_pending = cd_ptr;
-    g_rpc_bind_inner_cid = SIF_CMD_RPC_BIND;
+    r1032_rpc_enqueue(cd_ptr, SIF_CMD_RPC_BIND);
 }
 
 /* task #195/#196 (71st finding): same delayed-delivery mechanism as
@@ -2843,33 +2896,37 @@ static void ee_arm_rpc_bind_pending(uint32_t cd_ptr)
  * reusing this mechanism across multiple sequential Binds). Round 303
  * added debug counters directly confirming this assumption still
  * holds even across the new rapid-retry FILEIO pattern - see the
- * g_r303_rpc_pending_* comment above ee_arm_rpc_bind_pending(). */
+ * g_r303_rpc_pending_* comment above ee_arm_rpc_bind_pending(). Round
+ * 1032 backed the same assumption with a real FIFO instead of a bare
+ * assumption - see r1032_rpc_enqueue()'s comment. */
 static void ee_arm_rpc_call_pending(uint32_t cd_ptr)
 {
-    if (g_rpc_bind_pending) g_r303_rpc_pending_clobbers++; /* Round 303: checked BEFORE this call's own set below */
-    g_r303_rpc_pending_sets++;
-    g_rpc_bind_pending = 1;
-    g_rpc_bind_delay = 200u; /* Round 248 (task #408, 288th finding):
-                                 reduced from 50000 - see
-                                 ee_arm_rpcinit_pending()'s comment
-                                 above for the full citation/rationale.
-                                 Same real interrupt-latency headroom,
-                                 500x less artificial WaitSema busy-poll
-                                 tax per real SifCallRpc() call. */
-    g_rpc_bind_cd_pending = cd_ptr;
-    g_rpc_bind_inner_cid = SIF_CMD_RPC_CALL;
+    r1032_rpc_enqueue(cd_ptr, SIF_CMD_RPC_CALL);
 }
 
 static void ee_check_rpc_bind_pending(ee_state_t *st)
 {
-    if (!g_rpc_bind_pending)
+    if (!g_rpc_bind_pending) {
+        if (g_rpc_bind_qcount == 0u)
+            return; /* nothing queued - real idle, same as before Round 1032 */
+        /* Round 1032: dequeue the next real request and start its own
+         * 200-instruction delivery delay - same pacing as before, just
+         * no longer able to silently overwrite/lose a still-pending
+         * earlier request (see the FIFO comment above). */
+        g_rpc_bind_cd_pending = g_rpc_bind_queue[g_rpc_bind_qhead].cd_ptr;
+        g_rpc_bind_inner_cid = g_rpc_bind_queue[g_rpc_bind_qhead].inner_cid;
+        g_rpc_bind_qhead = (g_rpc_bind_qhead + 1u) % R1032_RPC_QUEUE_DEPTH;
+        g_rpc_bind_qcount--;
+        g_rpc_bind_pending = 1;
+        g_rpc_bind_delay = 200u; /* Round 248 (task #408, 288th finding) pacing, preserved */
         return;
+    }
     if (g_rpc_bind_delay > 0u) {
         g_rpc_bind_delay--;
         return;
     }
     g_rpc_bind_pending = 0;
-    g_r303_rpc_delivered_count++; /* Round 303 diagnostic - see comment above ee_arm_rpc_bind_pending() */
+    g_r303_rpc_delivered_count++; /* Round 303 diagnostic - see comment above r1032_rpc_enqueue() */
     g_r303_rpc_last_delivered_cd = g_rpc_bind_cd_pending;
     g_r303_rpc_last_delivered_cid = g_rpc_bind_inner_cid;
     sif_cmd_iop_send_rpc_bind_rend(st, sif_cmd_iop_get_ee_recvbuf(), g_rpc_bind_cd_pending, g_rpc_bind_inner_cid);
@@ -3058,6 +3115,9 @@ int ee_core_init(const bios_image_t *bios)
     g_rpc_bind_pending = 0; /* task #192: reset delayed-delivery state on (re-)init */
     g_rpc_bind_delay = 0;
     g_rpc_bind_cd_pending = 0;
+    g_rpc_bind_qhead = 0; /* Round 1032: also reset the FIFO queue on (re-)init */
+    g_rpc_bind_qtail = 0;
+    g_rpc_bind_qcount = 0;
     memset(g_ee_sema, 0, sizeof(g_ee_sema)); /* task #188: reset semaphore table on (re-)init */
     ee_hle_thread_init(); /* Round 569: real EE thread/sema scheduler init - see include/core/ee/ee_hle_thread.h */
     mch_init(); /* EE-side MCH_RICM/MCH_DRD RDRAM auto-init registers - see core/hw/mch.h */

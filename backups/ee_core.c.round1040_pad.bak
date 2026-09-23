@@ -7606,68 +7606,6 @@ static int ee_step(void)
                                 ee_mem_write32(st, call_recvbuf + 0u, rmman_cmd); /* real word[0]: echo the command word back unchanged, matching the real rmRpcPacket reply shape (the real IOP handler only ever overwrites the cmd2.result field) */
                                 ee_mem_write32(st, call_recvbuf + 4u, (uint32_t)-1); /* real cmd2.result: negative - honest "Remote Manager driver/hardware not present" for this diskless/no-peripheral boot, see comment above */
                                 ee_arm_rpc_call_pending(call_cd);
-                            } else if (call_sid == SIF_SID_PAD_BIND_ID1_NEW && rpc_number == 1u && call_recvbuf != 0u) {
-                                /* Round 1040: real PAD_BIND_RPC_ID1_NEW
-                                 * (sid=0x80000100), the "new"-protocol
-                                 * PADMAN pad-bind service (sibling of the
-                                 * already-handled SIF_SID_PAD_BIND_ID1_OLD/
-                                 * ID2_OLD above) - identified in Round
-                                 * 1039's 2nd verification run (call=30) as
-                                 * the next previously-uncatalogued real
-                                 * service immediately downstream of the
-                                 * newly-fixed SIF_SID_RMMAN2 branch above,
-                                 * and confirmed by this project's own trace
-                                 * ([R933EVT] call_sid=0x80000100
-                                 * rpc_number=1) to exactly match real
-                                 * padPortInit()'s single
-                                 * sceSifCallRpc(&padsif[0], 1, 0, &buffer,
-                                 * sizeof(buffer), &buffer, sizeof(buffer),
-                                 * NULL, NULL) call (fno always literally 1,
-                                 * same "real command inside payload, not
-                                 * fno" pattern as SIF_SID_MTAP_PORT_OPEN/
-                                 * SIF_SID_RMMAN2 above - real payload
-                                 * command word is buffer.command=
-                                 * PAD_RPCCMD_INIT(0x10), see
-                                 * ee/rpc/pad/src/libpad.c padPortInit()).
-                                 * UNLIKE the two branches above, this is
-                                 * NOT an absent-accessory negative reply:
-                                 * real IOP-side RpcPadInit() (iop/input/
-                                 * padman/src/rpcserver.c) calls
-                                 * data[3]=padInit((void*)data[4]), and real
-                                 * padInit() (iop/input/padman/src/
-                                 * padInit.c) always returns 1 on success,
-                                 * only returning 0 on internal
-                                 * CreateEventFlag/CreateThread resource
-                                 * failure - it does NOT probe physical
-                                 * controller connectivity at all (that is
-                                 * discovered later via padPortOpen()/
-                                 * padGetState() polling, already wired to
-                                 * real iop_sio2 pad-connected state by this
-                                 * project's existing PAD_BIND_ID1_OLD/
-                                 * ID2_OLD branches per Round 663/664). So
-                                 * the honest, evidence-grounded reply here
-                                 * is a positive result=1 (module init
-                                 * success), not a fabricated negative
-                                 * error - sending -1 here would falsely
-                                 * claim the IOP-side PADMAN module itself
-                                 * failed to initialize, which real hardware
-                                 * (with or without a controller plugged in)
-                                 * never does. data[3] is the 4th u32 word
-                                 * of the SAME buffer used for both send and
-                                 * receive (send and recv addresses are
-                                 * identical in the real sceSifCallRpc()
-                                 * call above) - i.e. byte offset 12, NOT
-                                 * offset 4 like the two branches above -
-                                 * confirmed directly against the real
-                                 * client-side union's `padResult` member:
-                                 * struct{s32 unknown[3]; s32 result;}
-                                 * (ee/rpc/pad/src/libpad.c, full union read
-                                 * lines ~140-230). Only word 12 is written;
-                                 * the other bytes are the real buffer's own
-                                 * leftover request content (harmless, real
-                                 * client code never reads them back). */
-                                ee_mem_write32(st, call_recvbuf + 12u, 1u); /* real data[3]=padResult.result: positive "PADMAN module initialized" - see comment above, offset 12 confirmed against real padResult union member, NOT the offset-4 pattern used by the two sibling branches above */
-                                ee_arm_rpc_call_pending(call_cd);
                             } else if (call_sid == SIF_SID_FILEIO) {
                                 /* Round 303 generalized catch-all for
                                  * any other real FILEIO fno this

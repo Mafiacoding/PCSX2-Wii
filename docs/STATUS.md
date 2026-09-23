@@ -50445,3 +50445,26 @@ Directly answers Round 1048's own "next round" plan: search for the real schedul
 **Mandatory workflow:** docs-only + new disassembly/xref tooling (`tools/round1049-real-scheduler/`, `tools/` excluded from SOURCES/Wii build). No tracked core source modified this round (still investigation-phase, not yet at the point of a safely-evidenced tracked-source edit - the TCB node-field layout must be confirmed first, per the standing backup-before-experimenting rule). `git status --short` confirms only new tool files + STATUS.md. Regression/Wii-build correctly skipped. Leak-check clean.
 
 Next round: disassemble the real list-primitive bodies at 0x0011b0e0/0x0011b100/0x0011b118 to extract the exact real TCB node field offsets (next/prev/etc.) they read and write, completing the real struct layout needed to safely bridge our HLE thread handlers into this real engine.
+
+## Round 1050: decoded the real Sony TCB list-node header layout - {prev, next} at offsets +0x00/+0x04 (task #447/#536/#1009 continuation)
+
+Disassembled the three real list-primitive bodies Round 1049 found (0x0011b0e0/0x0011b100/0x0011b118) plus their two neighboring siblings (0x0011b0c0/0x0011b0cc):
+
+- **0x0011b0c0-0x0011b0cc**: `list_init_self(node)` - real real circular-list-sentinel init: `node->+0=node; node->+4=node` (self-referencing empty-list idiom).
+- **0x0011b0cc-0x0011b0dc**: `list_is_singleton(node)` - `return (node->+0 ^ node) == 0` (true if the node's `prev` link still points at itself, i.e. nothing else linked in).
+- **0x0011b0e0-0x0011b0fc** (`list_remove`, Round 1049's finding): `v1=node->+0 (prev); v0=node->+4 (next); v1->+4=v0; v0->+0=v1` - exactly the standard doubly-linked-list unlink (`prev->next=next; next->prev=prev`).
+- **0x0011b100-0x0011b114** (`list_test`, Round 1049's finding): identical body to `list_is_singleton` above, confirming Round 1049's read that 0x00115798's dequeue only clears the ready-bitmap bit when the list is left empty after removal.
+- **0x0011b118-0x0011b134** (`list_insert`, Round 1049's finding, `a0`=new node, `a1`=list head/anchor): `anchor->+0=a0 (head->prev=new); a0->+4=head->+4 (new->next=head->next); head->+4=a0 (head->next=new); (a0->next)->+0=a0 (new->next's prev=new)` - textbook insert-before-head (= insert-at-tail-of-a-circular-list) operation.
+
+**Confirmed real TCB list-node header layout (start of the real Sony TCB struct):**
+```
++0x00: prev  (circular doubly-linked-list "prev" pointer)
++0x04: next  (circular doubly-linked-list "next" pointer)
+  ...
++0x0E: priority (u16, Round 1049)
+```
+This is a textbook, fully real, internally-consistent embedded circular-list-node header - exactly the same idiom real ps2sdk/Sony kernel headers use throughout THREADMAN, SYSMEM, and other kernel modules (an intrusive `{prev,next}` pair at the very start of a struct so any struct can double as a list node without a separate allocation). This is genuine, decoded-not-guessed structure, directly read from the real BIOS image's own real, still-intact THREADMAN code.
+
+**Still needed before implementing the bridge (per the user's explicit "take the time, get it right" instruction):** the `entry` (thread function pointer) and `status`/wait-state field offsets, and - critically - the real top-level "pick highest-ready-priority thread" scan function that actually reads the 0x0011BA28 bitmap to choose what runs next (not yet located; this is the true dispatcher, distinct from the ready/unready helper functions decoded so far). Next round's task.
+
+**Mandatory workflow:** docs-only, no new tooling needed this round (reused Round 1049's `tools/round1049-real-scheduler/disasm_region.c` as-is). No tracked source modified. Regression/Wii-build correctly skipped. Leak-check clean.

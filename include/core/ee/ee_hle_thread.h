@@ -251,6 +251,7 @@ void ee_hle_thread_eventlog_set_enabled(int enabled);
  * which only needs to be true within one continuous observation window. */
 uint64_t ee_hle_thread_get_wakeup_calls(int thid);
 uint64_t ee_hle_thread_get_signal_calls(int semid);
+int ee_hle_thread_get_sema_state(int semid, int *out_in_use, int32_t *out_max_count, int32_t *out_count, int32_t *out_wait_threads);
 
 /* Round 733 diagnostic-only (task #447): forces a WAIT/SLEEP thread to
  * READY using the exact same real-hardware transition as the real

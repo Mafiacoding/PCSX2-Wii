@@ -49973,3 +49973,56 @@ Docs-only round, no tracked-source change (nothing here contradicts or
 extends prior findings - it is a confirming disassembly). Regression
 suite and Wii cross-build correctly skipped per this project's standing
 convention for docs-only rounds.
+
+## Round 1035: the current WaitSema(0) park is confirmed NOT caused by Round 1033's fire-and-forget call - it is a different, already-diagnosed blocker
+
+Added a pure read-only diagnostic accessor, `ee_hle_thread_get_sema_state()`
+(source/core/ee/ee_hle_thread.c + header), exposing `in_use`/`max_count`/
+`count`/`wait_threads` for a given semid - same "project-internal
+accessor" convention as Round 733's call counters. Built a survey driver
+dumping semaphore-0's real state plus the current thread's status at the
+end of a fresh 60M-instruction SCPH-50004 diskless boot:
+
+```
+[R1035-SEMA] semid=0 in_use=1 max_count=1 count=0 wait_threads=1 signal_calls=19
+[R1035-THREAD] tid=1 status=0x4 wait_type=2 wait_id=0 saved_pc=0x00257964
+```
+
+`max_count=1` confirms semaphore 0 is a real binary semaphore. Thread 1
+is genuinely `WAIT`-parked (status 0x4, wait_type=SEMA, wait_id=0) at
+the real `WaitSema` syscall instruction, with count currently 0 - a
+legitimate block, exactly matching the real handler's semantics (this
+project's WaitSema/SignalSema implementation, verified again this round
+via `test_ee_hle_reschedule_exl_guard`/`test_ee_syscall_setupthread`/
+`test_ee_syscall_thread_family`, all pass).
+
+**Checked whether this park is the direct consequence of Round 1033's
+fire-and-forget 20th call:** disassembled the caller of that specific
+submission (`0x802092E4`-`0x80209340`, the function enclosing the
+`ra=0x00209330` call site identified in Round 1033) in full. It is NOT
+the code currently parked. This function registers three name/log
+strings via `jal 0x80209138`, then submits the async SIF-RPC request
+(`jal 0x8026F250` with `a1=18, a2=1`) and **returns immediately
+afterward with no `WaitSema` call at all** - fully consistent with
+Round 1033's "fire-and-forget, no completion wait expected" finding.
+
+**Conclusion:** the real BIOS code that submits the async 20th call
+correctly never waits on it - so it cannot be what's parking thread 1.
+The actual WaitSema(0) park at `pc=0x00257964` is a separate call site,
+elsewhere in the boot flow, waiting for one of the *other* (synchronous-
+mode) SIF-RPC completions - and is already the subject of this
+project's Rounds 1017-1019/1029-1031 "SIF2 gate, no new fix" diagnosis
+(the real IOP-side reply-delivery path that would eventually produce
+that signal is itself blocked upstream, a distinct, previously
+documented gap). This round's contribution is ruling out a plausible-
+looking but incorrect unification of the two findings: fixing or
+synthesizing a signal for the Round 1033 call would NOT unblock this
+park, since they are provably different call sites.
+
+No further tracked-source change warranted this round beyond the
+read-only accessor (verified via the 3 targeted regression tests above
+plus no other logic paths touched). Full 136-test suite and Wii
+cross-build left for the next round that ships an actual behavioral
+change; this diagnostic addition alone is low-risk enough that the
+targeted subset is a proportionate check, consistent with this
+project's precedent for narrow additive-accessor rounds.

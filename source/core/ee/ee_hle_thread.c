@@ -179,6 +179,27 @@ uint64_t ee_hle_thread_get_signal_calls(int semid)
     return g_signal_call_count[semid];
 }
 
+/* Round 1035 (task #536/#447 continuation): pure read-only diagnostic
+ * accessor into the semaphore table - same "project-internal accessor"
+ * convention as Round 733's per-target call counters above. Exposes
+ * in_use/max_count/count/wait_threads for a given semid so a survey
+ * driver can dump the real semaphore state at the end of a run,
+ * without needing R812_EVENTLOG's full (too-verbose-to-run-to-
+ * completion) WaitSema-entry event log. */
+int ee_hle_thread_get_sema_state(int semid, int *out_in_use,
+                                  int32_t *out_max_count,
+                                  int32_t *out_count,
+                                  int32_t *out_wait_threads)
+{
+    if (semid < 0 || semid >= EE_HLE_THREAD_MAX_SEMAS) return -1;
+    ee_sema_internal_t *s = &g.semas[semid];
+    if (out_in_use) *out_in_use = s->in_use;
+    if (out_max_count) *out_max_count = s->max_count;
+    if (out_count) *out_count = s->count;
+    if (out_wait_threads) *out_wait_threads = s->wait_threads;
+    return 0;
+}
+
 void ee_hle_thread_get_checkpoint_blob(void **ptr, uint32_t *size)
 {
     *ptr = &g;

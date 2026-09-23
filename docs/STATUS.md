@@ -50280,3 +50280,25 @@ Next round: implement `SIF_SID_CDVD_POFF` (0x80000596, real `CD_SERVER_POFF`) us
 **Wii cross-build:** both `source/hw/sif.c` and `source/core/ee/ee_core.c` compile cleanly under `powerpc-eabi-gcc -DGEKKO -mcpu=750 -meabi -mhard-float` with zero errors.
 
 Next round: identify the 4 newly-surfaced real call_sid values (0x80000003, 0x80000006, 0x80000400, 0x80000601) against ps2sdk-master source, and/or pursue call-site-level tracing to determine 0x80000596's real identity.
+
+## Round 1042: identify Round 1041's 4 new call_sid values + implement real LF_F_GET_ADDR (SCPH-50004 diskless boot, task #447/#536)
+
+**Identification of the 4 new real services surfaced by Round 1041's bind-table fix:** cross-referenced each against the real ps2sdk source tree:
+- `0x80000003` = real `SifInitIopHeap()`'s bind target (`ee/kernel/src/iopheap.c`) - this project already implements this (`SIF_SID_IOPHEAP`, Round 401/task #203).
+- `0x80000006` = real `SifLoadFileInit()`'s bind target (`ee/kernel/src/loadfile.c`) - this project already implements this (`SIF_SID_LOADFILE`, task #195/#196).
+- `0x80000400` = real `MCSERV_RPC_ID` (`iop/memorycard/mcserv/src/mcserv.c`) - already implemented (`SIF_SID_MCSERV`, Round 278/456).
+- `0x80000601` = real `sce_SPU_DEV` (`iop/sound/rspu2drv/src/include/rs_i.h`) - already implemented (`SIF_SID_SPU2DRV`, task #209).
+
+So all 4 sids were already correctly identified and dispatched in this tree - not new gaps. However, cross-checking the actual `rpc_number` values seen in the Round 1041 trace against each service's dispatch coverage found one real, unhandled command: **`SIF_SID_LOADFILE` `rpc_number=3`**, observed twice in the trace, with no existing branch (only `rpc_number==0` MOD_LOAD and `rpc_number==1` ELF_LOAD were covered).
+
+**Identification:** real ps2sdk's `common/include/loadfile-common.h` enum `_lf_functions`: `LF_F_MOD_LOAD=0, LF_F_ELF_LOAD=1, LF_F_SET_ADDR=2, LF_F_GET_ADDR=3, ...` - rpc_number=3 is `LF_F_GET_ADDR`, the real client function `SifIopGetVal()` (`ee/kernel/src/loadfile.c`): `sceSifCallRpc(&_lf_cd, LF_F_GET_ADDR, 0, &arg, sizeof arg, &arg, 4, NULL, NULL)` - send and recv share one buffer, matching this project's already-implemented `SIF_SID_IOPHEAP` branch's pattern. The real send struct (`struct _lf_iop_val_arg`) is `union{u32 iop_addr; s32 result;} p` (offset 0) + `s32 type` (offset 4). The real IOP-side handler (`loadfile_getaddr()`, `iop/system/loadfile/src/loadfile.c`) reads a byte/short/long directly from real IOP memory at `iop_addr` and returns it at `outbuffer[0]` (== `p.result`, offset 0).
+
+**Fix:** implemented the `SIF_SID_LOADFILE && rpc_number==3` branch in `ee_core.c`, reading `iop_addr`/`type` from the established extra-descriptor payload location (same `payload_base = dmat_ptr + (i-1)*16` pattern as the sibling LOADFILE/IOPHEAP branches), and reaching real IOP memory via a new optional read-bridge (`g_ee_iop_read`/`ee_core_set_iop_read_bridge()`), mirroring the existing write8 bridge (`g_ee_iop_write8`, task #172) exactly - this keeps `ee_core.c` link-independent of `iop_core.c` for the many EE-only tests. Wired the bridge in `system.c` (`system_iop_read_adapter()`, called from both `system_init()` and `system_rebind_iop_bridge()`, mirroring the write8 adapter). Backups taken first (`backups/ee_core.c.round1042_getaddr.bak`, `backups/system.c.round1042_getaddr.bak`).
+
+**Verification (scratch, `/tmp/r1042/`):** rebuilt a scratch copy combining this fix with the already-shipped Round 1041 `sif.c` bind-table fix and Round 1040 `ee_core.c` PAD_BIND_ID1_NEW branch, ran a fresh 90,000,000-instruction SCPH-50004 diskless boot with the same trace instrumentation. Confirmed both `LF_F_GET_ADDR` events now get a real reply (registration count `[R1036REG]` advanced from Round 1041's 118 to **135**), and the bind-table fix continues to hold (zero `call_sid=0x00000000` misses in the fresh trace).
+
+**Regression:** re-ran the same 6-test subset (`test_ee_core`, `test_ee_cdvd_ncmd_reentry`, `test_ee_dma_bus`, `test_ee_syscall_full_audit_sweep`, `test_ee_exceptions`, `test_ee_hle_reschedule_exl_guard`) - all passed, 0 failures.
+
+**Wii cross-build:** `ee_core.c`, `system.c`, and `sif.c` all compile cleanly under `powerpc-eabi-gcc -DGEKKO -mcpu=750 -meabi -mhard-float`.
+
+Next round: identify what real IOP-memory address(es) SCPH-50004's BIOS is polling via `LF_F_GET_ADDR` and whether this project's own IOP memory model returns a value that lets the boot progress further (or whether it's an addr this project's IOP RAM never organically initializes, in which case the honest 0 is the correct current-state reply).

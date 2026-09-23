@@ -327,6 +327,18 @@ void ee_core_park_tick(ee_state_t *st);
  * tests simply never call it. */
 void ee_core_set_iop_write8_bridge(void *iop_ctx, void (*write8_fn)(void *ctx, uint32_t addr, uint8_t val));
 
+/* Round 1042 (task #447/#536 continuation, real LF_F_GET_ADDR/
+ * SifIopGetVal RPC): the same link-time-isolation problem as the
+ * write8 bridge above, but for reading IOP memory (real ee/kernel/
+ * src/loadfile.c's SifIopGetVal() peeks a byte/short/long directly
+ * out of IOP RAM via the real IOP-side loadfile_getaddr() handler -
+ * see the SIF_SID_LOADFILE rpc_number==3 branch in ee_core.c for the
+ * full citation). Mirrors the write8 bridge's optional-pointer
+ * design exactly: NULL until a combined-core caller wires it via
+ * system_init()/system_rebind_iop_bridge(), so EE-only tests are
+ * unaffected. */
+void ee_core_set_iop_read_bridge(void *iop_ctx, uint32_t (*read_fn)(void *ctx, uint32_t addr, int width));
+
 /* Exposed for the recompiler PoC (source/core/recompiler) to share
  * register state layout / memory access helpers. */
 ee_state_t *ee_core_get_state(void);

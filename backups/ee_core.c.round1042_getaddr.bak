@@ -143,20 +143,6 @@
 static void *g_ee_iop_ctx = NULL;
 static void (*g_ee_iop_write8)(void *ctx, uint32_t addr, uint8_t val) = NULL;
 
-/* Round 1042 (task #447/#536): same optional-bridge pattern as
- * g_ee_iop_write8 immediately above, but for reads - see the header's
- * ee_core_set_iop_read_bridge() citation and the SIF_SID_LOADFILE
- * rpc_number==3 (real LF_F_GET_ADDR) branch below for the full real-
- * protocol grounding. width is 1/2/4 bytes (LF_VAL_BYTE/SHORT/LONG). */
-static void *g_ee_iop_read_ctx = NULL;
-static uint32_t (*g_ee_iop_read)(void *ctx, uint32_t addr, int width) = NULL;
-
-void ee_core_set_iop_read_bridge(void *iop_ctx, uint32_t (*read_fn)(void *ctx, uint32_t addr, int width))
-{
-    g_ee_iop_read_ctx = iop_ctx;
-    g_ee_iop_read = read_fn;
-}
-
 /* task #188: minimal, real EE kernel semaphore object table for
  * CreateSema (syscall 64) - see the syscall-64 case's own comment
  * for full real-source grounding (ps2sdk's ee/kernel/include/
@@ -6036,62 +6022,6 @@ static int ee_step(void)
                                     }
                                 }
                                 ee_arm_rpc_call_pending(call_cd);
-                            } else if (call_sid == SIF_SID_LOADFILE && rpc_number == 3u && call_recvbuf != 0u && i >= 1u) {
-                                /* Round 1042 (task #447/#536, discovered via the Round
-                                 * 1041 bind-table-capacity fix widening this project's
-                                 * real-service visibility): real LF_F_GET_ADDR (=3, see
-                                 * common/include/loadfile-common.h's enum _lf_functions:
-                                 * MOD_LOAD=0, ELF_LOAD=1, SET_ADDR=2, GET_ADDR=3) - the
-                                 * real EE-side client is SifIopGetVal() (ee/kernel/src/
-                                 * loadfile.c): "sceSifCallRpc(&_lf_cd, LF_F_GET_ADDR, 0,
-                                 * &arg, sizeof arg, &arg, 4, NULL, NULL)" - send and recv
-                                 * share one buffer/struct, exactly like this project's
-                                 * already-implemented SIF_SID_IOPHEAP branch above (same
-                                 * "&arg reused for both directions" pattern - see that
-                                 * branch's own citation for the precedent).
-                                 *
-                                 * The real send struct (struct _lf_iop_val_arg,
-                                 * common/include/loadfile-common.h) is a union{u32
-                                 * iop_addr; s32 result;} p (offset 0) followed by s32 type
-                                 * (offset 4): "iop_addr = (void *)in_packet->p.iop_addr;
-                                 * type = in_packet->type;" (real IOP-side
-                                 * loadfile_getaddr(), iop/system/loadfile/src/loadfile.c)
-                                 * - read directly from this project's own already-
-                                 * established extra-descriptor payload location
-                                 * (payload_base = dmat_ptr + (i-1)*16, matching the
-                                 * LOADFILE/IOPHEAP branches above).
-                                 *
-                                 * The real IOP-side handler switches on type and returns
-                                 * the raw memory value at outbuffer[0] (== p.result,
-                                 * offset 0, since it's a union with iop_addr):
-                                 * "case LF_VAL_BYTE: outbuffer[0]=*(u8*)iop_addr; ...
-                                 * SHORT: *(u16*)...; LONG: *(u32*)...; default: break"
-                                 * (real loadfile_getaddr()). This project reaches real
-                                 * IOP memory via the same optional read-bridge pattern
-                                 * already established for writes (g_ee_iop_write8/
-                                 * ee_core_set_iop_write8_bridge, task #172) - see
-                                 * ee_core_set_iop_read_bridge()'s own citation above for
-                                 * why a direct iop_core_get_state() call isn't used here
-                                 * (keeps ee_core.c link-independent of iop_core.c for the
-                                 * many EE-only tests). If the bridge isn't wired (EE-only
-                                 * test context), this is an honest no-reply gap, not a
-                                 * fabricated value - matching this project's standing
-                                 * anti-fabrication discipline. */
-                                uint32_t getaddr_payload_base = dmat_ptr + (i - 1u) * 16u;
-                                uint32_t getaddr_payload_src = ee_mem_read32(st, getaddr_payload_base + 0u);
-                                if (getaddr_payload_src != 0u && g_ee_iop_read) {
-                                    uint32_t iop_addr = ee_mem_read32(st, getaddr_payload_src + 0u);
-                                    int32_t val_type = (int32_t)ee_mem_read32(st, getaddr_payload_src + 4u);
-                                    int width = (val_type == 0) ? 1 : (val_type == 1) ? 2 : (val_type == 2) ? 4 : 0;
-                                    if (width != 0) {
-                                        uint32_t val = g_ee_iop_read(g_ee_iop_read_ctx, iop_addr, width);
-                                        ee_mem_write32(st, call_recvbuf + 0u, val); /* real p.result, offset 0 (union with iop_addr) */
-                                        ee_arm_rpc_call_pending(call_cd);
-                                    }
-                                    /* unrecognized type (real default: break, no
-                                     * outbuffer write) - left un-replied, matching real
-                                     * hardware's own behavior for a malformed request. */
-                                }
                             } else if (call_sid == SIF_SID_MCSERV && call_recvbuf != 0u) {
                                 /* task #203 (80th finding): real
                                  * MC_RPCCMD_INIT (=0x70, see the

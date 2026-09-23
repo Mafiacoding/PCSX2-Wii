@@ -69,22 +69,6 @@ static void system_iop_write8_adapter(void *ctx, uint32_t addr, uint8_t val)
     iop_mem_write8((iop_state_t *)ctx, addr, val);
 }
 
-/* Round 1042 (task #447/#536): read-side counterpart to
- * system_iop_write8_adapter() above, for ee_core.c's real
- * LF_F_GET_ADDR (SIF_SID_LOADFILE rpc_number==3) handler - see
- * ee_core_set_iop_read_bridge()'s citation in ee_core.h for the full
- * rationale. width is 1/2/4 bytes. */
-static uint32_t system_iop_read_adapter(void *ctx, uint32_t addr, int width)
-{
-    iop_state_t *iop = (iop_state_t *)ctx;
-    switch (width) {
-        case 1: return (uint32_t)iop_mem_read8(iop, addr);
-        case 2: return (uint32_t)iop_mem_read16(iop, addr);
-        case 4: return iop_mem_read32(iop, addr);
-        default: return 0u;
-    }
-}
-
 int system_init(const bios_image_t *ee_bios, const bios_image_t *iop_bios)
 {
     if (ee_core_init(ee_bios) != 0) {
@@ -96,7 +80,6 @@ int system_init(const bios_image_t *ee_bios, const bios_image_t *iop_bios)
         return -1;
     }
     ee_core_set_iop_write8_bridge(iop_core_get_state(), system_iop_write8_adapter);
-    ee_core_set_iop_read_bridge(iop_core_get_state(), system_iop_read_adapter);
     return 0;
 }
 
@@ -105,7 +88,6 @@ int system_init(const bios_image_t *ee_bios, const bios_image_t *iop_bios)
 void system_rebind_iop_bridge(void)
 {
     ee_core_set_iop_write8_bridge(iop_core_get_state(), system_iop_write8_adapter);
-    ee_core_set_iop_read_bridge(iop_core_get_state(), system_iop_read_adapter);
 }
 
 /* Round 1017 (task #994, user's explicit instruction: "Nimm alle

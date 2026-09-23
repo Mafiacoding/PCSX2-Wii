@@ -49943,3 +49943,33 @@ mandatory leak-check are still completed below.
 (2 of Round 1032's 19 real `SignalSema(0)` calls) remains completely
 undisassembled and is a legitimate next-round candidate, though it is
 unrelated to this round's finding.
+
+## Round 1034: disassemble the ra=0x00084504 signal source - closes the last Round 1032 open thread
+
+Disassembled `0x800844C0`-`0x8008451C` (the caller context around
+`ra=0x00084504`, the source of 2 of Round 1032's 19 real `SignalSema(0)`
+calls). The result is byte-for-byte the same reply-cleanup routine
+already disassembled in Round 1033 as "region B" at `0x8026F550`-
+`0x8026F57C` (`lw a0,8(s0); bltz a0,skip; jal iSignalSema; jal
+<secondary-cleanup>; sw zero,0(s0); return`) - just resident at a
+different address. This is the real BIOS's REND-reply completion helper,
+present in two copies: once in the base kernel-resident image
+(`0x80084xxx`) and again in OSDSYS/EELOAD's own relocated code copy
+(`0x0026fxxx`, disassembled in Round 1033). Early boot's SIF-RPC replies
+route through the kernel-resident copy before OSDSYS's own relocated
+code takes over request handling; both copies are the same real,
+correct logic.
+
+**Conclusion:** this is not a second subsystem or a separate signal
+source - it is the same completion mechanism appearing twice because
+the real BIOS itself relocates/copies this code during boot. No gap, no
+fix needed. This closes the last open thread from Round 1032/1033's
+19-signal accounting: all 20 SIF-RPC submissions are now fully and
+correctly explained (19 real completions via the shared reply-cleanup
+routine at its two resident addresses, 1 genuine fire-and-forget
+submission with no completion signal by BIOS design, per Round 1033).
+
+Docs-only round, no tracked-source change (nothing here contradicts or
+extends prior findings - it is a confirming disassembly). Regression
+suite and Wii cross-build correctly skipped per this project's standing
+convention for docs-only rounds.

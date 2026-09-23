@@ -3676,6 +3676,10 @@ uint64_t g_r832_addcall_hits = 0;      /* pc == 0x0101D508 (the real AddDmacHand
 uint64_t g_r832_vector_hits = 0;       /* pc == 0x80000200 (real EE interrupt vector, BEV=0) */
 uint64_t g_r832_bev_vector_hits = 0;   /* pc == 0xBFC00400 (real EE interrupt vector, BEV=1/boot-ROM) */
 
+/* Round 1036 (task #1008): ordinal counter for R1036_REG_TRACE, see
+ * that macro's block inside ee_step() below for full rationale. */
+uint64_t g_r1036_reg_calls = 0;        /* phys_pc == 0x0026FA40 (F0C8-F134 helper's registration call) */
+
 static int ee_step(void)
 {
     ee_state_t *st = &g_state;
@@ -3711,6 +3715,32 @@ static int ee_step(void)
     else if (pc == 0x0101D508u) g_r832_addcall_hits++;
     else if (pc == 0x80000200u) g_r832_vector_hits++;
     else if (pc == 0xBFC00400u) g_r832_bev_vector_hits++;
+
+#ifdef R1036_REG_TRACE
+    /* Round 1036 (task #1008 continuation, correcting Round 1035's
+     * mistaken SIF2-gate attribution): fires on every call into the
+     * F0C8-F134 helper's resource-completion registration routine at
+     * real addr 0x8026FA40 (Round 1031's disassembly). Logs the
+     * ordinal call number, the resource-type arg ($a0) and the
+     * caller's $ra, so the 20 CreateSema cycles traced via
+     * R818_SEMA_TRACE can be correlated 1:1 against which
+     * registration actually reaches the 0x8026F4D0 dispatcher (18 of
+     * them) and which one (the 20th, currently-parked one) never
+     * does. Masks to physical address per Round 1032's established
+     * KSEG0/KUSEG convention. Read-only: touches no emulated state,
+     * only g_r1036_reg_* counters/logs declared alongside the
+     * existing g_r832_* counters. */
+    {
+        uint32_t phys_pc = pc & 0x1FFFFFFFu;
+        if (phys_pc == 0x0026FA40u) {
+            g_r1036_reg_calls++;
+            uint32_t a0 = (uint32_t)st->gpr[4].ud0;
+            uint32_t ra = (uint32_t)st->gpr[31].ud0;
+            fprintf(stderr, "[R1036REG] call=%llu a0=0x%08x ra=0x%08x pc=0x%08x\n",
+                    (unsigned long long)g_r1036_reg_calls, a0, ra, pc);
+        }
+    }
+#endif
 
 #ifdef R815_HANDOFF_TRACE
     if (g_r815_armed) {

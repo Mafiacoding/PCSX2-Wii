@@ -50026,3 +50026,90 @@ cross-build left for the next round that ships an actual behavioral
 change; this diagnostic addition alone is low-risk enough that the
 targeted subset is a proportionate check, consistent with this
 project's precedent for narrow additive-accessor rounds.
+
+## Round 1036 (task #1008 continuation): erratum on Round 1035's attribution, plus the F0C8-F134/0x8026FA40 registration-vs-signal correlation
+
+**Erratum first.** Round 1035's STATUS.md entry claimed the current
+WaitSema(0) park was "the same, already-diagnosed SIF2-gate blocker
+this project's Rounds 1017-1019/1029-1031 already characterized." That
+attribution is wrong and is corrected here. Round 1031's own entry
+(written before this window) had already explicitly ruled out the
+SIF2-outbound chain as the explanation for this exact symptom, in favor
+of a precisely different mechanism: the F0C8-F134 helper (CreateSema →
+register via 0x8026FA40 → WaitSema → DeleteSema) and its external
+completion dispatcher at 0x8026F4D0, reached only via indirect JALR.
+Round 1035 re-read that history sloppily and reintroduced a hypothesis
+its own project had already superseded. What Round 1035 got right: the
+current park is NOT caused by Round 1033's fire-and-forget async
+submission (cd_ptr=0x002fcfc0) - that conclusion still stands, just not
+for the reason stated.
+
+**New evidence this round.** Built a second scratch trace
+(`R1036_REG_TRACE`, a new `#ifdef`-gated instrumentation block added
+directly to tracked `ee_core.c` inside `ee_step()`, same zero-cost-when-
+undefined convention as the existing `R815_HANDOFF_TRACE`/
+`R832`/`R818_SEMA_TRACE` blocks) that logs every call into the
+resource-completion registration routine at real addr 0x8026FA40 (the
+`jal 0x8026FA40` inside F0C8-F134's body, per Round 1031's disassembly):
+ordinal call number, the resource-type arg ($a0), and the caller's $ra
+(to distinguish the two call-site variants, 0x0026f13c vs 0x0026f2c8).
+
+Run chronologically interleaved against the existing `R818_SEMA_TRACE`
+log across a fresh 60,000,000-instruction SCPH-50004 diskless boot
+(source: `/tmp/r1036/full_trace2.log`), the real sequence is:
+
+```
+CreateSema(ra=0x0026f13c) -> Register(a0=0x8000000a) -> SignalSema(ra=0x0026f564)
+CreateSema(ra=0x0026f2c8) -> Register(a0=0x80000009) -> SignalSema(ra=0x0026f564)
+... (18 more identical cycles, alternating types) ...
+CreateSema(ra=0x0026f13c) -> Register(a0=0x8000000a)   <- trace ends here, NO SignalSema
+```
+
+20 total CreateSema events: 2 are a separate, unrelated kernel-resident
+subsystem (ra=0x00084830/0x00084a9c, matched 1:1 by the 2 SignalSema
+events at ra=0x00084504, Round 1034's "region B" copy) and 18 are the
+F0C8-F134 family (ra=0x0026f13c or 0x0026f2c8). Of those 18, 17 get a
+SignalSema (ra=0x0026f564, the 0x8026F4D0 dispatcher's own self-signal)
+essentially immediately - in every completed cycle, CreateSema,
+registration, and SignalSema appear back-to-back with no other
+CreateSema interleaved. The 20th (final) CreateSema/Register pair is the
+one currently parked: no SignalSema of any kind follows it before the
+trace budget runs out.
+
+**Ruled out "just needs more time."** Re-ran the identical scratch
+build at 200,000,000 instructions (3.33x budget) via
+`/tmp/r1036/r1036_iop`: `signal_calls=19` still, `wait_type=2 wait_id=0`
+still, same resting `ee_pc=0x00257964`. The park is genuine, not a
+budget artifact - contradicts the "it would eventually complete" reading
+that the tight completed-cycle timing might otherwise suggest.
+
+**IOP-side snapshot at the same instant** (same 200M-instruction run,
+via a new scratch-only driver `/tmp/r1036/driver_iop.c` calling only
+existing read-only accessors - `iop_hle_thread_get_status/wait_type/
+wait_id/entry/pc/priority`, `sif_cmd_iop_get_rpc_bind_count`,
+`iop_cdvd_get_*`, all already tracked and already used by prior rounds):
+IOP has 8 HLE threads. Threads 4-8 (entries 0x0014a214, 0x00151884,
+0x00151af0, 0x0014e5bc, 0x0014e68c - the real worker-module threads,
+consistent with task #1004's prior characterization) are ALL parked in
+TSW_SLEEP-class waits (status=0x4, wait_type=1, wait_id=0 - IOP's own
+semaphore slot 0, a separate namespace from the EE side). Only threads
+1-3 (status=0x10, not waiting) are runnable, and IOP pc oscillates
+across a handful of values in 0x00019040-0x00019098 between slices -
+consistent with an idle/dispatcher loop, not new work. `cdvd_ncmd_calls`
+stayed at 0 throughout; `rpc_bind_count=8`.
+
+**Working hypothesis for the next round (not yet fix-implemented):**
+the missing 20th REND-reply is IOP-side production-starved - the real
+worker thread that would service this specific resource-type-0x8000000a
+request appears to be itself asleep, while only low-priority/idle-class
+IOP threads are getting IOP CPU time. This links this round's finding
+directly to task #1004's already-completed tid4-8 characterization and
+is the natural next thread to pull: which of tid4-8 is supposed to be
+the actual F0C8-F134-request servicer, and what should wake it.
+
+**No fix shipped this round** - the new instrumentation
+(`R1036_REG_TRACE` in `ee_core.c`) is a pure `#ifdef`-gated diagnostic
+block, off by default, verified via the full 136-test host-native
+regression suite (136/136 pass) and a clean devkitPPC Wii cross-build,
+both with the macro undefined (as in normal builds). No behavioral
+change to any code path that runs without the macro defined.

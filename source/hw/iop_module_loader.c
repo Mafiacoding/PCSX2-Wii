@@ -1384,7 +1384,22 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
         st->idle = 1;
         st->cop0[12] |= 0x1u; /* Status.IEc = 1 */
         st->exception_pending = 0;
-        /* Round 519: disabled - see iop_hle_thread.c header comment on iop_hle_thread_retire_root_thread() */
+        /* Round 1025: re-enabled. Round 519's guarded retest (thread 1
+         * only, only while RUN, only once) still regressed RPC dispatch
+         * to 0 at the time - but that predates both Round 1021's real
+         * SIF_SMFLAG fix and Round 1023's interrupt-dispatch GPR/HI/LO
+         * save-restore fix, which fixed a genuine register-clobber bug
+         * in this exact retirement+interrupt-dispatch combination
+         * (Round 1022's pc=0x72000000 crash). Round 1025's direct
+         * thread-table + RPC-counter comparison (docs/STATUS.md) shows
+         * rpc_bind_count/rpc_pending_sets/rpc_pending_clobbers/
+         * rpc_delivered now IDENTICAL with retirement on vs off (8/20/
+         * 0/20 in both, at 150M instructions), and previously-starved
+         * real IOP threads 4/5/6 (permanently READY, pc==entry, per
+         * Round 1006) now genuinely execute past their entry points and
+         * create+start two new real worker threads (7/8) - verified via
+         * direct disassembly of the IOP RAM dump, not just pc-sampling. */
+        iop_hle_thread_retire_root_thread(st);
         strncpy(st->halt_reason, panic_msg, sizeof(st->halt_reason) - 1);
         st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';
         return 1;
@@ -1491,7 +1506,22 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
         st->idle = 1;
         st->cop0[12] |= 0x1u; /* Status.IEc = 1 */
         st->exception_pending = 0;
-        /* Round 519: disabled - see iop_hle_thread.c header comment on iop_hle_thread_retire_root_thread() */
+        /* Round 1025: re-enabled. Round 519's guarded retest (thread 1
+         * only, only while RUN, only once) still regressed RPC dispatch
+         * to 0 at the time - but that predates both Round 1021's real
+         * SIF_SMFLAG fix and Round 1023's interrupt-dispatch GPR/HI/LO
+         * save-restore fix, which fixed a genuine register-clobber bug
+         * in this exact retirement+interrupt-dispatch combination
+         * (Round 1022's pc=0x72000000 crash). Round 1025's direct
+         * thread-table + RPC-counter comparison (docs/STATUS.md) shows
+         * rpc_bind_count/rpc_pending_sets/rpc_pending_clobbers/
+         * rpc_delivered now IDENTICAL with retirement on vs off (8/20/
+         * 0/20 in both, at 150M instructions), and previously-starved
+         * real IOP threads 4/5/6 (permanently READY, pc==entry, per
+         * Round 1006) now genuinely execute past their entry points and
+         * create+start two new real worker threads (7/8) - verified via
+         * direct disassembly of the IOP RAM dump, not just pc-sampling. */
+        iop_hle_thread_retire_root_thread(st);
         strncpy(st->halt_reason, trap_msg, sizeof(st->halt_reason) - 1);
         st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';
         return 1;
@@ -1513,7 +1543,22 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
         st->idle = 1;
         st->cop0[12] |= 0x1u; /* Status.IEc = 1 */
         st->exception_pending = 0;
-        /* Round 519: disabled - see iop_hle_thread.c header comment on iop_hle_thread_retire_root_thread() */
+        /* Round 1025: re-enabled. Round 519's guarded retest (thread 1
+         * only, only while RUN, only once) still regressed RPC dispatch
+         * to 0 at the time - but that predates both Round 1021's real
+         * SIF_SMFLAG fix and Round 1023's interrupt-dispatch GPR/HI/LO
+         * save-restore fix, which fixed a genuine register-clobber bug
+         * in this exact retirement+interrupt-dispatch combination
+         * (Round 1022's pc=0x72000000 crash). Round 1025's direct
+         * thread-table + RPC-counter comparison (docs/STATUS.md) shows
+         * rpc_bind_count/rpc_pending_sets/rpc_pending_clobbers/
+         * rpc_delivered now IDENTICAL with retirement on vs off (8/20/
+         * 0/20 in both, at 150M instructions), and previously-starved
+         * real IOP threads 4/5/6 (permanently READY, pc==entry, per
+         * Round 1006) now genuinely execute past their entry points and
+         * create+start two new real worker threads (7/8) - verified via
+         * direct disassembly of the IOP RAM dump, not just pc-sampling. */
+        iop_hle_thread_retire_root_thread(st);
         strncpy(st->halt_reason, reg_panic_msg, sizeof(st->halt_reason) - 1);
         st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';
         return 1;
@@ -1637,7 +1682,11 @@ int iop_module_loader_try_handle(iop_state_t *st, uint32_t pc)
      * actually work. */
     st->exception_pending = 0;
 
-    /* Round 519: disabled - see iop_hle_thread.c header comment on iop_hle_thread_retire_root_thread() */
+    /* Round 1025: re-enabled - see the three sibling call sites above
+     * in this file for the full evidence trail (docs/STATUS.md Round
+     * 1025). Same fix, same reasoning, applied consistently to this
+     * fourth idle-bypass re-entry point. */
+    iop_hle_thread_retire_root_thread(st);
 
     strncpy(st->halt_reason, msg, sizeof(st->halt_reason) - 1);
     st->halt_reason[sizeof(st->halt_reason) - 1] = '\0';

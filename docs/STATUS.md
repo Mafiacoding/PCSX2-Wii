@@ -49566,3 +49566,166 @@ This is a real, qualitative change from the buggy first attempt: with `reschedul
 **Next step (task #1008 continuation):** re-open the `0x0040DA80` mailbox-identity investigation (Rounds 991-1003) with the specific question of whether IT (not the SIF2-send chain) is semaphore-0's real producer - trace forward from whatever currently writes/reads that mailbox structure to see if it independently reaches a `SignalSema(0)`-class call, using the same real per-instruction hit-counter technique established this round.
 
 **Mandatory workflow:** regression suite and Wii cross-build correctly skipped (docs-only round; all work in `/tmp/r1030/` scratch, no tracked source modified). Leak-check below.
+
+## Round 1031 (task #1009, corrected scope): semid=0's real missing-20th-signal mechanism precisely identified - an async callback dispatcher reached only via indirect JALR, NOT the SIF2-outbound chain; plus real-hardware research answering the user's IOP CDVD-cause-bit question
+
+**Context correction, done honestly before any new tool use.** Task #1009 was
+originally framed (end of Round 1030) as "re-open the 0x0040DA80 EE-RAM
+mailbox lead as semid=0's unrelated producer candidate." Re-reading Round
+1002-1004's full text (not just their one-line summaries) before resuming
+showed this framing was stale: the 0x0040DA80 mailbox investigation
+(Rounds 991-1003) was already fully resolved by Round 1004, which found and
+fixed the real bug (a one-shot RPCINIT-ready arm that only fired on the
+FIRST of two real SIF_CMD_INIT_CMD sends, targeting a stale pre-reboot
+recvbuf address) - that fix is what moved the EE resting point from
+pc=0x0026fe9c to the CURRENT pc=0x00257964 WaitSema(0) park back in Round
+1004, several rounds before this window's Round 1028-1030 work even began.
+Re-opening it as an "unrelated producer" candidate would have been
+re-investigating an already-closed, already-fixed bug. Task #1009 was
+corrected in-place to a genuinely new angle instead: a static + dynamic
+scan for every real SignalSema(0)/iSignalSema(0) call site in the current
+tree, to find semid=0's actual missing producer directly rather than by
+elimination.
+
+**Method - static scan for the syscall stubs (extends the Round 1028-1030
+static JAL-target-scan technique).** Took a fresh 60,000,000-instruction
+KSEG0 EE RAM dump (`tools/round655-ee-disasm`-built disassembler, `/tmp/r1031/
+dump_driver.c`) confirming the by-now-familiar resting state (`ee_pc=
+0x00257964`, `signal_calls(0)=19`, unchanged). A Python scanner
+(`/tmp/r1031/find_stub.py`) located the real per-syscall-number "addiu
+$v1,$zero,N ; syscall" stub pattern (matching the real EE convention this
+project already uses: `sysnum = (int32_t)GPR(3)` at the syscall instruction,
+`source/core/ee/ee_core.c:3976`) for SignalSema(66)/iSignalSema(-67), finding
+THREE separate copies of each stub at 0x80083600s/0x80100580s/0x80257940s
+(different modules statically link their own copy of the tiny BIOS-call
+stub, a normal PS2 toolchain pattern). A JAL-target caller scan
+(`find_callers.py`) found 150 real callers of the 0x80257940 SignalSema stub
+and 7 of its 0x80257950 iSignalSema sibling - all in the same module as the
+current resting point.
+
+**Method - dynamic ground truth via the project's own existing R818SEMA
+trace (Round 818 precedent, `source/core/ee/ee_hle_thread.c`).** Rather than
+guess `$a0` values from static backward-scanning (which failed: 141/157
+call sites had non-immediate, register-carried semid values undeterminable
+by static analysis alone), rebuilt the tree with `-DR818_SEMA_TRACE`
+(already-existing, tracked instrumentation - no new source edits needed)
+and re-ran the full 60M-instruction boot. This gave the real, complete,
+ordered event log of every CreateSema/SignalSema call and its exact
+argument/caller address - ground truth, not inference.
+
+**Result - the real event log, decisive.** Across the boot: **20 real
+CreateSema(...) calls, but only 19 real SignalSema calls**, all against
+semaphore slot 0 (init_count=0, max_count=1 every time - the same binary
+semaphore ID gets reused because each instance is deleted before the next
+is created). The first 19 iterations are `CreateSema -> SignalSema` pairs,
+alternating between two call sites (`ra=0x0026f13c`/`ra=0x0026f2c8`, both
+CreateSema callers) - every one of them gets self-completed. The 20th and
+final CreateSema (`ra=0x0026f13c`, same call site as most of the prior 19)
+fires and succeeds exactly like the others, but **no matching SignalSema
+ever follows it** - this is the literal, directly-observed missing 20th
+signal, not an inference from absence.
+
+**Disassembly of the real control flow (extends the round's own scan;
+`ee_disasm ee_full_kseg0.bin 0x80000000 <addr> <count>`, KSEG0-addressed
+per this project's Round 1028 methodology rule).** Confirmed by reading
+`ee->gpr[31]` (real $ra) directly at the frozen resting point:
+`ra=0x0026f180`, `a0=0x00000000` - this is exactly the return address of
+`jal 0x80257960` (the WaitSema stub) at EE address 0x8026F178, inside a
+small helper function (starts ~0x8026F0C8-F134) that does, in strict
+straight-line order: `CreateSema(count=0,max=1)` at F134 -> a second
+registration/lookup call to a shared helper `0x8026FA40` at F168 with
+`$a0=0x8000000A` (a resource-type/event-ID constant) -> `WaitSema(semid)`
+at F178 (**this is exactly where thread 1 is frozen right now**) ->
+`DeleteSema(semid)` at F180. This helper does NOT self-signal its own
+semaphore anywhere in its body - by design, it expects an **external**
+producer to signal it while it's parked in WaitSema.
+
+That external producer was also found and disassembled: a separate
+function at entry 0x8026F4D0 (32-byte stack frame, confirmed real
+prologue/epilogue) which dispatches on a struct field (`+32`) against the
+literal constants `0x8000000A`/`0x80000009` (the SAME resource-type ID the
+F0C8 helper registered), and in its generic/fallthrough case (0x8026F550)
+reads a semid field from the passed struct (`+8`) and, **only if that
+semid is non-negative** (`bltz $a0, skip`), calls `iSignalSema(semid)` -
+this is the exact function whose call produced all 19 successful
+`ra=0x0026f564` SignalSema events in the trace (confirmed: `jal
+0x80257950` at 0x8026F55C sets $ra=0x8026F55C+8=0x8026F564, an exact match
+to every one of the 19 logged SignalSema `ra` values). **Critically, a
+static JAL-target scan across the full 4MB image finds ZERO direct callers
+of 0x8026F4D0** - it is reachable only via an indirect `jalr`, i.e. it is a
+registered callback/event-completion handler (the same architectural
+pattern as the callback-table mechanism this project already fully
+reverse-engineered in Rounds 993-999 for the now-fixed 0x0040DA80 mailbox -
+plausibly part of the same generic event-dispatch subsystem, though not
+yet proven identical).
+
+**Honest conclusion for this round.** The missing 20th `SignalSema(0)` is
+NOT explained by the SIF2-outbound dead-code chain Rounds 1028-1030 spent
+three rounds proving dead (that conclusion stands and is now understood to
+be investigating the wrong subsystem for this specific gap). The real,
+now-precisely-identified mechanism is: thread 1 itself registers a
+"resource-type 0x8000000A" completion request (via `0x8026FA40`) and blocks
+on its own freshly-created semaphore; a callback dispatcher at 0x8026F4D0,
+reachable only through an indirect call (consistent with a real registered
+event-completion callback, not a directly-called function), is supposed to
+fire once that resource becomes ready and self-signal the semaphore -
+and did so correctly and repeatably for 19 real prior resource requests,
+but has not yet fired for the 20th. This is a materially different,
+better-scoped, and more actionable finding than anything in Rounds
+1017-1030: the next concrete step is finding what registers 0x8026F4D0
+into whatever table dispatches it (an indirect-call-site scan for JALR
+targets loaded from that callback-table region, mirroring the exact
+technique Round 998 already used successfully for the analogous
+0x0026FEA8/0x0026FEB8 callback pair), and what real condition is supposed
+to trigger resource-type 0x8000000A's 20th completion. No fix is shipped
+this round - per this project's anti-fabrication discipline, this is a
+precise diagnostic result, not yet a resolved root cause.
+
+**Second part of this round, per the user's explicit follow-up request
+("check afterward whether the IOP has a CDVD cause bit"):** researched
+real PS2/PS1 IOP INTC hardware documentation (not guessed) via
+psx-spx.consoledev.net/interrupts/ (the "PS2 IOP interrupts" section
+explicitly states: "The PS2's IOP has the same interrupt controller as the
+PS1 but with more channels", citing ps2tek's own "IOP Interrupts" page for
+the PS2-specific extra channels) and its real, cited PS1 I_STAT/I_MASK
+cause-bit table:
+
+```
+0     IRQ0 VBLANK
+1     IRQ1 GPU
+2     IRQ2 CDROM
+3     IRQ3 DMA
+4     IRQ4 TMR0
+5     IRQ5 TMR1
+6     IRQ6 TMR2
+7     IRQ7 Controller/Memory Card
+8     IRQ8 SIO
+9     IRQ9 SPU
+10    IRQ10 Controller (Lightpen) / PIO
+11-15 Not used
+```
+
+**Answer: yes, real hardware has a dedicated CDVD/CDROM cause bit - bit 2
+(IRQ2)** - in the exact same 32-bit I_STAT/I_MASK register space this
+project's own `source/hw/iop_intc.c`/`include/core/hw/iop_intc.h` already
+models for VBLANK (bit 0, wired) and the IOP timers (bits 4-6, wired).
+This directly answers Round 1030's open question: the current absence of
+any CDVD cause bit in this project's IOP-INTC model is a **genuine,
+citable, fixable modeling gap**, not a correct omission - and
+`include/core/hw/iop_intc.h`'s own header comment (written back around
+task #172/#267/#268) already honestly flagged this exact gap ("Real PS2
+IOP has ~20 total IRQ sources; the remainder (DMA completion, CDVD, SIO,
+SPU, PIO, etc.) are NOT modeled yet") without previously pinning down the
+real bit number - this round supplies that missing number with a real
+citation. Not implemented this round (research-only, per the user's
+explicit two-part instruction to investigate first, then research after) -
+a future round could wire `iop_intc_raise(2)` into `source/hw/iop_cdvd.c`'s
+real command-completion paths, mirroring the existing VBLANK/timer wiring
+pattern exactly.
+
+**Classification.** No tracked source changed this round (research and
+diagnostic-only; all instrumentation used the tree's own already-tracked
+`R818_SEMA_TRACE` macro via a `-D` build flag, never edited into the
+tracked source itself). Host-native regression suite and Wii cross-build
+correctly skipped per this project's established docs-only-round
+convention.

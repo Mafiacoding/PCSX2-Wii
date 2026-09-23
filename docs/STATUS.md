@@ -50468,3 +50468,33 @@ This is a textbook, fully real, internally-consistent embedded circular-list-nod
 **Still needed before implementing the bridge (per the user's explicit "take the time, get it right" instruction):** the `entry` (thread function pointer) and `status`/wait-state field offsets, and - critically - the real top-level "pick highest-ready-priority thread" scan function that actually reads the 0x0011BA28 bitmap to choose what runs next (not yet located; this is the true dispatcher, distinct from the ready/unready helper functions decoded so far). Next round's task.
 
 **Mandatory workflow:** docs-only, no new tooling needed this round (reused Round 1049's `tools/round1049-real-scheduler/disasm_region.c` as-is). No tracked source modified. Regression/Wii-build correctly skipped. Leak-check clean.
+
+## Round 1051: FOUND the real Sony scheduler's top-level Reschedule()/GetHighestReadyPriority() dispatcher - LIVE and already populated in the current boot (task #447/#536/#1009 continuation)
+
+Directly continues Round 1049/1050's search for the real dispatcher (distinct from the ready/unready helper functions already decoded).
+
+**Found `GetHighestReadyPriority()` at 0x001158A8:** a clean 4-word unrolled loop reading each word of the ready-bitmap (`0x0011BA28+i*4`, i=0..3), and on the first nonzero word calls a bit-scan helper (`0x0011b440`, find-first-set-bit-in-word) to compute the exact priority (`word_idx*32 + bit_offset`). Returns `128` (an invalid/sentinel priority, one past the real 0-127 range) if all four words are zero (nothing ready). This is the textbook real O(1)-scheduler "find highest-priority ready thread" primitive, directly consuming the bitmap Round 1049 already decoded.
+
+**Found `Reschedule()` at 0x0011590C**, its actual caller (function at ~0x00115BE0-0x00115D10+, not yet fully bounded) and TWO new real, confirmed global kernel state slots:
+- **`0x0011BA20`**: the real "current TCB pointer" global.
+- **`0x0011BA24`**: a real "reschedule-needed" flag - the calling function only invokes `Reschedule()` (`jal 0x0011590c`) when this flag reads zero (`0x00115c8c-0x00115c9c`).
+
+`Reschedule()`'s own body reads `*0x0011BA20` (current TCB), checks its `status` byte at **TCB+0x0C** (`lb $s5, 12($s3)`) against `1`, checks a scheduler-state-flags field at TCB+0x18 for a debug/assert path, and otherwise calls `GetHighestReadyPriority()` - i.e. this is genuinely the real top-level "should we switch threads, and if so to what priority" decision function.
+
+**Confirmed this is LIVE, currently-populated real kernel state in this project's own running boot** (not dead/never-initialized data): a live read at the Round 1045 steady-state checkpoint shows:
+```
+*0x0011BA20 (current TCB ptr) = 0x00020850
+*0x0011BA24 (need-resched flag) = 0x00020850  [same value observed here - needs re-verification next round, may be a different field than initially assumed]
+ready-bitmap words: 00000000 00000000 00000000 80000000
+```
+The bitmap's only set bit is bit 31 of word 3 = priority `3*32+31 = 127` - the real, well-known THREADMAN convention for the lowest-priority/idle thread. **This confirms the real Sony scheduler infrastructure is already alive and correctly tracking at least one real thread (almost certainly the idle thread) in this project's current boot** - it was never "dead code," just never told about any of this project's own HLE-created threads (4-8, etc.), because their creation/wakeup bypasses the real code that would call `ready_set`/`list_insert` into this same live structure.
+
+**Xref results:** `Reschedule()` (0x0011590C) has exactly **one** static caller (0x00115c9c, inside the not-yet-fully-bounded enclosing function). `GetHighestReadyPriority()` (0x001158A8) has 4 callers, consistent with being a small reused primitive. The single-caller property of `Reschedule()` and its context (a bounds-check against what looks like a table at $v0+60, then the need-resched-flag check) strongly suggests this enclosing function is the real **interrupt/exception-return dispatch hook** - i.e. code that plausibly runs on every real IOP interrupt return, which this project's `iop_core.c` already executes for real (Round 1047 confirmed real INTC/exception delivery is modeled, not bypassed). If confirmed, this would mean simply populating the real bitmap/TCB-list side effects from our HLE thread handlers is sufficient - **no additional un-interception or new call-site hooking would be needed**, since the real code already gets a chance to run and would organically pick up newly-ready threads on the very next interrupt return.
+
+**Concrete, now well-evidenced next steps (per the user's explicit "take the correct solution, however many rounds it takes" instruction):**
+1. Fully bound and disassemble the function enclosing 0x00115c9c to confirm it is indeed reached from the real IOP interrupt/exception-return path (not some other rarely-hit code path).
+2. Extract the remaining real TCB fields needed for a safe synthetic shadow struct (at minimum: `entry`/context-restore fields used elsewhere in real StartThread, beyond the now-confirmed `prev`/`next`/`status`/`priority`).
+3. Implement, in a scratch copy first (per standing rule), the HLE-side bridge: `iop_hle_thread.c`'s `CreateThread`/`StartThread`/`WakeupThread`/`SleepThread`/`ExitThread` handlers allocate/maintain a real-format shadow TCB in IOP RAM and call the real `ready_set`/`ready_clear`/list primitives (0x001156CC/0x00115730/0x00115798) as genuine subroutine calls (JIT-trampoline-style, Round 891 precedent) - populating the SAME live structures the real, currently-executing `Reschedule()`/`GetHighestReadyPriority()` already consult.
+4. Verify with a decisive experiment (Round 1037 rigor): does this lead to genuine, sustained real-code dispatch of previously-parked threads, not just a cosmetic change.
+
+**Mandatory workflow:** docs-only + new xref tooling (`tools/round1051-real-dispatcher/`, `tools/` excluded from SOURCES/Wii build). No tracked source modified yet - deliberately, since the TCB layout and the interrupt-return-reachability question are not yet fully confirmed, and the standing backup-before-experimenting rule requires that confirmation before any tracked edit. `git status --short` shows only new tool files + STATUS.md. Regression/Wii-build correctly skipped. Leak-check clean.

@@ -50790,3 +50790,34 @@ Round 1064 proved D is already running permanently, never re-entered indirectly.
 **Verification performed.** Direct `python3` arithmetic re-derivation of the LUI+ADDIU encoding (self-caught erratum, no user report involved). `/tmp/r1060/xref` and `/tmp/r1060/xref_hilo2` re-run against corrected target `1a760` (2 hi/lo hits) and against `18d88` (1 literal hit, 0 hi/lo hits). `/tmp/r1060/disasm_region` used for all three newly-disassembled address ranges (`18d80-18e30`, `187d0-18820`, `18f00-18fa8`). Cross-referenced against the already-confirmed real SIFCMD export table bounds (`0x19280-0x192F4`) from Round 1062.
 
 **Workflow note.** Docs-only/investigation round — no tracked source file was modified, so the host-native regression suite and devkitPPC Wii cross-build are correctly skipped per the standing workflow rule (only run when tracked source actually changes).
+
+## Round 1066: tid=3's entry point (0x0001A928) identified as the real Sony REBOOT service module - closes the flagged lead from Round 1065 as a coincidental proximity, not a functional link
+
+**Context.** Round 1065 flagged an unexplored lead: at the 210M-instruction diskless-boot checkpoint, EE/IOP thread tid=3 has entry point `0x0001A928` - only 456 bytes past the corrected SIFCMD queue head address `0x0001A760`. This round investigates whether that proximity reflects a real functional relationship to the enqueue/dequeue/drain mechanism (Functions A-E).
+
+**Positive identification via embedded debug strings.** Disassembling `0x0001A928` onward and dumping the raw bytes at the string-constant addresses it references (via a new small tool, `/tmp/r1060/dumpstr`, built against the tracked `iop_mem_read8()`/`checkpoint_load()` accessors) reveals two genuine, unambiguous Sony debug strings:
+
+- `0x00018AB98`(sic, `0x0001AB98`): `"Reboot service module.(99/11/10)\n"`
+- `0x0001ABBC`: `"Get Reboot Request From EE\n"`
+
+**tid=3's entry point is the real Sony REBOOT module's own service thread**, not code related to the SIFCMD queue at all. This is a genuine dated build-string match (`99/11/10`) of the kind the project has already relied on elsewhere (e.g. Round 1062's "sifcmd" name-string decode), and directly confirms the citation already in the project's history (Round 373/395: OPL `ioprp.c`/`system.c`, ps2sdk `SifIopRebootBuffer.c`, task #212's "IOP-reboot" documentation) — this is the first time the actual on-ROM code for that mechanism has been located and disassembled.
+
+**Bonus finding: an embedded module dependency/trap-table.** Immediately following the REBOOT thread body (`0x0001A9E8-0x0001AAAC`), the ROM contains a sequence of real Sony EXPORT-magic module headers (`0x41E00000` / version / name-string) interleaved with jump-stub tables, positively decoding four more module names via the same little-endian ASCII technique used in Rounds 1060-1063:
+
+- `0x0001A9F8`: **"loadcore"**
+- `0x0001AA24`: **"intrman"**
+- `0x0001AA48`: **"stdio"**
+- `0x0001AA64`: **"sifman"**
+- `0x0001AAA0`: **"sifcmd"**
+
+Each header is followed by `j <target>` / literal-index pairs (e.g. `j 0x00016a48`/index 5, `j 0x000175ac`/index 22, `j 0x00016bd8`/index 29 for sifman; `j 0x00017fc8` for sifcmd). This is REBOOT's own real dependency list — the set of core kernel modules it must re-attach to after performing a soft IOP reset, exactly matching real PS2 IOP reboot semantics (the rebooting module re-establishes LOADCORE/INTRMAN/STDIO/SIFMAN/SIFCMD bindings before resuming normal service).
+
+**tid=3's actual runtime status: DORMANT, not blocked.** Using the existing `iop_hle_thread_get_status()` accessor (confirmed via `include/core/hw/iop_hle_thread.h`'s own documented bit values: `IOP_THS_RUN=0x01`, `READY=0x02`, `WAIT=0x04`, `SUSPEND=0x08`, `DORMANT=0x10`), Round 1064's `dump_threads.c` output already showed `tid=3 status=0x10` — i.e. **`IOP_THS_DORMANT`**, not `WAIT`. This means REBOOT's service thread was created (its TCB exists) but has never actually been started (no `StartThread()` call reached it) at any point in the 210,000,000-instruction diskless survey.
+
+**Conclusion: the proximity to the SIFCMD queue head was coincidental ROM layout, not a functional relationship.** REBOOT's thread is correctly dormant during plain diskless BIOS boot: the real Sony IOP-reboot mechanism is only triggered on-demand, when the EE issues a reboot-class SIF request (e.g. a game calling `sceSifLoadIopHeap`-class functions to swap in a custom IOP module set) — which never happens during an organic diskless boot with no game loaded. This is consistent with, and further corroborates, Round 1065's finding that the SIFCMD queue (Functions A-E) is also completely idle: **neither the SIFCMD service mechanism nor the REBOOT mechanism receives any EE-side stimulus during diskless boot**, because diskless boot has no client (game or otherwise) that would ever need either one. This closes the tid=3 lead cleanly as a negative-but-informative result — no fix is warranted, since a dormant REBOOT thread during diskless boot is correct, real Sony behavior.
+
+**Relevance to the standing goal.** The user's overriding success criterion is that "IOP RAM and SIF must be able to communicate with each other." This round's identification of the real REBOOT module - especially its debug string "Get Reboot Request From EE" - pinpoints exactly the kind of genuine EE-to-IOP SIF-driven mechanism the standing goal is about, and gives this investigation a second, independently-identified, fully real Sony subsystem (alongside SIFCMD) to target in a future round: specifically, whether a disc-boot title (as opposed to diskless BIOS boot) ever triggers this REBOOT thread by sending it a real "reboot request" over SIF, and whether our SIF-RPC/SMFLAG modeling correctly delivers such a request if a title does send one. This is flagged as the next concrete lead, distinct from and complementary to the SIFCMD queue investigated in Round 1065.
+
+**Verification performed.** `/tmp/r1060/dumpstr` built and run against the tracked `iop_mem_read8()`/`iop_core_get_state()`/`checkpoint_load()` accessors (no scratch-only source modification - purely a new read-only diagnostic tool, tracked source untouched). `/tmp/r1060/disasm_region` used to disassemble `0x1a900-0x1aaac`. Byte-for-byte string dumps performed for all five string/name-header addresses referenced by the disassembly. Cross-checked `IOP_THS_DORMANT=0x10` definition directly against `include/core/hw/iop_hle_thread.h` line 228 and against Round 1064's already-recorded `dump_threads` output (no new checkpoint run needed - reused `/tmp/r1064/c3.ckpt`).
+
+**Workflow note.** Docs-only/investigation round - no tracked source file was modified (the new `dumpstr.c` tool is scratch-only, `/tmp/r1060/dumpstr.c`, not added to the tracked tree), so the host-native regression suite and devkitPPC Wii cross-build are correctly skipped per the standing workflow rule.

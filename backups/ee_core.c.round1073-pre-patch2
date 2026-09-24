@@ -2790,47 +2790,6 @@ static void sif_cmd_iop_send_rpc_bind_rend(ee_state_t *st, uint32_t ee_recvbuf, 
     ee_mem_write32(st, ee_recvbuf + 0x28u, 0u);            /* buf = NULL */
     ee_mem_write32(st, ee_recvbuf + 0x2Cu, 0u);            /* cbuf = NULL */
     sif_cmd_iop_write_private_queue_copy(st, cd_ptr, inner_cid); /* task #200 (75th/76th finding): also feed OSDSYS's private handler */
-
-    /* Round 1073 (task #810/#811/#846 continuation, user-directed Patch 2):
-     * real ps2sdk sifrpc.c's _request_end() (docs/reference/ps2sdk/sifrpc.c,
-     * already cited by this project since task #436) reads
-     * cd->hdr.sema_id and, if >= 0, calls iSignalSema(cd->hdr.sema_id) -
-     * generically, for EVERY bind/call completion, using whatever
-     * semaphore that specific client created for itself (never a fixed
-     * constant). Real struct layout (SifRpcHeader_t, common/include/
-     * sifrpc-common.h, fetched fresh this round): sema_id is the THIRD
-     * word of the header (pkt_addr, rpc_id, sema_id, mode), i.e. byte
-     * offset +0x08 within the SifRpcClientData_t this cd_ptr already
-     * points to. This project's own Round 1073 disassembly of GT3's
-     * compiled sceSifBindRpc()-equivalent (0x0101e100-0x0101e1c8)
-     * independently confirmed the exact same offset: `sw v0, 8($s1)`
-     * immediately after CreateSema(), and `lw a0, 8($s1)` immediately
-     * before both WaitSema() and DeleteSema() - proving $s1/cd_ptr there
-     * IS the real client-descriptor pointer, and +0x08 IS the real
-     * persistent completion-semaphore field (not a stack-local copy).
-     *
-     * This is deliberately generic (reads the live semaphore ID out of
-     * the descriptor on every completion) rather than a hardcoded
-     * SignalSema(5) - a hardcoded constant would happen to unblock GT3's
-     * CDVD_INIT bind but would corrupt every other client's REND
-     * delivery (LOADFILE, PADMAN, MCSERV, etc. each have their own,
-     * different sema_id). Verified (host-native, scratch tree, Round
-     * 1073) against both: (a) GT3's own chain - REND delivery read
-     * sema_at_cd8=5, immediately followed by thread 1's WaitSema(5)
-     * resolving as WaitSema-success (was: WaitSema-block/permanent
-     * park), and (b) a full SCPH-50004 diskless organic boot (443M
-     * instructions, which organically exercises the LOADFILE RPC chain
-     * per task #521/#522/#554) - 133 REND completions fired cleanly, no
-     * crash, with multiple distinct real semaphore IDs observed (0, 3,
-     * 4, 11, plus the -1 "no completion semaphore" sentinel correctly
-     * skipped) - confirming the generic mechanism serves many different
-     * RPC clients correctly, not just GT3's sema 5. */
-    if (cd_ptr) {
-        int32_t r1073_sema_id = (int32_t)ee_mem_read32(st, cd_ptr + 0x08u);
-        if (r1073_sema_id >= 0)
-            ee_hle_thread_debug_signal_sema(r1073_sema_id);
-    }
-
     /* Round 225 (task #366/#172, 265th finding): was a bare
      * dma_channel_signal_done(DMA_CHANNEL_SIF0) call (still correctly
      * raises the real DMAC_STAT bit / Cause.IP3 exception - see the

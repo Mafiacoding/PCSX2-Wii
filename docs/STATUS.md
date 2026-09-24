@@ -50737,3 +50737,56 @@ No tracked-source change; regression suite and Wii cross-build correctly skipped
 **The real open question is therefore NOT "who calls Function D"** (answered: nobody needs to, it already runs forever) **but "what should call Function A's enqueue counterpart"** - the function that would `sw`-append a new request onto the `0x0002A760` list Function A/B walk, which is what any client wanting a real SIF_CMD_RPC_CALL dispatched would call. That enqueue primitive has not yet been located (Function A only implements the *find/remove* side of the list); finding it is the concrete next step for task #1004/#1027, since it is the real, single missing link between "some client issues a CD-read/FILEIO-class RPC" and "Function D's already-running loop picks it up and Function C actually dispatches the SIF_CMD_RPC_CALL packet."
 
 No tracked-source change (scratch-only instrumented copy under `/tmp/r1064`, never committed). Regression suite and Wii cross-build correctly skipped (docs-only round). Leak-check clean.
+
+## Round 1065: Function E (real enqueue primitive) found; SIFCMD export table now fully mapped and confirmed idle; erratum on list-head address
+
+**Context.** Continuing directly from Round 1064's proof that Function D (the SIFCMD drain loop at `0x00019220`) is never invoked via any indirect call during a 210,000,000-instruction diskless boot — it's already running as a permanent, unattributed loop. The open question left standing was: what real code should be *enqueueing* work onto the list Function D drains, and where is that enqueue primitive?
+
+**Erratum (self-caught, not user-reported).** Round 1058-1061's STATUS.md text, and my own prior-turn conversation summary, stated the shared list head Function A (`0x00018FA8`) operates on is at IOP address `0x0002A760`. This is wrong. Function A's own code reads:
+
+```
+lui   $v1, 0x0002
+addiu $v1, $v1, -22688     ; -22688 decimal = -0x58A0
+```
+
+`(0x0002 << 16) + sign_extend(-0x58A0) = 0x00020000 - 0x000058A0 = 0x0001A760`, **not** `0x0002A760`. Verified directly via `python3`. Every static xref search against the erroneous `0x0002A760` (this round and presumably in earlier rounds) returned zero hits — which should have been the tell, since Function A's own already-disassembled reference should trivially match if the address were right. Re-running both `/tmp/r1060/xref` and `/tmp/r1060/xref_hilo2` against the corrected `0x0001A760` immediately produced real hits. **The correct list-head address is `0x0001A760`.** This correction applies to all prior rounds' references to "the ready-queue at `0x0002A760`."
+
+**Function E: the real enqueue-to-tail primitive, `0x00018D88-0x00018E2C`.** Found via the corrected hi/lo-pair xref against `0x1a760`, which returned two hits: Function A's own known reference (`0x00018FC4/0x00018FC8`) and a new one at `0x00018DA8/0x00018DAC`. Disassembling that region (`/tmp/r1060/disasm_region ... 18d80 18e30`) decodes a complete, self-contained function:
+
+- Enters a critical section via `jal 0x00019360` (the same `CpuSuspendIntr`-class call used by Function A and Function D).
+- Zero-initializes the new node's fields at offsets `+4/+8/+0xC/+0x10/+0x14`.
+- Sets the new node's `+0` field to the caller's `$a1` argument (the payload/type value).
+- If the list at `0x1A760` is currently empty, makes the new node the head.
+- Otherwise walks the existing chain via each node's `+0x14` "next" field to the real tail, and appends the new node there.
+- Exits the critical section via `jal 0x00019368`.
+
+This is the exact, structurally-required counterpart to Function A (find/remove) and Function D (drain/dispatch): it is the "submit a new SIF-RPC-call request" entry point. Cross-checking `0x00018D88` against the real SIFCMD export table (`0x00019280-0x000192F4`) confirms it sits at table offset `0x000192C0` — **table index 16**, in the same real, previously-mapped SIFCMD export block as Functions A/B/C/D.
+
+**Function E's own caller: not found statically, and not found dynamically either.** Running `xref`/`xref_hilo2` against Function E's entry `0x18D88` finds exactly one reference anywhere in static IOP RAM: the table literal itself, at `0x000192C0` (`total hits: 1`, hi/lo-pair hits: 0). No JAL, no computed hi/lo pair, nothing. This exactly mirrors Function D's situation from Round 1064.
+
+Critically, `0x00018D88` already falls inside the `0x00016000-0x0001A000` range that Round 1064's dynamic JALR-target-capture driver watched for the full 210,000,000-instruction diskless boot — and that run recorded **zero hits total**. So the same evidence that proved Function D is never indirectly called also proves **Function E is never called at all** (directly or indirectly) during the entire observed diskless boot window.
+
+**Remaining unidentified SIFCMD table slots decoded.** The two table entries adjacent to Function A that had not yet been disassembled:
+
+- `0x000192D0` → `0x000187D4`: a 4-argument function that saves `a0-a3` to `s1-s4`, computes address `0x0002<<16 + (-22720) = 0x0001A740` (a *second* list-head-like address, 32 bytes before the queue at `0x1A760` — likely a free-object pool, not the active queue), calls `jal 0x00018518` (an unidentified allocator-style helper), stores the result into `*s1` if non-null, and reads a field at the returned object's `+0x18`. This has the shape of a "allocate a new queue-entry object from a fixed-size pool" constructor — a natural partner for Function E, but operating on a different list head.
+- `0x000192D4` → `0x00018F10`: a generic list-remove-by-match utility, structurally similar to Function A but walking a `+0x38` "next" field instead of `+0x14`, with the list head passed in as an argument (`$a1`/`$s2`) rather than hardcoded to `0x1A760`. This is a general-purpose library routine, not specific to the SIFCMD queue.
+
+Neither of these two functions references `0x1A760` — they operate on separate, generic list/pool infrastructure. This is consistent with real Sony IOP kernel modules sharing a common linked-list/object-pool library (LOADCORE-class utility functions) across multiple higher-level services.
+
+**Synthesis: the SIFCMD service-queue mechanism (Functions A-E) is now fully decoded, and fully confirmed idle.** All five real functions in this control-flow arc are disassembled and understood:
+
+| Function | Table idx | Address | Role |
+|---|---|---|---|
+| E | 16 | `0x00018D88` | enqueue-to-tail |
+| B | 17 | `0x0001903C` | dequeue-from-object |
+| C | 18 | `0x000190A4` | build SIF_CMD_RPC_CALL packet |
+| D | 19 | `0x00019220` | permanent drain/dispatch loop |
+| A | 22 | `0x00018FA8` | find/remove-by-value |
+
+Round 1064 proved D is already running permanently, never re-entered indirectly. This round proves E — the only way anything could ever get onto the queue D drains — is **never called at all**, statically or dynamically, in 210M instructions of organic diskless boot. Therefore the queue at `0x1A760` sits permanently empty; Function D's loop spins forever on nothing. This closes out the SIFCMD-internal angle of task #1004/#1027 cleanly: **the real gap is not inside SIFCMD** — every internal primitive is correctly present and consistent with genuine Sony code. The gap is entirely **upstream**: whatever higher-level client code (a game/BIOS module bound to the "sifcmd" library via LOADCORE, per Round 1063) should be calling the real `sceSifSendCmd`-class exported entry point (Function E, table slot 16) to submit the very first outbound RPC request never does so in this window — consistent with the broader IOP-thread-starvation/dispatch gap already tracked since Round 1057.
+
+**Open item flagged for a future round (not yet pursued).** The `dump_threads` snapshot at the 210M-instruction checkpoint (`/tmp/r1064/c3.ckpt`) shows tid=3 with entry point `0x0001A928` — 456 bytes past the corrected list-head address `0x0001A760`. Not yet investigated for a possible relationship (e.g. tid=3's body might contain or call into the queue-management code, or its creation might be tied to this subsystem's real init). Flagged as a lead for whichever round next resumes task #1004/#1027.
+
+**Verification performed.** Direct `python3` arithmetic re-derivation of the LUI+ADDIU encoding (self-caught erratum, no user report involved). `/tmp/r1060/xref` and `/tmp/r1060/xref_hilo2` re-run against corrected target `1a760` (2 hi/lo hits) and against `18d88` (1 literal hit, 0 hi/lo hits). `/tmp/r1060/disasm_region` used for all three newly-disassembled address ranges (`18d80-18e30`, `187d0-18820`, `18f00-18fa8`). Cross-referenced against the already-confirmed real SIFCMD export table bounds (`0x19280-0x192F4`) from Round 1062.
+
+**Workflow note.** Docs-only/investigation round — no tracked source file was modified, so the host-native regression suite and devkitPPC Wii cross-build are correctly skipped per the standing workflow rule (only run when tracked source actually changes).
